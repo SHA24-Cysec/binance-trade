@@ -1,0 +1,81 @@
+2026-09-23 21:59:25 | INFO     | pump_bot | ======================================================================
+2026-09-23 21:59:25 | INFO     | pump_bot | Pump Scanner Bot mulai berjalan. MODE=LIVE | endpoint=https://api.binance.com
+2026-09-23 21:59:25 | WARNING  | pump_bot | MODE LIVE AKTIF: order memakai UANG ASLI di Binance produksi.
+2026-09-23 21:59:25 | INFO     | pump_bot | Mode exit: ATR adaptif (periode 14, 2x, batas 1.20%-4.00%, RR 2:1)
+2026-09-23 21:59:25 | INFO     | pump_bot | ======================================================================
+2026-09-23 21:59:25 | INFO     | binance_client | Sinkronisasi waktu server selesai. Offset = 642 ms
+2026-09-23 21:59:25 | INFO     | pump_bot | Mengambil exchangeInfo untuk semua simbol (sekali di awal)...
+2026-09-23 21:59:26 | INFO     | pump_bot | Filter untuk 3710 simbol berhasil dimuat.
+2026-09-23 21:59:26 | INFO     | pump_bot | Hari baru (UTC): 2026-09-23. Equity awal hari = 5.61 USDT
+2026-09-23 21:59:28 | INFO     | pump_bot | Kandidat terpilih: SAGAUSDT (24h=28.69%, vol=14228148, spread=0.041%)
+2026-09-23 21:59:28 | INFO     | pump_bot | BUY FILLED SAGAUSDT: qty=109.00000000 @ avg 0.048750 | 24h=28.69% | vol24h=14228148 | alasan: momentum masih naik; VWAP: harga 3.42% di atas VWAP, masih wajar (batas 3.50%)
+2026-09-23 21:59:28 | INFO     | pump_bot | SAGAUSDT: level exit dikunci -> ATR | ATR(14)=2.38% x 2 = 4.76% -> SL 4.00% (dibatasi plafon 4.00%), TP 8.00% (RR 2:1)
+2026-09-23 21:59:28 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=5.61 USDT | pegang SAGAUSDT (PnL=+0.00%)
+2026-09-23 22:01:12 | INFO     | pump_bot | SAGAUSDT: Breakeven diaktifkan, stop dikunci di 0.048823
+2026-09-23 22:01:12 | INFO     | pump_bot | SAGAUSDT: Trailing stop diaktifkan di 0.049213
+2026-09-23 22:04:41 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=5.75 USDT | pegang SAGAUSDT (PnL=+2.63%)
+2026-09-23 22:07:12 | INFO     | pump_bot | SELL FILLED SAGAUSDT (TRAILING_STOP): qty=108.80000000 @ avg 0.050270 | entry=0.048750 | estimasi PnL=0.17 USDT
+2026-09-23 22:07:12 | INFO     | pump_bot | DUST SWEEP OK: sisa SAGA dikonversi ke 0.00714717 BNB (sudah dikurangi biaya layanan Binance).
+2026-09-23 22:09:42 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=5.76 USDT | tidak ada posisi
+2026-09-23 22:10:34 | INFO     | pump_bot | Menerima sinyal berhenti (2). Bot akan berhenti setelah iterasi ini selesai.
+2026-09-23 22:18:26 | INFO     | pump_bot | ======================================================================
+2026-09-23 22:18:26 | INFO     | pump_bot | Pump Scanner Bot mulai berjalan. MODE=LIVE | endpoint=https://api.binance.com
+2026-09-23 22:18:26 | WARNING  | pump_bot | MODE LIVE AKTIF: order memakai UANG ASLI di Binance produksi.
+2026-09-23 22:18:26 | INFO     | pump_bot | Mode exit: ATR adaptif (periode 14, SL 2x, batas 1.20%-4.00%, RR 2:1)
+2026-09-23 22:18:26 | INFO     | pump_bot |            Breakeven & Trailing juga ikut ATR (BE 0.5x, lock 0.1x, trail mulai 1x, jarak 1.5x)
+2026-09-23 22:18:26 | INFO     | pump_bot | ======================================================================
+2026-09-23 22:18:26 | INFO     | binance_client | Sinkronisasi waktu server selesai. Offset = 672 ms
+2026-09-23 22:18:26 | INFO     | pump_bot | Mengambil exchangeInfo untuk semua simbol (sekali di awal)...
+2026-09-23 22:18:27 | INFO     | pump_bot | Filter untuk 3710 simbol berhasil dimuat.
+2026-09-23 22:18:30 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=5.76 USDT | tidak ada posisi
+2026-09-23 22:23:45 | INFO     | pump_bot | Kandidat terpilih: PROMUSDT (24h=17.25%, vol=6083491, spread=0.058%)
+2026-09-23 22:23:46 | INFO     | pump_bot | BUY FILLED PROMUSDT: qty=1.06000000 @ avg 5.130000 | 24h=17.25% | vol24h=6083491 | alasan: momentum masih naik; VWAP: harga 0.66% di atas VWAP, masih wajar (batas 3.50%)
+2026-09-23 22:23:46 | INFO     | pump_bot | PROMUSDT: level exit dikunci -> ATR | ATR(14)=0.89% x 2 = 1.77% -> SL 1.77%, TP 3.54% (RR 2:1), BE@0.44% kunci 0.09%, Trail@0.89% jarak 1.33%
+2026-09-23 22:23:46 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=5.76 USDT | pegang PROMUSDT (PnL=+0.00%)
+2026-09-23 22:28:58 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=5.76 USDT | pegang PROMUSDT (PnL=+0.12%)
+2026-09-23 22:33:28 | INFO     | binance_client | Sinkronisasi waktu server selesai. Offset = 611 ms
+2026-09-23 22:34:13 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=5.74 USDT | pegang PROMUSDT (PnL=-0.33%)
+2026-09-23 22:39:28 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=5.72 USDT | pegang PROMUSDT (PnL=-0.74%)
+2026-09-23 22:42:58 | INFO     | pump_bot | PROMUSDT: Breakeven diaktifkan, stop dikunci di 5.134546
+2026-09-23 22:44:29 | INFO     | pump_bot | SELL FILLED PROMUSDT (BREAKEVEN): qty=1.05000000 @ avg 5.132000 | entry=5.130000 | estimasi PnL=0.00 USDT
+2026-09-23 22:44:30 | INFO     | pump_bot | DUST SWEEP OK: sisa PROM dikonversi ke 0.00711757 BNB (sudah dikurangi biaya layanan Binance).
+2026-09-23 22:44:30 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=5.76 USDT | tidak ada posisi
+2026-09-23 22:48:43 | INFO     | binance_client | Sinkronisasi waktu server selesai. Offset = 571 ms
+2026-09-23 22:49:43 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=5.70 USDT | tidak ada posisi
+2026-09-23 22:54:43 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=5.70 USDT | tidak ada posisi
+2026-09-23 22:59:29 | INFO     | pump_bot | Kandidat terpilih: PROMUSDT (24h=18.47%, vol=6099465, spread=0.097%)
+2026-09-23 22:59:30 | INFO     | pump_bot | BUY FILLED PROMUSDT: qty=1.04000000 @ avg 5.158000 | 24h=18.47% | vol24h=6099465 | alasan: momentum masih naik; VWAP: harga 1.03% di atas VWAP, masih wajar (batas 3.50%)
+2026-09-23 22:59:30 | INFO     | pump_bot | PROMUSDT: level exit dikunci -> ATR | ATR(14)=0.91% x 2 = 1.81% -> SL 1.81%, TP 3.62% (RR 2:1), BE@0.45% kunci 0.09%, Trail@0.91% jarak 1.36%
+2026-09-23 22:59:43 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=5.70 USDT | pegang PROMUSDT (PnL=+0.04%)
+2026-09-23 23:02:29 | INFO     | pump_bot | SELL FILLED PROMUSDT (STOP_LOSS): qty=1.04000000 @ avg 5.058000 | entry=5.158000 | estimasi PnL=-0.10 USDT
+2026-09-23 23:02:29 | INFO     | pump_bot | DUST SWEEP OK: sisa PROM dikonversi ke 0.00700085 BNB (sudah dikurangi biaya layanan Binance).
+2026-09-23 23:03:24 | INFO     | pump_bot | Menerima sinyal berhenti (2). Bot akan berhenti setelah iterasi ini selesai.
+2026-09-24 02:24:48 | CRITICAL | pump_bot | ENTRY_MODEL=VWAP_RETEST_RVOL masih eksperimen dan diblokir di MODE=LIVE. Jalankan backtest/TESTNET lebih dulu; setelah ada validasi yang memadai, set ALLOW_EXPERIMENTAL_ENTRY_LIVE=True secara sadar.
+2026-09-24 02:25:37 | INFO     | pump_bot | ======================================================================
+2026-09-24 02:25:37 | INFO     | pump_bot | Pump Scanner Bot mulai berjalan. MODE=LIVE | endpoint=https://api.binance.com
+2026-09-24 02:25:37 | WARNING  | pump_bot | MODE LIVE AKTIF: order memakai UANG ASLI di Binance produksi.
+2026-09-24 02:25:37 | INFO     | pump_bot | Mode exit: ATR adaptif (periode 14, SL 2x, batas 1.20%-4.00%, RR 2:1)
+2026-09-24 02:25:37 | INFO     | pump_bot |            Breakeven & Trailing juga ikut ATR (BE 0.5x, lock 0.1x, trail mulai 1x, jarak 1.5x)
+2026-09-24 02:25:37 | INFO     | pump_bot | ======================================================================
+2026-09-24 02:25:37 | INFO     | binance_client | Sinkronisasi waktu server selesai. Offset = -52 ms
+2026-09-24 02:25:37 | INFO     | pump_bot | Mengambil exchangeInfo untuk semua simbol (sekali di awal)...
+2026-09-24 02:25:38 | INFO     | pump_bot | Filter untuk 3710 simbol berhasil dimuat.
+2026-09-24 02:25:38 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=5.59 USDT | tidak ada posisi
+2026-09-24 02:30:39 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=5.59 USDT | tidak ada posisi
+2026-09-24 02:35:53 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=5.59 USDT | tidak ada posisi
+2026-09-24 02:40:38 | INFO     | binance_client | Sinkronisasi waktu server selesai. Offset = -64 ms
+2026-09-24 02:40:55 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=5.59 USDT | tidak ada posisi
+2026-09-24 02:46:09 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=5.59 USDT | tidak ada posisi
+2026-09-24 02:51:23 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=5.59 USDT | tidak ada posisi
+2026-09-24 02:55:53 | INFO     | binance_client | Sinkronisasi waktu server selesai. Offset = -50 ms
+2026-09-24 02:56:24 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=5.59 USDT | tidak ada posisi
+2026-09-24 03:01:24 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=5.59 USDT | tidak ada posisi
+2026-09-24 03:06:39 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=5.59 USDT | tidak ada posisi
+2026-09-24 03:11:08 | INFO     | binance_client | Sinkronisasi waktu server selesai. Offset = -54 ms
+2026-09-24 03:11:55 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=5.59 USDT | tidak ada posisi
+2026-09-24 03:17:08 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=5.59 USDT | tidak ada posisi
+2026-09-24 03:22:23 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=5.59 USDT | tidak ada posisi
+2026-09-24 03:26:23 | INFO     | binance_client | Sinkronisasi waktu server selesai. Offset = -53 ms
+2026-09-24 03:27:38 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=5.59 USDT | tidak ada posisi
+2026-09-24 03:32:53 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=5.59 USDT | tidak ada posisi
+2026-09-24 03:33:25 | INFO     | pump_bot | Menerima sinyal berhenti (15). Bot akan berhenti setelah iterasi ini selesai.

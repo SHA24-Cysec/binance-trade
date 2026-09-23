@@ -113,6 +113,29 @@ PUMP_CONFIG = {
     # mode membaca variabel .env yang sama (BINANCE_API_KEY/SECRET), isi .env
     # harus diganti sesuai mode yang sedang dipakai.
     "MODE": "TESTNET",                        # "TESTNET" (default, aman) atau "LIVE"
+
+    # Tampilkan fitur Backtest di dashboard saat MODE="LIVE"?
+    #
+    # False (default) = tab Backtest DISEMBUNYIKAN saat mode LIVE, dan
+    #                   endpoint /api/backtest/* menolak permintaan dengan
+    #                   HTTP 403. Di mode TESTNET backtest tetap tersedia
+    #                   seperti biasa.
+    # True            = backtest tetap tersedia di kedua mode.
+    #
+    # Alasan defaultnya False: backtest menarik data historis dalam jumlah
+    # besar dari endpoint publik Binance (paging /api/v3/klines). Saat bot
+    # sedang jalan dengan uang asli, beban itu ikut menghabiskan jatah
+    # rate-limit IP yang sama dengan yang dipakai bot untuk memindai pasar
+    # dan mengirim order. Kalau jatah habis, Binance membalas HTTP 429 dan
+    # dapat berlanjut ke blokir IP sementara (HTTP 418), yang berarti bot
+    # bisa gagal menutup posisi tepat waktu. Di testnet risikonya tidak ada
+    # karena tidak ada uang asli yang dipertaruhkan.
+    #
+    # Ini murni soal pemisahan alat analisis dari operasional live. Kalau
+    # Anda memang perlu backtest sambil live (misalnya dashboard berjalan
+    # di mesin terpisah dengan IP berbeda dari bot), ubah saja ke True.
+    "SHOW_BACKTEST_IN_LIVE": False,
+
     "LIVE_BASE_URL": "https://api.binance.com",
     "TESTNET_BASE_URL": "https://testnet.binance.vision",
     "API_KEY": os.environ.get("BINANCE_API_KEY", ""),    # diisi otomatis dari file .env (lihat panduan di atas)
@@ -344,6 +367,27 @@ def get_mode(config: dict = None) -> str:
 
 def is_testnet(config: dict = None) -> bool:
     return get_mode(config) == "TESTNET"
+
+
+def backtest_enabled(config: dict = None) -> bool:
+    """Apakah fitur backtest boleh dipakai pada mode yang sedang aktif.
+
+    Di TESTNET selalu boleh. Di LIVE hanya boleh kalau
+    SHOW_BACKTEST_IN_LIVE diset True secara eksplisit.
+
+    Nilai config dibaca longgar (menerima True/False, "true"/"false",
+    1/0) supaya tidak gampang salah pasang, tetapi apa pun yang tidak
+    jelas berarti "ya" akan dianggap False -- sikap default yang aman,
+    konsisten dengan get_mode() yang juga tidak pernah diam-diam
+    menganggap nilai asing sebagai LIVE.
+    """
+    if is_testnet(config):
+        return True
+    cfg = PUMP_CONFIG if config is None else config
+    raw = cfg.get("SHOW_BACKTEST_IN_LIVE", False)
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in ("true", "1", "yes", "ya", "on")
 
 
 def get_base_url(config: dict = None) -> str:

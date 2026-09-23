@@ -3,171 +3,307 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Pump Scanner Bot — Dashboard</title>
+<title>Pump Scanner Bot - Dashboard</title>
 <style>
+  /* ============================================================
+     TEMA: Terminal Slate (glassmorphism)
+     ------------------------------------------------------------
+     Semua nama kelas & id dipertahankan persis seperti versi
+     sebelumnya supaya seluruh kode JavaScript di bawah tetap
+     bekerja tanpa perubahan. Yang berubah hanya lapisan visual.
+     Catatan teknis: backdrop-filter didukung semua browser
+     evergreen (Chrome/Edge 76+, Firefox 103+, Safari 9 dengan
+     prefix -webkit-). Untuk browser yang tidak mendukung, panel
+     tetap terbaca karena warna dasarnya sudah cukup pekat.
+     ============================================================ */
   :root{
-    --bg:#0b0e14; --panel:#141922; --panel2:#1b212d; --border:#252d3a;
-    --txt:#e6edf3; --muted:#8b97a7; --accent:#3b82f6; --accent2:#0ea5e9;
-    --green:#22c55e; --red:#ef4444; --amber:#f59e0b; --grid:#1f2733;
+    --bg:#0e1116; --panel:rgba(23,28,36,.72); --panel2:rgba(148,163,184,.07);
+    --solid:#171c24; --border:rgba(148,163,184,.16); --border2:rgba(148,163,184,.26);
+    --txt:#dfe5ec; --muted:#7d8899; --accent:#4ade80; --accent2:#16a34a;
+    --green:#4ade80; --red:#f43f5e; --amber:#f59e0b; --info:#38bdf8;
+    --grid:rgba(148,163,184,.1); --rowhover:rgba(74,222,128,.06);
+    --radius:10px; --blur:12px;
+    --shadow:0 6px 20px rgba(0,0,0,.4);
+    --mono:"IBM Plex Mono","SF Mono",SFMono-Regular,ui-monospace,Menlo,Consolas,monospace;
   }
   *{box-sizing:border-box;margin:0;padding:0}
-  html{overflow-x:hidden}
-  body{background:var(--bg);color:var(--txt);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;line-height:1.5;-webkit-font-smoothing:antialiased;overflow-x:hidden;width:100%}
+  html{overflow-x:hidden;scroll-behavior:smooth}
+  body{background:var(--bg);color:var(--txt);
+    font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.55;-webkit-font-smoothing:antialiased;overflow-x:hidden;width:100%;min-height:100vh}
   a{color:var(--accent)}
-  .wrap{max-width:1280px;margin:0 auto;padding:20px}
-  header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:20px}
-  .brand{display:flex;align-items:center;gap:12px}
-  .logo{width:42px;height:42px;border-radius:10px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-weight:800;font-size:20px;color:#fff;box-shadow:0 4px 14px rgba(59,130,246,.35)}
-  .brand h1{font-size:18px;font-weight:700;letter-spacing:.2px}
+  /* Lapisan cahaya latar. position:fixed + z-index:-1 supaya tidak
+     pernah menangkap klik dan tidak ikut ter-scroll. */
+  .bgfx{position:fixed;inset:0;z-index:-1;overflow:hidden;pointer-events:none}
+  .bgfx i{position:absolute;border-radius:50%;filter:blur(90px);opacity:.28;display:block}
+  .bgfx .o1{width:520px;height:520px;background:#15803d;top:-180px;left:-140px}
+  .bgfx .o2{width:460px;height:460px;background:#0369a1;top:32%;right:-150px}
+  .bgfx .o3{width:520px;height:520px;background:#334155;bottom:-220px;left:28%}
+  .wrap{max-width:1420px;margin:0 auto;padding:18px 18px 34px}
+
+  /* ---------- header ---------- */
+  header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;
+    margin-bottom:14px;padding:12px 16px;border-radius:var(--radius);
+    background:var(--panel);border:1px solid var(--border);box-shadow:var(--shadow);
+    backdrop-filter:blur(var(--blur)) saturate(150%);-webkit-backdrop-filter:blur(var(--blur)) saturate(150%)}
+  .brand{display:flex;align-items:center;gap:12px;min-width:0}
+  .logo{width:40px;height:40px;border-radius:11px;background:linear-gradient(135deg,var(--accent),var(--accent2));
+    display:flex;align-items:center;justify-content:center;font-weight:800;font-size:18px;color:#04140a;
+    box-shadow:0 5px 16px rgba(74,222,128,.25);flex:none}
+  .brand h1{font-size:17px;font-weight:700;letter-spacing:-.2px}
   .brand p{font-size:12px;color:var(--muted)}
-  .head-right{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-  .pill{font-size:11px;font-weight:600;padding:5px 11px;border-radius:999px;border:1px solid var(--border);background:var(--panel);display:inline-flex;align-items:center;gap:6px}
-  .dot{width:8px;height:8px;border-radius:50%}
-  .dot.on{background:var(--green);box-shadow:0 0 8px var(--green)}
+  .head-right{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .pill{font-size:11.5px;font-weight:700;letter-spacing:.3px;padding:6px 12px;border-radius:999px;
+    border:1px solid var(--border);background:var(--panel2);display:inline-flex;align-items:center;gap:7px}
+  .dot{width:7px;height:7px;border-radius:50%;flex:none}
+  .dot.on{background:var(--green);animation:pulse 2s infinite}
   .dot.off{background:var(--red)}
   .dot.warn{background:var(--amber)}
-  .pill.dry{background:rgba(245,158,11,.12);border-color:rgba(245,158,11,.4);color:var(--amber)}
-  .pill.live{background:rgba(34,197,94,.12);border-color:rgba(34,197,94,.4);color:var(--green)}
-  .grid{display:grid;gap:16px}
-  /* PENTING (perbaikan bug responsif): item grid secara default punya
-     min-width:auto, artinya kolom grid akan MEMAKSA melebar mengikuti
-     konten terlebar di dalamnya (mis. baris log panjang dengan
-     white-space:nowrap) walaupun sudah diberi proporsi fr tertentu.
-     Ini penyebab utama horizontal-scroll & panel yang saling menghimpit
-     di semua ukuran layar (bahkan desktop). min-width:0 memaksa kolom
-     grid patuh pada proporsi fr yang diminta, lalu overflow di DALAM
-     kolom ditangani sendiri oleh masing-masing elemen (scroll/ellipsis). */
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(74,222,128,.55)}70%{box-shadow:0 0 0 7px rgba(74,222,128,0)}100%{box-shadow:0 0 0 0 rgba(74,222,128,0)}}
+  .pill.dry{background:rgba(245,158,11,.12);border-color:rgba(245,158,11,.32);color:var(--amber)}
+  .pill.live{background:rgba(74,222,128,.12);border-color:rgba(74,222,128,.32);color:var(--green)}
+
+  /* ---------- tab navigasi ---------- */
+  .tabs{display:flex;gap:3px;padding:4px;border-radius:12px;background:var(--panel2);
+    border:1px solid var(--border);overflow-x:auto;scrollbar-width:none}
+  .tabs::-webkit-scrollbar{display:none}
+  .tabs button{border:0;background:transparent;color:var(--muted);font:inherit;font-size:13px;
+    font-weight:600;padding:7px 15px;border-radius:9px;cursor:pointer;white-space:nowrap;transition:.16s}
+  .tabs button:hover{color:var(--txt)}
+  .tabs button[aria-selected="true"]{background:rgba(148,163,184,.18);color:var(--txt)}
+  .tabpane[hidden]{display:none}
+
+  /* ---------- grid & kartu ---------- */
+  .grid{display:grid;gap:14px}
+  /* min-width:0 wajib: tanpa ini item grid melebar mengikuti konten
+     terpanjang (mis. baris log) dan memicu scroll horizontal. */
   .grid > *{min-width:0}
   .cards{grid-template-columns:repeat(4,1fr)}
-  @media(max-width:900px){.cards{grid-template-columns:repeat(2,1fr)}}
-  @media(max-width:520px){.cards{grid-template-columns:1fr}}
-  .card{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:18px;position:relative;overflow:hidden}
-  .card .label{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;font-weight:600}
-  .card .value{font-size:26px;font-weight:750;margin-top:6px;letter-spacing:-.5px}
-  .card .sub{font-size:12px;color:var(--muted);margin-top:4px}
-  .card .accent-bar{position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--accent)}
-  .card.good .accent-bar{background:var(--green)} .card.bad .accent-bar{background:var(--red)} .card.warn .accent-bar{background:var(--amber)}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);
+    padding:15px 16px;position:relative;overflow:hidden;box-shadow:var(--shadow);
+    backdrop-filter:blur(var(--blur)) saturate(150%);-webkit-backdrop-filter:blur(var(--blur)) saturate(150%);
+    transition:border-color .16s,transform .16s}
+  .card:hover{border-color:var(--border2);transform:translateY(-1px)}
+  .card .label{font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.9px;font-weight:700}
+  .card .value{font-size:25px;font-weight:750;margin-top:7px;letter-spacing:-.8px;font-family:var(--mono)}
+  .card .sub{font-size:12px;color:var(--muted);margin-top:5px}
+  .card .accent-bar{position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--info)}
+  .card.good .accent-bar{background:var(--green)}
+  .card.bad .accent-bar{background:var(--red)}
+  .card.warn .accent-bar{background:var(--amber)}
   .pos{color:var(--green)} .neg{color:var(--red)} .mut{color:var(--muted)}
-  .cols{grid-template-columns:1.3fr 1fr}
-  @media(max-width:900px){.cols{grid-template-columns:1fr}}
-  .panel{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:18px}
-  .panel h2{font-size:14px;font-weight:700;margin-bottom:14px;display:flex;align-items:center;gap:8px}
+  .cols{grid-template-columns:1.45fr 1fr}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:16px;
+    box-shadow:var(--shadow);
+    backdrop-filter:blur(var(--blur)) saturate(150%);-webkit-backdrop-filter:blur(var(--blur)) saturate(150%)}
+  .panel h2{font-size:13.5px;font-weight:700;margin-bottom:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
   .panel h2 .ic{width:18px;height:18px;opacity:.8}
-  table{width:100%;border-collapse:collapse;font-size:13px}
-  th{text-align:left;color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.5px;padding:8px 10px;border-bottom:1px solid var(--border)}
-  td{padding:9px 10px;border-bottom:1px solid var(--grid)}
+
+  /* ---------- tabel ---------- */
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th{text-align:left;color:var(--muted);font-weight:700;font-size:10.5px;text-transform:uppercase;
+    letter-spacing:.8px;padding:9px 12px;border-bottom:1px solid var(--border);background:var(--panel2)}
+  td{padding:9px 12px;border-bottom:1px solid var(--grid)}
   tr:last-child td{border-bottom:none}
-  tbody tr:hover{background:var(--panel2)}
-  .tag{font-size:10px;font-weight:700;padding:2px 7px;border-radius:6px;letter-spacing:.3px}
-  .tag.tp{background:rgba(34,197,94,.15);color:var(--green)}
-  .tag.be{background:rgba(59,130,246,.15);color:var(--accent)}
-  .tag.tr{background:rgba(14,165,233,.15);color:var(--accent2)}
-  .tag.fade,.tag.max{background:rgba(245,158,11,.15);color:var(--amber)}
-  .tag.dry{background:rgba(139,151,167,.15);color:var(--muted)}
-  .tag.manual{background:rgba(168,85,247,.15);color:#c084fc}
-  .mono{font-variant-numeric:tabular-nums;font-family:"SF Mono",SFMono-Regular,ui-monospace,Menlo,Consolas,monospace}
-  .posbox{display:flex;flex-direction:column;gap:14px}
-  .posrow{display:flex;justify-content:space-between;align-items:baseline;font-size:13px}
+  tbody tr{transition:background .12s}
+  tbody tr:hover{background:var(--rowhover)}
+  .tag{font-size:10px;font-weight:700;padding:2px 7px;border-radius:6px;letter-spacing:.3px;
+    border:1px solid transparent;white-space:nowrap;display:inline-block}
+  .tag.tp,.tag.take_profit{background:rgba(74,222,128,.13);color:var(--green);border-color:rgba(74,222,128,.3)}
+  .tag.be,.tag.breakeven{background:rgba(56,189,248,.13);color:var(--info);border-color:rgba(56,189,248,.28)}
+  .tag.tr,.tag.trailing_stop{background:rgba(45,212,191,.13);color:#2dd4bf;border-color:rgba(45,212,191,.28)}
+  .tag.fade,.tag.max,.tag.max_hold_time{background:rgba(245,158,11,.13);color:var(--amber);border-color:rgba(245,158,11,.28)}
+  .tag.dry,.tag.timeout,.tag.end_of_data{background:rgba(148,163,184,.12);color:var(--muted);border-color:var(--border)}
+  .tag.manual{background:rgba(167,139,250,.13);color:#a78bfa;border-color:rgba(167,139,250,.3)}
+  .tag.stop_loss{background:rgba(244,63,94,.13);color:var(--red);border-color:rgba(244,63,94,.3)}
+  .mono{font-variant-numeric:tabular-nums;font-family:var(--mono)}
+
+  /* ---------- kotak posisi ---------- */
+  .posbox{display:flex;flex-direction:column;gap:2px}
+  .posrow{display:flex;justify-content:space-between;align-items:baseline;gap:12px;font-size:12.5px;
+    padding:8px 11px;border-radius:7px}
+  .posbox .posrow:nth-child(odd){background:var(--panel2)}
   .posrow .k{color:var(--muted)}
-  .posrow .v{font-weight:650}
-  .bigpnl{text-align:center;padding:16px;border-radius:12px;background:var(--panel2);border:1px solid var(--border)}
-  .bigpnl .n{font-size:34px;font-weight:800;letter-spacing:-1px}
-  .bigpnl .s{font-size:13px;color:var(--muted);margin-top:2px}
-  .empty{text-align:center;padding:32px 16px;color:var(--muted);font-size:13px}
-  .empty .big{font-size:40px;opacity:.5;margin-bottom:8px}
+  .posrow .v{font-weight:650;text-align:right;word-break:break-word}
+  .bigpnl{text-align:center;padding:16px;border-radius:var(--radius);background:var(--panel2);
+    border:1px solid var(--border);margin-bottom:8px}
+  .bigpnl .n{font-size:32px;font-weight:800;letter-spacing:-1.2px;font-family:var(--mono)}
+  .bigpnl .s{font-size:12.5px;color:var(--muted);margin-top:2px}
+  .empty{text-align:center;padding:30px 16px;color:var(--muted);font-size:13px}
+  .empty .big{font-size:36px;opacity:.45;margin-bottom:8px}
+
+  /* ---------- skeleton loading ---------- */
+  .skel{display:block;height:1em;border-radius:6px;background:linear-gradient(90deg,
+    rgba(148,163,184,.1),rgba(148,163,184,.22),rgba(148,163,184,.1));
+    background-size:200% 100%;animation:skel 1.3s ease-in-out infinite}
+  @keyframes skel{0%{background-position:200% 0}100%{background-position:-200% 0}}
+
+  /* ---------- progress ---------- */
   .progress{height:7px;border-radius:5px;background:var(--grid);overflow:hidden;margin-top:8px;position:relative}
-  .progress > span{display:block;height:100%;border-radius:5px;background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .5s cubic-bezier(.4,0,.2,1);position:relative;overflow:hidden}
-  .progress > span::after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(255,255,255,.35),transparent);width:60px;animation:shimmer 1.3s linear infinite}
-  @keyframes shimmer{0%{transform:translateX(-80px)}100%{transform:translateX(calc(100vw))}}
-  .bt-loading{background:var(--panel2);border:1px solid var(--border);border-radius:14px;padding:20px;display:flex;flex-direction:column;gap:14px;min-width:0}
+  .progress > span{display:block;height:100%;border-radius:5px;
+    background:linear-gradient(90deg,var(--accent),var(--accent2));
+    transition:width .5s cubic-bezier(.4,0,.2,1);position:relative;overflow:hidden}
+  .progress > span::after{content:"";position:absolute;inset:0;
+    background:linear-gradient(90deg,transparent,rgba(255,255,255,.35),transparent);
+    width:60px;animation:shimmer 1.3s linear infinite}
+  @keyframes shimmer{0%{transform:translateX(-80px)}100%{transform:translateX(400px)}}
+  .bt-loading{background:var(--panel2);border:1px solid var(--border);border-radius:var(--radius);
+    padding:18px;display:flex;flex-direction:column;gap:14px;min-width:0}
   .bt-loading-top{display:flex;align-items:center;gap:14px;min-width:0}
-  .bt-spinner{width:38px;height:38px;border-radius:50%;border:3px solid var(--border);border-top-color:var(--accent);border-right-color:var(--accent2);animation:sp .9s linear infinite;flex-shrink:0}
+  .bt-spinner{width:36px;height:36px;border-radius:50%;border:3px solid var(--border);
+    border-top-color:var(--accent);border-right-color:var(--accent2);animation:sp .9s linear infinite;flex-shrink:0}
   .bt-loading-text{flex:1;min-width:0}
   .bt-loading-stage{font-size:13.5px;font-weight:650;color:var(--txt);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .bt-loading-sub{font-size:11.5px;color:var(--muted);margin-top:3px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
-  .bt-loading-pct{font-size:26px;font-weight:800;font-variant-numeric:tabular-nums;letter-spacing:-.5px;background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent;flex-shrink:0}
-  .bt-loading-meta{display:flex;gap:18px;flex-wrap:wrap;font-size:11.5px;color:var(--muted);border-top:1px solid var(--border);padding-top:12px}
+  .bt-loading-sub{font-size:11.5px;color:var(--muted);margin-top:3px;overflow:hidden;text-overflow:ellipsis;
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+  .bt-loading-pct{font-size:25px;font-weight:800;font-variant-numeric:tabular-nums;letter-spacing:-.5px;
+    font-family:var(--mono);color:var(--accent);flex-shrink:0}
+  .bt-loading-meta{display:flex;gap:18px;flex-wrap:wrap;font-size:11.5px;color:var(--muted);
+    border-top:1px solid var(--border);padding-top:12px}
   .bt-loading-meta b{color:var(--txt);font-variant-numeric:tabular-nums}
-  @media(max-width:480px){
-    .bt-loading{padding:16px}
-    .bt-spinner{width:30px;height:30px}
-    .bt-loading-stage{font-size:12.5px;white-space:normal}
-    .bt-loading-sub{font-size:11px}
-    .bt-loading-pct{font-size:20px}
-    .bt-loading-meta{gap:10px 16px;font-size:11px}
-  }
   .bt-dots::after{content:'';animation:dots 1.4s steps(4,end) infinite}
   @keyframes dots{0%{content:''}25%{content:'.'}50%{content:'..'}75%{content:'...'}100%{content:''}}
-  .logbox{max-height:340px;overflow-y:auto;overflow-x:hidden;width:100%;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11.5px;line-height:1.7}
-  .logline{padding:2px 8px;border-radius:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
-  .logline.WARNING{color:var(--amber)} .logline.ERROR,.logline.CRITICAL{color:var(--red);background:rgba(239,68,68,.06)}
+
+  /* ---------- log ---------- */
+  .logbox{max-height:330px;overflow-y:auto;overflow-x:hidden;width:100%;font-family:var(--mono);
+    font-size:11.5px;line-height:1.7;border:1px solid var(--border);border-radius:9px;
+    background:rgba(14,17,22,.5);padding:4px}
+  .logbox::-webkit-scrollbar{width:8px}
+  .logbox::-webkit-scrollbar-thumb{background:var(--border2);border-radius:8px}
+  .logline{padding:3px 9px;border-radius:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+  .logline.WARNING{color:var(--amber)}
+  .logline.ERROR,.logline.CRITICAL{color:#fda4af;background:rgba(244,63,94,.08)}
   .logline.INFO{color:var(--muted)}
-  .chart-wrap{width:100%;overflow:hidden}
-  footer{margin-top:22px;text-align:center;color:var(--muted);font-size:11px}
+  .chart-wrap{width:100%;overflow:hidden;border-radius:9px;background:var(--panel2);padding:4px}
+  footer{margin-top:20px;text-align:center;color:var(--muted);font-size:11px;line-height:1.7}
   .refresh{font-size:11px;color:var(--muted);display:flex;align-items:center;gap:6px}
-  .spin{width:12px;height:12px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:sp 1s linear infinite}
+  .spin{width:12px;height:12px;border:2px solid var(--border);border-top-color:var(--accent);
+    border-radius:50%;animation:sp 1s linear infinite;flex:none}
   @keyframes sp{to{transform:rotate(360deg)}}
-  .banner{padding:11px 16px;border-radius:10px;font-size:12.5px;margin-bottom:16px;display:none;align-items:center;gap:8px}
+
+  /* ---------- banner ---------- */
+  .banner{padding:11px 15px;border-radius:9px;font-size:12.5px;margin-bottom:14px;display:none;
+    align-items:center;gap:9px;border-left-width:3px;border-left-style:solid}
   .banner.show{display:flex}
-  .banner.dry{background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.35);color:var(--amber)}
-  .banner.err{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.35);color:#fca5a5}
+  .banner.dry{background:rgba(245,158,11,.09);border:1px solid rgba(245,158,11,.3);
+    border-left:3px solid var(--amber);color:var(--amber)}
+  .banner.err{background:rgba(244,63,94,.09);border:1px solid rgba(244,63,94,.3);
+    border-left:3px solid var(--red);color:#fda4af}
+
+  /* ---------- form backtest ---------- */
   .bt-form{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}
   .bt-form > *{min-width:0}
-  @media(max-width:1100px){.bt-form{grid-template-columns:repeat(3,1fr)}}
-  @media(max-width:900px){.bt-form{grid-template-columns:repeat(2,1fr)}}
-  @media(max-width:520px){.bt-form{grid-template-columns:1fr}}
   .bt-field{display:flex;flex-direction:column;gap:6px;min-width:0}
-  .bt-field input,.bt-field select{width:100%;max-width:100%}
-  .bt-field label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;font-weight:600}
-  .bt-field input,.bt-field select{background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:9px 10px;color:var(--txt);font-size:13px;font-family:inherit}
-  .bt-field input:focus,.bt-field select:focus{outline:none;border-color:var(--accent)}
+  .bt-field label{font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;font-weight:700}
+  .bt-field input,.bt-field select{width:100%;max-width:100%;background:rgba(14,17,22,.6);
+    border:1px solid var(--border);border-radius:8px;padding:9px 10px;color:var(--txt);
+    font-size:13px;font-family:var(--mono);transition:border-color .15s,box-shadow .15s}
+  .bt-field input:focus,.bt-field select:focus{outline:none;border-color:var(--accent);
+    box-shadow:0 0 0 3px rgba(74,222,128,.14)}
   .bt-field.dim{opacity:.4}
   .bt-field.dim input{cursor:not-allowed}
   .bt-sub{margin-top:14px;padding-top:14px;border-top:1px dashed var(--border)}
-  .bt-sub h3{font-size:12px;margin:0 0 4px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)}
-  .bt-sub p{font-size:11.5px;color:var(--muted);margin:0 0 12px;line-height:1.5}
+  .bt-sub h3{font-size:11.5px;margin:0 0 4px;text-transform:uppercase;letter-spacing:.7px;color:var(--muted)}
+  .bt-sub p{font-size:11.5px;color:var(--muted);margin:0 0 12px;line-height:1.6}
   .bt-toggle{display:flex;align-items:center;gap:9px;padding:10px 12px;background:var(--panel2);
-             border:1px solid var(--border);border-radius:8px;cursor:pointer;user-select:none}
+    border:1px solid var(--border);border-radius:8px;cursor:pointer;user-select:none}
   .bt-toggle input{width:16px;height:16px;accent-color:var(--accent);cursor:pointer;flex:none}
   .bt-toggle span{font-size:12.5px;font-weight:600}
   .bt-cmp{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:10px}
   .bt-cmp th,.bt-cmp td{padding:7px 10px;border-bottom:1px solid var(--border);text-align:right}
   .bt-cmp th:first-child,.bt-cmp td:first-child{text-align:left;color:var(--muted)}
-  .bt-cmp thead th{font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--muted)}
+  .bt-cmp thead th{font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted)}
   .bt-cmp td.win{color:var(--green);font-weight:700}
   .bt-actions{justify-content:flex-end}
-  .bt-actions button{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;border:none;border-radius:8px;padding:10px 14px;font-size:13px;font-weight:700;cursor:pointer;transition:opacity .15s}
-  .bt-actions button:hover{opacity:.9}
-  .bt-actions button:disabled{opacity:.5;cursor:not-allowed}
-  .btn-danger{background:linear-gradient(135deg,#ef4444,#dc2626);color:#fff;border:none;border-radius:8px;padding:10px 14px;font-size:13px;font-weight:700;cursor:pointer;transition:opacity .15s;width:100%;margin-top:12px}
-  .btn-danger:hover{opacity:.9}
-  .btn-danger:disabled{opacity:.5;cursor:not-allowed}
-  .manual-status{font-size:12px;margin-top:8px;padding:8px 10px;border-radius:8px;display:none}
+  .bt-actions button{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#04140a;
+    border:none;border-radius:8px;padding:10px 14px;font-size:13px;font-weight:700;cursor:pointer;
+    transition:.16s;font-family:inherit}
+  .bt-actions button:hover:not(:disabled){box-shadow:0 6px 18px rgba(74,222,128,.28);transform:translateY(-1px)}
+  .bt-actions button:disabled{opacity:.45;cursor:not-allowed}
+
+  /* ---------- tombol bahaya & modal ---------- */
+  .btn-danger{background:rgba(244,63,94,.14);color:#fda4af;border:1px solid rgba(244,63,94,.35);
+    border-radius:9px;padding:11px 14px;font-size:13px;font-weight:700;cursor:pointer;
+    transition:.16s;width:100%;margin-top:14px;font-family:inherit}
+  .btn-danger:hover:not(:disabled){background:var(--red);color:#fff;border-color:var(--red);
+    box-shadow:0 8px 22px rgba(244,63,94,.28)}
+  .btn-danger:disabled{opacity:.45;cursor:not-allowed}
+  .manual-status{font-size:12px;margin-top:8px;padding:9px 11px;border-radius:8px;display:none;line-height:1.6}
   .manual-status.show{display:block}
-  .manual-status.info{background:rgba(59,130,246,.12);color:#93c5fd;border:1px solid rgba(59,130,246,.3)}
-  .manual-status.warn{background:rgba(245,158,11,.12);color:var(--amber);border:1px solid rgba(245,158,11,.3)}
-  .manual-status.err{background:rgba(239,68,68,.12);color:#fca5a5;border:1px solid rgba(239,68,68,.3)}
-  .manual-status.ok{background:rgba(34,197,94,.12);color:var(--green);border:1px solid rgba(34,197,94,.3)}
-  .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:100;padding:20px}
-  .modal-overlay.show{display:flex}
-  .modal-box{background:var(--panel2);border:1px solid var(--border);border-radius:14px;padding:22px;max-width:380px;width:100%}
+  .manual-status.info{background:rgba(56,189,248,.1);color:#7dd3fc;border:1px solid rgba(56,189,248,.28)}
+  .manual-status.warn{background:rgba(245,158,11,.1);color:var(--amber);border:1px solid rgba(245,158,11,.28)}
+  .manual-status.err{background:rgba(244,63,94,.1);color:#fda4af;border:1px solid rgba(244,63,94,.28)}
+  .manual-status.ok{background:rgba(74,222,128,.1);color:var(--green);border:1px solid rgba(74,222,128,.28)}
+  .modal-overlay{position:fixed;inset:0;background:rgba(4,6,10,.7);display:none;align-items:center;
+    justify-content:center;z-index:100;padding:20px;
+    backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)}
+  .modal-overlay.show{display:flex;animation:fade .18s ease-out}
+  @keyframes fade{from{opacity:0}to{opacity:1}}
+  .modal-box{background:var(--solid);border:1px solid var(--border2);border-radius:14px;padding:22px;
+    max-width:400px;width:100%;box-shadow:0 24px 60px rgba(0,0,0,.6);animation:rise .2s ease-out}
+  @keyframes rise{from{transform:translateY(10px);opacity:0}to{transform:none;opacity:1}}
   .modal-box h3{font-size:15px;margin-bottom:10px;display:flex;align-items:center;gap:8px}
-  .modal-box p{font-size:13px;color:var(--muted);line-height:1.6;margin-bottom:16px}
+  .modal-box p{font-size:13px;color:var(--muted);line-height:1.65;margin-bottom:16px}
   .modal-box p b{color:var(--txt)}
   .modal-actions{display:flex;gap:10px}
-  .modal-actions button{flex:1;padding:10px;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;border:none}
-  .modal-cancel{background:var(--panel);border:1px solid var(--border) !important;color:var(--txt)}
-  .modal-confirm{background:linear-gradient(135deg,#ef4444,#dc2626);color:#fff}
-  .modal-confirm:disabled{opacity:.5;cursor:not-allowed}
-  .tag.timeout,.tag.end_of_data{background:rgba(139,151,167,.15);color:var(--muted)}
-  .tag.breakeven{background:rgba(59,130,246,.15);color:var(--accent)}
-  .tag.trailing_stop{background:rgba(14,165,233,.15);color:var(--accent2)}
-  .tag.take_profit{background:rgba(34,197,94,.15);color:var(--green)}
-  .tag.max_hold_time{background:rgba(245,158,11,.15);color:var(--amber)}
-  .tag.stop_loss{background:rgba(239,68,68,.15);color:var(--red)}
+  .modal-actions button{flex:1;padding:10px;border-radius:8px;font-size:13px;font-weight:700;
+    cursor:pointer;border:none;font-family:inherit}
+  .modal-cancel{background:transparent;border:1px solid var(--border) !important;color:var(--txt)}
+  .modal-confirm{background:var(--red);color:#fff}
+  .modal-confirm:disabled{opacity:.45;cursor:not-allowed}
+
+  /* ---------- toast ---------- */
+  .toastwrap{position:fixed;right:16px;bottom:16px;z-index:200;display:flex;flex-direction:column;
+    gap:9px;max-width:min(360px,calc(100vw - 32px));pointer-events:none}
+  .toast{pointer-events:auto;display:flex;gap:10px;align-items:flex-start;padding:11px 13px;
+    border-radius:10px;font-size:12.5px;line-height:1.55;background:var(--solid);
+    border:1px solid var(--border2);box-shadow:0 12px 32px rgba(0,0,0,.5);animation:slidein .22s ease-out}
+  .toast.out{animation:slideout .22s ease-in forwards}
+  @keyframes slidein{from{transform:translateX(18px);opacity:0}to{transform:none;opacity:1}}
+  @keyframes slideout{to{transform:translateX(18px);opacity:0}}
+  .toast b{display:block;font-size:12px;margin-bottom:1px}
+  .toast.ok{border-left:3px solid var(--green)} .toast.ok b{color:var(--green)}
+  .toast.err{border-left:3px solid var(--red)} .toast.err b{color:#fda4af}
+  .toast.warn{border-left:3px solid var(--amber)} .toast.warn b{color:var(--amber)}
+  .toast.info{border-left:3px solid var(--info)} .toast.info b{color:var(--info)}
+
+  /* ---------- responsif ---------- */
+  @media(max-width:1200px){.bt-form{grid-template-columns:repeat(3,1fr)}}
+  @media(max-width:1080px){
+    .cards{grid-template-columns:repeat(2,1fr)}
+    .cols{grid-template-columns:1fr}
+  }
+  @media(max-width:900px){.bt-form{grid-template-columns:repeat(2,1fr)}}
+  @media(max-width:760px){
+    .wrap{padding:12px 12px 28px}
+    header{padding:12px;gap:10px}
+    .head-right{width:100%}
+    .card .value{font-size:22px}
+    .panel{padding:14px}
+    .toastwrap{left:12px;right:12px;bottom:12px;max-width:none}
+  }
+  @media(max-width:520px){
+    .cards{grid-template-columns:1fr}
+    .bt-form{grid-template-columns:1fr}
+    .bt-loading{padding:15px}
+    .bt-spinner{width:30px;height:30px}
+    .bt-loading-stage{font-size:12.5px;white-space:normal}
+    .bt-loading-pct{font-size:20px}
+    .bt-loading-meta{gap:10px 16px;font-size:11px}
+    .bigpnl .n{font-size:27px}
+    .posrow{flex-direction:column;align-items:flex-start;gap:2px}
+    .posrow .v{text-align:left}
+  }
+  /* Hormati preferensi sistem pengguna yang mematikan animasi. */
+  @media(prefers-reduced-motion:reduce){
+    *,*::after,*::before{animation-duration:.001ms !important;animation-iteration-count:1 !important;
+      transition-duration:.001ms !important;scroll-behavior:auto !important}
+  }
 </style>
 </head>
 <body>
+<div class="bgfx" aria-hidden="true"><i class="o1"></i><i class="o2"></i><i class="o3"></i></div>
+<div class="toastwrap" id="toastWrap" role="status" aria-live="polite"></div>
 <div class="wrap">
   <header>
     <div class="brand">
@@ -184,15 +320,24 @@
     </div>
   </header>
 
-  <div class="banner dry" id="testnetBanner"><span>🧪</span><span>Mode <b>TESTNET</b> aktif — order benar-benar dikirim ke Binance Spot Test Network memakai dana virtual (bukan uang asli). Alur kerjanya sama persis dengan mode LIVE.</span></div>
+  <div class="banner dry" id="testnetBanner"><span>🧪</span><span>Mode <b>TESTNET</b> aktif, order benar-benar dikirim ke Binance Spot Test Network memakai dana virtual (bukan uang asli). Alur kerjanya sama persis dengan mode LIVE.</span></div>
   <div class="banner err" id="errBanner"><span>⚠️</span><span id="errText"></span></div>
+
+  <!-- NAVIGASI TAB -->
+  <nav class="tabs" role="tablist" aria-label="Bagian dashboard" style="margin-bottom:14px">
+    <button role="tab" aria-selected="true" aria-controls="paneIkhtisar" data-tab="Ikhtisar">Ikhtisar</button>
+    <button role="tab" aria-selected="false" aria-controls="paneRiwayat" data-tab="Riwayat">Riwayat<span class="mut" id="tabTradeBadge"></span></button>
+    <button role="tab" aria-selected="false" aria-controls="paneBacktest" data-tab="Backtest">Backtest</button>
+  </nav>
+
+  <div class="tabpane" id="paneIkhtisar" role="tabpanel">
 
   <!-- KARTU RINGKASAN -->
   <div class="grid cards" style="margin-bottom:16px">
-    <div class="card" id="cardEquity"><div class="accent-bar"></div><div class="label">Equity (Live)</div><div class="value mono" id="equityVal">—</div><div class="sub" id="equitySub">saldo + nilai posisi</div></div>
-    <div class="card" id="cardPnl"><div class="accent-bar"></div><div class="label">PnL Posisi Terbuka</div><div class="value mono" id="openPnlVal">—</div><div class="sub" id="openPnlSub">belum ada posisi</div></div>
-    <div class="card" id="cardRealized"><div class="accent-bar"></div><div class="label">Total PnL Terealisasi</div><div class="value mono" id="realizedVal">—</div><div class="sub" id="realizedSub">dari riwayat trade</div></div>
-    <div class="card" id="cardWin"><div class="accent-bar"></div><div class="label">Win Rate</div><div class="value mono" id="winVal">—</div><div class="sub" id="winSub">—</div></div>
+    <div class="card" id="cardEquity"><div class="accent-bar"></div><div class="label">Equity (Live)</div><div class="value mono" id="equityVal"><span class="skel" style="width:70%"></span></div><div class="sub" id="equitySub">saldo + nilai posisi</div></div>
+    <div class="card" id="cardPnl"><div class="accent-bar"></div><div class="label">PnL Posisi Terbuka</div><div class="value mono" id="openPnlVal"><span class="skel" style="width:70%"></span></div><div class="sub" id="openPnlSub">belum ada posisi</div></div>
+    <div class="card" id="cardRealized"><div class="accent-bar"></div><div class="label">Total PnL Terealisasi</div><div class="value mono" id="realizedVal"><span class="skel" style="width:70%"></span></div><div class="sub" id="realizedSub">dari riwayat trade</div></div>
+    <div class="card" id="cardWin"><div class="accent-bar"></div><div class="label">Win Rate</div><div class="value mono" id="winVal"><span class="skel" style="width:70%"></span></div><div class="sub" id="winSub">—</div></div>
   </div>
 
   <!-- POSISI + EQUITY CHART -->
@@ -209,33 +354,6 @@
     </div>
   </div>
 
-  <!-- MODAL KONFIRMASI JUAL MANUAL -->
-  <div class="modal-overlay" id="manualCloseModal">
-    <div class="modal-box">
-      <h3>⚠️ Konfirmasi Jual Sekarang</h3>
-      <p>
-        Anda akan menutup posisi <b id="manualCloseSymbol">-</b> saat ini juga dengan harga
-        pasar, DI LUAR logika otomatis Stop Loss/Take Profit/Breakeven/Trailing bot.
-        Perintah ini akan diproses oleh bot dalam beberapa detik. Yakin lanjutkan?
-      </p>
-      <div class="modal-actions">
-        <button class="modal-cancel" onclick="closeManualCloseModal()">Batal</button>
-        <button class="modal-confirm" id="manualCloseConfirmBtn" onclick="confirmManualClose()">Ya, Jual Sekarang</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- RIWAYAT TRADE -->
-  <div class="panel" style="margin-bottom:16px">
-    <h2>🧾 Riwayat Trade <span class="mut" style="font-weight:400;font-size:12px" id="tradeCount"></span></h2>
-    <div style="overflow-x:auto">
-      <table id="tradeTable">
-        <thead><tr><th>Waktu Keluar</th><th>Simbol</th><th>Entry</th><th>Keluar</th><th>Qty</th><th>PnL %</th><th>PnL (USDT)</th><th>Alasan</th></tr></thead>
-        <tbody id="tradeBody"><tr><td colspan="8" class="empty">Memuat…</td></tr></tbody>
-      </table>
-    </div>
-  </div>
-
   <!-- LOG + KONFIG -->
   <div class="grid cols">
     <div class="panel">
@@ -248,27 +366,53 @@
     </div>
   </div>
 
+  </div><!-- /paneIkhtisar -->
+
+  <div class="tabpane" id="paneRiwayat" role="tabpanel" hidden>
+  <!-- RIWAYAT TRADE -->
+  <div class="panel" style="margin-bottom:16px">
+    <h2>🧾 Riwayat Trade <span class="mut" style="font-weight:400;font-size:12px" id="tradeCount"></span></h2>
+    <div style="overflow-x:auto">
+      <table id="tradeTable">
+        <thead><tr><th>Waktu Keluar</th><th>Simbol</th><th>Entry</th><th>Keluar</th><th>Qty</th><th>PnL %</th><th>PnL (USDT)</th><th>Alasan</th></tr></thead>
+        <tbody id="tradeBody"><tr><td colspan="8" class="empty">Memuat…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  </div><!-- /paneRiwayat -->
+
+  <div class="tabpane" id="paneBacktest" role="tabpanel" hidden>
   <!-- BACKTEST -->
   <div class="panel" style="margin-top:16px">
-    <h2>🧪 Backtest Parameter (data historis Binance)</h2>
-    <p class="mut" style="font-size:12.5px;margin-bottom:14px">
-      Uji parameter exit/entry pada satu simbol memakai data historis. Backtest ini
-      <b>tidak mensimulasikan persaingan antar-simbol</b> seperti bot asli (yang memindai
-      seluruh pasar dan hanya memilih satu kandidat terbaik) -- gunakan untuk membandingkan
-      set parameter pada simbol yang sama, bukan sebagai jaminan hasil di masa depan.
-      Backtest bersifat read-only, tidak menyentuh bot/posisi yang sedang berjalan.
-      Rentang hari <b>tidak dibatasi</b> -- isi berapa saja, batas alaminya hanya sejak
-      kapan simbol itu mulai listing di Binance. Rentang yang sangat panjang akan
-      memakan waktu proses lebih lama.
+    <h2>🧪 Backtest Portofolio (meniru cara bot live bekerja)</h2>
+    <p class="mut" style="font-size:12.5px;margin-bottom:12px">
+      Simulasi ini memindai <b>seluruh pasar</b> seperti bot asli: me-ranking semua pair
+      berdasarkan kenaikan 24 jam di setiap titik waktu, mengonfirmasi kandidat teratas
+      satu per satu, mengambil <b>yang pertama lolos</b>, dan hanya memegang
+      <b>satu posisi</b> pada satu waktu. Hasilnya menjawab "berapa hasil bot saya",
+      bukan sekadar "bagaimana kalau bot hanya memantau satu koin ini".
+      Backtest bersifat read-only, tidak menyentuh bot atau posisi yang sedang berjalan.
     </p>
+    <div class="banner dry show" style="margin-bottom:14px">
+      <span>⚠️</span>
+      <span><b>Survivorship bias tidak bisa dihilangkan.</b> Binance hanya menyediakan data
+      historis untuk pair yang masih listing hari ini. Koin yang sudah didelisting, sering
+      justru yang kolaps setelah pump, tidak ada dalam data. Hasil di sini tetap cenderung
+      lebih baik daripada kenyataan.</span>
+    </div>
     <div id="btForm" class="bt-form">
       <div class="bt-field">
-        <label>Simbol</label>
-        <input type="text" id="btSymbol" placeholder="mis. SOLUSDT" autocomplete="off">
+        <label>Jumlah simbol dipindai</label>
+        <input type="number" id="btMaxSymbols" min="2" max="600" value="150"
+               title="Diambil dari pair paling likuid. Semakin banyak simbol, semakin mendekati perilaku bot asli, tetapi semakin lama pengunduhan datanya."
+               oninput="btUpdateEstimate()">
       </div>
       <div class="bt-field">
         <label>Rentang (hari)</label>
-        <input type="number" id="btDays" min="1" value="90" title="Tidak dibatasi -- semakin panjang rentangnya, semakin lama waktu proses (mengambil data historis dari Binance dengan paging).">
+        <input type="number" id="btDays" min="2" value="30"
+               title="Hari pertama dipakai sebagai warmup statistik 24 jam, jadi minimal 2 hari."
+               oninput="btUpdateEstimate()">
       </div>
       <div class="bt-field">
         <label>Stop Loss %</label>
@@ -308,9 +452,13 @@
       </div>
       <div class="bt-field bt-actions">
         <label>&nbsp;</label>
-        <button id="btRunBtn" onclick="startBacktest()">▶ Jalankan Backtest</button>
+        <div style="display:flex;gap:8px">
+          <button id="btRunBtn" onclick="startBacktest()">▶ Jalankan</button>
+          <button id="btCancelBtn" onclick="cancelBacktest()" style="display:none;background:rgba(244,63,94,.16);color:#fda4af;border:1px solid rgba(244,63,94,.35)">✕ Batal</button>
+        </div>
       </div>
     </div>
+    <div id="btEstimate" class="mut" style="font-size:11.5px;margin-top:10px;line-height:1.6"></div>
 
     <div class="bt-sub">
       <h3>🎯 Entry retest VWAP + volume relatif</h3>
@@ -376,13 +524,6 @@
           <input type="number" id="btAtrTrStart" step="0.1"></div>
         <div class="bt-field"><label>Pengali Trail Step</label>
           <input type="number" id="btAtrTrStep" step="0.1"></div>
-        <div class="bt-field bt-actions">
-          <label>&nbsp;</label>
-          <button id="btCmpBtn" onclick="startBacktest(true)"
-                  title="Menjalankan dua backtest pada data candle yang sama persis: sekali SL/TP tetap, sekali berbasis ATR. Toggle di atas diabaikan.">
-            ⚖ Bandingkan Tetap vs ATR
-          </button>
-        </div>
       </div>
       <div id="btAtrPreview" class="mut" style="font-size:11.5px;margin-top:10px;line-height:1.6"></div>
     </div>
@@ -415,7 +556,21 @@
           <div class="posbox" id="btInfoBox"></div>
         </div>
       </div>
-      <div class="panel" id="btCompareWrap" style="background:var(--panel2);margin-bottom:14px;display:none"></div>
+      <div class="grid cols" style="margin-bottom:14px">
+        <div class="panel" style="background:var(--panel2)">
+          <h2 style="font-size:13px">🏆 Kontribusi per Simbol</h2>
+          <div id="btSymbolBox"></div>
+        </div>
+        <div class="panel" style="background:var(--panel2)">
+          <h2 style="font-size:13px">🚫 Sinyal Terlewat <span class="mut" style="font-weight:400;font-size:11.5px" id="btSkipCount"></span></h2>
+          <p class="mut" style="font-size:11.5px;margin-bottom:10px;line-height:1.6">
+            Peluang yang lolos semua filter tetapi TIDAK bisa diambil karena bot hanya
+            boleh memegang satu posisi. Inilah yang dihitung sebagai trade oleh backtest
+            satu simbol, sehingga hasilnya terlihat jauh lebih bagus dari kenyataan.
+          </p>
+          <div id="btSkipBox"></div>
+        </div>
+      </div>
       <div class="panel" style="background:var(--panel2);margin-bottom:14px">
         <h2 style="font-size:13px">⚠️ Keterbatasan Backtest Ini</h2>
         <ul id="btLimitList" style="padding-left:18px;font-size:12px;color:var(--muted);line-height:1.9"></ul>
@@ -424,10 +579,28 @@
         <h2 style="font-size:13px">🧾 Riwayat Trade Hasil Simulasi <span class="mut" style="font-weight:400" id="btTradeCount"></span></h2>
         <div style="overflow-x:auto">
           <table>
-            <thead><tr><th>Masuk</th><th>Keluar</th><th>Entry</th><th>Exit</th><th>Hold</th><th>PnL %</th><th>Alasan</th></tr></thead>
+            <thead><tr><th>Simbol</th><th>Masuk</th><th>Keluar</th><th>Entry</th><th>Exit</th><th>Peringkat</th><th>Hold</th><th>PnL %</th><th>Alasan</th></tr></thead>
             <tbody id="btTradeBody"></tbody>
           </table>
         </div>
+      </div>
+    </div>
+  </div>
+
+  </div><!-- /paneBacktest -->
+
+  <!-- MODAL KONFIRMASI JUAL MANUAL -->
+  <div class="modal-overlay" id="manualCloseModal">
+    <div class="modal-box">
+      <h3>⚠️ Konfirmasi Jual Sekarang</h3>
+      <p>
+        Anda akan menutup posisi <b id="manualCloseSymbol">-</b> saat ini juga dengan harga
+        pasar, DI LUAR logika otomatis Stop Loss/Take Profit/Breakeven/Trailing bot.
+        Perintah ini akan diproses oleh bot dalam beberapa detik. Yakin lanjutkan?
+      </p>
+      <div class="modal-actions">
+        <button class="modal-cancel" onclick="closeManualCloseModal()">Batal</button>
+        <button class="modal-confirm" id="manualCloseConfirmBtn" onclick="confirmManualClose()">Ya, Jual Sekarang</button>
       </div>
     </div>
   </div>
@@ -436,10 +609,112 @@
 </div>
 
 <script>
-const fmt = (n,d=2)=> (n===null||n===undefined||isNaN(n))?'—':Number(n).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
-const fmtP = (n,d=6)=> (n===null||n===undefined||isNaN(n))?'—':Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:d});
+// Format angka memakai locale id-ID (pemisah ribuan titik, desimal koma).
+// Hanya memengaruhi TAMPILAN; nilai yang dikirim ke server tetap angka mentah.
+const LOCALE = 'id-ID';
+const fmt = (n,d=2)=> (n===null||n===undefined||isNaN(n))?'—':Number(n).toLocaleString(LOCALE,{minimumFractionDigits:d,maximumFractionDigits:d});
+const fmtP = (n,d=6)=> (n===null||n===undefined||isNaN(n))?'—':Number(n).toLocaleString(LOCALE,{minimumFractionDigits:2,maximumFractionDigits:d});
 const sign = n => (n>0?'+':'');
 const cls = n => n>0?'pos':(n<0?'neg':'mut');
+
+
+// ======================= TAB NAVIGASI =======================
+// Tab murni di sisi klien: semua pane tetap ada di DOM (hanya
+// disembunyikan dengan atribut hidden) supaya fungsi render yang
+// memanggil getElementById tidak pernah menemukan elemen null.
+// Pilihan tab disimpan di localStorage agar tidak balik ke Ikhtisar
+// setiap kali halaman dimuat ulang.
+const TAB_KEY = 'psb_tab';
+function showTab(name, save){
+  const btns = document.querySelectorAll('.tabs button[data-tab]');
+  let found = false;
+  btns.forEach(b => {
+    const on = b.dataset.tab === name;
+    if(on) found = true;
+    b.setAttribute('aria-selected', on ? 'true' : 'false');
+    const pane = document.getElementById(b.getAttribute('aria-controls'));
+    if(pane) pane.hidden = !on;
+  });
+  if(!found){ showTab('Ikhtisar', false); return; }
+  if(save !== false){
+    try{ localStorage.setItem(TAB_KEY, name); }catch(e){ /* mode privat: abaikan */ }
+  }
+}
+document.querySelectorAll('.tabs button[data-tab]').forEach(b => {
+  b.addEventListener('click', () => showTab(b.dataset.tab));
+});
+(function initTab(){
+  let saved = null;
+  try{ saved = localStorage.getItem(TAB_KEY); }catch(e){ saved = null; }
+  showTab(saved || 'Ikhtisar', false);
+})();
+
+// ======================= TOAST =======================
+// Notifikasi ringan. Otomatis hilang, bisa ditutup dengan klik.
+// Dibatasi 4 buah agar tidak menumpuk memenuhi layar.
+function toast(kind, title, msg, ms){
+  const wrap = document.getElementById('toastWrap');
+  if(!wrap) return;
+  while(wrap.children.length >= 4){ wrap.removeChild(wrap.firstChild); }
+  const el = document.createElement('div');
+  el.className = 'toast ' + (kind || 'info');
+  const b = document.createElement('b'); b.textContent = title;
+  const sp = document.createElement('span'); sp.textContent = msg || '';
+  const box = document.createElement('div'); box.appendChild(b); box.appendChild(sp);
+  el.appendChild(box);
+  const close = () => {
+    if(!el.isConnected) return;
+    el.classList.add('out');
+    setTimeout(() => el.remove(), 220);
+  };
+  el.addEventListener('click', close);
+  wrap.appendChild(el);
+  setTimeout(close, ms || 6000);
+}
+
+// Penanda agar toast "koneksi putus" tidak diulang tiap 5 detik.
+let _connWasDown = false;
+
+// ======================= VISIBILITAS BACKTEST =======================
+// Sumber kebenarannya adalah field backtest_enabled dari /api/status.
+// Server yang memutuskan (config SHOW_BACKTEST_IN_LIVE + mode aktif),
+// dashboard hanya mengikuti. Endpoint /api/backtest/* juga dijaga
+// terpisah di sisi server, jadi menyembunyikan tab di sini adalah soal
+// kerapian tampilan, bukan pengamanan.
+let _btVisibility = null;   // null = belum tahu; true/false = sudah diputuskan
+let _btDefaultsLoaded = false;
+
+function applyBacktestVisibility(enabled){
+  enabled = !!enabled;
+  if(_btVisibility === enabled) return;   // tidak berubah, jangan kerja ulang
+  const first = (_btVisibility === null);
+  _btVisibility = enabled;
+
+  const btn = document.querySelector('.tabs button[data-tab="Backtest"]');
+  const pane = document.getElementById('paneBacktest');
+  if(btn) btn.hidden = !enabled;
+  if(pane && !enabled) pane.hidden = true;
+
+  if(enabled){
+    // Muat nilai default form sekali saja, dan hanya kalau diizinkan.
+    if(!_btDefaultsLoaded){
+      _btDefaultsLoaded = true;
+      loadBacktestDefaults();
+    }
+  } else {
+    // Kalau pengguna sedang berada di tab Backtest saat fitur ini mati
+    // (misalnya tab tersimpan di localStorage dari sesi TESTNET, lalu
+    // config diganti ke LIVE), pindahkan ke Ikhtisar supaya tidak
+    // terjebak di halaman kosong.
+    if(btn && btn.getAttribute('aria-selected') === 'true'){
+      showTab('Ikhtisar');
+    }
+    if(!first){
+      toast('warn','Backtest dinonaktifkan',
+            'Mode LIVE sedang aktif. Set SHOW_BACKTEST_IN_LIVE=True di config.py bila ingin tetap memakainya.',8000);
+    }
+  }
+}
 
 function reasonTag(r){
   if(!r) return '';
@@ -463,6 +738,11 @@ function renderStatus(s){
   var isTestnet = (s.mode==='TESTNET') || !!s.testnet;
   if(isTestnet){mp.className='pill dry';document.getElementById('modeText').textContent='TESTNET';md.className='dot warn';document.getElementById('testnetBanner').classList.add('show');}
   else{mp.className='pill live';document.getElementById('modeText').textContent='LIVE';md.className='dot on';document.getElementById('testnetBanner').classList.remove('show');}
+  // Backtest boleh tampil atau tidak (diputuskan server). Kalau field-nya
+  // tidak ada -- misalnya dashboard.py versi lama -- anggap aktif supaya
+  // perilakunya tidak berubah diam-diam.
+  applyBacktestVisibility(s.backtest_enabled === undefined ? true : s.backtest_enabled);
+
   // conn
   const cd=document.getElementById('connDot'), ct=document.getElementById('connText');
   if(s.live_connected){cd.className='dot on';ct.textContent=s.has_api_key?'Binance terhubung':'Harga live (tanpa API key)';}
@@ -581,10 +861,12 @@ async function confirmManualClose(){
     if(!r.ok){
       window._manualStatusLocked = false;
       showManualStatus('err', '❌ ' + (d.error || 'Gagal mengirim perintah jual.'));
+      toast('err','Perintah jual ditolak', d.error || 'Gagal mengirim perintah jual.');
       return;
     }
     window._manualStatusLocked = true;
     showManualStatus(d.bot_alive ? 'info' : 'warn', (d.bot_alive?'⏳ ':'⚠️ ') + d.message);
+    toast(d.bot_alive ? 'info' : 'warn', 'Perintah jual terkirim', d.message);
     startManualClosePolling(sym);
   }catch(e){
     closeManualCloseModal();
@@ -608,6 +890,7 @@ function startManualClosePolling(symbol){
         clearInterval(window._manualPollTimer); window._manualPollTimer = null;
         window._manualStatusLocked = true;
         showManualStatus('ok', `✅ Posisi ${symbol} berhasil ditutup.`);
+        toast('ok','Posisi ditutup', symbol + ' sudah terjual. Riwayat trade akan diperbarui.');
         setTimeout(()=>{ window._manualStatusLocked = false; hideManualStatus(); }, 8000);
         refresh();
         return;
@@ -630,6 +913,7 @@ function startManualClosePolling(symbol){
       clearInterval(window._manualPollTimer); window._manualPollTimer = null;
       window._manualStatusLocked = true;
       showManualStatus('err', '❌ Perintah jual belum juga diproses setelah 2 menit. Cek apakah bot sedang berjalan, atau coba klik lagi.');
+      toast('err','Perintah jual tidak diproses','Sudah 2 menit tanpa konfirmasi. Pastikan proses bot sedang berjalan.',9000);
     }
   }, 3000);
 }
@@ -645,6 +929,8 @@ function renderSummary(sum, quote){
 
 function renderTrades(trades, quote){
   document.getElementById('tradeCount').textContent = trades.length? '('+trades.length+' terakhir)':'';
+  const badge = document.getElementById('tabTradeBadge');
+  if(badge) badge.textContent = trades.length? ' ('+trades.length+')' : '';
   const tb=document.getElementById('tradeBody');
   const closed=trades.filter(t=>t.sell_time);
   if(!closed.length){tb.innerHTML='<tr><td colspan="8" class="empty">Belum ada trade yang selesai.</td></tr>';return;}
@@ -682,17 +968,17 @@ function renderChart(trades){
   let line=pts.map((v,i)=>(i?'L':'M')+x(i).toFixed(1)+' '+y(v).toFixed(1)).join(' ');
   let area=line+` L ${x(pts.length-1).toFixed(1)} ${zeroY.toFixed(1)} L ${x(0).toFixed(1)} ${zeroY.toFixed(1)} Z`;
   const up=cum>=0;
-  const col=up?'#22c55e':'#ef4444';
+  const col=up?'#4ade80':'#f43f5e';
   wrap.innerHTML=`
   <svg viewBox="0 0 ${W} ${H}" width="100%" preserveAspectRatio="xMidYMid meet" style="display:block">
     <defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0%" stop-color="${col}" stop-opacity="0.28"/><stop offset="100%" stop-color="${col}" stop-opacity="0"/>
     </linearGradient></defs>
-    <line x1="${pad}" y1="${zeroY}" x2="${W-pad}" y2="${zeroY}" stroke="#2b3444" stroke-dasharray="3 3"/>
+    <line x1="${pad}" y1="${zeroY}" x2="${W-pad}" y2="${zeroY}" stroke="rgba(148,163,184,.25)" stroke-dasharray="3 3"/>
     <path d="${area}" fill="url(#g)"/>
     <path d="${line}" fill="none" stroke="${col}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
     ${pts.map((v,i)=>`<circle cx="${x(i).toFixed(1)}" cy="${y(v).toFixed(1)}" r="${i===pts.length-1?4:2.5}" fill="${col}"/>`).join('')}
-    <text x="${pad}" y="16" fill="#8b97a7" font-size="11" font-family="monospace">PnL kumulatif</text>
+    <text x="${pad}" y="16" fill="#7d8899" font-size="11" font-family="monospace">PnL kumulatif</text>
     <text x="${W-pad}" y="16" fill="${col}" font-size="13" font-weight="700" text-anchor="end" font-family="monospace">${(cum>=0?'+':'')}${cum.toFixed(2)}</text>
   </svg>`;
 }
@@ -700,8 +986,13 @@ function renderChart(trades){
 async function refresh(){
   try{
     const r=await fetch('/api/all',{cache:'no-store'});
+    if(!r.ok) throw new Error('HTTP '+r.status);
     const d=await r.json();
     document.getElementById('errBanner').classList.remove('show');
+    if(_connWasDown){
+      _connWasDown = false;
+      toast('ok','Koneksi pulih','Data dashboard kembali diperbarui.',4000);
+    }
     renderStatus(d.status);
     renderSummary(d.summary, d.status.quote);
     renderTrades(d.trades, d.status.quote);
@@ -712,7 +1003,11 @@ async function refresh(){
   }catch(e){
     document.getElementById('errText').textContent='Gagal memuat data dari server dashboard: '+e.message;
     document.getElementById('errBanner').classList.add('show');
-    document.getElementById('lastUpdate').textContent='error — mencoba lagi…';
+    document.getElementById('lastUpdate').textContent='error, mencoba lagi...';
+    if(!_connWasDown){
+      _connWasDown = true;
+      toast('err','Koneksi terputus','Tidak bisa menghubungi server dashboard. Percobaan ulang tiap 5 detik.',7000);
+    }
   }
 }
 refresh();
@@ -725,6 +1020,13 @@ async function loadBacktestDefaults(){
   try{
     const r = await fetch('/api/backtest/defaults');
     const d = await r.json();
+    if(!r.ok){
+      // Paling mungkin HTTP 403 karena backtest dimatikan di mode LIVE.
+      // Izinkan percobaan ulang nanti bila status berubah.
+      _btDefaultsLoaded = false;
+      if(d && d.backtest_disabled) applyBacktestVisibility(false);
+      return;
+    }
     document.getElementById('btDays').value = d.default_days;
     // Tidak ada batas maksimum hari yang dipaksakan (rentang backtest bebas).
     document.getElementById('btSl').value = d.SL_PCT;
@@ -754,8 +1056,10 @@ async function loadBacktestDefaults(){
     document.getElementById('btAtrBeLock').value = d.ATR_BE_LOCK_MULT;
     document.getElementById('btAtrTrStart').value = d.ATR_TRAILING_START_MULT;
     document.getElementById('btAtrTrStep').value = d.ATR_TRAILING_STEP_MULT;
-    document.getElementById('btSymbol').placeholder = 'mis. SOL' + d.quote_asset;
+    if(d.default_days) document.getElementById('btDays').value = d.default_days;
+    if(d.default_max_symbols) document.getElementById('btMaxSymbols').value = d.default_max_symbols;
     btSyncAtrUi();
+    btUpdateEstimate();
   }catch(e){ /* form tetap kosong, tidak fatal */ }
 }
 
@@ -805,25 +1109,77 @@ function btShowError(msg){
   el.classList.add('show');
 }
 
-// Kedua tombol dikunci bersamaan supaya tidak bisa menjalankan dua job sekaligus.
-function btBusy(busy, compare){
+function btBusy(busy){
   const run = document.getElementById('btRunBtn');
-  const cmp = document.getElementById('btCmpBtn');
-  run.disabled = busy; cmp.disabled = busy;
-  run.textContent = (busy && !compare) ? 'Menjalankan…' : '▶ Jalankan Backtest';
-  cmp.textContent = (busy && compare) ? 'Membandingkan…' : '⚖ Bandingkan Tetap vs ATR';
+  run.disabled = busy;
+  run.textContent = busy ? 'Menjalankan…' : '▶ Jalankan';
+  const cancel = document.getElementById('btCancelBtn');
+  if(cancel && !busy) cancel.style.display = 'none';
 }
 
-async function startBacktest(compare){
-  compare = !!compare;
+// ID job yang sedang berjalan, dipakai tombol Batal.
+let _btJobId = null;
+
+async function cancelBacktest(){
+  if(!_btJobId) return;
+  const btn = document.getElementById('btCancelBtn');
+  if(btn){ btn.disabled = true; btn.textContent = 'Membatalkan…'; }
+  try{
+    await fetch('/api/backtest/cancel/' + encodeURIComponent(_btJobId), {method:'POST'});
+    toast('info','Pembatalan dikirim','Backtest akan berhenti pada titik pemeriksaan berikutnya.');
+  }catch(e){
+    toast('err','Gagal membatalkan', e.message);
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = '✕ Batal'; }
+  }
+}
+
+// Perkiraan beban unduhan. Angkanya kasar tetapi cukup untuk mencegah
+// pengguna tidak sengaja meminta puluhan ribu request, dan memberi
+// gambaran jujur bahwa backtest portofolio memang butuh waktu.
+function btUpdateEstimate(){
+  const el = document.getElementById('btEstimate');
+  if(!el) return;
+  const days = parseInt(document.getElementById('btDays').value || '0', 10);
+  const sym = parseInt(document.getElementById('btMaxSymbols').value || '0', 10);
+  if(!(days >= 2) || !(sym >= 2)){ el.textContent = ''; return; }
+  const barsPerSym = (days + 1) * 288;          // 288 bar 5 menit per hari + warmup
+  const reqPerSym = Math.ceil(barsPerSym / 1000);
+  const totalReq = sym * reqPerSym;
+  const weight = totalReq * 2;                   // bobot /api/v3/klines = 2
+  // Binance mengizinkan 6000 bobot per menit per IP. Diasumsikan hanya
+  // separuh jatah yang dipakai supaya bot tetap punya ruang bernapas.
+  const mins = weight / 3000;
+  const warn = totalReq > 20000
+    ? ' <b style="color:#f43f5e">Melebihi batas 20.000 request, kurangi simbol atau hari.</b>'
+    : '';
+  el.innerHTML = 'Perkiraan beban: <b>' + sym.toLocaleString(LOCALE) + '</b> simbol x <b>'
+    + reqPerSym + '</b> request = <b>' + totalReq.toLocaleString(LOCALE)
+    + '</b> request ke Binance (bobot ' + weight.toLocaleString(LOCALE)
+    + '). Perkiraan waktu unduh minimal <b>' + (mins < 1 ? '<1' : Math.ceil(mins))
+    + ' menit</b>.' + warn;
+}
+
+async function startBacktest(){
   btShowError('');
+  // Jaga-jaga kalau fungsi ini terpanggil saat fitur sedang dimatikan
+  // (misalnya dari konsol browser, atau status berubah setelah halaman
+  // dimuat). Server tetap menolak sendiri, ini hanya agar pesannya jelas.
+  if(_btVisibility === false){
+    btShowError('Fitur backtest sedang dinonaktifkan karena bot berjalan di mode LIVE.');
+    return;
+  }
   document.getElementById('btResult').style.display = 'none';
-  const symbol = document.getElementById('btSymbol').value.trim().toUpperCase();
-  if(!symbol){ btShowError('Isi simbol dulu, misalnya SOLUSDT.'); return; }
+
+  const days = parseInt(document.getElementById('btDays').value || '30', 10);
+  const maxSym = parseInt(document.getElementById('btMaxSymbols').value || '150', 10);
+  if(!(days >= 2)){ btShowError('Rentang minimal 2 hari (hari pertama dipakai warmup statistik 24 jam).'); return; }
+  if(!(maxSym >= 2)){ btShowError('Jumlah simbol minimal 2, supaya ada persaingan antar-simbol untuk disimulasikan.'); return; }
+  if(maxSym > 600){ btShowError('Jumlah simbol maksimal 600.'); return; }
 
   const payload = {
-    symbol: symbol,
-    days: parseInt(document.getElementById('btDays').value || '90', 10),
+    days: days,
+    max_symbols: maxSym,
     SL_PCT: document.getElementById('btSl').value,
     TP_PCT: document.getElementById('btTp').value,
     BE_TRIGGER_PCT: document.getElementById('btBeTrig').value,
@@ -851,14 +1207,13 @@ async function startBacktest(compare){
     ATR_BE_LOCK_MULT: document.getElementById('btAtrBeLock').value,
     ATR_TRAILING_START_MULT: document.getElementById('btAtrTrStart').value,
     ATR_TRAILING_STEP_MULT: document.getElementById('btAtrTrStep').value,
-    compare: compare,
   };
 
   // SL/TP dinonaktifkan saat ATR aktif, jadi .value bisa kosong -- jangan kirim.
   if(payload.SL_PCT === '') delete payload.SL_PCT;
   if(payload.TP_PCT === '') delete payload.TP_PCT;
 
-  btBusy(true, compare);
+  btBusy(true);
   document.getElementById('btProgressWrap').style.display = 'flex';
   document.getElementById('btProgressBar').style.width = '2%';
   document.getElementById('btStage').textContent = 'Mengirim permintaan';
@@ -874,10 +1229,13 @@ async function startBacktest(compare){
     });
     const d = await r.json();
     if(!r.ok){ throw new Error(d.error || 'Gagal memulai backtest.'); }
+    _btJobId = d.job_id;
+    const cb = document.getElementById('btCancelBtn');
+    if(cb) cb.style.display = 'inline-block';
     pollBacktest(d.job_id);
   }catch(e){
     btShowError(e.message);
-    btBusy(false, compare);
+    btBusy(false);
     document.getElementById('btProgressWrap').style.display = 'none';
   }
 }
@@ -894,7 +1252,10 @@ function fmtDuration(sec){
 
 function btStageSub(stage){
   const s = (stage||'').toLowerCase();
+  if(s.includes('daftar pasar')) return 'Mengambil statistik 24 jam seluruh pair untuk menentukan semesta simbol…';
+  if(s.includes('mengunduh')) return 'Mengunduh candle historis tiap simbol dari Binance. Ini bagian paling lama…';
   if(s.includes('mengambil')) return 'Mengunduh candle historis dari Binance secara bertahap (paging)…';
+  if(s.includes('portofolio')) return 'Memutar ulang pasar bar demi bar: ranking, konfirmasi, entry, kelola exit…';
   if(s.includes('simulasi')) return 'Memutar ulang data historis candle demi candle, menerapkan aturan entry & exit…';
   if(s.includes('selesai')) return 'Selesai, menyusun hasil…';
   return 'Menyiapkan permintaan backtest…';
@@ -928,10 +1289,12 @@ function pollBacktest(jobId){
         clearInterval(btPolling); btPolling = null;
         finishBacktestUI();
         renderBacktestResult(d.result);
+        toast('ok','Backtest selesai','Hasil simulasi sudah ditampilkan di bawah form.');
       } else if(d.status === 'error'){
         clearInterval(btPolling); btPolling = null;
         finishBacktestUI();
         btShowError(d.error);
+        toast('err','Backtest gagal', d.error || 'Terjadi kesalahan saat menjalankan backtest.',8000);
       }
     }catch(e){
       clearInterval(btPolling); btPolling = null;
@@ -942,86 +1305,54 @@ function pollBacktest(jobId){
 }
 
 function finishBacktestUI(){
-  btBusy(false, false);
+  btBusy(false);
+  _btJobId = null;
+  const cb = document.getElementById('btCancelBtn');
+  if(cb) cb.style.display = 'none';
   document.getElementById('btProgressWrap').style.display = 'none';
-}
-
-// Tabel banding TETAP vs ATR. Dua backtest pada candle yang sama persis,
-// jadi selisihnya benar-benar dari metode exit.
-function renderCompareBlock(res){
-  const wrap = document.getElementById('btCompareWrap');
-  if(!res.compare){ wrap.style.display = 'none'; wrap.innerHTML = ''; return; }
-  const f = res.compare.fixed, a = res.compare.atr, info = res.compare.atr_info || {};
-  const n2 = (x,d=2) => (x==null||!isFinite(x)) ? '∞' : Number(x).toFixed(d);
-
-  // higher=true berarti angka lebih besar itu lebih bagus.
-  const rows = [
-    ['Total trade',        f.total_trades,       a.total_trades,       0, null],
-    ['Win rate (%)',       f.win_rate,           a.win_rate,           1, true],
-    ['Return total (%)',   f.total_return_pct,   a.total_return_pct,   2, true],
-    ['Profit factor',      f.profit_factor,      a.profit_factor,      2, true],
-    ['Max drawdown (%)',   f.max_drawdown_pct,   a.max_drawdown_pct,   2, false],
-    ['Rata-rata menang (%)',f.avg_win_pct,       a.avg_win_pct,        2, true],
-    ['Rata-rata kalah (%)',f.avg_loss_pct,       a.avg_loss_pct,       2, true],
-    ['Rata-rata hold (mnt)',f.avg_hold_minutes,  a.avg_hold_minutes,   0, null],
-  ].map(([label, fv, av, dec, higher])=>{
-    let cf='', ca='';
-    if(higher !== null && isFinite(fv) && isFinite(av) && Math.abs(fv-av) > 1e-9){
-      const fWins = higher ? (fv > av) : (fv < av);
-      if(fWins) cf='win'; else ca='win';
-    }
-    return `<tr><td>${label}</td><td class="mono ${cf}">${n2(fv,dec)}</td><td class="mono ${ca}">${n2(av,dec)}</td></tr>`;
-  }).join('');
-
-  const reasons = Array.from(new Set([
-    ...Object.keys(f.reason_counts||{}), ...Object.keys(a.reason_counts||{})
-  ])).sort().map(k=>
-    `<tr><td>Exit: ${btReasonLabel(k)}</td><td class="mono">${(f.reason_counts||{})[k]||0}x</td>`+
-    `<td class="mono">${(a.reason_counts||{})[k]||0}x</td></tr>`).join('');
-
-  const nMin = Math.min(f.real_trades||0, a.real_trades||0);
-  const caution = nMin < 30
-    ? `<span style="color:var(--amber)">⚠ Hanya ${nMin} trade. Ini TERLALU SEDIKIT untuk menyimpulkan apa pun.
-       Selisih sebesar apa pun pada sampel sekecil ini kemungkinan besar kebetulan.
-       Perpanjang rentang hari, atau uji beberapa simbol lalu gabungkan.</span>`
-    : `${nMin} trade. Ini indikasi awal, bukan bukti kuat. Uji beberapa simbol dan
-       beberapa periode berbeda sebelum mengubah config yang dipakai uang asli.`;
-
-  const infoHtml = (info && info.trades_with_atr) ? `
-    <div style="margin-top:10px;font-size:11.5px;line-height:1.7" class="mut">
-      <b>Sebaran stop ATR:</b>
-      ATR rata-rata ${n2(info.avg_atr_pct)}% dari harga &middot;
-      SL rata-rata ${n2(info.avg_sl_pct)}% (terkecil ${n2(info.min_sl_pct)}%, terbesar ${n2(info.max_sl_pct)}%) &middot;
-      kena batas bawah ${info.clamped_low||0} trade &middot;
-      kena batas atas ${info.clamped_high||0} trade &middot;
-      gagal hitung ATR ${info.trades_fallback||0} trade (pakai SL/TP tetap).
-    </div>` : '';
-
-  wrap.style.display = 'block';
-  wrap.innerHTML = `
-    <h2 style="font-size:13px">⚖ Perbandingan: SL/TP Tetap vs ATR</h2>
-    <p class="mut" style="font-size:11.5px;line-height:1.5;margin:4px 0 0">
-      Dua backtest dijalankan pada candle yang <b>sama persis</b>, dengan filter entry dan
-      max hold identik. Jadi selisihnya benar-benar berasal dari metode exit, bukan dari
-      perbedaan data. Angka <span style="color:var(--green);font-weight:700">hijau</span>
-      menandai sisi yang lebih unggul di baris itu.
-    </p>
-    <table class="bt-cmp">
-      <thead><tr><th>Metrik</th><th>TETAP</th><th>ATR</th></tr></thead>
-      <tbody>${rows}
-        <tr><td colspan="3" style="border-bottom:none;padding-top:12px"></td></tr>
-        ${reasons}</tbody>
-    </table>
-    ${infoHtml}
-    <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border);font-size:11.5px;line-height:1.6">
-      ${caution}
-    </div>`;
 }
 
 function btReasonTagClass(r){ return (r||'').toLowerCase(); }
 function btReasonLabel(r){
-  const map = {STOP_LOSS:'SL', TAKE_PROFIT:'TP', BREAKEVEN:'BE', TRAILING_STOP:'TRAIL', MAX_HOLD_TIME:'TIMEOUT', END_OF_DATA:'DATA HABIS'};
+  const map = {STOP_LOSS:'SL', TAKE_PROFIT:'TP', BREAKEVEN:'BE', TRAILING_STOP:'TRAIL',
+               MAX_HOLD_TIME:'TIMEOUT', MOMENTUM_FADE:'FADE', END_OF_DATA:'DATA HABIS'};
   return map[r] || r;
+}
+
+// Kontribusi PnL per simbol, diurutkan dari penyumbang terbesar.
+function renderSymbolBreakdown(s){
+  const box = document.getElementById('btSymbolBox');
+  const top = s.top_symbols || [];
+  if(!top.length){ box.innerHTML = '<div class="empty">Belum ada trade.</div>'; return; }
+  const max = Math.max(...top.map(x=>Math.abs(x.pnl_pct)), 1);
+  box.innerHTML = top.map(x=>{
+    const w = Math.max(2, Math.abs(x.pnl_pct)/max*100);
+    const col = x.pnl_pct>=0 ? 'var(--green)' : 'var(--red)';
+    return `<div style="margin-bottom:9px">
+      <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px">
+        <span><b>${x.symbol}</b> <span class="mut">${x.trades}x</span></span>
+        <span class="mono ${cls(x.pnl_pct)}">${sign(x.pnl_pct)}${fmt(x.pnl_pct)}%</span>
+      </div>
+      <div style="height:5px;border-radius:99px;background:var(--inset,rgba(148,163,184,.12))">
+        <i style="display:block;height:100%;border-radius:99px;width:${w}%;background:${col}"></i>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderSkipped(res){
+  const box = document.getElementById('btSkipBox');
+  const cnt = document.getElementById('btSkipCount');
+  const sk = res.skipped || [];
+  cnt.textContent = (res.summary && res.summary.skipped_signals)
+    ? '(' + fmt(res.summary.skipped_signals,0) + ' total)' : '';
+  if(!sk.length){
+    box.innerHTML = '<div class="empty">Tidak ada sinyal yang terlewat pada rentang ini.</div>';
+    return;
+  }
+  box.innerHTML = '<div class="logbox" style="max-height:220px">' + sk.map(x=>
+    `<div class="logline INFO"><b>${x.symbol}</b> terlewat pada ${x.time}, bot sedang memegang ${x.holding}</div>`
+  ).join('') + '</div>';
 }
 
 function renderBacktestResult(res){
@@ -1032,7 +1363,7 @@ function renderBacktestResult(res){
     <div class="card ${s.total_return_pct>=0?'good':'bad'}"><div class="accent-bar"></div>
       <div class="label">Return Total (compounding)</div>
       <div class="value mono ${cls(s.total_return_pct)}">${sign(s.total_return_pct)}${fmt(s.total_return_pct)}%</div>
-      <div class="sub">${s.total_trades} trade (${s.real_trades} selesai wajar)</div></div>
+      <div class="sub">${s.total_trades} trade diambil bot</div></div>
     <div class="card"><div class="accent-bar"></div>
       <div class="label">Win Rate</div>
       <div class="value mono">${s.total_trades? fmt(s.win_rate,1)+'%':'—'}</div>
@@ -1044,7 +1375,23 @@ function renderBacktestResult(res){
     <div class="card"><div class="accent-bar"></div>
       <div class="label">Profit Factor</div>
       <div class="value mono">${isFinite(s.profit_factor)? fmt(s.profit_factor,2) : '∞'}</div>
-      <div class="sub">rata2 hold ${fmt(s.avg_hold_minutes,0)} mnt</div></div>`;
+      <div class="sub">rata2 hold ${fmt(s.avg_hold_minutes,0)} mnt</div></div>
+    <div class="card warn"><div class="accent-bar"></div>
+      <div class="label">Sinyal Terlewat</div>
+      <div class="value mono">${fmt(s.skipped_signals,0)}</div>
+      <div class="sub">peluang valid yang tidak bisa diambil karena slot penuh</div></div>
+    <div class="card"><div class="accent-bar"></div>
+      <div class="label">Simbol Ditradingkan</div>
+      <div class="value mono">${fmt(s.unique_symbols,0)}<small style="font-size:13px;color:var(--muted)"> / ${fmt(s.symbols_in_universe,0)}</small></div>
+      <div class="sub">dari semesta yang dipindai</div></div>
+    <div class="card"><div class="accent-bar"></div>
+      <div class="label">Eksposur Pasar</div>
+      <div class="value mono">${fmt(s.exposure_pct,1)}%</div>
+      <div class="sub">${fmt(s.trades_per_day,2)} trade per hari</div></div>
+    <div class="card"><div class="accent-bar"></div>
+      <div class="label">Rata-rata Peringkat Entry</div>
+      <div class="value mono">#${fmt(s.avg_rank_at_entry,2)}</div>
+      <div class="sub">posisi di papan gainer saat dibeli</div></div>`;
   document.getElementById('btCards').innerHTML = cardsHtml;
 
   // info box
@@ -1052,9 +1399,9 @@ function renderBacktestResult(res){
   let reasonRows = Object.entries(s.reason_counts||{}).map(([k,v])=>
     `<div class="posrow"><span class="k">${btReasonLabel(k)}</span><span class="v mono">${v}x</span></div>`).join('');
   document.getElementById('btInfoBox').innerHTML = `
-    <div class="posrow"><span class="k">Simbol</span><span class="v">${res.symbol}</span></div>
+    <div class="posrow"><span class="k">Semesta simbol</span><span class="v mono">${res.universe_with_data} berhasil / ${res.universe_requested} diminta${res.symbols_failed_count? ' ('+res.symbols_failed_count+' gagal)':''}</span></div>
     <div class="posrow"><span class="k">Rentang data</span><span class="v mono" style="font-size:11.5px">${res.start_time||'—'} &rarr; ${res.end_time||'—'}</span></div>
-    <div class="posrow"><span class="k">Jumlah candle terpakai</span><span class="v mono">${res.bars_usable} / ${res.bars_total}</span></div>
+    <div class="posrow"><span class="k">Titik waktu diproses</span><span class="v mono">${fmt(res.bars_total,0)} bar ${res.interval}</span></div>
     <div class="posrow"><span class="k">SL / TP / BE (trig,lock) / Trail (start,step)</span><span class="v mono" style="font-size:11.5px">${p.SL_PCT}% / ${p.TP_PCT}% / ${p.BE_TRIGGER_PCT}%,${p.BE_LOCK_PCT}% / ${p.TRAILING_START_PCT}%,${p.TRAILING_STEP_PCT}%</span></div>
     <div class="posrow"><span class="k">Maks hold / Min pump 24h</span><span class="v mono">${p.MAX_HOLD_MINUTES} mnt / ${p.MIN_PUMP_PCT_24H}%</span></div>
     <div class="posrow"><span class="k">Maks ekstensi VWAP</span><span class="v mono">${p.VWAP_MAX_EXTENSION_PCT}%</span></div>
@@ -1062,8 +1409,8 @@ function renderBacktestResult(res){
     ${p.ENTRY_MODEL==='VWAP_RETEST_RVOL' ? `
       <div class="posrow"><span class="k">Retest VWAP: bar / sentuh / breakdown / reclaim</span><span class="v mono" style="font-size:11.5px">${p.VWAP_RETEST_LOOKBACK_BARS} / ${p.VWAP_RETEST_TOUCH_TOLERANCE_PCT}% / ${p.VWAP_RETEST_MAX_BREAKDOWN_PCT}% / ${p.VWAP_RETEST_MIN_RECLAIM_PCT}%</span></div>
       <div class="posrow"><span class="k">Sinyal: posisi close / RVOL</span><span class="v mono">${p.VWAP_RETEST_SIGNAL_MIN_CLOSE_POSITION} / ${p.MIN_RELATIVE_QUOTE_VOLUME}x (${p.RVOL_LOOKBACK_BARS} bar)</span></div>` : ''}
-    <div class="posrow"><span class="k">Mode exit</span><span class="v mono">${res.compare? 'BANDING (tetap vs ATR)' : (p.USE_ATR_EXITS? 'ATR' : 'TETAP')}</span></div>
-    ${(p.USE_ATR_EXITS || res.compare) ? `
+    <div class="posrow"><span class="k">Mode exit</span><span class="v mono">${p.USE_ATR_EXITS? 'ATR' : 'TETAP'}</span></div>
+    ${p.USE_ATR_EXITS ? `
       <div class="posrow"><span class="k">ATR: periode / pengali SL / RR</span><span class="v mono">${p.ATR_PERIOD} / ${p.ATR_MULTIPLIER_SL}x / ${p.ATR_TP_RR_RATIO}x</span></div>
       <div class="posrow"><span class="k">ATR: batas SL</span><span class="v mono">${p.ATR_SL_MIN_PCT}% .. ${p.ATR_SL_MAX_PCT}%</span></div>
       <div class="posrow"><span class="k">ATR: pengali BE (trig,lock) / Trail (start,step)</span><span class="v mono" style="font-size:11.5px">${p.ATR_BE_TRIGGER_MULT}x,${p.ATR_BE_LOCK_MULT}x / ${p.ATR_TRAILING_START_MULT}x,${p.ATR_TRAILING_STEP_MULT}x</span></div>` : ''}
@@ -1072,7 +1419,6 @@ function renderBacktestResult(res){
     ${(res.warnings&&res.warnings.length)? '<div style="border-top:1px solid var(--border);margin:4px 0"></div>'+res.warnings.map(w=>`<div class="posrow"><span class="k" style="color:var(--amber)">⚠ ${w}</span></div>`).join('') : ''}
   `;
 
-  renderCompareBlock(res);
 
   document.getElementById('btLimitList').innerHTML = (res.limitations||[]).map(l=>`<li>${l}</li>`).join('');
 
@@ -1080,19 +1426,24 @@ function renderBacktestResult(res){
   document.getElementById('btTradeCount').textContent = res.trades.length? '('+res.trades.length+' trade)':'';
   const tb = document.getElementById('btTradeBody');
   if(!res.trades.length){
-    tb.innerHTML = '<tr><td colspan="7" class="empty">Tidak ada trade yang lolos filter & konfirmasi pada rentang ini. Coba longgarkan Min Pump 24h atau perpanjang rentang hari.</td></tr>';
+    tb.innerHTML = '<tr><td colspan="9" class="empty">Tidak ada trade yang lolos filter & konfirmasi pada rentang ini. Coba longgarkan Min Pump 24h, perbanyak simbol, atau perpanjang rentang hari.</td></tr>';
   } else {
     tb.innerHTML = res.trades.map(t=>`
       <tr>
+        <td><b>${t.symbol}</b></td>
         <td class="mono mut">${t.entry_time}</td>
         <td class="mono mut">${t.exit_time}</td>
         <td class="mono">${fmtP(t.entry_price)}</td>
         <td class="mono">${fmtP(t.exit_price)}</td>
+        <td class="mono mut">#${t.rank_at_entry} <span style="opacity:.7">(${sign(t.pct24h_at_entry)}${fmt(t.pct24h_at_entry,1)}%)</span></td>
         <td class="mono">${Math.round(t.hold_minutes)} mnt</td>
         <td class="mono ${cls(t.pnl_pct)}">${sign(t.pnl_pct)}${fmt(t.pnl_pct)}%</td>
         <td><span class="tag ${btReasonTagClass(t.reason)}">${btReasonLabel(t.reason)}</span></td>
       </tr>`).join('');
   }
+
+  renderSymbolBreakdown(s);
+  renderSkipped(res);
 
   // chart return kumulatif
   const wrap = document.getElementById('btChartWrap');
@@ -1107,7 +1458,7 @@ function renderBacktestResult(res){
     const y=v=>H-pad-((v-min)/range)*(H-pad*2);
     const zeroY=y(0);
     const last = pts[pts.length-1];
-    const col = last>=0? '#22c55e':'#ef4444';
+    const col = last>=0? '#4ade80':'#f43f5e';
     let line=pts.map((v,i)=>(i?'L':'M')+x(i).toFixed(1)+' '+y(v).toFixed(1)).join(' ');
     let area=line+` L ${x(pts.length-1).toFixed(1)} ${zeroY.toFixed(1)} L ${x(0).toFixed(1)} ${zeroY.toFixed(1)} Z`;
     wrap.innerHTML = `
@@ -1115,16 +1466,20 @@ function renderBacktestResult(res){
       <defs><linearGradient id="g2" x1="0" y1="0" x2="0" y2="1">
         <stop offset="0%" stop-color="${col}" stop-opacity="0.28"/><stop offset="100%" stop-color="${col}" stop-opacity="0"/>
       </linearGradient></defs>
-      <line x1="${pad}" y1="${zeroY}" x2="${W-pad}" y2="${zeroY}" stroke="#2b3444" stroke-dasharray="3 3"/>
+      <line x1="${pad}" y1="${zeroY}" x2="${W-pad}" y2="${zeroY}" stroke="rgba(148,163,184,.25)" stroke-dasharray="3 3"/>
       <path d="${area}" fill="url(#g2)"/>
       <path d="${line}" fill="none" stroke="${col}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
-      <text x="${pad}" y="16" fill="#8b97a7" font-size="11" font-family="monospace">Return kumulatif</text>
+      <text x="${pad}" y="16" fill="#7d8899" font-size="11" font-family="monospace">Return kumulatif</text>
       <text x="${W-pad}" y="16" fill="${col}" font-size="13" font-weight="700" text-anchor="end" font-family="monospace">${(last>=0?'+':'')}${last.toFixed(2)}%</text>
     </svg>`;
   }
 }
 
-loadBacktestDefaults();
+// loadBacktestDefaults() TIDAK dipanggil di sini. Pemanggilannya ditunda
+// sampai renderStatus() memastikan backtest memang aktif untuk mode yang
+// sedang berjalan -- lihat applyBacktestVisibility(). Tanpa penundaan ini,
+// permintaan pertama ke /api/backtest/defaults akan selalu kena HTTP 403
+// saat mode LIVE dengan backtest dimatikan.
 </script>
 </body>
 </html>

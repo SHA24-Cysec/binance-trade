@@ -123,7 +123,14 @@ def main() -> int:
     mode_label = ("TESTNET (order sungguhan, dana virtual)" if mode == "TESTNET"
                   else "LIVE (order sungguhan, UANG ASLI!)")
     _log(f"Mode bot: {mode_label} | endpoint={base_url} | RISK_PERCENT={risk_pct}%")
-    _log(f"Dashboard akan tersedia di http://0.0.0.0:{port}")
+    # Ikuti pengaturan yang sama dengan dashboard.py. Bawaannya hanya
+    # komputer ini, karena dashboard tidak punya login sementara ada
+    # tombol yang bisa menjual posisi sungguhan.
+    dash_host = os.environ.get("DASHBOARD_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    dash_label = "localhost" if dash_host == "127.0.0.1" else dash_host
+    _log(f"Dashboard akan tersedia di http://{dash_label}:{port}")
+    if dash_host == "0.0.0.0":
+        _log("PERINGATAN: dashboard terbuka ke seluruh jaringan tanpa password.")
     _log("Tekan Ctrl+C untuk menghentikan KEDUANYA sekaligus.")
     _log("=" * 70)
 

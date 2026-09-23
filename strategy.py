@@ -39,14 +39,47 @@ def parse_klines(raw: list) -> list[Kline]:
     0=openTime 1=open 2=high 3=low 4=close 5=volume 6=closeTime
     7=quoteAssetVolume ..."""
     out = []
-    for row in raw:
+    for idx, row in enumerate(raw):
+        o = float(row[1])
+        h = float(row[2])
+        low_ = float(row[3])
+        c = float(row[4])
+
+        # Penjagaan data rusak. Ini BUKAN paranoia berlebihan: bursa
+        # sesekali mengirim nilai aneh saat maintenance atau saat simbol
+        # baru didelisting, dan akibatnya senyap tapi fatal.
+        #
+        # NaN adalah yang paling berbahaya. Setiap perbandingan dengan NaN
+        # menghasilkan False, termasuk "pnl_low <= -SL_PCT". Artinya satu
+        # candle NaN saja membuat Stop Loss BERHENTI BEKERJA tanpa satu pun
+        # pesan error, dan posisi ditahan terus sampai data habis. Lebih
+        # baik gagal keras di sini daripada diam-diam kehilangan uang.
+        for nama, nilai in (("open", o), ("high", h), ("low", low_), ("close", c)):
+            if nilai != nilai:      # True hanya untuk NaN
+                raise ValueError(
+                    f"Candle ke-{idx} punya {nama}=NaN. Data bursa rusak. "
+                    "Dihentikan karena NaN membuat semua cek Stop Loss/Take "
+                    "Profit diam-diam gagal."
+                )
+            if nilai in (float("inf"), float("-inf")):
+                raise ValueError(f"Candle ke-{idx} punya {nama} tak hingga. Data bursa rusak.")
+            if nilai <= 0:
+                raise ValueError(
+                    f"Candle ke-{idx} punya {nama}={nilai}. Harga wajib > 0. "
+                    "Data bursa rusak atau simbol sudah tidak diperdagangkan."
+                )
+
+        # high/low yang terbalik akan mengacaukan deteksi sentuhan SL/TP.
+        if h < low_:
+            raise ValueError(f"Candle ke-{idx}: high ({h}) lebih kecil dari low ({low_}).")
+
         out.append(
             Kline(
                 open_time=int(row[0]),
-                open=float(row[1]),
-                high=float(row[2]),
-                low=float(row[3]),
-                close=float(row[4]),
+                open=o,
+                high=h,
+                low=low_,
+                close=c,
                 close_time=int(row[6]),
                 volume=float(row[5]) if len(row) > 5 else 0.0,
                 quote_volume=float(row[7]) if len(row) > 7 else 0.0,
@@ -229,6 +262,12 @@ def resolve_exit_levels(config: dict, klines: "list[Kline] | None" = None,
 
     # Breakeven harus terpicu sebelum Trailing, kalau tidak urutannya kacau.
     be_trigger = min(be_trigger, trail_start)
+
+    # Profit yang dikunci saat BE tidak boleh melebihi profit yang memicunya.
+    # Kalau lock > trigger, stop dipindah ke harga di atas harga yang baru
+    # saja tersentuh, sehingga backtest bisa mencatat fill yang pada
+    # kenyataannya mustahil, dan di mode live stop langsung tidak valid.
+    be_lock = min(be_lock, be_trigger)
 
     return {
         "sl_pct": sl_pct,

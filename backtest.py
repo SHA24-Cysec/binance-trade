@@ -637,7 +637,40 @@ def selftest():
     cfg2["MIN_PUMP_PCT_24H"] = 500.0  # mustahil lolos
     result2 = run_backtest(klines, cfg2, warmup_bars=0)
     assert len(result2.trades) == 0, "Harusnya TIDAK ada entry kalau filter pump % dibuat mustahil"
-    print("  -> OK (tidak ada entry, sesuai harapan)")
+    # Kontrol positif. Tanpa ini, tes di atas tetap hijau seandainya
+    # run_backtest rusak total dan SELALU mengembalikan nol trade. Data
+    # yang sama dengan filter wajar harus tetap menghasilkan entry.
+    assert len(result.trades) > 0, \
+        ("Kontrol positif gagal: data yang sama dengan filter wajar pun tidak "
+         "menghasilkan trade, jadi tes 'nol entry' di atas tidak membuktikan apa-apa")
+    print(f"  -> OK (0 entry saat filter mustahil, {len(result.trades)} entry saat wajar)")
+
+    print("\n=== SELFTEST backtest.py: data candle rusak ditolak, bukan diam-diam dipakai ===")
+    # Regresi untuk bug senyap: NaN membuat SETIAP perbandingan bernilai
+    # False, termasuk cek Stop Loss. Satu candle NaN dulu cukup untuk
+    # membuat SL tidak pernah kena dan posisi ditahan sampai data habis,
+    # tanpa satu pun pesan error. parse_klines() sekarang wajib menolaknya.
+    _kasus_rusak = [
+        ("close NaN", [[0, "1", "2", "0.5", "NaN", 10, 300_000, 1000]]),
+        ("close nol", [[0, "1", "2", "0.5", "0", 10, 300_000, 1000]]),
+        ("close negatif", [[0, "1", "2", "0.5", "-5", 10, 300_000, 1000]]),
+        ("close tak hingga", [[0, "1", "2", "0.5", "inf", 10, 300_000, 1000]]),
+        ("high < low", [[0, "1", "0.5", "2", "1", 10, 300_000, 1000]]),
+    ]
+    for _nama, _raw in _kasus_rusak:
+        try:
+            strategy.parse_klines(_raw)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(
+                f"Candle rusak ({_nama}) TIDAK ditolak parse_klines(). "
+                "Ini membuka jalan Stop Loss gagal diam-diam."
+            )
+    # Kontrol positif: candle wajar tidak boleh ikut tertolak.
+    _ok = strategy.parse_klines([[0, "1", "2", "0.5", "1.5", 10, 300_000, 1000]])
+    assert len(_ok) == 1 and _ok[0].close == 1.5, "Candle normal malah ditolak"
+    print(f"  -> OK ({len(_kasus_rusak)} bentuk data rusak ditolak, candle normal tetap lolos)")
 
     print("\n=== SELFTEST backtest.py: filter VWAP menolak pump yang terlalu curam/ekstrem ===")
     # Pump SANGAT curam (+3%/candle, candle close dekat high supaya lolos cek
@@ -755,7 +788,11 @@ def selftest():
          f"dapat {sl_trade.gross_pnl_pct:.2f}%")
     # PnL BERSIH harus lebih buruk, tepat sebesar fee pulang-pergi. Ini
     # membuktikan biaya benar-benar diperhitungkan dan bukan sekadar dicatat.
-    _expected_fee = 0.1 * 2
+    # Fee harus diambil dari config, bukan diketik ulang. Kalau dihardcode
+    # 0,1% tes ini pecah begitu diskon BNB (0,075%) aktif, padahal kode
+    # produksinya benar. Sumber kebenaran tunggal = get_taker_fee_pct().
+    from config import get_taker_fee_pct as _fee_now
+    _expected_fee = _fee_now(cfg) * 2
     assert abs(sl_trade.fee_pct - _expected_fee) < 1e-9, \
         f"Fee pulang-pergi harusnya {_expected_fee}%, dapat {sl_trade.fee_pct}%"
     assert abs(sl_trade.pnl_pct - (sl_trade.gross_pnl_pct - _expected_fee)) < 1e-9, \

@@ -39,7 +39,7 @@ from datetime import datetime, timezone
 
 from flask import Flask, jsonify, render_template, request
 
-from config import PUMP_CONFIG, get_mode, get_base_url, is_testnet
+from config import PUMP_CONFIG, get_mode, get_base_url, is_testnet, backtest_enabled
 import state as state_mod
 
 try:
@@ -49,6 +49,7 @@ except Exception:  # pragma: no cover - kalau requests tidak ada, tetap jalan ta
     _HAS_CLIENT = False
 
 import backtest as bt
+import portfolio_backtest as pbt
 
 app = Flask(__name__)
 
@@ -259,6 +260,10 @@ def build_status():
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
         "mode": get_mode(PUMP_CONFIG),
         "testnet": is_testnet(PUMP_CONFIG),
+        # Dipakai dashboard untuk menyembunyikan tab Backtest. Ini hanya
+        # petunjuk untuk UI -- penegakan sebenarnya ada di endpoint
+        # /api/backtest/* lewat _reject_if_backtest_disabled().
+        "backtest_enabled": backtest_enabled(PUMP_CONFIG),
         "live_connected": live_price is not None or balances is not None,
         "bot_alive": _bot_looks_alive(),
         "has_api_key": bool(PUMP_CONFIG.get("API_KEY")),
@@ -306,12 +311,20 @@ def build_status():
             "atr_pct_at_entry": state.get("atr_pct_at_entry") or None,
             # BE/Trailing juga mengikuti ATR, jadi tampilkan level yang
             # benar-benar berlaku untuk posisi terbuka, bukan nilai config.
+            #
+            # CATATAN BUG (diperbaiki): dulu "be_trigger_pct" ditulis dua
+            # kali di dict yang sama. Python diam-diam memakai yang
+            # TERAKHIR, yaitu nilai config statis, sehingga level ATR yang
+            # sebenarnya terkunci pada posisi tidak pernah sampai ke layar.
+            # Persis kebalikan dari maksud komentar di atas. Jangan
+            # menambahkan kunci dengan nama sama lagi di sini.
             "be_trigger_pct": state.get("be_trigger_pct") or PUMP_CONFIG.get("BE_TRIGGER_PCT"),
             "trail_start_pct": state.get("trail_start_pct") or PUMP_CONFIG.get("TRAILING_START_PCT"),
             "trail_step_pct": state.get("trail_step_pct") or PUMP_CONFIG.get("TRAILING_STEP_PCT"),
             "use_atr_exits": bool(PUMP_CONFIG.get("USE_ATR_EXITS")),
-            "be_trigger_pct": PUMP_CONFIG.get("BE_TRIGGER_PCT"),
-            "trailing_start_pct": PUMP_CONFIG.get("TRAILING_START_PCT"),
+            # Alias lama yang dipakai template. Ikut mengambil nilai posisi
+            # supaya angka di layar konsisten dengan kunci di atas.
+            "trailing_start_pct": state.get("trail_start_pct") or PUMP_CONFIG.get("TRAILING_START_PCT"),
             "max_hold_minutes": PUMP_CONFIG.get("MAX_HOLD_MINUTES"),
             "min_pump_pct_24h": PUMP_CONFIG.get("MIN_PUMP_PCT_24H"),
             "entry_model": PUMP_CONFIG.get("ENTRY_MODEL", "LEGACY_MOMENTUM"),
@@ -355,6 +368,28 @@ def build_trade_summary(trades):
 # candle dari Binance lalu mensimulasikan di memori. Job berjalan di thread
 # terpisah karena bisa memakan waktu (mengambil ribuan candle dengan paging).
 
+def _reject_if_backtest_disabled():
+    """Penjaga untuk semua endpoint /api/backtest/*.
+
+    Kembalikan response penolakan (tuple Flask) kalau backtest sedang
+    dimatikan, atau None kalau boleh lanjut. Dicek ULANG di setiap
+    permintaan, bukan sekali saat startup, supaya perubahan config saat
+    proses direstart langsung berlaku.
+
+    Penegakan diletakkan di server, bukan cuma menyembunyikan tab di
+    dashboard, karena menyembunyikan elemen HTML sama sekali bukan
+    pengamanan -- endpoint-nya masih bisa dipanggil langsung dengan curl.
+    """
+    if backtest_enabled(PUMP_CONFIG):
+        return None
+    return jsonify({
+        "error": "Fitur backtest dinonaktifkan saat mode LIVE. "
+                 "Untuk mengaktifkannya, set SHOW_BACKTEST_IN_LIVE=True di config.py "
+                 "lalu jalankan ulang dashboard.",
+        "backtest_disabled": True,
+    }), 403
+
+
 BT_PARAM_KEYS = (
     "USE_ATR_EXITS",
     "SL_PCT", "TP_PCT", "BE_TRIGGER_PCT", "BE_LOCK_PCT", "TRAILING_START_PCT",
@@ -379,7 +414,13 @@ def _bt_cleanup_old_jobs():
             _bt_jobs.pop(jid, None)
 
 
-def _bt_run_job(job_id: str, symbol: str, days: int, overrides: dict, compare: bool = False):
+def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
+    """Jalankan backtest PORTOFOLIO di thread terpisah.
+
+    Alurnya meniru bot live: pindai seluruh pasar, ranking per bar, ambil
+    satu kandidat terbaik, pegang satu posisi. Lihat portfolio_backtest.py
+    untuk penjelasan lengkap dan daftar keterbatasan.
+    """
     def set_progress(frac, stage=""):
         with _bt_jobs_lock:
             if job_id in _bt_jobs:
@@ -388,14 +429,28 @@ def _bt_run_job(job_id: str, symbol: str, days: int, overrides: dict, compare: b
                     _bt_jobs[job_id]["stage"] = stage
                 _bt_jobs[job_id]["updated_at"] = time.time()
 
+    def cancelled():
+        with _bt_jobs_lock:
+            job = _bt_jobs.get(job_id)
+            return bool(job and job.get("cancel"))
+
     try:
         cfg = bt.apply_overrides(PUMP_CONFIG, overrides)
-        cfg["_symbol"] = symbol
         bt.validate_params(cfg)
 
         interval = cfg.get("CONFIRM_INTERVAL", "5m")
-        window_bars = bt.bars_per_day(interval)
-        warmup_ms = bt.MS_PER_DAY + cfg["CONFIRM_LOOKBACK_BARS"] * bt.INTERVAL_MINUTES.get(interval, 5) * 60_000
+        # Validasi interval. Ini WAJIB dipanggil walau hasilnya tidak
+        # dipakai: bars_per_day() melempar BacktestError untuk interval
+        # yang tidak didukung, sedangkan baris bar_ms di bawah memakai
+        # .get(interval, 5) yang diam-diam jatuh ke 5 menit. Tanpa cek
+        # ini, CONFIRM_INTERVAL yang salah ketik di config.py (misalnya
+        # "7m") akan menghasilkan backtest yang berjalan mulus tetapi
+        # seluruh perhitungan waktunya meleset tanpa peringatan.
+        bt.bars_per_day(interval)
+        bar_ms = bt.INTERVAL_MINUTES[interval] * 60_000
+        # Warmup: 24 jam penuh untuk statistik bergulir, ditambah jendela
+        # konfirmasi. Tanpa ini bar-bar awal tidak punya pct24h sama sekali.
+        warmup_ms = bt.MS_PER_DAY + cfg["CONFIRM_LOOKBACK_BARS"] * bar_ms
 
         end_ms = int(time.time() * 1000)
         start_ms = end_ms - days * bt.MS_PER_DAY
@@ -408,76 +463,112 @@ def _bt_run_job(job_id: str, symbol: str, days: int, overrides: dict, compare: b
                 "Backtest butuh akses ke data historis publik Binance."
             )
 
-        set_progress(0.02, "mengambil data historis dari Binance...")
-        klines = bt.fetch_full_klines(
-            client, symbol, interval, fetch_start_ms, end_ms,
-            progress_cb=lambda f: set_progress(0.02 + f * 0.7, "mengambil data historis dari Binance..."),
-        )
-        if len(klines) < window_bars + cfg["CONFIRM_LOOKBACK_BARS"] + 5:
+        # --- Tahap 1: tentukan semesta simbol -------------------------
+        set_progress(0.01, "mengambil daftar pasar...")
+        try:
+            tickers = client.get_ticker_24hr_all()
+        except Exception as exc:  # noqa: BLE001
             raise bt.BacktestError(
-                f"Data historis terlalu sedikit ({len(klines)} candle) untuk simbol '{symbol}'. "
-                "Kemungkinan simbol salah/tidak ada di Binance Spot, atau rentang hari terlalu pendek."
+                f"Gagal mengambil daftar pasar dari Binance: {exc}"
+            ) from exc
+
+        universe = pbt.select_universe(tickers, cfg, max_symbols=max_symbols)
+        if not universe:
+            raise bt.BacktestError(
+                "Tidak ada simbol yang lolos saringan pasar. Periksa QUOTE_ASSET "
+                "dan MIN_QUOTE_VOLUME_USDT_24H di config.py."
             )
 
-        if compare:
-            # Dua simulasi pada candle yang SAMA PERSIS: sekali SL/TP tetap,
-            # sekali berbasis ATR. Semua parameter lain identik, jadi selisih
-            # hasil benar-benar berasal dari metode exit.
-            set_progress(0.75, "menjalankan simulasi TETAP lalu ATR...")
-            cmp_out = bt.compare_fixed_vs_atr(klines, cfg, warmup_bars=window_bars)
-            set_progress(0.99, "menyusun perbandingan...")
-            result = cmp_out["result_atr"]
-            summary = cmp_out["atr"]
-        else:
-            set_progress(0.75, "menjalankan simulasi...")
-            result = bt.run_backtest(
-                klines, cfg, warmup_bars=window_bars,
-                progress_cb=lambda f: set_progress(0.75 + f * 0.24, "menjalankan simulasi..."),
+        with _bt_jobs_lock:
+            if job_id in _bt_jobs:
+                _bt_jobs[job_id]["universe_size"] = len(universe)
+
+        # --- Tahap 2: unduh candle semua simbol -----------------------
+        # Bagian terberat, diberi porsi progres paling besar (0.03 - 0.80).
+        set_progress(0.03, f"mengunduh data {len(universe)} simbol...")
+
+        def dl_progress(frac, sym):
+            set_progress(0.03 + frac * 0.77,
+                         f"mengunduh {sym} ({int(frac * len(universe))}/{len(universe)})")
+
+        data, failed = pbt.fetch_universe_klines(
+            client, universe, interval, fetch_start_ms, end_ms,
+            progress_cb=dl_progress, cancel_cb=cancelled,
+        )
+        if not data:
+            raise bt.BacktestError(
+                "Tidak ada satu pun simbol yang berhasil diunduh datanya. "
+                "Periksa koneksi ke Binance."
             )
-            summary = bt.summarize(result)
-            cmp_out = None
+
+        # --- Tahap 3: simulasi ----------------------------------------
+        set_progress(0.82, "menjalankan simulasi portofolio...")
+        result = pbt.run_portfolio_backtest(
+            data, cfg, interval, warmup_ms=warmup_ms,
+            progress_cb=lambda f: set_progress(0.82 + f * 0.17,
+                                               "menjalankan simulasi portofolio..."),
+            cancel_cb=cancelled,
+        )
+        summary = pbt.summarize_portfolio(result)
+
+        def _ts(ms):
+            if not ms:
+                return None
+            return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
 
         trades_out = [{
-            "entry_time": datetime.fromtimestamp(t.entry_time / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M"),
-            "exit_time": datetime.fromtimestamp(t.exit_time / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M"),
+            "symbol": t.symbol,
+            "entry_time": _ts(t.entry_time),
+            "exit_time": _ts(t.exit_time),
             "entry_price": t.entry_price,
             "exit_price": t.exit_price,
             "reason": t.reason,
             "hold_minutes": t.hold_minutes,
             "pnl_pct": t.pnl_pct,
+            "rank_at_entry": t.rank_at_entry,
+            "pct24h_at_entry": t.pct24h_at_entry,
         } for t in result.trades]
 
+        skipped_out = [{
+            "time": _ts(s.time),
+            "symbol": s.symbol,
+            "reason": s.reason,
+            "holding": s.holding,
+        } for s in result.skipped[:200]]
+
         payload = {
-            "symbol": symbol,
+            "mode": "portfolio",
             "interval": interval,
             "days": days,
+            "universe_requested": len(universe),
+            "universe_with_data": len(data),
+            "symbols_failed": failed[:50],
+            "symbols_failed_count": len(failed),
             "bars_total": result.bars_total,
-            "bars_usable": result.bars_usable,
-            "start_time": datetime.fromtimestamp(result.start_time / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if result.start_time else None,
-            "end_time": datetime.fromtimestamp(result.end_time / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if result.end_time else None,
+            "start_time": (_ts(result.start_time) or "") + " UTC" if result.start_time else None,
+            "end_time": (_ts(result.end_time) or "") + " UTC" if result.end_time else None,
             "params_used": {k: cfg.get(k) for k in BT_PARAM_KEYS},
             "summary": summary,
-            "compare": None if not compare else {
-                "fixed": cmp_out["fixed"],
-                "atr": cmp_out["atr"],
-                "atr_info": cmp_out.get("atr_info") or {},
-            },
             "trades": trades_out,
+            "skipped": skipped_out,
             "warnings": result.warnings,
             "limitations": [
-                "Persaingan antar-simbol TIDAK disimulasikan -- ini menguji \"jika bot memantau "
-                "simbol ini dan lolos filter\", bukan peluang bot benar-benar memilihnya dari "
-                "seluruh pasar.",
-                "Exit dievaluasi per-candle 5 menit (bukan tick real-time seperti bot asli), "
-                "dengan urutan prioritas tetap dan sengaja konservatif: STOP_LOSS -> TAKE_PROFIT -> "
-                "BREAKEVEN -> TRAILING -> MAX_HOLD (Stop Loss dianggap kena lebih dulu kalau ambigu "
-                "dalam satu candle, supaya hasil tidak melebih-lebihkan profit).",
-                "MOMENTUM_FADE_EXIT (keluar dini dari ranking top-N) tidak disimulasikan.",
-                "Filter VWAP (USE_VWAP_FILTER) memakai VWAP BERGULIR jangka pendek (window = "
-                "candle konfirmasi momentum yang sama), bukan VWAP sesi/harian -- kandidat ditolak "
-                "kalau harga di bawah VWAP atau lebih dari VWAP_MAX_EXTENSION_PCT di atasnya.",
-                "Return total memakai compounding sederhana. Fee taker beli+jual dari config "
-                "SUDAH diperhitungkan, tetapi spread dan slippage market order belum dimodelkan.",
+                "SURVIVORSHIP BIAS, dan ini tidak bisa diperbaiki: Binance hanya menyediakan "
+                "data historis untuk pair yang MASIH listing hari ini. Koin yang sudah "
+                "didelisting, sering justru yang kolaps setelah pump, tidak ada dalam data. "
+                "Hasil di sini karenanya masih cenderung lebih baik daripada kenyataan.",
+                "Peringkat 24 jam DIREKONSTRUKSI dari candle, bukan diambil dari snapshot "
+                "ticker/24hr historis (Binance tidak menyediakannya). Nilainya sangat dekat "
+                "tetapi tidak identik dengan yang dilihat bot saat itu.",
+                "Exit dievaluasi per-candle " + interval + " (bukan tiap "
+                + str(PUMP_CONFIG.get("LOOP_INTERVAL_SECONDS", 15)) + " detik seperti bot asli), "
+                "dengan urutan prioritas konservatif: STOP_LOSS -> TAKE_PROFIT -> BREAKEVEN -> "
+                "TRAILING -> MAX_HOLD -> MOMENTUM_FADE. Stop Loss dianggap kena lebih dulu kalau "
+                "ambigu dalam satu candle, supaya hasil tidak melebih-lebihkan profit.",
+                "Entry dianggap terjadi tepat di harga penutupan candle sinyal. Slippage market "
+                "order dan spread belum dimodelkan. Fee taker beli+jual SUDAH dipotong.",
+                "Volume 24 jam juga direkonstruksi dari penjumlahan quote volume candle, "
+                "sehingga bisa sedikit berbeda dari field quoteVolume di ticker.",
             ],
         }
 
@@ -499,64 +590,75 @@ def _bt_run_job(job_id: str, symbol: str, days: int, overrides: dict, compare: b
 
 @app.route("/api/backtest/start", methods=["POST"])
 def api_backtest_start():
+    blocked = _reject_if_backtest_disabled()
+    if blocked is not None:
+        return blocked
     _bt_cleanup_old_jobs()
     data = request.get_json(force=True, silent=True) or {}
 
-    symbol = str(data.get("symbol", "")).strip().upper()
-    if not symbol:
-        return jsonify({"error": "Simbol wajib diisi (contoh: SOLUSDT)."}), 400
-    if not re.fullmatch(r"[A-Z0-9]{5,20}", symbol):
-        return jsonify({"error": "Format simbol tidak valid. Contoh yang benar: SOLUSDT, PEPEUSDT."}), 400
-    if not symbol.endswith(QUOTE):
-        return jsonify({"error": f"Simbol harus berakhiran {QUOTE} (pair spot), contoh: SOL{QUOTE}."}), 400
-
     try:
-        days = int(data.get("days", 90))
+        days = int(data.get("days", 30))
     except (TypeError, ValueError):
         return jsonify({"error": "Jumlah hari tidak valid."}), 400
-    # TIDAK ADA batas atas yang dipaksakan di sini -- rentang backtest
-    # sepenuhnya fleksibel. Batas alaminya hanya sejak kapan simbol itu
-    # listing di Binance: kalau data historis yang diminta lebih panjang
-    # dari yang tersedia, fetch_full_klines() akan mengembalikan apa yang
-    # ADA (bukan error), lalu backtest jalan dengan data yang tersedia itu.
-    if days < 1:
-        return jsonify({"error": "Jumlah hari minimal 1."}), 400
+    if days < 2:
+        # Minimal 2 hari: satu hari penuh habis untuk warmup statistik 24 jam,
+        # jadi rentang 1 hari tidak menyisakan bar yang bisa ditradingkan.
+        return jsonify({"error": "Jumlah hari minimal 2 (satu hari pertama dipakai warmup statistik 24 jam)."}), 400
 
-    compare = bool(data.get("compare"))
+    try:
+        max_symbols = int(data.get("max_symbols", 150))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Jumlah simbol tidak valid."}), 400
+    if max_symbols < 2:
+        return jsonify({"error": "Jumlah simbol minimal 2 (kalau hanya 1, tidak ada persaingan antar-simbol untuk disimulasikan)."}), 400
+    if max_symbols > 600:
+        return jsonify({"error": "Jumlah simbol maksimal 600."}), 400
+
+    # Perlindungan dari permintaan yang tidak realistis. Setiap simbol butuh
+    # sekitar satu request per 1000 candle, jadi beban total tumbuh sebagai
+    # perkalian simbol x hari. Batas ini mencegah satu klik tak sengaja
+    # memicu puluhan ribu request ke Binance.
+    est_requests = max_symbols * max(1, -(-(days + 1) * 288 // 1000))
+    if est_requests > 20000:
+        return jsonify({
+            "error": f"Permintaan terlalu besar (perkiraan {est_requests:,} request ke Binance). "
+                     f"Kurangi jumlah simbol atau jumlah hari."
+        }), 400
+
     overrides = {k: data.get(k) for k in BT_PARAM_KEYS}
-    if compare:
-        # Mode banding mengatur USE_ATR_EXITS sendiri (dijalankan dua kali),
-        # jadi toggle dari form tidak relevan dan sengaja diabaikan.
-        overrides.pop("USE_ATR_EXITS", None)
     try:
         cfg_preview = bt.apply_overrides(PUMP_CONFIG, overrides)
         bt.validate_params(cfg_preview)
     except bt.BacktestError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    # Batasi jumlah job yang berjalan bersamaan (backtest lumayan berat &
-    # membebani rate-limit publik Binance kalau dijalankan paralel banyak).
+    # Backtest portofolio jauh lebih berat dari versi satu simbol, jadi hanya
+    # SATU yang boleh berjalan pada satu waktu. Dua job paralel akan saling
+    # berebut jatah rate-limit Binance dan justru memperlambat keduanya.
     with _bt_jobs_lock:
         running = sum(1 for j in _bt_jobs.values() if j["status"] == "running")
-        if running >= 2:
-            return jsonify({"error": "Sudah ada backtest lain sedang berjalan. Tunggu selesai dulu."}), 429
+        if running >= 1:
+            return jsonify({"error": "Sudah ada backtest berjalan. Tunggu selesai atau batalkan dulu."}), 429
 
         job_id = uuid.uuid4().hex[:12]
         now = time.time()
         _bt_jobs[job_id] = {
             "status": "running", "progress": 0.0, "stage": "memulai...",
             "created_at": now, "started_at": now, "updated_at": now,
-            "symbol": symbol, "days": days,
+            "days": days, "max_symbols": max_symbols, "cancel": False,
         }
 
     thread = threading.Thread(target=_bt_run_job,
-                              args=(job_id, symbol, days, overrides, compare), daemon=True)
+                              args=(job_id, days, overrides, max_symbols), daemon=True)
     thread.start()
     return jsonify({"job_id": job_id})
 
 
 @app.route("/api/backtest/status/<job_id>")
 def api_backtest_status(job_id):
+    blocked = _reject_if_backtest_disabled()
+    if blocked is not None:
+        return blocked
     with _bt_jobs_lock:
         job = _bt_jobs.get(job_id)
         if job is None:
@@ -585,13 +687,50 @@ def api_backtest_status(job_id):
     return jsonify(out)
 
 
+@app.route("/api/backtest/cancel/<job_id>", methods=["POST"])
+def api_backtest_cancel(job_id):
+    """Batalkan job yang sedang berjalan.
+
+    Backtest portofolio bisa berjalan belasan menit, jadi pengguna harus
+    bisa menghentikannya. Pembatalan bersifat kooperatif: flag diset di
+    sini, lalu thread pekerja memeriksanya di sela pengunduhan tiap simbol
+    dan tiap 200 bar simulasi. Thread TIDAK dibunuh paksa, karena
+    menghentikan thread di tengah request HTTP bisa meninggalkan koneksi
+    menggantung.
+    """
+    blocked = _reject_if_backtest_disabled()
+    if blocked is not None:
+        return blocked
+    with _bt_jobs_lock:
+        job = _bt_jobs.get(job_id)
+        if job is None:
+            return jsonify({"error": "Job tidak ditemukan."}), 404
+        if job["status"] != "running":
+            return jsonify({"ok": True, "message": "Job sudah selesai."})
+        job["cancel"] = True
+    return jsonify({"ok": True, "message": "Permintaan batal dikirim."})
+
+
 @app.route("/api/backtest/defaults")
 def api_backtest_defaults():
     """Nilai default form backtest, diambil langsung dari config.py yang
     sedang dipakai bot supaya form selalu mencerminkan konfigurasi terkini."""
+    blocked = _reject_if_backtest_disabled()
+    if blocked is not None:
+        return blocked
     out = {k: PUMP_CONFIG.get(k) for k in BT_PARAM_KEYS}
     out["quote_asset"] = QUOTE
-    out["default_days"] = 90
+    # Default sengaja jauh lebih kecil dari versi satu simbol dulu (90 hari),
+    # karena backtest portofolio mengunduh ratusan simbol sekaligus. 30 hari
+    # x 150 simbol sudah memberi gambaran yang layak dalam beberapa menit.
+    out["default_days"] = 30
+    out["default_max_symbols"] = 150
+    out["mode"] = "portfolio"
+    out["top_n_candidates"] = PUMP_CONFIG.get("TOP_N_CANDIDATES_TO_CONFIRM", 10)
+    out["momentum_fade_exit"] = PUMP_CONFIG.get("MOMENTUM_FADE_EXIT", False)
+    out["momentum_fade_rank"] = PUMP_CONFIG.get("MOMENTUM_FADE_RANK_THRESHOLD", 30)
+    out["confirm_lookback_bars"] = PUMP_CONFIG.get("CONFIRM_LOOKBACK_BARS", 20)
+    out["min_quote_volume"] = PUMP_CONFIG.get("MIN_QUOTE_VOLUME_USDT_24H", 0)
     return jsonify(out)
 
 
@@ -722,5 +861,28 @@ def api_all():
 
 if __name__ == "__main__":
     port = int(os.environ.get("DASHBOARD_PORT", "8080"))
-    print(f"Dashboard berjalan di http://0.0.0.0:{port}  (Ctrl+C untuk berhenti)")
-    app.run(host="0.0.0.0", port=port, debug=False)
+
+    # KEAMANAN: dashboard ini TIDAK punya login, dan punya endpoint yang
+    # bisa menjual posisi sungguhan (/api/manual/close). Sebelumnya host
+    # dipaksa "0.0.0.0", artinya siapa pun yang sejaringan (wifi kafe,
+    # kos, kantor) bisa membuka dashboard Anda dan menekan "Jual Sekarang".
+    #
+    # Sekarang bawaannya 127.0.0.1 (hanya komputer ini). Kalau Anda memang
+    # perlu mengaksesnya dari HP atau komputer lain, jalankan dengan:
+    #     DASHBOARD_HOST=0.0.0.0 python dashboard.py
+    # dan pastikan jaringannya tepercaya, atau pasang di belakang reverse
+    # proxy yang meminta password.
+    host = os.environ.get("DASHBOARD_HOST", "127.0.0.1").strip() or "127.0.0.1"
+
+    if host == "0.0.0.0":
+        print("=" * 62)
+        print("PERINGATAN KEAMANAN")
+        print("Dashboard dibuka ke SELURUH jaringan tanpa password.")
+        print("Siapa pun yang sejaringan bisa melihat posisi Anda dan")
+        print("menekan tombol Jual Sekarang. Pakai hanya di jaringan")
+        print("yang Anda percaya sepenuhnya.")
+        print("=" * 62)
+
+    tampil = "localhost" if host == "127.0.0.1" else host
+    print(f"Dashboard berjalan di http://{tampil}:{port}  (Ctrl+C untuk berhenti)")
+    app.run(host=host, port=port, debug=False)
