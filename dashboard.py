@@ -9,11 +9,18 @@ adalah tombol "Jual Sekarang" untuk menutup paksa posisi yang sedang
 terbuka (lihat check_manual_close() dan endpoint /api/manual/close di bawah).
 Di luar itu, sumber datanya:
 
-1. File state bot   -> pump_bot_state.json  (posisi, level BE/trailing, equity)
-2. File log bot     -> pump_bot.log         (riwayat trade + kejadian)
+1. File state bot   -> pump_bot_state_testnet.json / pump_bot_state_live.json
+                       (posisi, level BE/trailing, equity)
+2. File log bot     -> pump_bot_testnet.log / pump_bot_live.log
+                       (riwayat trade + kejadian)
 3. Data live Binance (opsional) -> harga real-time koin yang dipegang, saldo
    akun (kalau API key tersedia). Kalau Binance tak terjangkau atau API key
    kosong, dashboard tetap jalan dengan data dari file saja (degradasi anggun).
+
+File state/log/kontrol OTOMATIS mengikuti MODE yang aktif di config.py
+(TESTNET atau LIVE) dan terpisah per mode, jadi dashboard hanya menampilkan
+data mode yang sedang dijalankan bot. Kalau MODE diubah, jalankan ulang bot
+DAN dashboard ini (nama file dibaca sekali saat start).
 
 Jalankan:
     pip install -r requirements.txt
@@ -39,7 +46,10 @@ from datetime import datetime, timezone
 
 from flask import Flask, jsonify, render_template, request
 
-from config import PUMP_CONFIG, get_mode, get_base_url, is_testnet, backtest_enabled
+from config import (
+    PUMP_CONFIG, get_mode, get_base_url, is_testnet, backtest_enabled,
+    get_state_file, get_log_file, get_control_file,
+)
 import state as state_mod
 
 try:
@@ -53,9 +63,14 @@ import portfolio_backtest as pbt
 
 app = Flask(__name__)
 
-STATE_FILE = PUMP_CONFIG.get("STATE_FILE", "pump_bot_state.json")
-LOG_FILE = PUMP_CONFIG.get("LOG_FILE", "pump_bot.log")
-CONTROL_FILE = PUMP_CONFIG.get("CONTROL_FILE", "pump_bot_control.json")
+# Nama file state/log/kontrol sudah otomatis mengandung akhiran mode aktif
+# (mis. pump_bot_state_testnet.json), dihitung sekali di config.py saat
+# di-import. Fallback get_state_file() dst. hanya terpakai kalau kunci config
+# hilang, dan tetap mode-aware supaya dashboard tidak diam-diam membaca file
+# mode yang salah.
+STATE_FILE = PUMP_CONFIG.get("STATE_FILE") or get_state_file()
+LOG_FILE = PUMP_CONFIG.get("LOG_FILE") or get_log_file()
+CONTROL_FILE = PUMP_CONFIG.get("CONTROL_FILE") or get_control_file()
 QUOTE = PUMP_CONFIG.get("QUOTE_ASSET", "USDT")
 
 # Jarak minimum antar-klik tombol "Jual Sekarang" -- mencegah dobel-klik

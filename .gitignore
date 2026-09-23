@@ -8,16 +8,10 @@ secrets.json
 credentials.json
 
 # === State & log runtime bot ===
-pump_bot_state.json
-pump_bot_state.json.tmp
-pump_bot_control.json
-pump_bot_control.json.tmp
-bot_state.json
-bot_state.json.tmp
+*.json
+*.json.*
 *.log
 *.log.*
-pump_bot.log
-pump_bot.log.*
 
 # === Python ===
 __pycache__/

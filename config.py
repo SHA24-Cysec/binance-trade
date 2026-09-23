@@ -324,7 +324,22 @@ PUMP_CONFIG = {
     "CLOSE_ALL_AT_LIMIT": True,
     "DD_COOLDOWN_HOURS": 24,
 
-    # --- File state & log ---
+    # --- File state & log (OTOMATIS dipisah per mode, lihat catatan) ---
+    # Nilai di bawah adalah NAMA DASAR. Saat config.py di-import, nama final
+    # otomatis disisipkan akhiran mode aktif SEBELUM ekstensinya:
+    #   MODE="TESTNET" -> pump_bot_state_testnet.json, pump_bot_testnet.log,
+    #                     pump_bot_control_testnet.json
+    #   MODE="LIVE"    -> pump_bot_state_live.json, pump_bot_live.log,
+    #                     pump_bot_control_live.json
+    # Tujuannya: data TESTNET dan LIVE tidak pernah tertukar/tercampur.
+    # Posisi testnet yang sedang terbuka tidak mungkin "dilanjutkan" bot
+    # saat pindah ke LIVE (atau sebaliknya), dan riwayat trade di dashboard
+    # hanya berasal dari mode yang sedang aktif.
+    # File versi LAMA tanpa akhiran (pump_bot_state.json, pump_bot.log,
+    # pump_bot_control.json) TIDAK dipindahkan/dihapus otomatis; dibiarkan
+    # apa adanya, dan mode yang aktif memulai dengan file barunya sendiri.
+    # Perhitungan nama final: get_state_file() / get_log_file() /
+    # get_control_file() di bagian bawah file ini.
     "STATE_FILE": "pump_bot_state.json",
     "LOG_FILE": "pump_bot.log",
     "HEARTBEAT_INTERVAL_SECONDS": 300,
@@ -404,8 +419,69 @@ def get_base_url(config: dict = None) -> str:
     return cfg.get("LIVE_BASE_URL", "https://api.binance.com")
 
 
+# ---------------------------------------------------------------------
+# Nama file state/log/kontrol TERPISAH per mode
+# ---------------------------------------------------------------------
+def _mode_filename(base: str, mode: str) -> str:
+    """Sisipkan akhiran mode ('_testnet' / '_live') sebelum ekstensi file.
+
+    Contoh:
+        pump_bot_state.json + TESTNET -> pump_bot_state_testnet.json
+        pump_bot.log       + LIVE     -> pump_bot_live.log
+
+    Idempoten DAN mengganti akhiran mode lama: kalau nama dasar sudah
+    mengandung akhiran mode (mis. 'pump_bot_state_testnet.json' lalu mode
+    diganti LIVE), akhiran lama dibuang dulu sebelum akhiran baru disisipkan,
+    sehingga hasilnya 'pump_bot_state_live.json' -- bukan menumpuk jadi
+    '..._testnet_live.json'. Ini penting kalau PUMP_CONFIG (yang nama
+    file-nya SUDAH final berakhiran mode) disalin lalu MODE-nya diubah,
+    misalnya oleh kode pengujian.
+    """
+    if not base:
+        return base
+    tag = mode.lower()  # "testnet" atau "live"
+    root, ext = os.path.splitext(base)
+    for old_tag in ("_testnet", "_live"):
+        if root.lower().endswith(old_tag):
+            root = root[: -len(old_tag)]
+            break
+    return f"{root}_{tag}{ext}"
+
+
+def get_state_file(config: dict = None) -> str:
+    """Nama file state posisi sesuai mode aktif (pump_bot_state_testnet.json
+    atau pump_bot_state_live.json)."""
+    cfg = PUMP_CONFIG if config is None else config
+    return _mode_filename(str(cfg.get("STATE_FILE", "pump_bot_state.json")), get_mode(cfg))
+
+
+def get_log_file(config: dict = None) -> str:
+    """Nama file log sesuai mode aktif (pump_bot_testnet.log atau
+    pump_bot_live.log)."""
+    cfg = PUMP_CONFIG if config is None else config
+    return _mode_filename(str(cfg.get("LOG_FILE", "pump_bot.log")), get_mode(cfg))
+
+
+def get_control_file(config: dict = None) -> str:
+    """Nama file kontrol (perintah manual dari dashboard) sesuai mode aktif
+    (pump_bot_control_testnet.json atau pump_bot_control_live.json)."""
+    cfg = PUMP_CONFIG if config is None else config
+    return _mode_filename(str(cfg.get("CONTROL_FILE", "pump_bot_control.json")), get_mode(cfg))
+
+
 # Disediakan supaya kode lama yang membaca PUMP_CONFIG["BASE_URL"] tetap jalan.
 PUMP_CONFIG["BASE_URL"] = get_base_url(PUMP_CONFIG)
+
+# Nama file state/log/kontrol FINAL (sudah mengandung akhiran mode aktif,
+# mis. 'pump_bot_state_testnet.json') ditulis balik ke PUMP_CONFIG supaya
+# semua kode yang membaca PUMP_CONFIG["STATE_FILE"] / ["LOG_FILE"] /
+# ["CONTROL_FILE"] -- pump_scanner_bot.py, dashboard.py, state.py --
+# otomatis memakai file yang benar untuk mode aktif tanpa perlu diubah
+# satu per satu. Helper di atas bersifat idempoten terhadap nilai yang
+# sudah berakhiran mode, jadi aman dipanggil ulang kapan pun.
+PUMP_CONFIG["STATE_FILE"] = get_state_file(PUMP_CONFIG)
+PUMP_CONFIG["LOG_FILE"] = get_log_file(PUMP_CONFIG)
+PUMP_CONFIG["CONTROL_FILE"] = get_control_file(PUMP_CONFIG)
 
 
 def get_taker_fee_pct(config: dict = None) -> float:

@@ -21,6 +21,17 @@ Bot ini punya dua mode, diatur lewat `"MODE"` di `config.py`:
 | API key | Dibuat di testnet.binance.vision | Binance produksi |
 | Dust sweep (`/sapi/*`) | Dilewati otomatis (tidak tersedia di testnet) | Aktif |
 | Jalur kode | Sama persis | Sama persis |
+| File state | `pump_bot_state_testnet.json` | `pump_bot_state_live.json` |
+| File log | `pump_bot_testnet.log` (+ rotasi `.log.1` dst.) | `pump_bot_live.log` (+ rotasi `.log.1` dst.) |
+| File kontrol (perintah dashboard) | `pump_bot_control_testnet.json` | `pump_bot_control_live.json` |
+
+File state, log, dan kontrol otomatis mengikuti mode aktif, jadi data
+TESTNET dan LIVE tidak pernah tercampur: posisi testnet yang sedang terbuka
+tidak akan "dilanjutkan" bot ketika Anda pindah ke LIVE (atau sebaliknya),
+dan riwayat trade di dashboard hanya berasal dari mode yang sedang aktif.
+File lama tanpa akhiran (`pump_bot_state.json`, `pump_bot.log`,
+`pump_bot_control.json`) TIDAK dipindahkan/dihapus otomatis; dibiarkan apa
+adanya dan mode yang aktif memulai dengan file barunya sendiri.
 
 Poin pentingnya: **tidak ada lagi jalur simulasi lokal**. Mode DRY_RUN yang
 dulu ada sudah dihapus, karena jalur simulasi itu melewatkan hal-hal yang
@@ -35,7 +46,8 @@ Cara pindah mode:
    variabel yang sama (`BINANCE_API_KEY` / `BINANCE_API_SECRET`), dan key
    produksi TIDAK berlaku di testnet begitu pula sebaliknya (akan muncul
    error `-2015 Invalid API-key`).
-3. Jalankan ulang bot.
+3. Jalankan ulang bot DAN dashboard (nama file state/log/kontrol per mode
+   dibaca keduanya sekali saat start).
 
 Hal yang perlu diketahui soal Spot Test Network (sumber: Binance Developer
 Docs, Testnet General Info, dicek 2026-09-23):
@@ -471,8 +483,10 @@ python run.py
 # Ctrl+B lalu D untuk detach; sesi tetap berjalan di background
 ```
 
-State dan log tersimpan di `pump_bot_state.json` dan `pump_bot.log`, sehingga
-posisi yang sedang berjalan dan level BE/trailing selamat dari restart/crash.
+State dan log tersimpan di `pump_bot_state_<mode>.json` dan
+`pump_bot_<mode>.log` (otomatis terpisah untuk TESTNET dan LIVE, lihat
+bagian "Mode TESTNET dan LIVE"), sehingga posisi yang sedang berjalan dan
+level BE/trailing selamat dari restart/crash.
 
 ## Dashboard pemantauan (web)
 
@@ -481,9 +495,9 @@ equity & saldo, riwayat trade, win rate, kurva PnL kumulatif, log aktivitas,
 dan parameter strategi. Dashboard **hampir sepenuhnya read-only** -- satu-satunya
 perintah yang bisa dikirim ke bot adalah tombol **"Jual Sekarang (Manual)"**
 untuk menutup paksa posisi yang sedang terbuka (lihat bagian "Jual Sekarang"
-di bawah). Di luar itu dashboard hanya membaca `pump_bot_state.json`,
-`pump_bot.log`, dan (opsional) data live Binance (harga real-time + saldo
-bila API key tersedia).
+di bawah). Di luar itu dashboard hanya membaca file state/log mode aktif
+(`pump_bot_state_<mode>.json`, `pump_bot_<mode>.log`), dan (opsional) data
+live Binance (harga real-time + saldo bila API key tersedia).
 
 ```bash
 pip install -r requirements.txt
@@ -514,7 +528,7 @@ Cara kerja:
 1. Klik tombol -> muncul modal konfirmasi (menyebutkan simbol yang akan
    dijual) supaya tidak kepencet tidak sengaja.
 2. Setelah dikonfirmasi, dashboard menulis perintah ke file terpisah
-   (`pump_bot_control.json`, sengaja dipisah dari `pump_bot_state.json`
+   (`pump_bot_control_<mode>.json`, sengaja dipisah dari file state
    supaya tidak tabrakan tulis dengan proses bot yang berjalan).
 3. Proses bot (`pump_scanner_bot.py`) membaca file ini di **awal setiap
    iterasi loop utamanya**, jadi perintah diproses dalam maksimal
@@ -532,7 +546,7 @@ Cara kerja:
    sempat mati) otomatis diabaikan oleh bot demi keamanan -- tidak akan
    ada penjualan "nyasar" dari klik lama yang terlupakan.
 7. Kalau proses bot tampaknya tidak berjalan (dideteksi dari kapan
-   terakhir `pump_bot_state.json` diperbarui), dashboard menampilkan
+   terakhir file state mode aktif diperbarui), dashboard menampilkan
    peringatan bahwa tombol ini tidak akan diproses sampai bot dijalankan
    lagi -- supaya Anda tahu harus mengecek `run.py`/proses bot dulu.
 

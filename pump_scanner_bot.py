@@ -21,6 +21,10 @@ MODE DI config.py:
     "LIVE"    -> order sungguhan ke Binance produksi (uang asli)
 Keduanya memakai jalur kode yang SAMA PERSIS; yang berbeda hanya base URL
 dan API key yang dipakai. Tidak ada lagi jalur simulasi lokal (DRY_RUN).
+
+File state, log, dan kontrol otomatis DIPISAH per mode (contoh:
+pump_bot_state_testnet.json vs pump_bot_state_live.json), dihitung di
+config.py, jadi data posisi/riwayat TESTNET dan LIVE tidak pernah tercampur.
 """
 
 from __future__ import annotations
@@ -432,9 +436,14 @@ def check_manual_control(client: BinanceSpotClient, config: dict, filters_cache:
     Kenapa lewat file, bukan panggilan langsung? Bot dan dashboard sengaja
     berjalan sebagai DUA PROSES terpisah (lihat run.py) supaya crash di satu
     proses tidak menjatuhkan proses lain. Satu-satunya cara komunikasi antar
-    proses yang sudah dipakai di proyek ini adalah file (pump_bot_state.json),
-    jadi kontrol manual memakai pola yang sama demi konsistensi."""
-    control_path = config.get("CONTROL_FILE", "pump_bot_control.json")
+    proses yang sudah dipakai di proyek ini adalah file (file state, mis.
+    pump_bot_state_testnet.json), jadi kontrol manual memakai pola yang sama
+    demi konsistensi."""
+    # Nama file kontrol ikut terpisah per mode (pump_bot_control_testnet.json
+    # vs ..._live.json), sudah otomatis dihitung di config.py. Fallback ke
+    # get_control_file() supaya dict config custom tanpa kunci ini pun tetap
+    # mendapat nama yang benar untuk mode aktif, bukan nama tanpa akhiran.
+    control_path = config.get("CONTROL_FILE") or get_control_file(config)
     cmd = state_mod.load_control(control_path)
     if not cmd:
         return
@@ -570,6 +579,9 @@ def run(config: dict) -> None:
 
     logger.info("=" * 70)
     logger.info("Pump Scanner Bot mulai berjalan. MODE=%s | endpoint=%s", mode, base_url)
+    logger.info("File data (otomatis per mode) -> state=%s | log=%s | kontrol=%s",
+                config["STATE_FILE"], config["LOG_FILE"],
+                config.get("CONTROL_FILE", "-"))
     if mode == "TESTNET":
         logger.warning(
             "MODE TESTNET AKTIF: order benar-benar dikirim ke Binance Spot Test Network "
