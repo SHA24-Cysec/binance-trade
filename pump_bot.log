@@ -1,0 +1,29 @@
+2026-09-13 21:32:14 | INFO     | pump_bot | ======================================================================
+2026-09-13 21:32:14 | INFO     | pump_bot | Pump Scanner Bot mulai berjalan. DRY_RUN=False
+2026-09-13 21:32:14 | INFO     | pump_bot | ======================================================================
+2026-09-13 21:32:15 | INFO     | binance_client | Sinkronisasi waktu server selesai. Offset = 1913 ms
+2026-09-13 21:32:15 | INFO     | pump_bot | Mengambil exchangeInfo untuk semua simbol (sekali di awal)...
+2026-09-13 21:32:15 | INFO     | pump_bot | Filter untuk 3698 simbol berhasil dimuat.
+2026-09-13 21:32:15 | INFO     | pump_bot | Hari baru (UTC): 2026-09-13. Equity awal hari = 5.94 USDT
+2026-09-13 21:32:16 | INFO     | pump_bot | Kandidat terpilih: PUNDIXUSDT (24h=39.78%, vol=5790983, spread=0.211%)
+2026-09-13 21:32:16 | INFO     | pump_bot | BUY FILLED PUNDIXUSDT: qty=40.00000000 @ avg 0.142100 | 24h=39.78% | vol24h=5790983 | alasan: momentum masih naik
+2026-09-13 21:32:16 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=5.94 USDT | pegang PUNDIXUSDT (PnL=+0.00%)
+2026-09-13 21:34:46 | INFO     | pump_bot | PUNDIXUSDT: Breakeven diaktifkan, stop dikunci di 0.142526
+2026-09-13 21:35:31 | INFO     | pump_bot | PUNDIXUSDT: Trailing stop diaktifkan di 0.145780
+2026-09-13 21:36:16 | INFO     | pump_bot | SELL FILLED PUNDIXUSDT (TAKE_PROFIT): qty=39.90000000 @ avg 0.151300 | entry=0.142100 | estimasi PnL=0.37 USDT
+2026-09-13 21:37:16 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=6.28 USDT | tidak ada posisi
+2026-09-13 21:42:31 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=6.28 USDT | tidak ada posisi
+2026-09-13 21:47:15 | INFO     | binance_client | Sinkronisasi waktu server selesai. Offset = 1937 ms
+2026-09-13 21:47:31 | INFO     | pump_bot | Kandidat terpilih: LSKUSDT (24h=232.63%, vol=142947494, spread=0.122%)
+2026-09-13 21:47:32 | INFO     | pump_bot | BUY FILLED LSKUSDT: qty=6.50000000 @ avg 0.904600 | 24h=232.63% | vol24h=142947494 | alasan: momentum masih naik
+2026-09-13 21:47:32 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=6.28 USDT | pegang LSKUSDT (PnL=+0.00%)
+2026-09-13 21:52:46 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=6.16 USDT | pegang LSKUSDT (PnL=-2.12%)
+2026-09-13 21:57:46 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=6.13 USDT | pegang LSKUSDT (PnL=-2.65%)
+2026-09-13 22:02:31 | INFO     | binance_client | Sinkronisasi waktu server selesai. Offset = 1957 ms
+2026-09-13 22:03:01 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=6.29 USDT | pegang LSKUSDT (PnL=+0.20%)
+2026-09-13 22:04:31 | INFO     | pump_bot | LSKUSDT: Breakeven diaktifkan, stop dikunci di 0.907314
+2026-09-13 22:04:46 | INFO     | pump_bot | LSKUSDT: Trailing stop diaktifkan di 0.935159
+2026-09-13 22:06:16 | INFO     | pump_bot | SELL FILLED LSKUSDT (TAKE_PROFIT): qty=6.40000000 @ avg 0.972000 | entry=0.904600 | estimasi PnL=0.43 USDT
+2026-09-13 22:08:16 | INFO     | pump_bot | [HEARTBEAT] Bot masih berjalan | equity=6.62 USDT | tidak ada posisi
+2026-09-13 22:08:22 | INFO     | pump_bot | Menerima sinyal berhenti (2). Bot akan berhenti setelah iterasi ini selesai.
+2026-09-13 22:08:30 | INFO     | pump_bot | Bot berhenti.
