@@ -1,147 +1,120 @@
 """
-Konfigurasi Bot Grid Martingale (adaptasi dari Gold_Grid_Martingale_Pro.mq5)
-=============================================================================
+Konfigurasi Bot Pump Scanner (Binance Spot)
+============================================
 
-CATATAN ADAPTASI DARI MT5 KE BINANCE SPOT (WAJIB DIBACA):
+Catatan: file ini dulu juga memuat blok CONFIG untuk bot grid martingale.
+Bot grid sudah dihapus, jadi kini hanya tersisa PUMP_CONFIG.
 
-1. Binance Spot TIDAK BISA short-sell. Karena itu bot ini HANYA membuka posisi
-   BUY (mengikuti pilihan Anda). Saat sinyal tren berbalik turun, bot TIDAK
-   membuka posisi apa pun (tidak short, tidak market-sell paksa) -- basket
-   yang sudah terbuka tetap dikelola lewat Take Profit / Breakeven / Trailing
-   seperti EA aslinya (mirror dari InpCloseOnOppositeTrend = false).
+Mode pump scanner TIDAK memprediksi pump sebelum terjadi -- ia mendeteksi koin
+yang harganya SUDAH naik signifikan + volume tinggi dalam 24 jam terakhir, lalu
+mengkonfirmasi lewat candle 5 menit apakah momentumnya kelihatan masih
+berlanjut, DAN apakah harga saat ini masih wajar dibanding VWAP bergulir
+jangka pendek (tidak kepanasan/ekstrem), sebelum ikut masuk. Ini reaktif
+(momentum chasing), bukan prediktif. Hanya satu entry per rotasi (tanpa
+averaging-down), dengan Stop Loss/TP/Breakeven/Trailing untuk keluar.
 
-2. EA asli memakai satuan "points" (mis. GridMinPoints=300 untuk XAUUSD).
-   Satuan itu tidak relevan untuk BTCUSDT, jadi semua jarak grid, TP,
-   breakeven, dan trailing di sini memakai PERSENTASE dari harga rata-rata
-   basket. Nilai default di bawah HANYALAH titik awal yang wajar, BUKAN hasil
-   backtest -- volatilitas BTC berbeda jauh dari XAUUSD. Anda WAJIB
-   menguji/menyesuaikan sebelum menaikkan modal.
+Kredensial diambil dari file .env, JANGAN taruh langsung di file config.py ini
+(kalau ditulis di sini, risiko ke-commit ke Git atau ke-share tanpa sengaja
+jadi besar). Baris "API_KEY" dan "API_SECRET" di bawah otomatis membaca dari
+file .env di folder yang sama dengan config.py ini, lewat library
+python-dotenv (sudah ada di requirements.txt). Kalau file .env belum ada atau
+isinya kosong, nilainya jadi string kosong dan bot akan gagal autentikasi ke
+Binance (tapi dashboard tetap bisa jalan mode read-only).
 
-3. "Lot" pada MT5 diganti dengan nominal USDT (quote asset) per entry.
+============================================================
+CARA MENAMBAHKAN API KEY LEWAT FILE .env (Windows maupun Linux/macOS)
+============================================================
 
-4. Tidak ada floating "Stop Loss" bawaan bursa di Spot (karena tidak ada
-   leverage/likuidasi) -- breakeven & trailing di sini dikelola bot dengan
-   cara memantau harga terus-menerus dan mengeksekusi MARKET SELL saat level
-   tersentuh. Ini artinya bot HARUS berjalan tanpa henti (24/7) di VPS Anda.
-   Jika bot mati, level BE/trailing tidak akan tereksekusi.
+Sudah disediakan file contoh bernama ".env.example" di folder yang sama
+dengan config.py ini. Langkahnya sama persis di Windows maupun Linux,
+cuma beda perintah salin file:
+
+1. Salin ".env.example" jadi file baru bernama ".env" (tanpa akhiran
+   .example):
+       Linux / macOS  :  cp .env.example .env
+       Windows (PowerShell atau cmd) :  copy .env.example .env
+   (bisa juga cukup duplikat filenya lewat File Explorer / file manager,
+   lalu ganti namanya jadi ".env")
+
+2. Buka file ".env" yang baru dibuat itu dengan editor teks apa saja
+   (Notepad, VS Code, nano, dll), lalu ganti isinya jadi API key/secret
+   Binance Anda yang sebenarnya, contoh:
+       BINANCE_API_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+       BINANCE_API_SECRET=yyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+   Tidak perlu tanda kutip di sekeliling nilainya, dan tidak perlu spasi
+   di sekitar tanda "=".
+
+3. Simpan file ".env", lalu jalankan bot seperti biasa:
+       python3 run.py        (Linux/macOS)
+       python run.py         (Windows)
+   Library python-dotenv otomatis membaca file ".env" ini setiap kali
+   config.py di-import, tidak perlu restart terminal atau set apa pun
+   secara manual di sistem operasi.
+
+4. File ".env" WAJIB ditempatkan di folder yang sama dengan config.py
+   (folder utama proyek ini), supaya otomatis terbaca.
+
+Catatan penting:
+- File ".env" sudah didaftarkan di .gitignore, jadi TIDAK akan pernah
+  ter-commit ke Git secara tidak sengaja. Yang aman di-commit hanya
+  ".env.example" (isinya cuma contoh format, bukan kredensial asli).
+- Kalau butuh cara lama (lewat environment variable OS, tanpa file .env),
+  itu tetap didukung sebagai cadangan -- kalau BINANCE_API_KEY /
+  BINANCE_API_SECRET sudah ada sebagai environment variable OS, python-dotenv
+  TIDAK akan menimpanya; nilai dari file .env hanya dipakai untuk variabel
+  yang belum di-set di level OS.
+
+============================================================
+PERINGATAN KEAMANAN
+============================================================
+- JANGAN pernah menulis API key/secret langsung di file config.py ini,
+  file .py lain, atau commit ke Git -- siapa pun yang bisa baca file/repo
+  otomatis bisa pakai akun Binance Anda.
+- JANGAN commit file ".env" (yang berisi kredensial asli) ke Git atau
+  bagikan ke siapa pun. Yang boleh dibagikan/di-commit hanya
+  ".env.example".
+- Kalau bikin API key di Binance, aktifkan HANYA permission yang benar-benar
+  dipakai bot ini (Enable Spot Trading kalau DRY_RUN mau dimatikan). JANGAN
+  aktifkan permission "Enable Withdrawals" sama sekali. Permission yang sama
+  ini juga sudah cukup untuk fitur dust sweep (USE_DUST_SWEEP di bawah) --
+  tidak perlu permission tambahan apa pun.
+- Kalau API key/secret pernah tidak sengaja bocor (ke-screenshot, ke-share,
+  ke-commit ke repo publik, dsb), langsung hapus/revoke key itu di halaman
+  Binance API Management dan buat key baru.
 """
 
 import os
 
-CONFIG = {
-    # ------------------------------------------------------------------
-    # 01. UMUM
-    # ------------------------------------------------------------------
-    "SYMBOL": "BTCUSDT",
-    "BASE_ASSET": "BTC",
-    "QUOTE_ASSET": "USDT",
-    "INTERVAL": "5m",                    # setara PERIOD_M5 di EA asli
-    "DRY_RUN": False,                     # WAJIB: set False manual kalau sudah yakin mau live
-    "LOOP_INTERVAL_SECONDS": 15,         # jeda antar-iterasi pengecekan TP/BE/trailing
-    "HEARTBEAT_INTERVAL_SECONDS": 300,   # log "masih hidup" tiap 5 menit meski tidak ada kejadian
-    "MIN_SECONDS_BETWEEN_ORDERS": 60,
-    "COOLDOWN_MINUTES_AFTER_CLOSE": 5,
+try:
+    from dotenv import load_dotenv
+    # Cari file .env di folder yang sama dengan config.py ini, apapun dari
+    # mana skrip dijalankan (run.py, dashboard.py, backtest.py, dll).
+    _ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    load_dotenv(dotenv_path=_ENV_PATH, override=False)
+except ImportError:
+    # python-dotenv belum terpasang (mis. requirements.txt belum di-install).
+    # Bot tetap bisa jalan kalau BINANCE_API_KEY/SECRET sudah di-set manual
+    # sebagai environment variable OS -- cuma file .env tidak akan terbaca.
+    pass
 
-    # Base URL REST. Untuk uji coba tanpa uang sungguhan, ganti ke:
-    # "https://testnet.binance.vision"
-    "BASE_URL": "https://api.binance.com",
-
-    # Kredensial diambil dari environment variable, JANGAN taruh langsung di sini.
-    # Set lewat: export BINANCE_API_KEY=...  &&  export BINANCE_API_SECRET=...
-    # $env:BINANCE_API_SECRET=... (Windows PowewrShell)
-    # $env:BINANCE_API_KEY=... (Windows PowewrShell)
-    "API_KEY": os.environ.get("BINANCE_API_KEY", ""),
-    "API_SECRET": os.environ.get("BINANCE_API_SECRET", ""),
-
-    # ------------------------------------------------------------------
-    # 02. MANAJEMEN RISIKO
-    # ------------------------------------------------------------------
-    "USE_RISK_PERCENT": False,           # True = order awal % dari saldo USDT free
-    "RISK_PERCENT": 3.0,                 # dipakai jika USE_RISK_PERCENT = True
-    "INITIAL_ORDER_USDT": 5.0,          # dipakai jika USE_RISK_PERCENT = False
-    "MAX_ORDER_USDT": 10.0,              # batas aman nominal per satu entry
-    "MAX_TOTAL_EXPOSURE_USDT": 50.0,    # batas total nominal seluruh grid (safety cap)
-
-    "USE_EQUITY_STOP": False,              # matikan (False) utk nonaktifkan DD Stop (drawdown dari puncak)
-    "MAX_DRAWDOWN_PERCENT": 20.0,        # stop dari peak equity
-    "USE_DAILY_STOP": False,               # matikan (False) utk nonaktifkan Daily Stop (rugi/profit harian)
-    "MAX_DAILY_LOSS_PERCENT": 5.0,
-    "DAILY_PROFIT_TARGET_PERCENT": 10.0,
-    "CLOSE_ALL_AT_LIMIT": True,
-    "DD_COOLDOWN_HOURS": 24,
-
-    # ------------------------------------------------------------------
-    # 03. ENTRY: SuperTrend + EMA (identik konsep dengan EA asli)
-    # ------------------------------------------------------------------
-    "ST_ATR_PERIOD": 10,
-    "ST_MULTIPLIER": 3.0,
-    "EMA_PERIOD": 200,
-    "USE_CLOSED_BAR_SIGNAL": True,
-    "CLOSE_ON_OPPOSITE_TREND": False,    # spot: tidak relevan (tidak ada short)
-
-    # ------------------------------------------------------------------
-    # 04. GRID MARTINGALE (konservatif, persentase dari harga)
-    # ------------------------------------------------------------------
-    "USE_ATR_GRID": True,
-    "GRID_ATR_PERIOD": 10,
-    "GRID_ATR_MULTIPLIER": 1.0,
-    "GRID_MIN_PCT": 0.6,                 # jarak minimum antar layer grid (%)
-    "GRID_MAX_PCT": 3.0,                 # jarak maksimum antar layer grid (%)
-    "FIXED_GRID_PCT": 1.0,               # dipakai jika USE_ATR_GRID = False
-    "LOT_MULTIPLIER": 1.3,               # pengali martingale, sama dgn EA asli
-    "MAX_GRID_LAYERS": 5,
-    "ONLY_ADD_IF_TREND_VALID": True,
-
-    # ------------------------------------------------------------------
-    # 05. EXIT: TP Basket, Breakeven, Trailing (persentase dari avg price)
-    # ------------------------------------------------------------------
-    "USE_BASKET_TP": True,
-    "BASKET_TP_PCT": 1.2,
-    "USE_BASKET_BREAKEVEN": True,
-    "BE_TRIGGER_PCT": 0.7,
-    "BE_LOCK_PCT": 0.1,
-    "USE_BASKET_TRAILING": True,
-    "TRAILING_START_PCT": 1.5,
-    "TRAILING_STEP_PCT": 0.4,
-
-    # ------------------------------------------------------------------
-    # 06. FILTER
-    # ------------------------------------------------------------------
-    "MAX_SPREAD_PCT": 0.15,              # tolak entry jika spread bid-ask > ini (%)
-
-    # ------------------------------------------------------------------
-    # 07. FILE STATE & LOG
-    # ------------------------------------------------------------------
-    "STATE_FILE": "bot_state.json",
-    "LOG_FILE": "bot.log",
-}
-
-
-# =========================================================================
-# KONFIGURASI MODE KEDUA: PUMP SCANNER (pump_scanner_bot.py)
-# =========================================================================
-# Mode ini TIDAK memprediksi pump sebelum terjadi -- ia mendeteksi koin yang
-# harganya SUDAH naik signifikan + volume tinggi dalam 24 jam terakhir, lalu
-# mengkonfirmasi lewat candle 5 menit apakah momentumnya kelihatan masih
-# berlanjut, sebelum ikut masuk. Ini reaktif (momentum chasing), bukan
-# prediktif. Berbeda dari grid martingale, mode ini TIDAK averaging-down --
-# hanya satu entry per rotasi, dengan TP/Breakeven/Trailing untuk keluar.
 PUMP_CONFIG = {
     "QUOTE_ASSET": "USDT",
-    "DRY_RUN": False,
+    "DRY_RUN": True,                          # default AMAN: simulasi tanpa order sungguhan. Ubah ke False kalau sudah yakin mau live
     "BASE_URL": "https://api.binance.com",
-    "API_KEY": os.environ.get("BINANCE_API_KEY", ""),
-    "API_SECRET": os.environ.get("BINANCE_API_SECRET", ""),
+    "API_KEY": os.environ.get("BINANCE_API_KEY", ""),    # diisi otomatis dari file .env (lihat panduan di atas)
+    "API_SECRET": os.environ.get("BINANCE_API_SECRET", ""),  # diisi otomatis dari file .env (lihat panduan di atas)
 
     # --- Scan & seleksi kandidat ---
     "MARKET_SCAN_INTERVAL_SECONDS": 300,     # scan seluruh pasar tiap 5 menit
     "LOOP_INTERVAL_SECONDS": 15,             # cek TP/BE/trailing tiap 15 detik
-    "MIN_PUMP_PCT_24H": 8.0,                 # minimal naik 8% dalam 24 jam utk dianggap kandidat
-    "MIN_QUOTE_VOLUME_USDT_24H": 2_000_000,  # minimal volume 24 jam (hindari koin ilikuid/rawan manipulasi)
+    "MIN_PUMP_PCT_24H": 13.0,                 # minimal naik 8% dalam 24 jam utk dianggap kandidat
+    "MIN_QUOTE_VOLUME_USDT_24H": 10_000_000,  # minimal volume 24 jam (hindari koin ilikuid/rawan manipulasi)
     "TOP_N_CANDIDATES_TO_CONFIRM": 10,       # dari hasil ranking, cek candle utk N teratas
     "CONFIRM_INTERVAL": "5m",
     "CONFIRM_LOOKBACK_BARS": 20,
     "MIN_CLOSE_POSITION_IN_RANGE": 0.35,     # lihat market_scanner.confirm_momentum()
+    "USE_VWAP_FILTER": True,                 # tolak kandidat yang terlalu jauh dari VWAP bergulir jangka pendek
+    "VWAP_MAX_EXTENSION_PCT": 3.5,            # tolak kalau harga > 5% di atas VWAP (window = CONFIRM_LOOKBACK_BARS); harga di BAWAH VWAP juga selalu ditolak
     "EXTRA_EXCLUDE_SYMBOLS": [],             # mis. ["SOMEUSDT"] kalau mau blacklist manual
 
     # --- Ukuran posisi (tanpa martingale -- sekali entry per rotasi) ---
@@ -152,14 +125,16 @@ PUMP_CONFIG = {
 
     # --- Exit ---
     "USE_TP": True,
-    "TP_PCT": 6.0,
+    "TP_PCT": 4.0,
+    "USE_STOP_LOSS": True,                   # kerugian maksimum per-trade dari harga entry, exit paksa di harga pasar
+    "SL_PCT": 1.8,                            # contoh: 3.0 = keluar kalau rugi >= 3% dari entry (SEBELUM Breakeven/Trailing aktif)
     "USE_BREAKEVEN": True,
-    "BE_TRIGGER_PCT": 3.0,
-    "BE_LOCK_PCT": 0.3,
+    "BE_TRIGGER_PCT": 1.0,
+    "BE_LOCK_PCT": 0.15,
     "USE_TRAILING": True,
-    "TRAILING_START_PCT": 4.0,
-    "TRAILING_STEP_PCT": 1.5,
-    "MAX_HOLD_MINUTES": 240,                 # paksa keluar kalau kelamaan hold (hindari nyangkut di pump mati)
+    "TRAILING_START_PCT": 1.5,
+    "TRAILING_STEP_PCT": 0.6,
+    "MAX_HOLD_MINUTES": 45,                 # paksa keluar kalau kelamaan hold (hindari nyangkut di pump mati)
     "MOMENTUM_FADE_EXIT": True,
     "MOMENTUM_FADE_RANK_THRESHOLD": 30,      # keluar dini kalau sudah tidak masuk top-30 gainer lagi
 
@@ -168,7 +143,7 @@ PUMP_CONFIG = {
     "COOLDOWN_MINUTES_AFTER_CLOSE": 10,
     "MIN_SECONDS_BETWEEN_TRADES": 60,
 
-    # --- Kontrol risiko (konsep sama dengan mode grid) ---
+    # --- Kontrol risiko ---
     "USE_EQUITY_STOP": False,              # matikan (False) utk nonaktifkan DD Stop
     "MAX_DRAWDOWN_PERCENT": 20.0,
     "USE_DAILY_STOP": False,               # matikan (False) utk nonaktifkan Daily Stop
@@ -177,9 +152,21 @@ PUMP_CONFIG = {
     "CLOSE_ALL_AT_LIMIT": True,
     "DD_COOLDOWN_HOURS": 24,
 
-    # --- File state & log (SENGAJA beda nama dari mode grid, supaya bisa
-    #     dijalankan berdua tanpa saling menimpa) ---
+    # --- File state & log ---
     "STATE_FILE": "pump_bot_state.json",
     "LOG_FILE": "pump_bot.log",
     "HEARTBEAT_INTERVAL_SECONDS": 300,
+    "CONTROL_FILE": "pump_bot_control.json",  # perintah manual dari dashboard (mis. "Jual Sekarang")
+
+    # --- Dust sweep ke BNB ---
+    # Setelah SEBUAH posisi ditutup (SL/TP/BE/Trailing/manual/dsb), kalau
+    # masih ada sisa saldo KECIL (dust) dari koin itu di akun -- biasanya
+    # dari pembulatan qty ke LOT_SIZE bursa -- bot mencoba mengonversinya ke
+    # BNB lewat endpoint resmi Binance (POST /sapi/v1/asset/dust). HANYA
+    # menyentuh base asset dari simbol yang baru saja ditutup, TIDAK PERNAH
+    # "menyapu semua aset kecil di akun" -- modal USDT/BNB Anda tidak pernah
+    # ikut disentuh fitur ini (proteksi ini di kode, bukan bisa
+    # dimatikan lewat config). Di mode DRY_RUN, fitur ini tidak pernah
+    # memanggil API sungguhan (hanya simulasi/log).
+    "USE_DUST_SWEEP": True,
 }

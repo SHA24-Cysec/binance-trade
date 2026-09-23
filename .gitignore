@@ -1,0 +1,65 @@
+# === Kredensial & rahasia (JANGAN pernah di-commit) ===
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets.json
+credentials.json
+
+# === State & log runtime bot ===
+pump_bot_state.json
+pump_bot_state.json.tmp
+pump_bot_control.json
+pump_bot_control.json.tmp
+bot_state.json
+bot_state.json.tmp
+*.log
+*.log.*
+pump_bot.log
+pump_bot.log.*
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# === Virtual environment ===
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# === Editor / OS ===
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# === Arsip yang dibuat lokal ===
+*.zip

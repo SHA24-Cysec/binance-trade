@@ -1,6 +1,6 @@
 """
 Persistensi state bot ke file JSON, supaya kalau bot restart (crash, reboot
-VPS, dsb) basket grid yang sedang berjalan, level breakeven/trailing, dan
+VPS, dsb) posisi yang sedang berjalan, level breakeven/trailing, dan
 tracking equity harian tidak hilang.
 """
 
@@ -65,3 +65,40 @@ def today_str() -> str:
 
 def now_ms() -> int:
     return int(time.time() * 1000)
+
+
+# ---------------------------------------------------------------------
+# "Control file" -- jalur sinyal SEARAH dari dashboard.py (proses lain)
+# ke pump_scanner_bot.py, dipakai untuk perintah manual dari dashboard
+# (mis. tombol "Jual Sekarang"). Dipisah dari file state utama supaya
+# TIDAK ada risiko tabrakan tulis dengan state.json yang aktif ditulis
+# terus-menerus oleh loop utama bot -- dashboard hanya menulis file kecil
+# ini, bot yang membaca & memprosesnya, lalu menghapusnya.
+# ---------------------------------------------------------------------
+
+def load_control(path: str) -> dict:
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_control(path: str, data: dict) -> None:
+    """Tulis atomik, sama seperti save_state() -- tulis ke file sementara
+    dulu baru rename, supaya tidak pernah terbaca setengah-tertulis."""
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    shutil.move(tmp_path, path)
+
+
+def clear_control(path: str) -> None:
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
+

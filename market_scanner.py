@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from statistics import mean
 from typing import Optional
 
-from strategy import Kline, parse_klines
+from strategy import Kline
 
 # Stablecoin/aset yang bukan "koin" dalam artian trading pump (kalau jadi
 # base asset, pair-nya seperti USDCUSDT bukan target yang relevan).
@@ -124,6 +124,64 @@ def confirm_momentum(klines: list[Kline], config: dict) -> tuple[bool, str]:
     return True, "momentum masih naik"
 
 
+def compute_vwap(klines: list[Kline]) -> Optional[float]:
+    """VWAP (Volume Weighted Average Price) BERGULIR dari sejumlah candle
+    terakhir yang diberikan -- BUKAN VWAP sesi/harian seperti di bursa saham
+    (yang reset tiap buka pasar). Binance Spot buka 24/7 tanpa sesi, jadi
+    VWAP bergulir dari window candle konfirmasi (CONFIRM_LOOKBACK_BARS) yang
+    dipakai di sini, sesuai praktik umum VWAP untuk pasar tanpa jam reset.
+
+    VWAP = total(quote_volume) / total(volume) pada window klines yang
+    diberikan -- ini setara dengan rata-rata harga tertimbang volume,
+    memakai quote_volume (dalam USDT) dan volume (dalam koin) yang SUDAH
+    tersedia di setiap Kline hasil parse_klines(), tanpa perlu field baru.
+
+    Mengembalikan None kalau tidak ada volume sama sekali di window
+    (data tidak valid untuk dihitung)."""
+    total_volume = sum(k.volume for k in klines)
+    if total_volume <= 0:
+        return None
+    total_quote = sum(k.quote_volume for k in klines)
+    return total_quote / total_volume
+
+
+def check_vwap_extension(klines: list[Kline], config: dict) -> tuple[bool, str]:
+    """Filter tambahan (opsional, USE_VWAP_FILTER): tolak kandidat kalau
+    harga saat ini terlalu jauh menyimpang dari VWAP bergulir jangka pendek
+    (window sama dengan CONFIRM_LOOKBACK_BARS, konsisten dengan
+    confirm_momentum() -- mengukur leg pump yang SEDANG terjadi, bukan
+    tercampur histori sebelum pump seperti VWAP 24 jam).
+
+    Dua kondisi yang membuat kandidat DITOLAK:
+    1. Harga masih di BAWAH VWAP (tekanan beli di leg ini belum benar-benar
+       dominan, VWAP dihitung dari transaksi RIIL jadi ini sinyal netral/
+       lemah, bukan pump yang solid).
+    2. Harga sudah lebih dari VWAP_MAX_EXTENSION_PCT persen DI ATAS VWAP
+       (kandidat sudah terlalu "kepanasan"/ekstrem dibanding rata-rata
+       transaksi baru-baru ini -- risiko besar membeli di puncak lokal yang
+       segera terkoreksi)."""
+    if not config.get("USE_VWAP_FILTER", False):
+        return True, "filter VWAP nonaktif"
+
+    min_bars = 8
+    if len(klines) < min_bars:
+        return False, "data candle VWAP tidak cukup"
+
+    vwap = compute_vwap(klines)
+    if vwap is None or vwap <= 0:
+        return False, "VWAP tidak bisa dihitung (data volume kosong/tidak valid)"
+
+    last_price = klines[-1].close
+    extension_pct = (last_price / vwap - 1.0) * 100.0
+    max_ext = config.get("VWAP_MAX_EXTENSION_PCT", 5.0)
+
+    if extension_pct < 0:
+        return False, f"harga masih {abs(extension_pct):.2f}% di bawah VWAP (tekanan beli belum dominan)"
+    if extension_pct > max_ext:
+        return False, f"harga sudah {extension_pct:.2f}% di atas VWAP (melebihi batas {max_ext:.2f}%, terlalu ekstrem/kepanasan)"
+    return True, f"harga {extension_pct:.2f}% di atas VWAP, masih wajar (batas {max_ext:.2f}%)"
+
+
 def find_best_candidate(tickers: list, klines_fetcher, config: dict) -> Optional[Candidate]:
     """klines_fetcher: fungsi(symbol) -> list[Kline] (dipisah supaya fungsi
     ini tetap murni/testable tanpa perlu klien jaringan sungguhan)."""
@@ -133,11 +191,20 @@ def find_best_candidate(tickers: list, klines_fetcher, config: dict) -> Optional
     for cand in top_n:
         klines = klines_fetcher(cand.symbol)
         ok, reason = confirm_momentum(klines, config)
+        if ok:
+            vwap_ok, vwap_reason = check_vwap_extension(klines, config)
+            if not vwap_ok:
+                cand.confirmed = False
+                cand.confirm_reason = f"lolos momentum tapi ditolak filter VWAP: {vwap_reason}"
+                continue
+            reason = f"{reason}; VWAP: {vwap_reason}"
+            ok = vwap_ok
         cand.confirmed = ok
         cand.confirm_reason = reason
         if ok:
             return cand
     return None
+
 
 
 def is_symbol_still_ranked(symbol: str, tickers: list, config: dict, rank_threshold: int) -> bool:

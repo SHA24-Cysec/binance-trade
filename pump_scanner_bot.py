@@ -25,7 +25,6 @@ import logging.handlers
 import signal
 import sys
 import time
-from decimal import Decimal
 
 from binance_client import BinanceSpotClient, BinanceAPIError, build_filters_cache
 from config import PUMP_CONFIG
@@ -155,6 +154,82 @@ def reset_position(state: dict) -> None:
     state["trailing_stop_price"] = 0.0
 
 
+def try_dust_sweep(client: BinanceSpotClient, config: dict, symbol: "str | None", dry_run: bool) -> None:
+    """Dipanggil SETELAH posisi `symbol` ditutup (SL/TP/BE/Trailing/manual/dsb)
+    untuk mengecek apakah masih ada sisa saldo kecil (dust) dari koin itu di
+    akun -- biasanya muncul karena pembulatan qty ke LOT_SIZE bursa, atau
+    sisa yang tidak lolos MIN_NOTIONAL saat dijual. Kalau Binance mengakui
+    sisa itu sebagai "dust convertible", langsung dikonversi ke BNB lewat
+    endpoint resmi POST /sapi/v1/asset/dust (dicek developers.binance.com
+    2026-09-23).
+
+    PROTEKSI KERAS terhadap modal (TIDAK bisa dimatikan lewat config,
+    disengaja demi keamanan dana):
+    1. HANYA base asset dari `symbol` yang BARU SAJA ditutup yang pernah
+       disentuh -- TIDAK PERNAH "menyapu semua aset kecil di akun" secara
+       serampangan. Ambang "dust" Binance (nilainya < 0.001 BTC, bisa
+       100+ USD tergantung harga BTC) jauh lebih besar dari modal trading
+       kecil bot ini, jadi kalau modal USDT/BNB ikut disapu, bot bisa
+       kehabisan modal untuk trading berikutnya.
+    2. Quote asset (USDT) dan BNB itu sendiri SELALU dikecualikan secara
+       eksplisit di kode ini, apa pun isi config -- bukan cuma "defaultnya
+       tidak termasuk", tapi memang tidak mungkin lolos pengecekan di bawah.
+    3. Di mode DRY_RUN, fungsi ini TIDAK PERNAH memanggil API sungguhan
+       (hanya mencatat log simulasi), konsisten dengan seluruh bagian lain
+       bot ini yang tidak mengirim apa pun ke Binance saat DRY_RUN=True.
+    4. Kegagalan (rate limit Binance untuk endpoint ini -- dilaporkan sekitar
+       tiap 6-24 jam sekali per akun, aset tidak/belum diakui sebagai dust,
+       dsb) SELALU ditangani sebagai hal wajar (dicoba lagi di kesempatan
+       berikutnya), bukan dianggap error yang menghentikan bot.
+    """
+    if not config.get("USE_DUST_SWEEP", True):
+        return
+    if not symbol:
+        return
+    quote_asset = config["QUOTE_ASSET"]
+    if not symbol.endswith(quote_asset):
+        return
+    base_asset = symbol[: -len(quote_asset)]
+    if not base_asset or base_asset in (quote_asset, "BNB"):
+        # Proteksi keras: tidak pernah convert quote asset (modal) atau BNB itu sendiri.
+        return
+
+    if dry_run:
+        logger.info("[DRY_RUN] Dust sweep dilewati (simulasi): sisa saldo %s (kalau ada) tidak dikonversi.",
+                     base_asset)
+        return
+
+    try:
+        convertible = client.get_dust_convertible()
+    except BinanceAPIError as exc:
+        logger.warning("Dust sweep: gagal ambil daftar aset convertible (%s). Dilewati, dicoba lagi nanti.", exc)
+        return
+
+    details = convertible.get("details", []) if isinstance(convertible, dict) else []
+    match = next((d for d in details if d.get("asset") == base_asset), None)
+    if not match:
+        # Wajar: sisa saldo mungkin nol, atau di atas/bawah ambang dust
+        # Binance saat ini, atau datanya belum "segar". Bukan error.
+        logger.info("Dust sweep: %s tidak (lagi) terdaftar sebagai dust convertible saat ini, dilewati.",
+                     base_asset)
+        return
+
+    try:
+        result = client.convert_dust([base_asset])
+    except BinanceAPIError as exc:
+        # Termasuk rate limit endpoint dust Binance (per akun, bukan dibatasi
+        # kode ini) -- SEMUA ditangani sebagai "coba lagi nanti", bukan bug.
+        logger.warning(
+            "Dust sweep %s -> BNB gagal (%s). Sisa saldo dibiarkan, dicoba lagi di kesempatan berikutnya.",
+            base_asset, exc,
+        )
+        return
+
+    transferred = result.get("totalTransfered", "0") if isinstance(result, dict) else "0"
+    logger.info("DUST SWEEP OK: sisa %s dikonversi ke %s BNB (sudah dikurangi biaya layanan Binance).",
+                base_asset, transferred)
+
+
 def close_position(client: BinanceSpotClient, config: dict, filters_cache: dict,
                     state: dict, reason: str, dry_run: bool) -> None:
     symbol = state["current_symbol"]
@@ -175,10 +250,15 @@ def close_position(client: BinanceSpotClient, config: dict, filters_cache: dict,
     if filters:
         qty_to_sell = filters.round_qty(qty_to_sell)
         if qty_to_sell < float(filters.min_qty):
+            # Ini justru kasus dust paling umum: sisa qty setelah pembulatan
+            # LOT_SIZE terlalu kecil untuk dijual lewat order biasa. Coba
+            # sapu sisa itu ke BNB lewat jalur dust convert Binance sebelum
+            # dianggap selesai.
             logger.warning("Qty jual %s (%.8f) di bawah minQty bursa. Posisi direset manual di state.",
                             symbol, qty_to_sell)
             reset_position(state)
             state["cooldown_until"] = state_mod.now_ms() + config["COOLDOWN_MINUTES_AFTER_CLOSE"] * 60 * 1000
+            try_dust_sweep(client, config, symbol, dry_run)
             return
 
     entry_price = state["entry_price"]
@@ -188,6 +268,7 @@ def close_position(client: BinanceSpotClient, config: dict, filters_cache: dict,
         reset_position(state)
         state["cooldown_until"] = state_mod.now_ms() + config["COOLDOWN_MINUTES_AFTER_CLOSE"] * 60 * 1000
         state["last_trade_time"] = state_mod.now_ms()
+        try_dust_sweep(client, config, symbol, dry_run)
         return
 
     try:
@@ -207,6 +288,10 @@ def close_position(client: BinanceSpotClient, config: dict, filters_cache: dict,
     reset_position(state)
     state["cooldown_until"] = state_mod.now_ms() + config["COOLDOWN_MINUTES_AFTER_CLOSE"] * 60 * 1000
     state["last_trade_time"] = state_mod.now_ms()
+    # Setelah SELL FILLED sungguhan, sisa qty yang tidak terjual (kalau ada,
+    # mis. executed_qty < qty_to_sell karena pembulatan bursa) mungkin
+    # menyisakan dust kecil -- coba sapu ke BNB.
+    try_dust_sweep(client, config, symbol, dry_run)
 
 
 def open_position(client: BinanceSpotClient, config: dict, filters_cache: dict,
@@ -274,6 +359,65 @@ def open_position(client: BinanceSpotClient, config: dict, filters_cache: dict,
     state["last_trade_time"] = state_mod.now_ms()
 
 
+def check_manual_control(client: BinanceSpotClient, config: dict, filters_cache: dict,
+                          state: dict, dry_run: bool) -> None:
+    """Cek "control file" yang bisa ditulis dashboard.py (proses terpisah)
+    untuk perintah manual, mis. tombol "Jual Sekarang". Dipanggil tiap
+    iterasi loop utama (maks setiap LOOP_INTERVAL_SECONDS, default 15 detik)
+    supaya perintah dari dashboard direspons cepat tanpa perlu bot di-restart.
+
+    Kenapa lewat file, bukan panggilan langsung? Bot dan dashboard sengaja
+    berjalan sebagai DUA PROSES terpisah (lihat run.py) supaya crash di satu
+    proses tidak menjatuhkan proses lain. Satu-satunya cara komunikasi antar
+    proses yang sudah dipakai di proyek ini adalah file (pump_bot_state.json),
+    jadi kontrol manual memakai pola yang sama demi konsistensi."""
+    control_path = config.get("CONTROL_FILE", "pump_bot_control.json")
+    cmd = state_mod.load_control(control_path)
+    if not cmd:
+        return
+
+    # Perintah kadaluarsa (mis. bot sempat mati/lama tidak jalan lalu baru
+    # nyala lagi) TIDAK dieksekusi -- mencegah "Jual Sekarang" yang diklik
+    # user berjam-jam lalu tiba-tiba dieksekusi tanpa konteks saat ini.
+    requested_at = int(cmd.get("requested_at", 0) or 0)
+    age_sec = (state_mod.now_ms() - requested_at) / 1000.0
+    MAX_AGE_SECONDS = 120
+    if requested_at <= 0 or age_sec > MAX_AGE_SECONDS:
+        logger.warning("Perintah manual dari dashboard diabaikan (kadaluarsa, umur %.0f detik): %s",
+                        age_sec, cmd)
+        state_mod.clear_control(control_path)
+        return
+
+    action = cmd.get("action")
+    if action != "CLOSE_POSITION":
+        logger.warning("Perintah manual dari dashboard tidak dikenali: %s", cmd)
+        state_mod.clear_control(control_path)
+        return
+
+    # Selalu hapus file SEBELUM eksekusi (bukan sesudah) -- kalau proses
+    # crash di tengah close_position(), file tidak akan "menyangkut" dan
+    # dieksekusi ulang berkali-kali begitu bot menyala lagi.
+    state_mod.clear_control(control_path)
+
+    if not state["current_symbol"] or state["qty"] <= 0:
+        logger.info("Perintah 'Jual Sekarang' dari dashboard diabaikan: tidak ada posisi terbuka saat ini.")
+        return
+
+    requested_symbol = cmd.get("symbol")
+    if requested_symbol and requested_symbol != state["current_symbol"]:
+        logger.warning(
+            "Perintah 'Jual Sekarang' dari dashboard diabaikan: diminta untuk %s, "
+            "tapi posisi saat ini adalah %s (kemungkinan posisi sudah berganti "
+            "sejak tombol diklik).",
+            requested_symbol, state["current_symbol"],
+        )
+        return
+
+    logger.info("Perintah 'Jual Sekarang' diterima dari dashboard untuk %s. Menutup posisi...",
+                state["current_symbol"])
+    close_position(client, config, filters_cache, state, "MANUAL_CLOSE_DASHBOARD", dry_run)
+
+
 def manage_exit(client: BinanceSpotClient, config: dict, filters_cache: dict,
                  state: dict, current_price: float, dry_run: bool) -> None:
     if not state["current_symbol"] or state["qty"] <= 0 or state["entry_price"] <= 0:
@@ -281,6 +425,15 @@ def manage_exit(client: BinanceSpotClient, config: dict, filters_cache: dict,
 
     pnl_pct = (current_price / state["entry_price"] - 1.0) * 100.0
     hold_minutes = (state_mod.now_ms() - state["entry_time"]) / 60000.0
+
+    # Stop Loss: batas kerugian maksimum dari harga entry. Dicek PALING AWAL
+    # dan TIDAK bergantung pada Breakeven/Trailing aktif atau tidak -- ini
+    # jaring pengaman kalau harga langsung turun sejak entry dan tidak pernah
+    # sempat untung (BE/Trailing baru aktif setelah profit menyentuh trigger-nya
+    # masing-masing, jadi TIDAK melindungi skenario ini tanpa Stop Loss).
+    if config["USE_STOP_LOSS"] and pnl_pct <= -abs(config["SL_PCT"]):
+        close_position(client, config, filters_cache, state, "STOP_LOSS", dry_run)
+        return
 
     if config["USE_BREAKEVEN"] and not state["be_active"] and pnl_pct >= config["BE_TRIGGER_PCT"]:
         state["be_active"] = True
@@ -312,7 +465,6 @@ def manage_exit(client: BinanceSpotClient, config: dict, filters_cache: dict,
 
 
 def run(config: dict) -> None:
-    import os
     setup_logging(config)
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
@@ -363,6 +515,11 @@ def run(config: dict) -> None:
                 filters_cache = build_filters_cache(exchange_info)
                 filters_cache_time = time.time()
                 logger.info("Filter simbol disegarkan ulang (%d simbol).", len(filters_cache))
+
+            # Perintah manual dari dashboard (mis. "Jual Sekarang") dicek
+            # PALING AWAL setiap iterasi, sebelum logika exit otomatis --
+            # kalau user memintanya, itu harus didahulukan.
+            check_manual_control(client, config, filters_cache, state, config["DRY_RUN"])
 
             current_price = None
             if state["current_symbol"]:
@@ -493,6 +650,51 @@ def selftest() -> None:
     print(f"  Skenario candle reversal kuat di akhir -> confirmed={ok2} ({reason2})")
     assert not ok2, "Candle reversal kuat harusnya GAGAL konfirmasi"
 
+    print("\n=== SELFTEST: filter VWAP (USE_VWAP_FILTER, VWAP_MAX_EXTENSION_PCT) ===")
+    assert cfg["USE_VWAP_FILTER"], "USE_VWAP_FILTER harusnya True di config default"
+
+    def bar_vol(o, c, vol=1000.0):
+        nonlocal t
+        h = max(o, c) * 1.001
+        l = min(o, c) * 0.999
+        qvol = vol * ((o + c) / 2.0)
+        k = strategy.Kline(open_time=t, open=o, high=h, low=l, close=c, close_time=t + 299999,
+                            volume=vol, quote_volume=qvol)
+        t += 300000
+        return k
+
+    # Skenario A: harga naik landai (extension dari VWAP kecil) -> harus lolos
+    klines_wajar = [bar_vol(100 + i * 0.1, 100 + i * 0.1 + 0.08) for i in range(20)]
+    vok, vreason = scanner.check_vwap_extension(klines_wajar, cfg)
+    print(f"  Kenaikan landai -> lolos={vok} ({vreason})")
+    assert vok, "Kenaikan landai (extension kecil dari VWAP) harusnya lolos filter VWAP"
+
+    # Skenario B: candle terakhir loncat tajam jauh di atas rata-rata window
+    # (harga >> VWAP_MAX_EXTENSION_PCT dari VWAP window) -> harus DITOLAK.
+    klines_ekstrem = list(klines_wajar[:-1])
+    lompat = klines_wajar[-2].close * 1.10  # loncat +10%, jauh melebihi ambang 5%
+    klines_ekstrem.append(bar_vol(lompat, lompat * 1.001))
+    vok2, vreason2 = scanner.check_vwap_extension(klines_ekstrem, cfg)
+    print(f"  Loncat +10% dari harga sebelumnya -> lolos={vok2} ({vreason2})")
+    assert not vok2, "Harga yang melompat jauh di atas VWAP harusnya DITOLAK filter VWAP"
+
+    # Skenario C: harga turun di bawah VWAP window -> harus DITOLAK (tekanan
+    # beli belum dominan), meskipun jaraknya tidak "ekstrem" secara persentase.
+    klines_bawah = list(klines_wajar[:-1])
+    turun = klines_wajar[-2].close * 0.95
+    klines_bawah.append(bar_vol(turun, turun * 1.001))
+    vok3, vreason3 = scanner.check_vwap_extension(klines_bawah, cfg)
+    print(f"  Harga di bawah VWAP window -> lolos={vok3} ({vreason3})")
+    assert not vok3, "Harga di bawah VWAP harusnya DITOLAK filter VWAP"
+
+    # Skenario D: USE_VWAP_FILTER=False -> filter dilewati sepenuhnya, kasus
+    # ekstrem yang sama di skenario B harus lolos begitu filter dimatikan.
+    cfg_no_vwap = dict(cfg)
+    cfg_no_vwap["USE_VWAP_FILTER"] = False
+    vok4, vreason4 = scanner.check_vwap_extension(klines_ekstrem, cfg_no_vwap)
+    print(f"  Filter VWAP dimatikan, kasus ekstrem yang sama -> lolos={vok4} ({vreason4})")
+    assert vok4, "Kalau USE_VWAP_FILTER=False, filter harus dilewati sepenuhnya (selalu lolos)"
+
     print("\n=== SELFTEST: simulasi exit (TP/Breakeven/Trailing) ===")
     from decimal import Decimal as D
     from binance_client import SymbolFilters
@@ -512,6 +714,168 @@ def selftest() -> None:
     manage_exit(None, cfg, filters_cache, state, 106.5, dry_run=True)  # TP_PCT = 6.0
     assert state["current_symbol"] is None, "Posisi harusnya sudah tertutup kena TAKE_PROFIT"
     print("  Setelah profit +6.5%: posisi tertutup (TAKE_PROFIT) -> OK")
+
+    print("\n=== SELFTEST: Stop Loss (harga langsung turun sejak entry, TIDAK sempat untung) ===")
+    assert cfg["USE_STOP_LOSS"], "USE_STOP_LOSS harusnya True di config default"
+    state2 = dict(DEFAULT_STATE)
+    state2["current_symbol"] = "TESTUSDT"
+    state2["entry_price"] = 100.0
+    state2["qty"] = 1.0
+    state2["entry_time"] = state_mod.now_ms()
+
+    # Rugi -2% dulu -- masih di atas ambang SL_PCT (3.0%), posisi harus TETAP terbuka.
+    manage_exit(None, cfg, filters_cache, state2, 98.0, dry_run=True)
+    assert state2["current_symbol"] == "TESTUSDT", "Rugi -2% belum boleh kena Stop Loss (ambang 3.0%)"
+    assert not state2["be_active"], "Breakeven tidak boleh aktif kalau posisi rugi"
+    print("  Rugi -2%: posisi masih terbuka, BE/Trailing tidak aktif -> OK")
+
+    # Rugi -3.5% -- melewati SL_PCT (3.0%), posisi harus dipaksa tertutup STOP_LOSS,
+    # walau BE_TRIGGER_PCT/TRAILING_START_PCT tidak pernah tersentuh sama sekali.
+    manage_exit(None, cfg, filters_cache, state2, 96.5, dry_run=True)
+    assert state2["current_symbol"] is None, "Posisi harusnya sudah tertutup kena STOP_LOSS di rugi -3.5%"
+    print("  Rugi -3.5%: posisi tertutup (STOP_LOSS) -> OK")
+
+    print("\n=== SELFTEST: perintah manual 'Jual Sekarang' dari dashboard (control file) ===")
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        control_path = f"{tmpdir}/pump_bot_control.json"
+        cfg_ctrl = dict(cfg)
+        cfg_ctrl["CONTROL_FILE"] = control_path
+
+        # Skenario A: ada posisi terbuka, perintah CLOSE_POSITION untuk simbol
+        # yang sesuai dan masih segar (baru saja ditulis) -> posisi harus
+        # tertutup dengan alasan MANUAL_CLOSE_DASHBOARD.
+        state3 = dict(DEFAULT_STATE)
+        state3["current_symbol"] = "TESTUSDT"
+        state3["entry_price"] = 100.0
+        state3["qty"] = 1.0
+        state3["entry_time"] = state_mod.now_ms()
+        state_mod.save_control(control_path, {
+            "action": "CLOSE_POSITION", "symbol": "TESTUSDT", "requested_at": state_mod.now_ms(),
+        })
+        check_manual_control(None, cfg_ctrl, filters_cache, state3, dry_run=True)
+        assert state3["current_symbol"] is None, "Posisi harusnya tertutup oleh perintah manual yang valid"
+        assert not state_mod.load_control(control_path), "Control file harus terhapus setelah diproses"
+        print("  Perintah valid untuk simbol yang sesuai -> posisi ditutup, control file dibersihkan -> OK")
+
+        # Skenario B: perintah kadaluarsa (requested_at sangat lampau) -> HARUS
+        # diabaikan, posisi tetap terbuka.
+        state4 = dict(DEFAULT_STATE)
+        state4["current_symbol"] = "TESTUSDT"
+        state4["entry_price"] = 100.0
+        state4["qty"] = 1.0
+        state4["entry_time"] = state_mod.now_ms()
+        state_mod.save_control(control_path, {
+            "action": "CLOSE_POSITION", "symbol": "TESTUSDT",
+            "requested_at": state_mod.now_ms() - 10 * 60 * 1000,  # 10 menit lalu
+        })
+        check_manual_control(None, cfg_ctrl, filters_cache, state4, dry_run=True)
+        assert state4["current_symbol"] == "TESTUSDT", "Perintah kadaluarsa (>2 menit) harus DIABAIKAN"
+        print("  Perintah kadaluarsa (10 menit lalu) -> diabaikan, posisi tetap terbuka -> OK")
+
+        # Skenario C: perintah untuk simbol yang BEDA dari posisi saat ini
+        # (mis. posisi sudah berganti sejak tombol diklik) -> HARUS diabaikan.
+        state5 = dict(DEFAULT_STATE)
+        state5["current_symbol"] = "LAINUSDT"
+        state5["entry_price"] = 50.0
+        state5["qty"] = 2.0
+        state5["entry_time"] = state_mod.now_ms()
+        state_mod.save_control(control_path, {
+            "action": "CLOSE_POSITION", "symbol": "TESTUSDT", "requested_at": state_mod.now_ms(),
+        })
+        check_manual_control(None, cfg_ctrl, filters_cache, state5, dry_run=True)
+        assert state5["current_symbol"] == "LAINUSDT", "Perintah untuk simbol berbeda dari posisi aktif harus DIABAIKAN"
+        print("  Perintah untuk simbol yang sudah tidak dipegang -> diabaikan, posisi lain tetap aman -> OK")
+
+        # Skenario D: tidak ada posisi sama sekali saat perintah diproses ->
+        # tidak boleh error, cukup diabaikan dengan aman.
+        state6 = dict(DEFAULT_STATE)
+        state_mod.save_control(control_path, {
+            "action": "CLOSE_POSITION", "symbol": "TESTUSDT", "requested_at": state_mod.now_ms(),
+        })
+        check_manual_control(None, cfg_ctrl, filters_cache, state6, dry_run=True)
+        assert state6["current_symbol"] is None, "Tanpa posisi terbuka, perintah manual harus diabaikan dengan aman"
+        print("  Tidak ada posisi terbuka saat perintah diproses -> diabaikan dengan aman, tidak error -> OK")
+
+    print("\n=== SELFTEST: dust sweep ke BNB setelah posisi ditutup ===")
+
+    class FakeDustClient:
+        """Client palsu utk mensimulasikan endpoint dust Binance tanpa jaringan.
+        Mencatat panggilan (convert_calls) supaya selftest bisa memverifikasi
+        PERSIS aset apa yang coba dikonversi -- ini krusial karena proteksi
+        modal di try_dust_sweep() harus terbukti tidak pernah menyentuh
+        quote asset atau BNB, bukan cuma "kelihatannya begitu"."""
+
+        def __init__(self, convertible_assets):
+            self.convertible_assets = convertible_assets  # list of asset code, mis. ["PEPE"]
+            self.convert_calls = []
+            self.fail_convert = False
+
+        def get_dust_convertible(self, account_type="SPOT"):
+            return {"details": [{"asset": a, "amountFree": "1.0", "toBNB": "0.0001"}
+                                 for a in self.convertible_assets]}
+
+        def convert_dust(self, assets, account_type="SPOT"):
+            self.convert_calls.append(list(assets))
+            if self.fail_convert:
+                raise BinanceAPIError(400, -5001, "Asset not supported (simulasi)")
+            return {"totalTransfered": "0.0001", "totalServiceCharge": "0.000002", "transferResult": []}
+
+    assert cfg["USE_DUST_SWEEP"], "USE_DUST_SWEEP harusnya True di config default"
+
+    # Skenario A: base asset dari simbol yang baru ditutup MEMANG terdaftar
+    # sebagai dust convertible -> harus dikonversi (convert_dust dipanggil
+    # persis dengan asset itu saja).
+    fake_a = FakeDustClient(convertible_assets=["PEPE"])
+    try_dust_sweep(fake_a, cfg, "PEPEUSDT", dry_run=False)
+    assert fake_a.convert_calls == [["PEPE"]], f"Harusnya convert PEPE saja, dapat: {fake_a.convert_calls}"
+    print("  Sisa PEPE terdaftar dust convertible -> convert_dust(['PEPE']) dipanggil -> OK")
+
+    # Skenario B: base asset TIDAK terdaftar sebagai dust convertible (mis.
+    # saldo sudah nol atau di atas ambang) -> convert_dust TIDAK boleh dipanggil.
+    fake_b = FakeDustClient(convertible_assets=[])
+    try_dust_sweep(fake_b, cfg, "PEPEUSDT", dry_run=False)
+    assert fake_b.convert_calls == [], "Tidak boleh convert kalau asset tidak terdaftar sebagai dust"
+    print("  Sisa PEPE TIDAK terdaftar dust convertible -> convert_dust tidak dipanggil -> OK")
+
+    # Skenario C (PROTEKSI MODAL -- paling penting): symbol yang ditutup
+    # adalah quote asset itu sendiri seharusnya mustahil terjadi di alur
+    # normal (symbol selalu "<BASE>USDT"), tapi diuji eksplisit bahwa base
+    # asset "USDT" atau "BNB" TIDAK PERNAH dikonversi walau seandainya lolos
+    # sampai ke fungsi ini.
+    fake_c = FakeDustClient(convertible_assets=["USDT", "BNB"])
+    try_dust_sweep(fake_c, cfg, "BNBUSDT", dry_run=False)  # base asset = "BNB"
+    assert fake_c.convert_calls == [], "BNB tidak boleh pernah dikonversi (proteksi keras)"
+    print("  Simbol dengan base asset BNB -> TIDAK PERNAH dikonversi (proteksi modal) -> OK")
+
+    # Skenario D: DRY_RUN=True -> tidak boleh ada panggilan API sama sekali,
+    # walaupun asset-nya terdaftar convertible.
+    fake_d = FakeDustClient(convertible_assets=["PEPE"])
+    try_dust_sweep(fake_d, cfg, "PEPEUSDT", dry_run=True)
+    assert fake_d.convert_calls == [], "Mode DRY_RUN tidak boleh memanggil convert_dust sama sekali"
+    print("  Mode DRY_RUN aktif -> tidak ada panggilan API sungguhan -> OK")
+
+    # Skenario E: endpoint convert_dust gagal (mis. kena rate limit Binance)
+    # -> harus ditangani dengan aman, TIDAK boleh melempar exception ke pemanggil.
+    fake_e = FakeDustClient(convertible_assets=["PEPE"])
+    fake_e.fail_convert = True
+    try:
+        try_dust_sweep(fake_e, cfg, "PEPEUSDT", dry_run=False)
+        gagal_ditangani = True
+    except BinanceAPIError:
+        gagal_ditangani = False
+    assert gagal_ditangani, "Kegagalan convert_dust (mis. rate limit) harus ditangani, bukan dilempar ke pemanggil"
+    print("  convert_dust gagal (simulasi rate limit Binance) -> ditangani dengan aman, tidak crash -> OK")
+
+    # Skenario F: USE_DUST_SWEEP=False -> fitur nonaktif total, tidak ada
+    # panggilan API apa pun walau semua syarat lain terpenuhi.
+    cfg_no_dust = dict(cfg)
+    cfg_no_dust["USE_DUST_SWEEP"] = False
+    fake_f = FakeDustClient(convertible_assets=["PEPE"])
+    try_dust_sweep(fake_f, cfg_no_dust, "PEPEUSDT", dry_run=False)
+    assert fake_f.convert_calls == [], "USE_DUST_SWEEP=False harusnya menonaktifkan fitur ini sepenuhnya"
+    print("  USE_DUST_SWEEP=False -> fitur nonaktif total -> OK")
 
     print("\nSEMUA SELFTEST LULUS.")
     print("(Selftest ini TIDAK menghubungi Binance sama sekali -- murni logika lokal.)")

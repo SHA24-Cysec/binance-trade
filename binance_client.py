@@ -156,10 +156,17 @@ class BinanceSpotClient:
         sering; cukup tiap beberapa menit untuk scanning pasar)."""
         return self._request("GET", "/api/v3/ticker/24hr", {})
 
-    def get_klines(self, symbol: str, interval: str, limit: int = 500) -> list:
-        return self._request(
-            "GET", "/api/v3/klines", {"symbol": symbol, "interval": interval, "limit": limit}
-        )
+    def get_klines(self, symbol: str, interval: str, limit: int = 500,
+                    start_time_ms: Optional[int] = None, end_time_ms: Optional[int] = None) -> list:
+        """start_time_ms/end_time_ms opsional -- dipakai fitur backtest untuk
+        mengambil rentang historis tertentu lewat paging (endpoint ini
+        maksimal mengembalikan 1000 candle per panggilan)."""
+        params = {"symbol": symbol, "interval": interval, "limit": limit}
+        if start_time_ms is not None:
+            params["startTime"] = start_time_ms
+        if end_time_ms is not None:
+            params["endTime"] = end_time_ms
+        return self._request("GET", "/api/v3/klines", params)
 
     def get_book_ticker(self, symbol: str) -> dict:
         return self._request("GET", "/api/v3/ticker/bookTicker", {"symbol": symbol})
@@ -183,6 +190,36 @@ class BinanceSpotClient:
             params["quoteOrderQty"] = quote_order_qty
         return self._request("POST", "/api/v3/order", params, signed=True)
 
+    def get_dust_convertible(self, account_type: str = "SPOT") -> dict:
+        """POST /sapi/v1/asset/dust-btc -- daftar aset "dust" (saldo kecil)
+        yang SAAT INI diakui Binance sebagai layak dikonversi ke BNB, beserta
+        estimasi hasil konversinya. Endpoint ini HANYA MEMBACA, tidak pernah
+        mengeksekusi apa pun -- dipakai untuk memvalidasi dulu sebelum
+        benar-benar memanggil convert_dust().
+        Referensi resmi: developers.binance.com/docs/wallet/asset/assets-can-convert-bnb
+        (dicek 2026-09-23)."""
+        return self._request("POST", "/sapi/v1/asset/dust-btc", {"accountType": account_type}, signed=True)
+
+    def convert_dust(self, assets: list, account_type: str = "SPOT") -> dict:
+        """POST /sapi/v1/asset/dust -- konversi aset "dust" (saldo kecil) ke
+        BNB. HANYA memproses asset yang disebutkan eksplisit di parameter
+        `assets` -- TIDAK PERNAH "menyapu semua aset kecil di akun" secara
+        implisit, supaya pemanggil (try_dust_sweep di pump_scanner_bot.py)
+        yang mengontrol persis apa yang boleh disentuh.
+        Format parameter `asset` di Binance adalah string dipisah koma
+        (mis. "BTC,ETH"), BUKAN parameter berulang -- ini terkonfirmasi dari
+        beberapa laporan pengguna komunitas python-binance yang membuktikan
+        format array/berulang menghasilkan error -1022 (signature tidak
+        valid), sedangkan format string dipisah koma berhasil.
+        Binance sendiri MEMBATASI FREKUENSI endpoint ini per akun (dilaporkan
+        sekitar tiap 6-24 jam sekali, bukan dibatasi kode ini) -- error dari
+        batas tersebut harus ditangani oleh pemanggil sebagai hal wajar,
+        bukan bug.
+        Referensi resmi: developers.binance.com/docs/wallet/asset/dust-transfer
+        (dicek 2026-09-23)."""
+        params = {"asset": ",".join(assets), "accountType": account_type}
+        return self._request("POST", "/sapi/v1/asset/dust", params, signed=True)
+
 
 # ---------------------------------------------------------------------
 # Util filter simbol (LOT_SIZE, NOTIONAL/MIN_NOTIONAL, PRICE_FILTER)
@@ -198,9 +235,8 @@ class SymbolFilters:
     @classmethod
     def from_symbol_data(cls, sym_data: dict) -> "SymbolFilters":
         """Parsing filter dari SATU entry symbol di exchangeInfo['symbols'].
-        Dipisah dari from_exchange_info() supaya bisa dipakai untuk
-        membangun cache banyak simbol sekaligus tanpa scan ulang list
-        symbols setiap kali (dipakai oleh build_filters_cache)."""
+        Dipakai oleh build_filters_cache() untuk membangun cache banyak
+        simbol sekaligus tanpa scan ulang list symbols setiap kali."""
         symbol = sym_data.get("symbol", "?")
 
         # PENTING: untuk simbol likuid seperti BTCUSDT, Binance sekarang
@@ -253,14 +289,6 @@ class SymbolFilters:
 
         return cls(step_size=step_size, min_qty=min_qty, min_notional=min_notional,
                    tick_size=tick_size)
-
-    @classmethod
-    def from_exchange_info(cls, exchange_info: dict, symbol: str) -> "SymbolFilters":
-        symbols = exchange_info.get("symbols", [])
-        sym_data = next((s for s in symbols if s.get("symbol") == symbol), None)
-        if sym_data is None:
-            raise ValueError(f"Simbol {symbol} tidak ditemukan di exchangeInfo")
-        return cls.from_symbol_data(sym_data)
 
     def round_qty(self, qty: float) -> float:
         q = Decimal(str(qty))

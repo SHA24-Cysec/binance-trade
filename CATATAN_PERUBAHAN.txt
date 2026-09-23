@@ -1,0 +1,19 @@
+CATATAN PERUBAHAN - Penghapusan Bot Grid Martingale
+====================================================
+Tanggal: 2026-09-23
+
+DIHAPUS:
+- bot.py                (program utama bot grid martingale) -> DIHAPUS TOTAL
+- config.py: blok CONFIG (khusus grid) -> DIHAPUS, sisakan hanya PUMP_CONFIG
+- strategy.py: fungsi indikator khusus grid (EMA, ATR Wilder, SuperTrend,
+  get_trend_signal, compute_grid_step_pct) -> DIHAPUS, sisakan Kline + parse_klines
+- README.md: bagian grid -> ditulis ulang fokus ke pump scanner
+
+FILE DALAM ZIP INI (yang berubah, selain bot.py yang dihapus):
+- config.py     (versi baru, hanya PUMP_CONFIG)
+- strategy.py   (versi ramping)
+- state.py      (docstring dirapikan)
+- README.md     (ditulis ulang)
+
+Bot yang tersisa: pump_scanner_bot.py (Pump Scanner) - tetap berfungsi,
+selftest LULUS.
