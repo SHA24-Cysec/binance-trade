@@ -108,7 +108,7 @@ PUMP_CONFIG = {
     "MARKET_SCAN_INTERVAL_SECONDS": 300,     # scan seluruh pasar tiap 5 menit
     "LOOP_INTERVAL_SECONDS": 15,             # cek TP/BE/trailing tiap 15 detik
     "MIN_PUMP_PCT_24H": 13.0,                 # minimal naik 8% dalam 24 jam utk dianggap kandidat
-    "MIN_QUOTE_VOLUME_USDT_24H": 10_000_000,  # minimal volume 24 jam (hindari koin ilikuid/rawan manipulasi)
+    "MIN_QUOTE_VOLUME_USDT_24H": 2_000_000,  # minimal volume 24 jam (hindari koin ilikuid/rawan manipulasi)
     "TOP_N_CANDIDATES_TO_CONFIRM": 10,       # dari hasil ranking, cek candle utk N teratas
     "CONFIRM_INTERVAL": "5m",
     "CONFIRM_LOOKBACK_BARS": 20,
