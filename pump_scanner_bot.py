@@ -73,6 +73,17 @@ DEFAULT_STATE = {
 }
 
 
+def experimental_entry_live_blocked(config: dict) -> bool:
+    """True jika mode entry baru mencoba berjalan di LIVE tanpa izin eksplisit."""
+    mode = get_mode(config)
+    entry_model = str(config.get("ENTRY_MODEL", scanner.ENTRY_MODEL_LEGACY)).strip().upper()
+    return (
+        mode == "LIVE"
+        and entry_model == scanner.ENTRY_MODEL_VWAP_RETEST_RVOL
+        and not config.get("ALLOW_EXPERIMENTAL_ENTRY_LIVE", False)
+    )
+
+
 def setup_logging(config: dict) -> None:
     root = logging.getLogger()
     root.setLevel(logging.INFO)
@@ -535,6 +546,20 @@ def run(config: dict) -> None:
     mode = get_mode(config)
     base_url = get_base_url(config)
 
+    # Retest VWAP + RVOL baru berupa hipotesis setelah model momentum lama
+    # gagal pada validasi panjang. Backtest dan TESTNET tetap boleh supaya
+    # dapat diuji, tetapi order uang asli diblokir sampai pengguna secara
+    # eksplisit mengizinkannya SETELAH validasi out-of-sample yang memadai.
+    entry_model = str(config.get("ENTRY_MODEL", scanner.ENTRY_MODEL_LEGACY)).strip().upper()
+    if experimental_entry_live_blocked(config):
+        logger.critical(
+            "ENTRY_MODEL=%s masih eksperimen dan diblokir di MODE=LIVE. "
+            "Jalankan backtest/TESTNET lebih dulu; setelah ada validasi yang memadai, "
+            "set ALLOW_EXPERIMENTAL_ENTRY_LIVE=True secara sadar.",
+            entry_model,
+        )
+        sys.exit(1)
+
     if not config["API_KEY"] or not config["API_SECRET"]:
         logger.error(
             "API key/secret belum di-set. Mode %s tetap mengirim order sungguhan "
@@ -598,8 +623,20 @@ def run(config: dict) -> None:
     FILTERS_REFRESH_INTERVAL_SECONDS = 6 * 3600
 
     def klines_fetcher(symbol: str):
-        raw = client.get_klines(symbol, config["CONFIRM_INTERVAL"], limit=config["CONFIRM_LOOKBACK_BARS"])
-        return strategy.parse_klines(raw)
+        """Ambil tepat window candle TERTUTUP untuk keputusan entry.
+
+        Endpoint kline Binance hampir selalu menyertakan candle interval saat
+        ini yang belum selesai. Memakai candle itu untuk sinyal live sementara
+        backtest memakai candle final menciptakan look-ahead/repaint mismatch.
+        Karena itu satu candle ekstra diminta, candle yang close_time-nya
+        belum lewat dibuang, lalu hanya window terbaru yang sudah selesai
+        dikembalikan. Cukup untuk konfirmasi, VWAP, RVOL, dan ATR entry.
+        """
+        lookback = int(config["CONFIRM_LOOKBACK_BARS"])
+        raw = client.get_klines(symbol, config["CONFIRM_INTERVAL"], limit=lookback + 1)
+        now_ms = state_mod.now_ms()
+        closed = [k for k in strategy.parse_klines(raw) if k.close_time < now_ms]
+        return closed[-lookback:]
 
     while not _shutdown_requested:
         loop_start = time.time()
@@ -715,8 +752,19 @@ def run(config: dict) -> None:
 
 
 def selftest() -> None:
-    print("=== SELFTEST: filter & ranking kandidat pump ===")
+    print("=== SELFTEST: proteksi entry eksperimen di mode LIVE ===")
     cfg = dict(PUMP_CONFIG)
+    assert not experimental_entry_live_blocked(cfg), "TESTNET tidak boleh diblokir"
+    cfg_live_experimental = dict(cfg, MODE="LIVE", ENTRY_MODEL=scanner.ENTRY_MODEL_VWAP_RETEST_RVOL,
+                                ALLOW_EXPERIMENTAL_ENTRY_LIVE=False)
+    assert experimental_entry_live_blocked(cfg_live_experimental), "Entry eksperimen harus diblokir di LIVE"
+    assert not experimental_entry_live_blocked(dict(cfg_live_experimental, ALLOW_EXPERIMENTAL_ENTRY_LIVE=True)), \
+        "Izin eksplisit harus membuka blokir setelah validasi"
+    assert not experimental_entry_live_blocked(dict(cfg_live_experimental, ENTRY_MODEL=scanner.ENTRY_MODEL_LEGACY)), \
+        "Mode legacy tidak boleh ikut diblokir"
+    print("  Retest+RVOL diblokir di LIVE sampai izin eksplisit diberikan -> OK")
+
+    print("\n=== SELFTEST: filter & ranking kandidat pump ===")
     tickers = [
         {"symbol": "AUSDT", "priceChangePercent": "15.0", "quoteVolume": "5000000", "lastPrice": "1.0"},
         {"symbol": "BUSDT", "priceChangePercent": "25.0", "quoteVolume": "3000000", "lastPrice": "2.0"},
@@ -799,6 +847,56 @@ def selftest() -> None:
     vok4, vreason4 = scanner.check_vwap_extension(klines_ekstrem, cfg_no_vwap)
     print(f"  Filter VWAP dimatikan, kasus ekstrem yang sama -> lolos={vok4} ({vreason4})")
     assert vok4, "Kalau USE_VWAP_FILTER=False, filter harus dilewati sepenuhnya (selalu lolos)"
+
+    print("\n=== SELFTEST: entry VWAP retest + relative volume ===")
+    # 16 candle datar membentuk VWAP sekitar 100. Lalu ada retest dengan low
+    # di area VWAP, dua candle pemulihan, dan candle sinyal bullish yang
+    # volumenya 2x rata-rata sebelumnya. Semua candle dalam contoh ini
+    # dianggap SUDAH selesai, persis kontrak yang dipakai scanner live.
+    cfg_retest = dict(cfg)
+    cfg_retest.update({
+        "ENTRY_MODEL": scanner.ENTRY_MODEL_VWAP_RETEST_RVOL,
+        "USE_VWAP_FILTER": True,
+        "VWAP_MAX_EXTENSION_PCT": 3.5,
+        "VWAP_RETEST_LOOKBACK_BARS": 3,
+        "VWAP_RETEST_TOUCH_TOLERANCE_PCT": 0.20,
+        "VWAP_RETEST_MAX_BREAKDOWN_PCT": 0.75,
+        "VWAP_RETEST_MIN_RECLAIM_PCT": 0.10,
+        "VWAP_RETEST_SIGNAL_MIN_CLOSE_POSITION": 0.60,
+        "RVOL_LOOKBACK_BARS": 5,
+        "MIN_RELATIVE_QUOTE_VOLUME": 1.50,
+    })
+    rt = 0
+
+    def rt_bar(o, h, l, c, vol=100.0):
+        nonlocal rt
+        out = strategy.Kline(open_time=rt, open=o, high=h, low=l, close=c,
+                             close_time=rt + 299999, volume=vol, quote_volume=vol * c)
+        rt += 300000
+        return out
+
+    retest_klines = [rt_bar(100, 100.1, 99.9, 100) for _ in range(16)]
+    retest_klines += [
+        rt_bar(100.2, 100.55, 100.0, 100.5),  # retest VWAP
+        rt_bar(100.5, 100.65, 100.4, 100.6),
+        rt_bar(100.6, 100.70, 100.5, 100.65),
+        rt_bar(100.75, 101.05, 100.7, 101.0, vol=200.0),  # sinyal + RVOL 2x
+    ]
+    rok, rreason = scanner.confirm_entry(retest_klines, cfg_retest)
+    print(f"  Retest + candle reclaim + RVOL -> lolos={rok} ({rreason})")
+    assert rok, "Retest VWAP yang diikuti reclaim bullish dengan RVOL harus lolos"
+
+    weak_volume = list(retest_klines)
+    weak_volume[-1] = weak_volume[-1]._replace(volume=100.0, quote_volume=101.0 * 100.0)
+    rok2, rreason2 = scanner.confirm_entry(weak_volume, cfg_retest)
+    print(f"  Data harga sama, RVOL 1x -> lolos={rok2} ({rreason2})")
+    assert not rok2 and "RVOL" in rreason2, "Candle sinyal tanpa RVOL harus ditolak"
+
+    no_retest = list(retest_klines)
+    no_retest[-4] = no_retest[-4]._replace(low=98.0)  # breakdown terlalu dalam, bukan retest valid
+    rok3, rreason3 = scanner.confirm_entry(no_retest, cfg_retest)
+    print(f"  Low retest breakdown terlalu dalam -> lolos={rok3} ({rreason3})")
+    assert not rok3, "Breakdown di bawah batas retest tidak boleh dianggap retest sehat"
 
     print("\n=== SELFTEST: simulasi exit (TP/Breakeven/Trailing) ===")
     from decimal import Decimal as D

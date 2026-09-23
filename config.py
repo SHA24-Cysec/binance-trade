@@ -128,7 +128,32 @@ PUMP_CONFIG = {
     "CONFIRM_LOOKBACK_BARS": 20,
     "MIN_CLOSE_POSITION_IN_RANGE": 0.35,     # lihat market_scanner.confirm_momentum()
     "USE_VWAP_FILTER": True,                 # tolak kandidat yang terlalu jauh dari VWAP bergulir jangka pendek
-    "VWAP_MAX_EXTENSION_PCT": 3.5,            # tolak kalau harga > 5% di atas VWAP (window = CONFIRM_LOOKBACK_BARS); harga di BAWAH VWAP juga selalu ditolak
+    "VWAP_MAX_EXTENSION_PCT": 3.5,            # tolak kalau harga > batas ini di atas VWAP; harga di BAWAH VWAP juga ditolak
+
+    # --- Model entry (EKSPERIMENTAL: wajib backtest out-of-sample dulu) ---
+    #
+    # LEGACY_MOMENTUM: perilaku lama, membeli saat momentum pendek naik dan
+    #                  harga masih berada di area VWAP yang diizinkan.
+    # VWAP_RETEST_RVOL: setelah pump 24 jam lolos, TUNGGU pullback/retest VWAP,
+    #                  lalu beli hanya jika candle 5m berikutnya bullish,
+    #                  reclaim VWAP, dan quote volume relatifnya menguat.
+    #
+    # Hasil 730 hari sebelumnya menunjukkan entry momentum langsung tidak
+    # punya edge kotor. Karena itu mode retest ini adalah DESAIN HIPOTESIS,
+    # bukan set parameter terbukti dan bukan izin untuk live trading.
+    "ENTRY_MODEL": "VWAP_RETEST_RVOL",
+    "VWAP_RETEST_LOOKBACK_BARS": 3,           # retest harus terjadi dalam 3 candle SEBELUM candle sinyal
+    "VWAP_RETEST_TOUCH_TOLERANCE_PCT": 0.20,  # low retest boleh sampai 0,20% di atas VWAP
+    "VWAP_RETEST_MAX_BREAKDOWN_PCT": 0.75,    # low retest tidak boleh breakdown >0,75% di bawah VWAP
+    "VWAP_RETEST_MIN_RECLAIM_PCT": 0.10,      # close sinyal minimal 0,10% di atas VWAP
+    "VWAP_RETEST_SIGNAL_MIN_CLOSE_POSITION": 0.60,  # close sinyal minimal di 60% range candle
+    "RVOL_LOOKBACK_BARS": 10,                 # pembanding volume = 10 candle sebelum candle sinyal
+    "MIN_RELATIVE_QUOTE_VOLUME": 1.50,        # quote volume sinyal minimal 1,5x rata-rata pembanding
+    # Proteksi keras: mode entry baru tidak boleh mengirim order LIVE sebelum
+    # lulus validasi out-of-sample yang disepakati. TESTNET dan backtest tetap
+    # diizinkan. Jangan ubah ke True hanya karena satu hasil backtest bagus.
+    "ALLOW_EXPERIMENTAL_ENTRY_LIVE": True,
+
     "EXTRA_EXCLUDE_SYMBOLS": [],             # mis. ["SOMEUSDT"] kalau mau blacklist manual
 
     # --- Ukuran posisi (tanpa martingale -- sekali entry per rotasi) ---
@@ -263,7 +288,7 @@ PUMP_CONFIG = {
     # dicek 2026-09-23.)
     # Bot SELALU memakai order MARKET, jadi yang relevan adalah TAKER.
     "TAKER_FEE_PCT": 0.1,                    # ubah ke 0.075 kalau Anda membayar fee dengan BNB
-    "USE_BNB_FEE_DISCOUNT": False,           # True = otomatis pakai 0,075% (diskon 25%)
+    "USE_BNB_FEE_DISCOUNT": True,           # True = otomatis pakai 0,075% (diskon 25%)
     "COOLDOWN_MINUTES_AFTER_CLOSE": 10,
     "MIN_SECONDS_BETWEEN_TRADES": 60,
 

@@ -314,6 +314,8 @@ def build_status():
             "trailing_start_pct": PUMP_CONFIG.get("TRAILING_START_PCT"),
             "max_hold_minutes": PUMP_CONFIG.get("MAX_HOLD_MINUTES"),
             "min_pump_pct_24h": PUMP_CONFIG.get("MIN_PUMP_PCT_24H"),
+            "entry_model": PUMP_CONFIG.get("ENTRY_MODEL", "LEGACY_MOMENTUM"),
+            "min_relative_quote_volume": PUMP_CONFIG.get("MIN_RELATIVE_QUOTE_VOLUME"),
             "risk_percent": PUMP_CONFIG.get("RISK_PERCENT"),
             "max_position_usdt": PUMP_CONFIG.get("MAX_POSITION_USDT"),
             "vwap_max_extension_pct": PUMP_CONFIG.get("VWAP_MAX_EXTENSION_PCT") if PUMP_CONFIG.get("USE_VWAP_FILTER") else None,
@@ -357,6 +359,9 @@ BT_PARAM_KEYS = (
     "USE_ATR_EXITS",
     "SL_PCT", "TP_PCT", "BE_TRIGGER_PCT", "BE_LOCK_PCT", "TRAILING_START_PCT",
     "TRAILING_STEP_PCT", "MAX_HOLD_MINUTES", "MIN_PUMP_PCT_24H", "VWAP_MAX_EXTENSION_PCT",
+    "ENTRY_MODEL", "VWAP_RETEST_LOOKBACK_BARS", "VWAP_RETEST_TOUCH_TOLERANCE_PCT",
+    "VWAP_RETEST_MAX_BREAKDOWN_PCT", "VWAP_RETEST_MIN_RECLAIM_PCT",
+    "VWAP_RETEST_SIGNAL_MIN_CLOSE_POSITION", "RVOL_LOOKBACK_BARS", "MIN_RELATIVE_QUOTE_VOLUME",
     "ATR_PERIOD", "ATR_MULTIPLIER_SL", "ATR_SL_MIN_PCT", "ATR_SL_MAX_PCT", "ATR_TP_RR_RATIO",
     "ATR_BE_TRIGGER_MULT", "ATR_BE_LOCK_MULT", "ATR_TRAILING_START_MULT", "ATR_TRAILING_STEP_MULT",
 )
@@ -471,8 +476,8 @@ def _bt_run_job(job_id: str, symbol: str, days: int, overrides: dict, compare: b
                 "Filter VWAP (USE_VWAP_FILTER) memakai VWAP BERGULIR jangka pendek (window = "
                 "candle konfirmasi momentum yang sama), bukan VWAP sesi/harian -- kandidat ditolak "
                 "kalau harga di bawah VWAP atau lebih dari VWAP_MAX_EXTENSION_PCT di atasnya.",
-                "Return total memakai compounding sederhana (reinvest 100% saldo tiap trade), "
-                "sesuai RISK_PERCENT bot, TANPA memperhitungkan slippage atau fee trading.",
+                "Return total memakai compounding sederhana. Fee taker beli+jual dari config "
+                "SUDAH diperhitungkan, tetapi spread dan slippage market order belum dimodelkan.",
             ],
         }
 
