@@ -62,6 +62,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from strategy import Kline
+import strategy
 import market_scanner as scanner
 
 MS_PER_MIN = 60_000
@@ -86,6 +87,12 @@ class BacktestTrade:
     reason: str
     hold_minutes: float
     pnl_pct: float
+    sl_pct: float = 0.0
+    tp_pct: float = 0.0
+    atr_pct: float = 0.0
+    exit_source: str = "FIXED"
+    gross_pnl_pct: float = 0.0
+    fee_pct: float = 0.0
 
 
 @dataclass
@@ -216,7 +223,27 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
     trailing_stop = 0.0
     next_entry_allowed_at = 0
 
-    i = max(warmup_bars, window - 1, lookback)
+    # Jumlah candle yang perlu diambil ke belakang untuk menghitung ATR.
+    # +1 karena TR candle pertama tidak punya close sebelumnya.
+    atr_need = max(int(config.get("ATR_PERIOD", 14)) + 1, lookback)
+
+    # Biaya per putaran: fee taker dibayar saat BUY dan saat SELL.
+    try:
+        from config import get_taker_fee_pct as _fee_fn
+        fee_round_trip_pct = _fee_fn(config) * 2.0
+    except ImportError:
+        fee_round_trip_pct = float(config.get("TAKER_FEE_PCT", 0.1)) * 2.0
+
+    cur_sl = abs(float(config.get("SL_PCT", 1.8)))
+    cur_tp = abs(float(config.get("TP_PCT", 4.0)))
+    cur_be_trig = abs(float(config.get("BE_TRIGGER_PCT", 1.0)))
+    cur_be_lock = abs(float(config.get("BE_LOCK_PCT", 0.15)))
+    cur_tr_start = abs(float(config.get("TRAILING_START_PCT", 1.5)))
+    cur_tr_step = abs(float(config.get("TRAILING_STEP_PCT", 0.6)))
+    cur_atr = 0.0
+    cur_src = "FIXED"
+
+    i = max(warmup_bars, window - 1, lookback, atr_need - 1)
     start_idx = i
 
     while i < n:
@@ -241,6 +268,22 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
                     trailing_active = False
                     be_stop = 0.0
                     trailing_stop = 0.0
+                    # Level exit dikunci saat entry memakai fungsi yang SAMA
+                    # PERSIS dengan bot live (strategy.resolve_exit_levels),
+                    # supaya hasil backtest benar-benar mewakili perilaku bot.
+                    # ATR dihitung HANYA dari candle sampai bar entry, tidak
+                    # pernah dari candle masa depan -- ini mencegah look-ahead
+                    # bias yang akan membuat hasil backtest terlalu bagus.
+                    atr_window = klines[max(0, i - atr_need + 1): i + 1]
+                    lv = strategy.resolve_exit_levels(config, atr_window, entry_price)
+                    cur_sl = lv["sl_pct"]
+                    cur_tp = lv["tp_pct"]
+                    cur_be_trig = lv["be_trigger_pct"]
+                    cur_be_lock = lv["be_lock_pct"]
+                    cur_tr_start = lv["trail_start_pct"]
+                    cur_tr_step = lv["trail_step_pct"]
+                    cur_atr = lv["atr_pct"] or 0.0
+                    cur_src = lv["source"]
             i += 1
             continue
 
@@ -249,18 +292,18 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
         pnl_low = (candle.low / entry_price - 1.0) * 100.0
         hold_minutes = (candle.close_time - entry_time) / 60000.0
 
-        sl_price = entry_price * (1 - config["SL_PCT"] / 100.0) if config["USE_STOP_LOSS"] else None
+        sl_price = entry_price * (1 - cur_sl / 100.0) if config["USE_STOP_LOSS"] else None
 
-        if config["USE_BREAKEVEN"] and not be_active and pnl_high >= config["BE_TRIGGER_PCT"]:
+        if config["USE_BREAKEVEN"] and not be_active and pnl_high >= cur_be_trig:
             be_active = True
-            be_stop = entry_price * (1 + config["BE_LOCK_PCT"] / 100.0)
+            be_stop = entry_price * (1 + cur_be_lock / 100.0)
 
         if config["USE_TRAILING"]:
-            if not trailing_active and pnl_high >= config["TRAILING_START_PCT"]:
+            if not trailing_active and pnl_high >= cur_tr_start:
                 trailing_active = True
-                trailing_stop = candle.high * (1 - config["TRAILING_STEP_PCT"] / 100.0)
+                trailing_stop = candle.high * (1 - cur_tr_step / 100.0)
             elif trailing_active:
-                cand_stop = candle.high * (1 - config["TRAILING_STEP_PCT"] / 100.0)
+                cand_stop = candle.high * (1 - cur_tr_step / 100.0)
                 if cand_stop > trailing_stop:
                     trailing_stop = cand_stop
 
@@ -276,12 +319,12 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
         # menambahkan fitur ini. Baru setelah itu TAKE_PROFIT (harga
         # TERTINGGI candle), lalu BREAKEVEN/TRAILING_STOP (harga TERENDAH),
         # baru MAX_HOLD_TIME.
-        if config["USE_STOP_LOSS"] and pnl_low <= -abs(config["SL_PCT"]):
+        if config["USE_STOP_LOSS"] and pnl_low <= -cur_sl:
             exit_reason = "STOP_LOSS"
             exit_price = sl_price
-        elif config["USE_TP"] and pnl_high >= config["TP_PCT"]:
+        elif config["USE_TP"] and pnl_high >= cur_tp:
             exit_reason = "TAKE_PROFIT"
-            exit_price = entry_price * (1 + config["TP_PCT"] / 100.0)
+            exit_price = entry_price * (1 + cur_tp / 100.0)
         elif be_active and candle.low <= be_stop:
             exit_reason = "BREAKEVEN"
             exit_price = be_stop
@@ -302,11 +345,20 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
             )
 
         if exit_reason:
-            pnl_pct = (exit_price / entry_price - 1.0) * 100.0
+            # PnL KOTOR (belum dipotong biaya)
+            gross_pct = (exit_price / entry_price - 1.0) * 100.0
+            # PnL BERSIH: fee taker dibayar DUA KALI (saat beli dan saat jual).
+            # Ini bukan detail kosmetik -- pada strategi dengan TP 4% dan
+            # banyak trade, biaya 0,2% pulang-pergi memakan bagian nyata dari
+            # hasil. Backtest yang mengabaikannya akan terlihat jauh lebih
+            # bagus daripada kenyataan.
+            pnl_pct = gross_pct - fee_round_trip_pct
             trades.append(BacktestTrade(
                 entry_time=entry_time, entry_price=entry_price,
                 exit_time=candle.close_time, exit_price=exit_price,
                 reason=exit_reason, hold_minutes=hold_minutes, pnl_pct=pnl_pct,
+                sl_pct=cur_sl, tp_pct=cur_tp, atr_pct=cur_atr, exit_source=cur_src,
+                gross_pnl_pct=gross_pct, fee_pct=fee_round_trip_pct,
             ))
             in_position = False
             next_entry_allowed_at = candle.close_time + cooldown_ms
@@ -340,8 +392,10 @@ def summarize(result: BacktestResult) -> dict:
     # penjumlahan biasa, karena bot memang memakai persentase saldo per entry.
     equity_curve = [0.0]  # dalam persen, basis 0% = modal awal
     equity_mult = 1.0
+    gross_mult = 1.0      # skenario tandingan: hasil yang sama TANPA fee
     for t in trades:
         equity_mult *= (1 + t.pnl_pct / 100.0)
+        gross_mult *= (1 + t.gross_pnl_pct / 100.0)
         equity_curve.append((equity_mult - 1.0) * 100.0)
 
     total_return_pct = (equity_mult - 1.0) * 100.0
@@ -381,6 +435,15 @@ def summarize(result: BacktestResult) -> dict:
         "avg_hold_minutes": avg_hold,
         "reason_counts": reason_counts,
         "equity_curve": equity_curve,
+        # Dampak biaya. PENTING: return kotor di bawah juga dihitung
+        # COMPOUNDING, sama seperti total_return_pct. Kalau yang satu
+        # dijumlah biasa dan yang lain di-compound, keduanya tidak sebanding
+        # dan bisa menghasilkan hal mustahil seperti "bersih > kotor".
+        "gross_return_pct": (gross_mult - 1.0) * 100.0,
+        # Selisih compounding antara tanpa-fee dan dengan-fee. Inilah biaya
+        # sesungguhnya terhadap hasil akhir, bukan sekadar penjumlahan fee.
+        "fee_drag_pct": (gross_mult - equity_mult) * 100.0,
+        "total_fee_pct": sum(t.fee_pct for t in trades),
     }
 
 
@@ -388,8 +451,31 @@ def apply_overrides(base_config: dict, overrides: dict) -> dict:
     """Gabungkan PUMP_CONFIG asli dengan override dari form backtest.
     Hanya key yang dikenal (whitelist) yang boleh menimpa -- ini mencegah
     input form sembarangan mengubah field lain yang tidak dimaksudkan."""
+    def _as_bool(v):
+        """Terima True/False asli, juga string 'true'/'1'/'on' dari form web."""
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, (int, float)):
+            return bool(v)
+        s = str(v).strip().lower()
+        if s in ("true", "1", "on", "yes", "ya"):
+            return True
+        if s in ("false", "0", "off", "no", "tidak"):
+            return False
+        raise ValueError(f"bukan boolean: {v!r}")
+
     ALLOWED = {
+        "USE_ATR_EXITS": _as_bool,
         "SL_PCT": float,
+        "ATR_BE_TRIGGER_MULT": float,
+        "ATR_BE_LOCK_MULT": float,
+        "ATR_TRAILING_START_MULT": float,
+        "ATR_TRAILING_STEP_MULT": float,
+        "ATR_MULTIPLIER_SL": float,
+        "ATR_SL_MIN_PCT": float,
+        "ATR_SL_MAX_PCT": float,
+        "ATR_TP_RR_RATIO": float,
+        "ATR_PERIOD": int,
         "TP_PCT": float,
         "BE_TRIGGER_PCT": float,
         "BE_LOCK_PCT": float,
@@ -412,6 +498,15 @@ def apply_overrides(base_config: dict, overrides: dict) -> dict:
 def validate_params(cfg: dict) -> None:
     checks = [
         ("SL_PCT", 0.01, 1000),
+        ("ATR_MULTIPLIER_SL", 0.1, 20),
+        ("ATR_BE_TRIGGER_MULT", 0.01, 20),
+        ("ATR_BE_LOCK_MULT", -5, 20),
+        ("ATR_TRAILING_START_MULT", 0.01, 20),
+        ("ATR_TRAILING_STEP_MULT", 0.01, 20),
+        ("ATR_SL_MIN_PCT", 0.01, 100),
+        ("ATR_SL_MAX_PCT", 0.01, 500),
+        ("ATR_TP_RR_RATIO", 0.1, 20),
+        ("ATR_PERIOD", 2, 500),
         ("TP_PCT", 0.01, 1000),
         ("BE_TRIGGER_PCT", 0.01, 1000),
         ("BE_LOCK_PCT", -100, 1000),
@@ -425,6 +520,12 @@ def validate_params(cfg: dict) -> None:
         val = cfg.get(key)
         if val is None or not (lo <= val <= hi):
             raise BacktestError(f"Parameter '{key}'={val} di luar rentang wajar ({lo}..{hi}).")
+
+    if cfg.get("ATR_SL_MIN_PCT") > cfg.get("ATR_SL_MAX_PCT"):
+        raise BacktestError(
+            f"Batas bawah SL ATR ({cfg['ATR_SL_MIN_PCT']}%) tidak boleh lebih besar "
+            f"dari batas atasnya ({cfg['ATR_SL_MAX_PCT']}%)."
+        )
 
 
 # ---------------------------------------------------------------------
@@ -570,9 +671,19 @@ def selftest():
           f"pnl={sl_trade.pnl_pct:+.2f}% alasan={sl_trade.reason}")
     assert sl_trade.reason == "STOP_LOSS", f"Harusnya keluar karena STOP_LOSS, dapat: {sl_trade.reason}"
     assert sl_trade.pnl_pct < 0, "Trade Stop Loss harusnya rugi"
-    assert abs(sl_trade.pnl_pct - (-3.0)) < 0.05, \
-        f"Kerugian Stop Loss harusnya persis -3.00% (harga exit dikunci di level SL), dapat {sl_trade.pnl_pct:.2f}%"
-    print("  -> OK (Stop Loss kena tepat di -3.00%, TIDAK menunggu sampai MAX_HOLD_TIME)")
+    # PnL KOTOR harus persis di level SL (harga exit dikunci di situ).
+    assert abs(sl_trade.gross_pnl_pct - (-3.0)) < 0.05, \
+        (f"Kerugian KOTOR Stop Loss harusnya persis -3.00% (harga exit dikunci di level SL), "
+         f"dapat {sl_trade.gross_pnl_pct:.2f}%")
+    # PnL BERSIH harus lebih buruk, tepat sebesar fee pulang-pergi. Ini
+    # membuktikan biaya benar-benar diperhitungkan dan bukan sekadar dicatat.
+    _expected_fee = 0.1 * 2
+    assert abs(sl_trade.fee_pct - _expected_fee) < 1e-9, \
+        f"Fee pulang-pergi harusnya {_expected_fee}%, dapat {sl_trade.fee_pct}%"
+    assert abs(sl_trade.pnl_pct - (sl_trade.gross_pnl_pct - _expected_fee)) < 1e-9, \
+        "PnL bersih harus = PnL kotor dikurangi fee pulang-pergi"
+    print(f"  -> OK (SL kotor -3.00%, fee {sl_trade.fee_pct:.2f}%, "
+          f"bersih {sl_trade.pnl_pct:.2f}%)")
 
     print("\n=== SELFTEST backtest.py: Stop Loss OFF -> trade yang sama jadi tertahan lebih lama/lebih rugi ===")
     sl_cfg_off = dict(sl_cfg)
@@ -602,9 +713,344 @@ def selftest():
         pass
     print("  -> OK")
 
+    print("\n=== SELFTEST backtest.py: ATR (Wilder) ===")
+    from strategy import atr as _atr, atr_percent as _atrp, true_ranges as _tr, \
+        resolve_exit_levels as _rel
+
+    # TR harus menangkap GAP, bukan cuma (high-low). Ini yang membedakan ATR
+    # dari sekadar rata-rata rentang candle.
+    gap = [_make_candle(0, 10, 11, 9, 10), _make_candle(1, 20, 21, 19, 20)]
+    trs = _tr(gap)
+    assert abs(trs[0] - 2.0) < 1e-9, f"TR candle pertama harus high-low = 2, dapat {trs[0]}"
+    assert abs(trs[1] - 11.0) < 1e-9, f"TR candle kedua harus menangkap gap = 11, dapat {trs[1]}"
+    print("  True Range menangkap gap antar candle -> OK")
+
+    # Data konstan: ATR harus persis sama dengan rentang tetapnya.
+    flat = [_make_candle(i, 100, 101, 99, 100) for i in range(30)]
+    assert abs(_atr(flat, 14) - 2.0) < 1e-9, "ATR data rentang tetap 2.0 harus = 2.0"
+    assert abs(_atrp(flat, 14) - 2.0) < 1e-9, "ATR% pada harga 100 dengan ATR 2.0 harus = 2%"
+    print("  ATR pada data rentang tetap -> OK")
+
+    # Data kurang dari period+1 harus mengembalikan None, BUKAN angka asal.
+    assert _atr(flat[:10], 14) is None, "ATR dengan candle kurang dari period+1 harus None"
+    print("  ATR menolak data yang terlalu sedikit (None, bukan angka asal) -> OK")
+
+    # Wilder smoothing (RMA) BUKAN rata-rata sederhana. Bedanya: Wilder tetap
+    # "mengingat" volatilitas lama dengan bobot yang meluruh, SMA membuangnya
+    # begitu keluar jendela. Data uji di bawah sengaja dibuat sangat volatil di
+    # awal lalu tenang di akhir, supaya perbedaannya tidak bisa kebetulan sama.
+    # Kalau suatu saat implementasi ATR diganti SMA, assertion ini harus gagal.
+    spiky = ([_make_candle(i, 100, 120, 80, 100) for i in range(14)]
+             + [_make_candle(i, 100, 101, 99, 100) for i in range(14, 30)])
+    a_wilder = _atr(spiky, 14)
+    sma_equiv = sum(_tr(spiky)[1:][-14:]) / 14
+    assert abs(a_wilder - sma_equiv) > 1.0, \
+        (f"ATR harus memakai Wilder smoothing (RMA), bukan rata-rata sederhana "
+         f"(wilder={a_wilder}, sma={sma_equiv})")
+    print(f"  Wilder smoothing terbukti beda dari SMA ({a_wilder:.2f} vs {sma_equiv:.2f}) -> OK")
+
+    print("\n=== SELFTEST backtest.py: resolve_exit_levels (SL/TP hibrida) ===")
+    base_atr_cfg = dict(PUMP_CONFIG)
+    base_atr_cfg.update({"SL_PCT": 1.8, "TP_PCT": 4.0, "USE_ATR_EXITS": True,
+                          "ATR_PERIOD": 14, "ATR_MULTIPLIER_SL": 2.0,
+                          "ATR_SL_MIN_PCT": 1.2, "ATR_SL_MAX_PCT": 4.0,
+                          "ATR_TP_RR_RATIO": 2.0})
+
+    # Fitur mati -> harus persis nilai config lama, tanpa efek samping apa pun.
+    off = _rel(dict(base_atr_cfg, USE_ATR_EXITS=False), flat, 100.0)
+    assert off["sl_pct"] == 1.8 and off["tp_pct"] == 4.0 and off["source"] == "FIXED", \
+        "USE_ATR_EXITS=False harus mengembalikan SL/TP tetap apa adanya"
+    print("  USE_ATR_EXITS=False -> perilaku lama tidak berubah -> OK")
+
+    # ATR 2% x 2.0 = 4% -> tepat di plafon, TP = 8%.
+    mid = _rel(base_atr_cfg, flat, 100.0)
+    assert mid["source"] == "ATR" and abs(mid["sl_pct"] - 4.0) < 1e-9, mid
+    assert abs(mid["tp_pct"] - 8.0) < 1e-9, "TP harus SL x rasio RR"
+    print(f"  ATR normal -> SL {mid['sl_pct']:.2f}%, TP {mid['tp_pct']:.2f}% -> OK")
+
+    # Volatilitas sangat kecil -> harus kena LANTAI, bukan stop mikroskopis.
+    calm = [_make_candle(i, 100, 100.02, 99.98, 100) for i in range(30)]
+    lo = _rel(base_atr_cfg, calm, 100.0)
+    assert abs(lo["sl_pct"] - 1.2) < 1e-9, f"SL harus dibatasi lantai 1.2%, dapat {lo['sl_pct']}"
+    print(f"  Volatilitas sangat rendah -> SL dibatasi lantai {lo['sl_pct']:.2f}% -> OK")
+
+    # Volatilitas meledak -> harus kena PLAFON, ini proteksi utama bentuk hibrida.
+    wild = [_make_candle(i, 100, 130, 70, 100) for i in range(30)]
+    hi = _rel(base_atr_cfg, wild, 100.0)
+    assert abs(hi["sl_pct"] - 4.0) < 1e-9, f"SL harus dibatasi plafon 4%, dapat {hi['sl_pct']}"
+    print(f"  Volatilitas ekstrem -> SL dibatasi plafon {hi['sl_pct']:.2f}% -> OK")
+
+    # Data kurang -> WAJIB fallback ke SL/TP tetap, JANGAN pernah tanpa stop.
+    fb = _rel(base_atr_cfg, flat[:5], 100.0)
+    assert fb["source"] == "ATR_FALLBACK_FIXED" and fb["sl_pct"] == 1.8, fb
+    print("  ATR gagal dihitung -> fallback ke SL/TP tetap (tidak pernah tanpa stop) -> OK")
+
+    # Config salah isi (min > max) tidak boleh menghasilkan rentang mustahil.
+    swapped = _rel(dict(base_atr_cfg, ATR_SL_MIN_PCT=5.0, ATR_SL_MAX_PCT=1.0), flat, 100.0)
+    assert 1.0 <= swapped["sl_pct"] <= 5.0, "Batas min/max tertukar harus ditangani, bukan crash"
+    print("  Batas min/max tertukar di config -> ditangani dengan aman -> OK")
+
+    print("\n=== SELFTEST backtest.py: ATR tidak memakai data masa depan ===")
+    # Ini uji paling penting untuk backtest: level exit sebuah trade hanya
+    # boleh bergantung pada candle SEBELUM entry. Kalau menambahkan candle di
+    # MASA DEPAN mengubah level trade yang sudah terjadi, berarti ada
+    # look-ahead bias dan seluruh hasil backtest tidak bisa dipercaya.
+    import random as _random
+    _random.seed(1234)
+    # Data sintetis dibuat sebagai SIKLUS PUMP berulang dengan amplitudo dan
+    # volatilitas yang BERBEDA-BEDA tiap siklus. Dua alasan:
+    #   1. Random walk murni hampir tidak pernah lolos confirm_momentum, jadi
+    #      trade-nya terlalu sedikit untuk menguji apa pun.
+    #   2. Volatilitas yang berubah-ubah memastikan ATR menghasilkan SL yang
+    #      berbeda antar trade -- kalau semua trade kebetulan punya SL sama,
+    #      uji look-ahead jadi lolos secara palsu.
+    # Timestamp memakai langkah 5 menit SUNGGUHAN (bukan indeks), karena
+    # MAX_HOLD_MINUTES dan cooldown dihitung dari selisih waktu. Kalau
+    # timestamp cuma indeks, exit berbasis waktu tidak pernah aktif dan
+    # backtest hanya menghasilkan segelintir trade.
+    price = 100.0
+    synth = []
+    t = 0
+    while len(synth) < 4000:
+        vol = _random.uniform(0.002, 0.02)      # volatilitas siklus ini
+        up_bars = _random.randint(30, 60)
+        down_bars = _random.randint(20, 40)
+        for _ in range(up_bars):                 # fase naik (memicu entry)
+            price *= (1 + abs(_random.gauss(0.004, vol / 2)))
+            hi_p = price * (1 + abs(_random.gauss(0, vol)))
+            lo_p = price * (1 - abs(_random.gauss(0, vol)))
+            synth.append(_make_candle(t, price, hi_p, lo_p, price))
+            t += 5 * MS_PER_MIN
+        for _ in range(down_bars):               # fase turun (memicu exit)
+            price *= (1 - abs(_random.gauss(0.003, vol / 2)))
+            hi_p = price * (1 + abs(_random.gauss(0, vol)))
+            lo_p = price * (1 - abs(_random.gauss(0, vol)))
+            synth.append(_make_candle(t, price, hi_p, lo_p, price))
+            t += 5 * MS_PER_MIN
+
+    cfg_la = dict(base_atr_cfg)
+    cfg_la.update({"MIN_PUMP_PCT_24H": -100.0, "MIN_QUOTE_VOLUME_USDT_24H": 0.0,
+                    "USE_VWAP_FILTER": False, "COOLDOWN_MINUTES_AFTER_CLOSE": 0})
+    short_run = run_backtest(synth[:2500], cfg_la, warmup_bars=bars_per_day("5m"))
+    long_run = run_backtest(synth, cfg_la, warmup_bars=bars_per_day("5m"))
+
+    shared = [t for t in short_run.trades if t.reason != "END_OF_DATA"]
+    long_by_entry = {t.entry_time: t for t in long_run.trades}
+    checked = 0
+    for t in shared:
+        other = long_by_entry.get(t.entry_time)
+        if other is None:
+            continue
+        assert abs(t.sl_pct - other.sl_pct) < 1e-9, (
+            f"LOOK-AHEAD BIAS: trade entry {t.entry_time} punya SL {t.sl_pct} pada data pendek "
+            f"tapi {other.sl_pct} pada data panjang. ATR terhitung dari candle masa depan.")
+        checked += 1
+    assert checked >= 10, (
+        f"Uji look-ahead hanya bisa membandingkan {checked} trade -- terlalu sedikit untuk "
+        "membuktikan tidak ada look-ahead bias. Perbanyak data sintetis.")
+    print(f"  {checked} trade dibandingkan, level SL identik pada data pendek & panjang -> OK")
+
+    print("\n=== SELFTEST backtest.py: perbandingan tetap vs ATR berjalan ===")
+    cmp_res = compare_fixed_vs_atr(synth, cfg_la, warmup_bars=bars_per_day("5m"))
+    assert "fixed" in cmp_res and "atr" in cmp_res
+    assert cmp_res["result_fixed"].trades or cmp_res["result_atr"].trades, \
+        "Perbandingan harus menghasilkan setidaknya sebagian trade pada data sintetis ini"
+    print(f"  Tetap: {cmp_res['fixed']['real_trades']} trade, "
+          f"ATR: {cmp_res['atr']['real_trades']} trade -> OK")
+    print("  (Angka di atas dari data ACAK sintetis, jadi TIDAK berarti apa-apa")
+    print("   soal mana yang lebih bagus. Ini hanya membuktikan kodenya jalan.)")
+
     print("\nSEMUA SELFTEST backtest.py LULUS.")
     print("(Tidak menghubungi Binance sama sekali -- murni logika lokal dengan data sintetis.)")
 
 
+# ---------------------------------------------------------------------
+# Mode perbandingan: SL/TP tetap vs SL/TP berbasis ATR
+# ---------------------------------------------------------------------
+def compare_fixed_vs_atr(klines: list[Kline], base_config: dict, warmup_bars: int) -> dict:
+    """Jalankan backtest DUA KALI pada data candle yang SAMA PERSIS: sekali
+    dengan SL/TP tetap, sekali dengan SL/TP berbasis ATR. Semua parameter lain
+    (filter entry, breakeven, trailing, max hold) identik, jadi selisih hasil
+    benar-benar berasal dari metode exit, bukan dari perbedaan lain.
+
+    Ini satu-satunya cara jujur menjawab "ATR lebih bagus atau tidak" untuk
+    strategi Anda. Angka dari blog/publikasi pihak lain diuji pada pasar,
+    timeframe, dan aturan entry yang berbeda, jadi tidak bisa dipindahkan
+    begitu saja ke sini.
+    """
+    cfg_fixed = copy.deepcopy(base_config)
+    cfg_fixed["USE_ATR_EXITS"] = False
+
+    cfg_atr = copy.deepcopy(base_config)
+    cfg_atr["USE_ATR_EXITS"] = True
+
+    res_fixed = run_backtest(klines, cfg_fixed, warmup_bars)
+    res_atr = run_backtest(klines, cfg_atr, warmup_bars)
+
+    sum_fixed = summarize(res_fixed)
+    sum_atr = summarize(res_atr)
+
+    atr_trades = [t for t in res_atr.trades if t.atr_pct > 0]
+    atr_info = {}
+    if atr_trades:
+        sls = [t.sl_pct for t in atr_trades]
+        atr_info = {
+            "trades_with_atr": len(atr_trades),
+            "trades_fallback": len([t for t in res_atr.trades if t.exit_source == "ATR_FALLBACK_FIXED"]),
+            "avg_atr_pct": sum(t.atr_pct for t in atr_trades) / len(atr_trades),
+            "avg_sl_pct": sum(sls) / len(sls),
+            "min_sl_pct": min(sls),
+            "max_sl_pct": max(sls),
+            "clamped_low": len([t for t in atr_trades
+                                 if abs(t.sl_pct - abs(float(cfg_atr.get("ATR_SL_MIN_PCT", 1.2)))) < 1e-9]),
+            "clamped_high": len([t for t in atr_trades
+                                  if abs(t.sl_pct - abs(float(cfg_atr.get("ATR_SL_MAX_PCT", 4.0)))) < 1e-9]),
+        }
+
+    return {"fixed": sum_fixed, "atr": sum_atr, "result_fixed": res_fixed,
+            "result_atr": res_atr, "atr_info": atr_info}
+
+
+def print_comparison(cmp_result: dict, config: dict) -> None:
+    f = cmp_result["fixed"]
+    a = cmp_result["atr"]
+    info = cmp_result["atr_info"]
+
+    def row(label, kf, ka, fmt="{:.2f}", higher_better=True):
+        vf, va = kf, ka
+        try:
+            delta = va - vf
+            arrow = ""
+            if abs(delta) > 1e-9:
+                good = (delta > 0) if higher_better else (delta < 0)
+                arrow = "  ATR lebih baik" if good else "  Tetap lebih baik"
+            print(f"  {label:<26} {fmt.format(vf):>12} {fmt.format(va):>12}   {delta:+.2f}{arrow}")
+        except (TypeError, ValueError):
+            print(f"  {label:<26} {vf:>12} {va:>12}")
+
+    print("\n" + "=" * 78)
+    print("PERBANDINGAN: SL/TP TETAP  vs  SL/TP BERBASIS ATR")
+    print("=" * 78)
+    print(f"  Konfigurasi tetap : SL {config.get('SL_PCT'):.2f}%  TP {config.get('TP_PCT'):.2f}%")
+    print(f"  Konfigurasi ATR   : {config.get('ATR_MULTIPLIER_SL')}x ATR({config.get('ATR_PERIOD')}), "
+          f"batas {config.get('ATR_SL_MIN_PCT')}%-{config.get('ATR_SL_MAX_PCT')}%, "
+          f"RR {config.get('ATR_TP_RR_RATIO')}:1")
+    try:
+        from config import get_taker_fee_pct as _ff
+        _fee = _ff(config)
+    except ImportError:
+        _fee = float(config.get("TAKER_FEE_PCT", 0.1))
+    print(f"  Biaya diperhitungkan: fee taker {_fee:.3f}% x2 = {_fee * 2:.3f}% per trade"
+          f"{' (diskon BNB aktif)' if config.get('USE_BNB_FEE_DISCOUNT') else ''}")
+    print("-" * 78)
+    print(f"  {'METRIK':<26} {'TETAP':>12} {'ATR':>12}   SELISIH")
+    print("-" * 78)
+    row("Jumlah trade", f["real_trades"], a["real_trades"], "{:.0f}")
+    row("Return KOTOR (%)", f["gross_return_pct"], a["gross_return_pct"])
+    row("Hilang krn fee (%)", f["fee_drag_pct"], a["fee_drag_pct"], higher_better=False)
+    row("Win rate (%)", f["win_rate"], a["win_rate"])
+    row("Return BERSIH (%)", f["total_return_pct"], a["total_return_pct"])
+    row("Max drawdown (%)", f["max_drawdown_pct"], a["max_drawdown_pct"], higher_better=False)
+    row("Profit factor", f["profit_factor"], a["profit_factor"])
+    row("Rata-rata menang (%)", f["avg_win_pct"], a["avg_win_pct"])
+    row("Rata-rata kalah (%)", f["avg_loss_pct"], a["avg_loss_pct"])
+    row("Rata-rata hold (menit)", f["avg_hold_minutes"], a["avg_hold_minutes"], "{:.1f}", False)
+
+    print("-" * 78)
+    print("  Alasan exit TETAP :", dict(sorted(f["reason_counts"].items())))
+    print("  Alasan exit ATR   :", dict(sorted(a["reason_counts"].items())))
+
+    if info:
+        print("-" * 78)
+        print("  Sebaran stop ATR:")
+        print(f"    ATR rata-rata          : {info['avg_atr_pct']:.2f}% dari harga")
+        print(f"    SL rata-rata           : {info['avg_sl_pct']:.2f}%  "
+              f"(terkecil {info['min_sl_pct']:.2f}%, terbesar {info['max_sl_pct']:.2f}%)")
+        print(f"    Kena batas bawah       : {info['clamped_low']} trade")
+        print(f"    Kena batas atas        : {info['clamped_high']} trade")
+        print(f"    Gagal hitung ATR       : {info['trades_fallback']} trade (pakai SL/TP tetap)")
+
+    print("=" * 78)
+    n = min(f["real_trades"], a["real_trades"])
+    if n < 30:
+        print(f"  PERINGATAN: hanya {n} trade. Ini TERLALU SEDIKIT untuk menyimpulkan apa pun.")
+        print("  Selisih sebesar apa pun pada sampel sekecil ini kemungkinan besar kebetulan.")
+        print("  Perpanjang rentang --days, atau uji beberapa simbol berbeda lalu gabungkan.")
+    else:
+        print(f"  Catatan: {n} trade. Ini indikasi awal, bukan bukti kuat. Uji beberapa simbol")
+        print("  dan beberapa periode berbeda sebelum mengubah config yang dipakai uang asli.")
+    print("=" * 78 + "\n")
+
+
+def main():
+    import argparse as _argparse
+
+    parser = _argparse.ArgumentParser(
+        description="Backtest pump scanner: SL/TP tetap vs SL/TP berbasis ATR")
+    parser.add_argument("--selftest", action="store_true",
+                         help="Jalankan audit logika lokal (tanpa jaringan) lalu keluar.")
+    parser.add_argument("--compare-atr", action="store_true",
+                         help="Bandingkan SL/TP tetap vs ATR pada data historis yang sama.")
+    parser.add_argument("--symbol", default="BTCUSDT", help="Simbol, mis. SOLUSDT")
+    parser.add_argument("--days", type=int, default=30, help="Jumlah hari data historis")
+    parser.add_argument("--interval", default=None, help="Interval candle (default dari config)")
+    parser.add_argument("--atr-multiplier", type=float, default=None)
+    parser.add_argument("--atr-period", type=int, default=None)
+    parser.add_argument("--atr-min", type=float, default=None, help="Batas bawah SL (%%)")
+    parser.add_argument("--atr-max", type=float, default=None, help="Batas atas SL (%%)")
+    parser.add_argument("--atr-rr", type=float, default=None, help="Rasio TP terhadap SL")
+    parser.add_argument("--atr-be-trigger", type=float, default=None,
+                         help="Pengali ATR untuk trigger Breakeven (default dari config)")
+    parser.add_argument("--atr-be-lock", type=float, default=None,
+                         help="Pengali ATR untuk kunci profit Breakeven")
+    parser.add_argument("--atr-trail-start", type=float, default=None,
+                         help="Pengali ATR untuk mulai Trailing")
+    parser.add_argument("--atr-trail-step", type=float, default=None,
+                         help="Pengali ATR untuk jarak Trailing (disarankan >= 1.5)")
+    args = parser.parse_args()
+
+    if args.selftest or not args.compare_atr:
+        selftest()
+        if not args.compare_atr:
+            return
+
+    from config import PUMP_CONFIG, get_base_url
+    from binance_client import BinanceSpotClient
+
+    cfg = copy.deepcopy(PUMP_CONFIG)
+    cfg["_symbol"] = args.symbol
+    if args.interval:
+        cfg["CONFIRM_INTERVAL"] = args.interval
+    for key, val in (("ATR_MULTIPLIER_SL", args.atr_multiplier), ("ATR_PERIOD", args.atr_period),
+                      ("ATR_SL_MIN_PCT", args.atr_min), ("ATR_SL_MAX_PCT", args.atr_max),
+                      ("ATR_TP_RR_RATIO", args.atr_rr),
+                      ("ATR_BE_TRIGGER_MULT", args.atr_be_trigger),
+                      ("ATR_BE_LOCK_MULT", args.atr_be_lock),
+                      ("ATR_TRAILING_START_MULT", args.atr_trail_start),
+                      ("ATR_TRAILING_STEP_MULT", args.atr_trail_step)):
+        if val is not None:
+            cfg[key] = val
+    validate_params(cfg)
+
+    interval = cfg["CONFIRM_INTERVAL"]
+    warmup = bars_per_day(interval)
+    total_bars = warmup + bars_per_day(interval) * args.days
+
+    print(f"Mengambil {total_bars} candle {interval} untuk {args.symbol} "
+          f"({args.days} hari + warmup 1 hari)...")
+    client = BinanceSpotClient("", "", get_base_url(cfg))
+    end_ms = int(time.time() * 1000)
+    start_ms = end_ms - (args.days + 1) * MS_PER_DAY
+    klines = fetch_full_klines(client, args.symbol, interval, start_ms, end_ms)
+    print(f"Dapat {len(klines)} candle.")
+
+    if len(klines) < warmup + 50:
+        raise BacktestError(
+            f"Data terlalu sedikit ({len(klines)} candle) untuk backtest yang berarti.")
+
+    cmp_result = compare_fixed_vs_atr(klines, cfg, warmup)
+    print_comparison(cmp_result, cfg)
+
+
 if __name__ == "__main__":
-    selftest()
+    main()

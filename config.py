@@ -74,7 +74,8 @@ PERINGATAN KEAMANAN
   bagikan ke siapa pun. Yang boleh dibagikan/di-commit hanya
   ".env.example".
 - Kalau bikin API key di Binance, aktifkan HANYA permission yang benar-benar
-  dipakai bot ini (Enable Spot Trading kalau DRY_RUN mau dimatikan). JANGAN
+  dipakai bot ini (Enable Spot Trading, karena bot mengirim order sungguhan
+  baik di mode TESTNET maupun LIVE). JANGAN
   aktifkan permission "Enable Withdrawals" sama sekali. Permission yang sama
   ini juga sudah cukup untuk fitur dust sweep (USE_DUST_SWEEP di bawah) --
   tidak perlu permission tambahan apa pun.
@@ -99,8 +100,21 @@ except ImportError:
 
 PUMP_CONFIG = {
     "QUOTE_ASSET": "USDT",
-    "DRY_RUN": True,                          # default AMAN: simulasi tanpa order sungguhan. Ubah ke False kalau sudah yakin mau live
-    "BASE_URL": "https://api.binance.com",
+
+    # --- Pemilihan lingkungan: TESTNET atau LIVE ---
+    # "TESTNET" = order SUNGGUHAN dikirim, tapi ke Binance Spot Test Network
+    #             (https://testnet.binance.vision) memakai dana virtual. Alur
+    #             kodenya sama persis dengan LIVE (tidak ada jalur simulasi
+    #             terpisah), jadi yang Anda uji benar-benar perilaku bot live.
+    # "LIVE"    = order sungguhan ke Binance produksi memakai uang asli.
+    #
+    # API key testnet BERBEDA dengan key produksi dan dibuat gratis di
+    # https://testnet.binance.vision (login pakai akun GitHub). Karena kedua
+    # mode membaca variabel .env yang sama (BINANCE_API_KEY/SECRET), isi .env
+    # harus diganti sesuai mode yang sedang dipakai.
+    "MODE": "TESTNET",                        # "TESTNET" (default, aman) atau "LIVE"
+    "LIVE_BASE_URL": "https://api.binance.com",
+    "TESTNET_BASE_URL": "https://testnet.binance.vision",
     "API_KEY": os.environ.get("BINANCE_API_KEY", ""),    # diisi otomatis dari file .env (lihat panduan di atas)
     "API_SECRET": os.environ.get("BINANCE_API_SECRET", ""),  # diisi otomatis dari file .env (lihat panduan di atas)
 
@@ -121,13 +135,108 @@ PUMP_CONFIG = {
     "USE_RISK_PERCENT": True,               # True = ukuran posisi % dari saldo USDT free
     "RISK_PERCENT": 95.0,                     # dipakai jika USE_RISK_PERCENT = True
     "POSITION_SIZE_USDT": 5.0,              # dipakai jika USE_RISK_PERCENT = False
-    "MAX_POSITION_USDT": 10.0,
+
+    # --- Plafon nominal per posisi ---
+    #
+    # 0 (atau negatif) = TIDAK ADA PLAFON. Ukuran posisi murni mengikuti
+    # RISK_PERCENT dari saldo USDT free, jadi persentase yang Anda set
+    # benar-benar terpakai berapa pun besar saldo Anda.
+    #
+    # PERINGATAN SEJARAH (penting, pernah jadi bug diam-diam di config ini):
+    # sebelumnya nilai ini 10.0 sementara RISK_PERCENT 95.0. Karena kode
+    # memakai min(nominal_dari_persen, MAX_POSITION_USDT), plafon 10 USDT
+    # SELALU menang dan RISK_PERCENT praktis tidak pernah terpakai:
+    #     saldo   100 USDT -> niat 95 USDT  -> nyatanya 10 USDT (10% saldo)
+    #     saldo 1.000 USDT -> niat 950 USDT -> nyatanya 10 USDT (1% saldo)
+    #     saldo 5.000 USDT -> niat 4.750    -> nyatanya 10 USDT (0,2% saldo)
+    # Makin besar saldo, makin kecil persentase sesungguhnya. Kalau Anda
+    # mengisi ulang plafon ini dengan angka > 0, PASTIKAN itu memang yang
+    # Anda maksud, dan bot akan memperingatkan di log kalau plafon
+    # membatalkan RISK_PERCENT Anda.
+    "MAX_POSITION_USDT": 0,                  # 0 = tanpa plafon (ikuti RISK_PERCENT sepenuhnya)
+
+    # Bantalan saldo (persen) yang TIDAK ikut dibelanjakan, dipotong dari
+    # saldo USDT free sebelum RISK_PERCENT dihitung. Gunanya teknis, bukan
+    # filosofi risiko: order MARKET BUY diisi pada harga yang bergerak, dan
+    # fee taker 0,1% dipotong dari saldo yang sama. Kalau bot mencoba
+    # membelanjakan 100% saldo persis, order sering ditolak bursa dengan
+    # error -2010 "Account has insufficient balance".
+    # Dengan RISK_PERCENT 95 bantalan ini praktis tidak terasa; ia baru
+    # penting kalau Anda menaikkan RISK_PERCENT mendekati 100.
+    "BALANCE_BUFFER_PCT": 0.5,
 
     # --- Exit ---
     "USE_TP": True,
     "TP_PCT": 4.0,
     "USE_STOP_LOSS": True,                   # kerugian maksimum per-trade dari harga entry, exit paksa di harga pasar
     "SL_PCT": 1.8,                            # contoh: 3.0 = keluar kalau rugi >= 3% dari entry (SEBELUM Breakeven/Trailing aktif)
+
+    # --- Stop Loss & Take Profit adaptif berbasis ATR (opsional) ---
+    #
+    # Kalau USE_ATR_EXITS = False (default), bot memakai SL_PCT/TP_PCT tetap
+    # persis seperti sebelumnya -- tidak ada perubahan perilaku sama sekali.
+    #
+    # Kalau True, jarak SL dihitung dari volatilitas koin yang sedang dipegang:
+    #     SL% = batasi(ATR_MULTIPLIER_SL x ATR%, antara ATR_SL_MIN_PCT dan ATR_SL_MAX_PCT)
+    #     TP% = SL% x ATR_TP_RR_RATIO
+    #
+    # ALASAN pakai bentuk HIBRIDA (ATR dengan batas bawah & atas), bukan ATR
+    # murni: pengujian lintas banyak strategi/pasar oleh Kevin Davey
+    # (kjtradingsystems.com) menemukan ATR menang hanya ~66% kasus, dan ATR
+    # murni bisa menghasilkan jarak stop ekstrem saat volatilitas meledak
+    # (contohnya 3x ATR di Crude Oil berkisar dari $240 sampai $15.000+).
+    # Batas min/max menahan itu tanpa membuang sifat adaptif ATR.
+    #
+    # ALASAN fitur ini relevan untuk bot pump scanner: bot ini memperdagangkan
+    # BANYAK koin berbeda (semua pair USDT), dan filter MIN_PUMP_PCT_24H
+    # memastikan koin yang dipilih SEDANG dalam volatilitas tinggi. SL tetap
+    # 1.8% bisa berarti 3x ATR di satu koin tapi hanya 0.8x ATR di koin lain.
+    # Data yang dikutip Volatility Box (595+ simbol, 2018-2025) menyebut stop
+    # di bawah 1.0x ATR terpicu noise >65% dalam 3 bar pertama, sedangkan di
+    # 1.5x ATR turun ke 38%.
+    #
+    # PERINGATAN JUJUR: angka-angka di atas berasal dari publikasi pihak
+    # ketiga (sebagian milik vendor), BUKAN dari data trading Anda sendiri.
+    # Bukti akademik yang lebih kuat (Barroso & Santa-Clara 2015) mendukung
+    # penyesuaian terhadap volatilitas, tapi studi momentum crypto di
+    # Financial Markets and Portfolio Management (2025) menegaskan volatility
+    # management TIDAK menghilangkan tail risk. Jadi JANGAN aktifkan ini
+    # begitu saja -- bandingkan dulu lewat backtest.py pada koin yang
+    # benar-benar lolos filter Anda:
+    #     python backtest.py --compare-atr --symbol <KOIN>USDT --days 30
+    "USE_ATR_EXITS": True,                  # default False = perilaku lama (SL/TP tetap) tidak berubah
+    "ATR_PERIOD": 14,                        # standar Wilder; dihitung pada CONFIRM_INTERVAL (default 5m)
+    "ATR_MULTIPLIER_SL": 2.0,                # 2.0x = nilai yang paling sering optimal di literatur
+    "ATR_SL_MIN_PCT": 1.2,                   # lantai: jangan pernah pasang stop lebih sempit dari ini
+    "ATR_SL_MAX_PCT": 4.0,                   # plafon: lindungi dari ATR yang meledak
+    "ATR_TP_RR_RATIO": 2.0,                  # TP = SL x rasio ini (2:1, sesuai backtest yang dikutip di atas)
+
+    # Breakeven & Trailing juga ikut skala ATR saat USE_ATR_EXITS = True.
+    #
+    # KENAPA INI WAJIB, bukan sekadar pelengkap: kalau hanya SL/TP yang ikut
+    # ATR sementara BE/Trailing tetap memakai angka tetap, hasilnya PINCANG.
+    # Contoh nyata pada koin dengan ATR 3%:
+    #     SL  -> 4.0%  (lebar, ikut ATR)
+    #     TP  -> 8.0%  (lebar, ikut ATR)
+    #     Trailing step -> 0.6% tetap = hanya 0,20x ATR
+    # Pullback normal yang masih jauh di dalam 1x ATR langsung menyentuh
+    # trailing, jadi posisi tertutup di sekitar +0,9% padahal TP 8% belum
+    # tersentuh. Risk:reward jadi TERBALIK: risiko 4%, imbalan 0,9%.
+    # Pada backtest data sintetis, kondisi pincang ini membuat TAKE_PROFIT
+    # hanya tercapai 2,9% dari trade, sementara 91,2% ditutup BE/Trailing.
+    #
+    # Angka pengali di bawah memakai ATR sebagai satuan, bukan persen tetap:
+    #   BE_TRIGGER  = 0.5x ATR -> amankan modal setelah gerakan setengah ATR
+    #   BE_LOCK     = 0.1x ATR -> kunci profit tipis di atas entry
+    #   TRAIL_START = 1.0x ATR -> mulai trailing setelah gerakan satu ATR penuh
+    #   TRAIL_STEP  = 1.5x ATR -> jarak trailing di ATAS 1x ATR, supaya tidak
+    #                             terpicu noise biasa (data yang dikutip di
+    #                             atas: stop < 1.0x ATR terpicu noise >65%
+    #                             dalam 3 bar pertama; di 1.5x turun ke 38%)
+    "ATR_BE_TRIGGER_MULT": 0.5,
+    "ATR_BE_LOCK_MULT": 0.1,
+    "ATR_TRAILING_START_MULT": 1.0,
+    "ATR_TRAILING_STEP_MULT": 1.5,
     "USE_BREAKEVEN": True,
     "BE_TRIGGER_PCT": 1.0,
     "BE_LOCK_PCT": 0.15,
@@ -139,7 +248,22 @@ PUMP_CONFIG = {
     "MOMENTUM_FADE_RANK_THRESHOLD": 30,      # keluar dini kalau sudah tidak masuk top-30 gainer lagi
 
     # --- Filter & jarak antar-trade ---
-    "MAX_SPREAD_PCT": 0.5,                   # altcoin biasanya spread lebih lebar dari BTCUSDT
+    # Spread maksimum (bid-ask) yang masih boleh dimasuki. Ini biaya NYATA
+    # yang langsung dibayar setiap kali masuk lewat order MARKET, dan
+    # dampaknya berlipat kalau Anda memutar porsi saldo yang besar tiap trade.
+    # Nilai 0.5 sebelumnya terlalu longgar: dengan TP 4%, spread 0,5% saja
+    # sudah memakan 12,5% dari target profit, ditambah fee 0,2% pulang-pergi.
+    # 0.25 lebih realistis untuk altcoin likuid yang lolos filter volume bot ini.
+    "MAX_SPREAD_PCT": 0.25,
+
+    # --- Biaya trading (dipakai backtest agar hasilnya jujur) ---
+    # Binance Spot VIP0 per 2026: 0,1% maker maupun taker; diskon 25% kalau
+    # fee dibayar memakai BNB, sehingga jadi 0,075%.
+    # (Sumber: halaman fee resmi Binance & beberapa ringkasan independen,
+    # dicek 2026-09-23.)
+    # Bot SELALU memakai order MARKET, jadi yang relevan adalah TAKER.
+    "TAKER_FEE_PCT": 0.1,                    # ubah ke 0.075 kalau Anda membayar fee dengan BNB
+    "USE_BNB_FEE_DISCOUNT": False,           # True = otomatis pakai 0,075% (diskon 25%)
     "COOLDOWN_MINUTES_AFTER_CLOSE": 10,
     "MIN_SECONDS_BETWEEN_TRADES": 60,
 
@@ -166,7 +290,63 @@ PUMP_CONFIG = {
     # menyentuh base asset dari simbol yang baru saja ditutup, TIDAK PERNAH
     # "menyapu semua aset kecil di akun" -- modal USDT/BNB Anda tidak pernah
     # ikut disentuh fitur ini (proteksi ini di kode, bukan bisa
-    # dimatikan lewat config). Di mode DRY_RUN, fitur ini tidak pernah
-    # memanggil API sungguhan (hanya simulasi/log).
+    # dimatikan lewat config). Di mode TESTNET fitur ini otomatis DILEWATI
+    # karena Binance Spot Test Network tidak menyediakan endpoint /sapi/*
+    # sama sekali (sumber: developers.binance.com/docs/binance-spot-api-docs/
+    # testnet/general-info, dicek 2026-09-23) -- jadi tidak ada gunanya
+    # dipanggil di sana dan kegagalannya bukan bug.
     "USE_DUST_SWEEP": True,
 }
+
+
+# ---------------------------------------------------------------------
+# Helper mode TESTNET / LIVE
+# ---------------------------------------------------------------------
+VALID_MODES = ("TESTNET", "LIVE")
+
+
+def get_mode(config: dict = None) -> str:
+    """Kembalikan mode yang dinormalisasi ("TESTNET" atau "LIVE").
+
+    Nilai yang tidak dikenal TIDAK pernah diam-diam dianggap LIVE -- selalu
+    jatuh ke TESTNET, supaya salah ketik di config tidak berujung order
+    memakai uang asli.
+    """
+    cfg = PUMP_CONFIG if config is None else config
+    mode = str(cfg.get("MODE", "TESTNET")).strip().upper()
+    return mode if mode in VALID_MODES else "TESTNET"
+
+
+def is_testnet(config: dict = None) -> bool:
+    return get_mode(config) == "TESTNET"
+
+
+def get_base_url(config: dict = None) -> str:
+    """Base URL REST sesuai mode.
+
+    Testnet: https://testnet.binance.vision (hanya endpoint /api/* tersedia).
+    Live   : https://api.binance.com
+    Sumber: developers.binance.com/docs/binance-spot-api-docs/testnet/general-info
+    (dicek 2026-09-23).
+    """
+    cfg = PUMP_CONFIG if config is None else config
+    if is_testnet(cfg):
+        return cfg.get("TESTNET_BASE_URL", "https://testnet.binance.vision")
+    return cfg.get("LIVE_BASE_URL", "https://api.binance.com")
+
+
+# Disediakan supaya kode lama yang membaca PUMP_CONFIG["BASE_URL"] tetap jalan.
+PUMP_CONFIG["BASE_URL"] = get_base_url(PUMP_CONFIG)
+
+
+def get_taker_fee_pct(config: dict = None) -> float:
+    """Fee taker efektif dalam persen, sudah memperhitungkan diskon BNB.
+
+    Binance Spot VIP0 = 0,1%; membayar fee dengan BNB memberi diskon 25%
+    sehingga menjadi 0,075% (dicek 2026-09-23).
+    """
+    cfg = PUMP_CONFIG if config is None else config
+    fee = float(cfg.get("TAKER_FEE_PCT", 0.1))
+    if cfg.get("USE_BNB_FEE_DISCOUNT"):
+        fee *= 0.75
+    return fee

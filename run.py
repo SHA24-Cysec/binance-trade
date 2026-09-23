@@ -40,7 +40,7 @@ import subprocess
 import sys
 import time
 
-from config import PUMP_CONFIG
+from config import PUMP_CONFIG, get_mode, get_base_url
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -114,19 +114,24 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _handle_signal)
 
     port = os.environ.get("DASHBOARD_PORT", "8080")
-    dry_run = PUMP_CONFIG.get("DRY_RUN")
+    mode = get_mode(PUMP_CONFIG)
+    base_url = get_base_url(PUMP_CONFIG)
     risk_pct = PUMP_CONFIG.get("RISK_PERCENT")
 
     _log("=" * 70)
     _log("Menjalankan Pump Scanner Bot + Dashboard dalam satu perintah.")
-    _log(f"Mode bot: {'DRY_RUN (simulasi, aman)' if dry_run else 'LIVE (order sungguhan!)'} | RISK_PERCENT={risk_pct}%")
+    mode_label = ("TESTNET (order sungguhan, dana virtual)" if mode == "TESTNET"
+                  else "LIVE (order sungguhan, UANG ASLI!)")
+    _log(f"Mode bot: {mode_label} | endpoint={base_url} | RISK_PERCENT={risk_pct}%")
     _log(f"Dashboard akan tersedia di http://0.0.0.0:{port}")
     _log("Tekan Ctrl+C untuk menghentikan KEDUANYA sekaligus.")
     _log("=" * 70)
 
-    if not dry_run and (not PUMP_CONFIG.get("API_KEY") or not PUMP_CONFIG.get("API_SECRET")):
-        _log("BERHENTI: DRY_RUN=False tapi BINANCE_API_KEY/BINANCE_API_SECRET belum di-set. "
-             "Set dulu environment variable-nya, atau kembalikan DRY_RUN=True untuk simulasi.")
+    if not PUMP_CONFIG.get("API_KEY") or not PUMP_CONFIG.get("API_SECRET"):
+        _log("BERHENTI: BINANCE_API_KEY/BINANCE_API_SECRET belum di-set di file .env. "
+             f"Mode {mode} tetap mengirim order sungguhan, jadi kredensial wajib ada. "
+             "Untuk mode TESTNET, buat key gratis di https://testnet.binance.vision "
+             "(key produksi TIDAK berlaku di testnet, dan sebaliknya).")
         return 1
 
     bot_proc = _start("Pump Scanner Bot", "pump_scanner_bot.py")

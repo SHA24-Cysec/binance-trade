@@ -14,7 +14,13 @@ CARA PAKAI (sama seperti bot.py):
     pip install -r requirements.txt
     set BINANCE_API_KEY / BINANCE_API_SECRET (lihat README.md)
     python pump_scanner_bot.py --selftest      # audit logika, tanpa jaringan
-    python pump_scanner_bot.py                 # jalan (DRY_RUN dulu, default True)
+    python pump_scanner_bot.py                 # jalan (MODE="TESTNET" dulu, default)
+
+MODE DI config.py:
+    "TESTNET" -> order sungguhan ke Binance Spot Test Network (dana virtual)
+    "LIVE"    -> order sungguhan ke Binance produksi (uang asli)
+Keduanya memakai jalur kode yang SAMA PERSIS; yang berbeda hanya base URL
+dan API key yang dipakai. Tidak ada lagi jalur simulasi lokal (DRY_RUN).
 """
 
 from __future__ import annotations
@@ -27,7 +33,7 @@ import sys
 import time
 
 from binance_client import BinanceSpotClient, BinanceAPIError, build_filters_cache
-from config import PUMP_CONFIG
+from config import PUMP_CONFIG, get_mode, get_base_url, is_testnet
 import market_scanner as scanner
 import state as state_mod
 import strategy
@@ -45,6 +51,16 @@ DEFAULT_STATE = {
     "be_stop_price": 0.0,
     "trailing_active": False,
     "trailing_stop_price": 0.0,
+    # Level exit yang DIKUNCI saat entry (lihat open_position). 0.0 berarti
+    # belum di-set, dan manage_exit akan jatuh ke SL_PCT/TP_PCT config.
+    "sl_pct": 0.0,
+    "tp_pct": 0.0,
+    "be_trigger_pct": 0.0,
+    "be_lock_pct": 0.0,
+    "trail_start_pct": 0.0,
+    "trail_step_pct": 0.0,
+    "exit_source": "",
+    "atr_pct_at_entry": 0.0,
     "last_scan_time": 0,
     "cooldown_until": 0,
     "last_trade_time": 0,
@@ -152,9 +168,17 @@ def reset_position(state: dict) -> None:
     state["be_stop_price"] = 0.0
     state["trailing_active"] = False
     state["trailing_stop_price"] = 0.0
+    state["sl_pct"] = 0.0
+    state["tp_pct"] = 0.0
+    state["be_trigger_pct"] = 0.0
+    state["be_lock_pct"] = 0.0
+    state["trail_start_pct"] = 0.0
+    state["trail_step_pct"] = 0.0
+    state["exit_source"] = ""
+    state["atr_pct_at_entry"] = 0.0
 
 
-def try_dust_sweep(client: BinanceSpotClient, config: dict, symbol: "str | None", dry_run: bool) -> None:
+def try_dust_sweep(client: BinanceSpotClient, config: dict, symbol: "str | None") -> None:
     """Dipanggil SETELAH posisi `symbol` ditutup (SL/TP/BE/Trailing/manual/dsb)
     untuk mengecek apakah masih ada sisa saldo kecil (dust) dari koin itu di
     akun -- biasanya muncul karena pembulatan qty ke LOT_SIZE bursa, atau
@@ -174,9 +198,12 @@ def try_dust_sweep(client: BinanceSpotClient, config: dict, symbol: "str | None"
     2. Quote asset (USDT) dan BNB itu sendiri SELALU dikecualikan secara
        eksplisit di kode ini, apa pun isi config -- bukan cuma "defaultnya
        tidak termasuk", tapi memang tidak mungkin lolos pengecekan di bawah.
-    3. Di mode DRY_RUN, fungsi ini TIDAK PERNAH memanggil API sungguhan
-       (hanya mencatat log simulasi), konsisten dengan seluruh bagian lain
-       bot ini yang tidak mengirim apa pun ke Binance saat DRY_RUN=True.
+    3. Di mode TESTNET, fungsi ini otomatis DILEWATI: Binance Spot Test
+       Network hanya menyediakan endpoint /api/*, sedangkan dust convert
+       memakai /sapi/v1/asset/dust yang memang tidak ada di sana (sumber:
+       developers.binance.com/docs/binance-spot-api-docs/testnet/general-info,
+       dicek 2026-09-23). Memanggilnya di testnet pasti gagal, jadi tidak
+       dipanggil sama sekali dan cukup dicatat di log.
     4. Kegagalan (rate limit Binance untuk endpoint ini -- dilaporkan sekitar
        tiap 6-24 jam sekali per akun, aset tidak/belum diakui sebagai dust,
        dsb) SELALU ditangani sebagai hal wajar (dicoba lagi di kesempatan
@@ -194,9 +221,12 @@ def try_dust_sweep(client: BinanceSpotClient, config: dict, symbol: "str | None"
         # Proteksi keras: tidak pernah convert quote asset (modal) atau BNB itu sendiri.
         return
 
-    if dry_run:
-        logger.info("[DRY_RUN] Dust sweep dilewati (simulasi): sisa saldo %s (kalau ada) tidak dikonversi.",
-                     base_asset)
+    if is_testnet(config):
+        logger.info(
+            "[TESTNET] Dust sweep dilewati untuk %s: endpoint /sapi/v1/asset/dust "
+            "tidak tersedia di Binance Spot Test Network. Di mode LIVE fitur ini tetap jalan.",
+            base_asset,
+        )
         return
 
     try:
@@ -231,21 +261,20 @@ def try_dust_sweep(client: BinanceSpotClient, config: dict, symbol: "str | None"
 
 
 def close_position(client: BinanceSpotClient, config: dict, filters_cache: dict,
-                    state: dict, reason: str, dry_run: bool) -> None:
+                    state: dict, reason: str) -> None:
     symbol = state["current_symbol"]
     if not symbol:
         return
     filters = filters_cache.get(symbol)
     qty_to_sell = state["qty"]
 
-    if not dry_run:
-        try:
-            account = client.get_account()
-            base_asset = symbol[: -len(config["QUOTE_ASSET"])]
-            free_base = get_balance(account, base_asset)
-            qty_to_sell = min(qty_to_sell, free_base)
-        except BinanceAPIError as exc:
-            logger.error("Gagal ambil saldo sebelum SELL %s: %s", symbol, exc)
+    try:
+        account = client.get_account()
+        base_asset = symbol[: -len(config["QUOTE_ASSET"])]
+        free_base = get_balance(account, base_asset)
+        qty_to_sell = min(qty_to_sell, free_base)
+    except BinanceAPIError as exc:
+        logger.error("Gagal ambil saldo sebelum SELL %s: %s", symbol, exc)
 
     if filters:
         qty_to_sell = filters.round_qty(qty_to_sell)
@@ -258,18 +287,10 @@ def close_position(client: BinanceSpotClient, config: dict, filters_cache: dict,
                             symbol, qty_to_sell)
             reset_position(state)
             state["cooldown_until"] = state_mod.now_ms() + config["COOLDOWN_MINUTES_AFTER_CLOSE"] * 60 * 1000
-            try_dust_sweep(client, config, symbol, dry_run)
+            try_dust_sweep(client, config, symbol)
             return
 
     entry_price = state["entry_price"]
-
-    if dry_run:
-        logger.info("[DRY_RUN] SELL MARKET %s qty=%.8f (alasan: %s)", symbol, qty_to_sell, reason)
-        reset_position(state)
-        state["cooldown_until"] = state_mod.now_ms() + config["COOLDOWN_MINUTES_AFTER_CLOSE"] * 60 * 1000
-        state["last_trade_time"] = state_mod.now_ms()
-        try_dust_sweep(client, config, symbol, dry_run)
-        return
 
     try:
         resp = client.new_market_order(symbol, "SELL", quantity=qty_to_sell)
@@ -291,23 +312,49 @@ def close_position(client: BinanceSpotClient, config: dict, filters_cache: dict,
     # Setelah SELL FILLED sungguhan, sisa qty yang tidak terjual (kalau ada,
     # mis. executed_qty < qty_to_sell karena pembulatan bursa) mungkin
     # menyisakan dust kecil -- coba sapu ke BNB.
-    try_dust_sweep(client, config, symbol, dry_run)
+    try_dust_sweep(client, config, symbol)
 
 
 def open_position(client: BinanceSpotClient, config: dict, filters_cache: dict,
-                   state: dict, candidate: "scanner.Candidate", dry_run: bool) -> None:
+                   state: dict, candidate: "scanner.Candidate",
+                   klines: "list | None" = None) -> None:
     filters = filters_cache.get(candidate.symbol)
     if filters is None:
         logger.warning("Tidak ada data filter untuk %s, entry dilewati.", candidate.symbol)
         return
 
+    usdt_free = None
     if config.get("USE_RISK_PERCENT"):
-        account = client.get_account() if not dry_run else None
-        usdt_free = get_balance(account, config["QUOTE_ASSET"]) if account else 1000.0
-        usdt_amount = usdt_free * config["RISK_PERCENT"] / 100.0
+        try:
+            account = client.get_account()
+        except BinanceAPIError as exc:
+            logger.error("Gagal ambil saldo sebelum BUY %s: %s. Entry dilewati.", candidate.symbol, exc)
+            return
+        usdt_free = get_balance(account, config["QUOTE_ASSET"])
+
+        # Bantalan teknis: order MARKET diisi pada harga yang bergerak dan fee
+        # taker dipotong dari saldo yang sama, jadi membelanjakan 100% saldo
+        # persis sering ditolak bursa (-2010 insufficient balance).
+        buffer_pct = max(0.0, float(config.get("BALANCE_BUFFER_PCT", 0.5)))
+        spendable = usdt_free * (1 - buffer_pct / 100.0)
+        usdt_amount = spendable * float(config["RISK_PERCENT"]) / 100.0
     else:
-        usdt_amount = config["POSITION_SIZE_USDT"]
-    usdt_amount = min(usdt_amount, config["MAX_POSITION_USDT"])
+        usdt_amount = float(config["POSITION_SIZE_USDT"])
+
+    # Plafon nominal OPSIONAL. 0 atau negatif = tanpa plafon, sehingga
+    # RISK_PERCENT benar-benar terpakai berapa pun besar saldo.
+    max_pos = float(config.get("MAX_POSITION_USDT", 0) or 0)
+    if max_pos > 0 and usdt_amount > max_pos:
+        logger.warning(
+            "Ukuran posisi %s dipotong plafon MAX_POSITION_USDT: %.2f -> %.2f %s. "
+            "Itu berarti hanya %.2f%% dari saldo free (%.2f), BUKAN RISK_PERCENT=%.1f%% "
+            "yang Anda set. Set MAX_POSITION_USDT=0 kalau memang ingin mengikuti persentase.",
+            candidate.symbol, usdt_amount, max_pos, config["QUOTE_ASSET"],
+            (max_pos / usdt_free * 100.0) if usdt_free else 0.0,
+            usdt_free or 0.0, float(config.get("RISK_PERCENT", 0)),
+        )
+        usdt_amount = max_pos
+
     qty = filters.round_qty(usdt_amount / candidate.last_price)
     notional = qty * candidate.last_price
     if qty < float(filters.min_qty) or notional < float(filters.min_notional):
@@ -319,19 +366,6 @@ def open_position(client: BinanceSpotClient, config: dict, filters_cache: dict,
             candidate.symbol, qty, notional, float(filters.min_qty), float(filters.min_notional),
             usdt_amount, config["QUOTE_ASSET"],
         )
-        return
-
-    if dry_run:
-        logger.info(
-            "[DRY_RUN] BUY MARKET %s qty=%.8f (~%.2f %s @ %.6f) | 24h=%.2f%% | vol24h=%.0f | alasan: %s",
-            candidate.symbol, qty, notional, config["QUOTE_ASSET"], candidate.last_price,
-            candidate.price_change_pct, candidate.quote_volume, candidate.confirm_reason,
-        )
-        state["current_symbol"] = candidate.symbol
-        state["entry_price"] = candidate.last_price
-        state["qty"] = qty
-        state["entry_time"] = state_mod.now_ms()
-        state["last_trade_time"] = state_mod.now_ms()
         return
 
     try:
@@ -358,9 +392,27 @@ def open_position(client: BinanceSpotClient, config: dict, filters_cache: dict,
     state["entry_time"] = state_mod.now_ms()
     state["last_trade_time"] = state_mod.now_ms()
 
+    # Level exit dihitung SEKALI di sini lalu DIKUNCI di state, memakai harga
+    # fill sungguhan sebagai acuan. Sengaja tidak dihitung ulang tiap iterasi:
+    # ATR bergerak, dan stop yang ikut bergerak TURUN setelah posisi dibuka
+    # berarti risiko per-trade membengkak diam-diam setelah Anda sudah
+    # berkomitmen. Stop hanya boleh mengetat lewat Breakeven/Trailing, tidak
+    # pernah melonggar.
+    levels = strategy.resolve_exit_levels(config, klines, fill_price)
+    state["sl_pct"] = levels["sl_pct"]
+    state["tp_pct"] = levels["tp_pct"]
+    state["be_trigger_pct"] = levels["be_trigger_pct"]
+    state["be_lock_pct"] = levels["be_lock_pct"]
+    state["trail_start_pct"] = levels["trail_start_pct"]
+    state["trail_step_pct"] = levels["trail_step_pct"]
+    state["exit_source"] = levels["source"]
+    state["atr_pct_at_entry"] = levels["atr_pct"] or 0.0
+    logger.info("%s: level exit dikunci -> %s | %s",
+                candidate.symbol, levels["source"], levels["note"])
+
 
 def check_manual_control(client: BinanceSpotClient, config: dict, filters_cache: dict,
-                          state: dict, dry_run: bool) -> None:
+                          state: dict) -> None:
     """Cek "control file" yang bisa ditulis dashboard.py (proses terpisah)
     untuk perintah manual, mis. tombol "Jual Sekarang". Dipanggil tiap
     iterasi loop utama (maks setiap LOOP_INTERVAL_SECONDS, default 15 detik)
@@ -415,43 +467,54 @@ def check_manual_control(client: BinanceSpotClient, config: dict, filters_cache:
 
     logger.info("Perintah 'Jual Sekarang' diterima dari dashboard untuk %s. Menutup posisi...",
                 state["current_symbol"])
-    close_position(client, config, filters_cache, state, "MANUAL_CLOSE_DASHBOARD", dry_run)
+    close_position(client, config, filters_cache, state, "MANUAL_CLOSE_DASHBOARD")
 
 
 def manage_exit(client: BinanceSpotClient, config: dict, filters_cache: dict,
-                 state: dict, current_price: float, dry_run: bool) -> None:
+                 state: dict, current_price: float) -> None:
     if not state["current_symbol"] or state["qty"] <= 0 or state["entry_price"] <= 0:
         return
 
     pnl_pct = (current_price / state["entry_price"] - 1.0) * 100.0
     hold_minutes = (state_mod.now_ms() - state["entry_time"]) / 60000.0
 
+    # Ambil level yang dikunci saat entry. Fallback ke config dipakai untuk
+    # posisi lama yang dibuka sebelum fitur ini ada (state file versi lama),
+    # supaya bot yang di-upgrade saat sedang memegang posisi tidak kehilangan
+    # stop loss-nya.
+    sl_pct = abs(float(state.get("sl_pct") or 0.0)) or abs(float(config["SL_PCT"]))
+    tp_pct = abs(float(state.get("tp_pct") or 0.0)) or abs(float(config["TP_PCT"]))
+    be_trigger = abs(float(state.get("be_trigger_pct") or 0.0)) or abs(float(config["BE_TRIGGER_PCT"]))
+    be_lock = abs(float(state.get("be_lock_pct") or 0.0)) or abs(float(config["BE_LOCK_PCT"]))
+    trail_start = abs(float(state.get("trail_start_pct") or 0.0)) or abs(float(config["TRAILING_START_PCT"]))
+    trail_step = abs(float(state.get("trail_step_pct") or 0.0)) or abs(float(config["TRAILING_STEP_PCT"]))
+
     # Stop Loss: batas kerugian maksimum dari harga entry. Dicek PALING AWAL
     # dan TIDAK bergantung pada Breakeven/Trailing aktif atau tidak -- ini
     # jaring pengaman kalau harga langsung turun sejak entry dan tidak pernah
     # sempat untung (BE/Trailing baru aktif setelah profit menyentuh trigger-nya
     # masing-masing, jadi TIDAK melindungi skenario ini tanpa Stop Loss).
-    if config["USE_STOP_LOSS"] and pnl_pct <= -abs(config["SL_PCT"]):
-        close_position(client, config, filters_cache, state, "STOP_LOSS", dry_run)
+    if config["USE_STOP_LOSS"] and pnl_pct <= -sl_pct:
+        close_position(client, config, filters_cache, state, "STOP_LOSS")
         return
 
-    if config["USE_BREAKEVEN"] and not state["be_active"] and pnl_pct >= config["BE_TRIGGER_PCT"]:
+    if config["USE_BREAKEVEN"] and not state["be_active"] and pnl_pct >= be_trigger:
         state["be_active"] = True
-        state["be_stop_price"] = state["entry_price"] * (1 + config["BE_LOCK_PCT"] / 100.0)
+        state["be_stop_price"] = state["entry_price"] * (1 + be_lock / 100.0)
         logger.info("%s: Breakeven diaktifkan, stop dikunci di %.6f", state["current_symbol"], state["be_stop_price"])
 
     if config["USE_TRAILING"]:
-        if not state["trailing_active"] and pnl_pct >= config["TRAILING_START_PCT"]:
+        if not state["trailing_active"] and pnl_pct >= trail_start:
             state["trailing_active"] = True
-            state["trailing_stop_price"] = current_price * (1 - config["TRAILING_STEP_PCT"] / 100.0)
+            state["trailing_stop_price"] = current_price * (1 - trail_step / 100.0)
             logger.info("%s: Trailing stop diaktifkan di %.6f", state["current_symbol"], state["trailing_stop_price"])
         elif state["trailing_active"]:
-            candidate_stop = current_price * (1 - config["TRAILING_STEP_PCT"] / 100.0)
+            candidate_stop = current_price * (1 - trail_step / 100.0)
             if candidate_stop > state["trailing_stop_price"]:
                 state["trailing_stop_price"] = candidate_stop
 
     reasons = []
-    if config["USE_TP"] and pnl_pct >= config["TP_PCT"]:
+    if config["USE_TP"] and pnl_pct >= tp_pct:
         reasons.append("TAKE_PROFIT")
     if state["be_active"] and current_price <= state["be_stop_price"]:
         reasons.append("BREAKEVEN")
@@ -461,7 +524,7 @@ def manage_exit(client: BinanceSpotClient, config: dict, filters_cache: dict,
         reasons.append("MAX_HOLD_TIME")
 
     if reasons:
-        close_position(client, config, filters_cache, state, "+".join(reasons), dry_run)
+        close_position(client, config, filters_cache, state, "+".join(reasons))
 
 
 def run(config: dict) -> None:
@@ -469,17 +532,52 @@ def run(config: dict) -> None:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
-    if not config["DRY_RUN"] and (not config["API_KEY"] or not config["API_SECRET"]):
-        logger.error("DRY_RUN=False tapi API key/secret belum di-set. Bot dihentikan demi keamanan.")
+    mode = get_mode(config)
+    base_url = get_base_url(config)
+
+    if not config["API_KEY"] or not config["API_SECRET"]:
+        logger.error(
+            "API key/secret belum di-set. Mode %s tetap mengirim order sungguhan "
+            "(di testnet memakai dana virtual), jadi kredensial wajib ada. Bot dihentikan.",
+            mode,
+        )
         sys.exit(1)
 
     logger.info("=" * 70)
-    logger.info("Pump Scanner Bot mulai berjalan. DRY_RUN=%s", config["DRY_RUN"])
-    if config["DRY_RUN"]:
-        logger.warning("MODE DRY_RUN AKTIF: tidak ada order sungguhan yang dikirim.")
+    logger.info("Pump Scanner Bot mulai berjalan. MODE=%s | endpoint=%s", mode, base_url)
+    if mode == "TESTNET":
+        logger.warning(
+            "MODE TESTNET AKTIF: order benar-benar dikirim ke Binance Spot Test Network "
+            "memakai dana virtual. Pakai API key dari testnet.binance.vision, bukan key produksi."
+        )
+    else:
+        logger.warning("MODE LIVE AKTIF: order memakai UANG ASLI di Binance produksi.")
+    if config.get("USE_ATR_EXITS"):
+        need = int(config.get("ATR_PERIOD", 14)) + 1
+        have = int(config.get("CONFIRM_LOOKBACK_BARS", 20))
+        if have < need:
+            logger.warning(
+                "USE_ATR_EXITS aktif tapi CONFIRM_LOOKBACK_BARS=%d, sedangkan ATR(%d) butuh "
+                "minimal %d candle. Akibatnya ATR akan selalu gagal dihitung dan bot selalu "
+                "jatuh ke SL/TP tetap. Naikkan CONFIRM_LOOKBACK_BARS jadi minimal %d.",
+                have, config.get("ATR_PERIOD", 14), need, need,
+            )
+        else:
+            logger.info("Mode exit: ATR adaptif (periode %d, SL %gx, batas %.2f%%-%.2f%%, RR %g:1)",
+                        config.get("ATR_PERIOD", 14), config.get("ATR_MULTIPLIER_SL", 2.0),
+                        config.get("ATR_SL_MIN_PCT", 1.2), config.get("ATR_SL_MAX_PCT", 4.0),
+                        config.get("ATR_TP_RR_RATIO", 2.0))
+            logger.info("           Breakeven & Trailing juga ikut ATR "
+                        "(BE %gx, lock %gx, trail mulai %gx, jarak %gx)",
+                        config.get("ATR_BE_TRIGGER_MULT", 0.5), config.get("ATR_BE_LOCK_MULT", 0.1),
+                        config.get("ATR_TRAILING_START_MULT", 1.0),
+                        config.get("ATR_TRAILING_STEP_MULT", 1.5))
+    else:
+        logger.info("Mode exit: SL/TP tetap (SL %.2f%%, TP %.2f%%)",
+                    config.get("SL_PCT", 0), config.get("TP_PCT", 0))
     logger.info("=" * 70)
 
-    client = BinanceSpotClient(config["API_KEY"], config["API_SECRET"], config["BASE_URL"])
+    client = BinanceSpotClient(config["API_KEY"], config["API_SECRET"], base_url)
     client.sync_time()
 
     logger.info("Mengambil exchangeInfo untuk semua simbol (sekali di awal)...")
@@ -519,19 +617,17 @@ def run(config: dict) -> None:
             # Perintah manual dari dashboard (mis. "Jual Sekarang") dicek
             # PALING AWAL setiap iterasi, sebelum logika exit otomatis --
             # kalau user memintanya, itu harus didahulukan.
-            check_manual_control(client, config, filters_cache, state, config["DRY_RUN"])
+            check_manual_control(client, config, filters_cache, state)
 
             current_price = None
             if state["current_symbol"]:
                 current_price = client.get_price(state["current_symbol"])
 
-            equity = get_equity(client, config, state) if not config["DRY_RUN"] else (
-                config["MAX_POSITION_USDT"] * 5
-            )
+            equity = get_equity(client, config, state)
             entries_paused = update_equity_controls(state, equity, config)
 
             if state["current_symbol"] and current_price is not None:
-                manage_exit(client, config, filters_cache, state, current_price, config["DRY_RUN"])
+                manage_exit(client, config, filters_cache, state, current_price)
 
             do_scan = time.time() * 1000 - state.get("last_scan_time", 0) > config["MARKET_SCAN_INTERVAL_SECONDS"] * 1000
             if do_scan:
@@ -545,7 +641,7 @@ def run(config: dict) -> None:
                     if not still_ranked and current_price is not None:
                         logger.info("%s sudah keluar dari top-%d gainer, momentum dianggap pudar.",
                                     state["current_symbol"], config["MOMENTUM_FADE_RANK_THRESHOLD"])
-                        close_position(client, config, filters_cache, state, "MOMENTUM_FADE", config["DRY_RUN"])
+                        close_position(client, config, filters_cache, state, "MOMENTUM_FADE")
 
                 now = state_mod.now_ms()
                 can_enter = (
@@ -566,7 +662,16 @@ def run(config: dict) -> None:
                                 "Kandidat terpilih: %s (24h=%.2f%%, vol=%.0f, spread=%.3f%%)",
                                 best.symbol, best.price_change_pct, best.quote_volume, spread_pct,
                             )
-                            open_position(client, config, filters_cache, state, best, config["DRY_RUN"])
+                            # klines kandidat diambil ulang di sini supaya
+                            # ATR dihitung dari data yang sama dengan yang
+                            # dipakai saat konfirmasi momentum.
+                            try:
+                                entry_klines = klines_fetcher(best.symbol)
+                            except BinanceAPIError as exc:
+                                logger.warning("Gagal ambil klines %s untuk hitung ATR: %s. "
+                                                "Level exit akan pakai SL/TP tetap.", best.symbol, exc)
+                                entry_klines = None
+                            open_position(client, config, filters_cache, state, best, entry_klines)
                         else:
                             logger.info("Kandidat %s dilewati: spread %.3f%% > batas %.3f%%.",
                                         best.symbol, spread_pct, config["MAX_SPREAD_PCT"])
@@ -698,25 +803,71 @@ def selftest() -> None:
     print("\n=== SELFTEST: simulasi exit (TP/Breakeven/Trailing) ===")
     from decimal import Decimal as D
     from binance_client import SymbolFilters
+
+    class FakeTradeClient:
+        """Client palsu untuk selftest exit/kontrol manual.
+
+        Sejak mode DRY_RUN dihapus, close_position() SELALU benar-benar
+        memanggil get_account() lalu new_market_order() -- persis seperti di
+        testnet maupun live. Jadi selftest butuh client tiruan (bukan None)
+        supaya bisa menguji logika exit tanpa menyentuh jaringan sama sekali.
+        """
+
+        def __init__(self, base_asset="TEST", free=1.0, price=100.0):
+            self.base_asset = base_asset
+            self.free = free
+            self.price = price
+            self.orders = []
+
+        def get_account(self):
+            return {"balances": [
+                {"asset": self.base_asset, "free": str(self.free), "locked": "0"},
+                {"asset": "USDT", "free": "1000", "locked": "0"},
+            ]}
+
+        def new_market_order(self, symbol, side, quantity=None, quote_order_qty=None):
+            self.orders.append((symbol, side, quantity))
+            qty = float(quantity or 0.0)
+            return {"executedQty": str(qty), "cummulativeQuoteQty": str(qty * self.price)}
+
+        def get_dust_convertible(self, account_type="SPOT"):
+            return {"details": []}
+
+        def convert_dust(self, assets, account_type="SPOT"):
+            return {"totalTransfered": "0"}
+
     filters_cache = {"TESTUSDT": SymbolFilters(step_size=D("0.01"), min_qty=D("0.01"),
                                                 min_notional=D("5"), tick_size=D("0.0001"))}
+    # Ambang exit dikunci eksplisit di selftest ini supaya hasilnya
+    # deterministik dan tidak ikut berubah setiap kali nilai di config.py
+    # di-tuning (sebelumnya selftest memakai nilai config langsung padahal
+    # angka pembandingnya hardcode, sehingga gagal begitu SL_PCT diubah).
+    cfg_exit = dict(cfg)
+    cfg_exit.update({
+        "USE_TP": True, "TP_PCT": 6.0,
+        "USE_STOP_LOSS": True, "SL_PCT": 3.0,
+        "USE_BREAKEVEN": True, "BE_TRIGGER_PCT": 3.0, "BE_LOCK_PCT": 0.15,
+        "USE_TRAILING": True, "TRAILING_START_PCT": 4.0, "TRAILING_STEP_PCT": 1.0,
+        "MAX_HOLD_MINUTES": 600,
+    })
+
     state = dict(DEFAULT_STATE)
     state["current_symbol"] = "TESTUSDT"
     state["entry_price"] = 100.0
     state["qty"] = 1.0
     state["entry_time"] = state_mod.now_ms()
 
-    manage_exit(None, cfg, filters_cache, state, 103.5, dry_run=True)  # >= BE_TRIGGER_PCT (3.0%)
+    manage_exit(FakeTradeClient(), cfg_exit, filters_cache, state, 103.5)  # >= BE_TRIGGER_PCT (3.0%)
     assert state["be_active"], "Breakeven harusnya sudah aktif di profit 3.5%"
     assert state["current_symbol"] == "TESTUSDT", "Belum boleh close, baru breakeven aktif"
     print(f"  Setelah profit +3.5%: be_active={state['be_active']}, be_stop={state['be_stop_price']:.4f} -> OK")
 
-    manage_exit(None, cfg, filters_cache, state, 106.5, dry_run=True)  # TP_PCT = 6.0
+    manage_exit(FakeTradeClient(), cfg_exit, filters_cache, state, 106.5)  # TP_PCT = 6.0
     assert state["current_symbol"] is None, "Posisi harusnya sudah tertutup kena TAKE_PROFIT"
     print("  Setelah profit +6.5%: posisi tertutup (TAKE_PROFIT) -> OK")
 
     print("\n=== SELFTEST: Stop Loss (harga langsung turun sejak entry, TIDAK sempat untung) ===")
-    assert cfg["USE_STOP_LOSS"], "USE_STOP_LOSS harusnya True di config default"
+    assert cfg_exit["USE_STOP_LOSS"], "USE_STOP_LOSS harus aktif di skenario ini"
     state2 = dict(DEFAULT_STATE)
     state2["current_symbol"] = "TESTUSDT"
     state2["entry_price"] = 100.0
@@ -724,23 +875,217 @@ def selftest() -> None:
     state2["entry_time"] = state_mod.now_ms()
 
     # Rugi -2% dulu -- masih di atas ambang SL_PCT (3.0%), posisi harus TETAP terbuka.
-    manage_exit(None, cfg, filters_cache, state2, 98.0, dry_run=True)
+    manage_exit(FakeTradeClient(), cfg_exit, filters_cache, state2, 98.0)
     assert state2["current_symbol"] == "TESTUSDT", "Rugi -2% belum boleh kena Stop Loss (ambang 3.0%)"
     assert not state2["be_active"], "Breakeven tidak boleh aktif kalau posisi rugi"
     print("  Rugi -2%: posisi masih terbuka, BE/Trailing tidak aktif -> OK")
 
     # Rugi -3.5% -- melewati SL_PCT (3.0%), posisi harus dipaksa tertutup STOP_LOSS,
     # walau BE_TRIGGER_PCT/TRAILING_START_PCT tidak pernah tersentuh sama sekali.
-    manage_exit(None, cfg, filters_cache, state2, 96.5, dry_run=True)
+    manage_exit(FakeTradeClient(), cfg_exit, filters_cache, state2, 96.5)
     assert state2["current_symbol"] is None, "Posisi harusnya sudah tertutup kena STOP_LOSS di rugi -3.5%"
     print("  Rugi -3.5%: posisi tertutup (STOP_LOSS) -> OK")
+
+    print("\n=== SELFTEST: ukuran posisi (RISK_PERCENT, plafon, bantalan saldo) ===")
+
+    class SizingClient(FakeTradeClient):
+        """Client tiruan dengan saldo USDT yang bisa diatur, untuk memeriksa
+        PERSIS berapa nominal yang dipakai open_position saat BUY."""
+
+        def __init__(self, usdt_free):
+            super().__init__(base_asset="TESTB", free=0.0, price=1.0)
+            self.usdt_free = usdt_free
+
+        def get_account(self):
+            return {"balances": [
+                {"asset": "USDT", "free": str(self.usdt_free), "locked": "0"},
+                {"asset": "TESTB", "free": "0", "locked": "0"},
+            ]}
+
+    from decimal import Decimal as D2
+    from binance_client import SymbolFilters as SF2
+    size_filters = {"TESTBUSDT": SF2(step_size=D2("0.00000001"), min_qty=D2("0.00000001"),
+                                      min_notional=D2("1"), tick_size=D2("0.0001"))}
+    cand = scanner.Candidate(symbol="TESTBUSDT", base_asset="TESTB", price_change_pct=20.0,
+                              quote_volume=9e6, last_price=1.0, confirmed=True,
+                              confirm_reason="selftest")
+
+    def nominal_dipakai(cfg_size, saldo):
+        """Jalankan open_position lalu kembalikan nominal USDT yang benar-benar
+        dibelanjakan (harga = 1.0, jadi qty = nominal)."""
+        cl = SizingClient(saldo)
+        st = dict(DEFAULT_STATE)
+        open_position(cl, cfg_size, size_filters, st, cand)
+        assert cl.orders, "Order BUY seharusnya terkirim"
+        return float(cl.orders[-1][2])
+
+    cfg_size = dict(cfg)
+    cfg_size.update({"USE_RISK_PERCENT": True, "RISK_PERCENT": 95.0,
+                      "BALANCE_BUFFER_PCT": 0.5, "MAX_POSITION_USDT": 0,
+                      "USE_ATR_EXITS": False})
+
+    # Tanpa plafon: persentase harus BENAR-BENAR terpakai dan ikut tumbuh
+    # bersama saldo. Inilah yang dulu tidak terjadi karena plafon 10 USDT.
+    for saldo, harap in ((100.0, 100 * 0.995 * 0.95), (1000.0, 1000 * 0.995 * 0.95),
+                          (5000.0, 5000 * 0.995 * 0.95)):
+        got = nominal_dipakai(cfg_size, saldo)
+        assert abs(got - harap) < 0.01, f"saldo {saldo}: harap {harap:.2f}, dapat {got:.2f}"
+        print(f"  Saldo {saldo:>7.0f} -> pakai {got:>8.2f} USDT ({got / saldo * 100:.2f}% saldo) -> OK")
+
+    # Plafon aktif harus benar-benar membatasi (dan bot memperingatkan di log).
+    cfg_cap = dict(cfg_size)
+    cfg_cap["MAX_POSITION_USDT"] = 10.0
+    got_cap = nominal_dipakai(cfg_cap, 1000.0)
+    assert abs(got_cap - 10.0) < 1e-6, f"Plafon 10 USDT harus mengikat, dapat {got_cap}"
+    print(f"  Plafon 10 USDT aktif, saldo 1000 -> pakai {got_cap:.2f} USDT "
+          f"({got_cap / 1000 * 100:.2f}% saldo) -> OK (inilah bug lama)")
+
+    # RISK_PERCENT 100 + bantalan: tidak boleh melebihi saldo, harus menyisakan
+    # ruang untuk fee supaya order tidak ditolak bursa (-2010).
+    cfg_allin = dict(cfg_size)
+    cfg_allin["RISK_PERCENT"] = 100.0
+    got_allin = nominal_dipakai(cfg_allin, 1000.0)
+    assert got_allin < 1000.0, "All-in tidak boleh membelanjakan 100% saldo persis (butuh ruang fee)"
+    assert got_allin >= 1000.0 * 0.98, f"Bantalan terlalu besar: {got_allin}"
+    print(f"  RISK_PERCENT=100, saldo 1000 -> pakai {got_allin:.2f} USDT "
+          f"(sisa {1000 - got_allin:.2f} untuk fee) -> OK")
+
+    # Mode nominal tetap harus tetap bekerja seperti dulu.
+    cfg_fixed_size = dict(cfg_size)
+    cfg_fixed_size.update({"USE_RISK_PERCENT": False, "POSITION_SIZE_USDT": 25.0})
+    got_fixed = nominal_dipakai(cfg_fixed_size, 1000.0)
+    assert abs(got_fixed - 25.0) < 1e-6, f"Mode nominal tetap harus pakai 25 USDT, dapat {got_fixed}"
+    print(f"  Mode nominal tetap (USE_RISK_PERCENT=False) -> {got_fixed:.2f} USDT -> OK")
+
+    print("\n=== SELFTEST: SL/TP adaptif berbasis ATR dipakai manage_exit ===")
+    # Membuktikan manage_exit benar-benar MEMAKAI level yang dikunci di state,
+    # bukan diam-diam kembali ke SL_PCT config. Kalau integrasi ini putus,
+    # bot akan tampak "punya fitur ATR" padahal exit-nya masih pakai nilai lama.
+    cfg_atr = dict(cfg_exit)
+    cfg_atr["SL_PCT"] = 3.0          # nilai config yang TIDAK boleh terpakai
+    state_atr = dict(DEFAULT_STATE)
+    state_atr["current_symbol"] = "TESTUSDT"
+    state_atr["entry_price"] = 100.0
+    state_atr["qty"] = 1.0
+    state_atr["entry_time"] = state_mod.now_ms()
+    state_atr["sl_pct"] = 1.0        # level terkunci dari ATR, jauh lebih ketat
+    state_atr["tp_pct"] = 2.0
+
+    # Rugi -1.5%: masih aman menurut SL_PCT config (3%), tapi SUDAH melewati
+    # level ATR yang dikunci (1%). Posisi HARUS tertutup.
+    manage_exit(FakeTradeClient(), cfg_atr, filters_cache, state_atr, 98.5)
+    assert state_atr["current_symbol"] is None, \
+        "manage_exit harus memakai sl_pct dari state (1%), bukan SL_PCT config (3%)"
+    print("  SL terkunci dari ATR (1%) dipakai, bukan SL_PCT config (3%) -> OK")
+
+    # TP juga harus memakai level terkunci.
+    state_tp = dict(DEFAULT_STATE)
+    state_tp["current_symbol"] = "TESTUSDT"
+    state_tp["entry_price"] = 100.0
+    state_tp["qty"] = 1.0
+    state_tp["entry_time"] = state_mod.now_ms()
+    state_tp["sl_pct"] = 1.0
+    state_tp["tp_pct"] = 2.0
+    cfg_tp = dict(cfg_atr)
+    cfg_tp["USE_BREAKEVEN"] = False
+    cfg_tp["USE_TRAILING"] = False
+    manage_exit(FakeTradeClient(), cfg_tp, filters_cache, state_tp, 102.5)
+    assert state_tp["current_symbol"] is None, \
+        "manage_exit harus memakai tp_pct dari state (2%), bukan TP_PCT config (6%)"
+    print("  TP terkunci dari ATR (2%) dipakai, bukan TP_PCT config (6%) -> OK")
+
+    # State lama (dari versi bot sebelum fitur ini) tidak punya sl_pct sama
+    # sekali. Bot yang di-upgrade saat sedang memegang posisi TIDAK BOLEH
+    # kehilangan stop loss-nya -- harus jatuh ke SL_PCT config.
+    state_old = dict(DEFAULT_STATE)
+    del state_old["sl_pct"]
+    del state_old["tp_pct"]
+    state_old["current_symbol"] = "TESTUSDT"
+    state_old["entry_price"] = 100.0
+    state_old["qty"] = 1.0
+    state_old["entry_time"] = state_mod.now_ms()
+    manage_exit(FakeTradeClient(), cfg_atr, filters_cache, state_old, 96.0)  # -4%, lewat SL config 3%
+    assert state_old["current_symbol"] is None, \
+        "State versi lama tanpa sl_pct harus tetap terlindungi oleh SL_PCT config"
+    print("  State versi lama (tanpa sl_pct) tetap terlindungi SL_PCT config -> OK")
+
+    print("\n=== SELFTEST: Breakeven & Trailing ikut skala ATR ===")
+    # Ini menutup celah pincang: kalau hanya SL/TP yang ikut ATR sementara
+    # BE/Trailing memakai angka tetap, trailing yang jauh lebih sempit dari
+    # ATR akan menutup posisi sebelum TP tercapai dan risk:reward terbalik.
+    cfg_full = dict(cfg)
+    cfg_full.update({"USE_ATR_EXITS": True, "ATR_PERIOD": 14,
+                      "ATR_MULTIPLIER_SL": 2.0, "ATR_SL_MIN_PCT": 0.5,
+                      "ATR_SL_MAX_PCT": 20.0, "ATR_TP_RR_RATIO": 2.0,
+                      "ATR_BE_TRIGGER_MULT": 0.5, "ATR_BE_LOCK_MULT": 0.1,
+                      "ATR_TRAILING_START_MULT": 1.0, "ATR_TRAILING_STEP_MULT": 1.5})
+
+    # Koin dengan ATR 2%: semua level harus berskala ATR, bukan angka config.
+    ks_2pct = [strategy.Kline(0, 100, 101, 99, 100, 0) for _ in range(20)]
+    lv_full = strategy.resolve_exit_levels(cfg_full, ks_2pct, 100.0)
+    assert abs(lv_full["atr_pct"] - 2.0) < 1e-6, lv_full
+    assert abs(lv_full["be_trigger_pct"] - 1.0) < 1e-6, "BE trigger harus 0.5x ATR = 1.0%"
+    assert abs(lv_full["be_lock_pct"] - 0.2) < 1e-6, "BE lock harus 0.1x ATR = 0.2%"
+    assert abs(lv_full["trail_start_pct"] - 2.0) < 1e-6, "Trailing start harus 1.0x ATR = 2.0%"
+    assert abs(lv_full["trail_step_pct"] - 3.0) < 1e-6, "Trailing step harus 1.5x ATR = 3.0%"
+    print(f"  ATR 2% -> BE@{lv_full['be_trigger_pct']:.2f}% kunci {lv_full['be_lock_pct']:.2f}%, "
+          f"Trail@{lv_full['trail_start_pct']:.2f}% jarak {lv_full['trail_step_pct']:.2f}% -> OK")
+
+    # Trailing step TIDAK BOLEH lebih longgar dari SL. Kalau lebih longgar,
+    # SL selalu kena duluan dan trailing cuma ilusi.
+    cfg_wide = dict(cfg_full)
+    cfg_wide["ATR_SL_MAX_PCT"] = 2.5          # SL dibatasi ketat
+    cfg_wide["ATR_TRAILING_STEP_MULT"] = 5.0  # trailing sengaja dibuat sangat longgar
+    lv_wide = strategy.resolve_exit_levels(cfg_wide, ks_2pct, 100.0)
+    assert lv_wide["trail_step_pct"] <= lv_wide["sl_pct"] + 1e-9, \
+        (f"Trailing step ({lv_wide['trail_step_pct']}) tidak boleh melebihi SL "
+         f"({lv_wide['sl_pct']}) -- SL akan selalu kena duluan")
+    print(f"  Trailing step dibatasi agar <= SL ({lv_wide['trail_step_pct']:.2f}% "
+          f"vs SL {lv_wide['sl_pct']:.2f}%) -> OK")
+
+    # Breakeven harus terpicu SEBELUM trailing, kalau tidak urutannya kacau.
+    cfg_order = dict(cfg_full)
+    cfg_order["ATR_BE_TRIGGER_MULT"] = 9.0    # sengaja dibuat lebih besar dari trailing start
+    lv_order = strategy.resolve_exit_levels(cfg_order, ks_2pct, 100.0)
+    assert lv_order["be_trigger_pct"] <= lv_order["trail_start_pct"] + 1e-9, \
+        "Breakeven harus terpicu sebelum atau bersamaan dengan Trailing"
+    print(f"  BE dipaksa terpicu sebelum Trailing ({lv_order['be_trigger_pct']:.2f}% "
+          f"<= {lv_order['trail_start_pct']:.2f}%) -> OK")
+
+    # manage_exit harus MEMAKAI level BE/Trailing dari state, bukan config.
+    st_be = dict(DEFAULT_STATE)
+    st_be["current_symbol"] = "TESTUSDT"
+    st_be["entry_price"] = 100.0
+    st_be["qty"] = 1.0
+    st_be["entry_time"] = state_mod.now_ms()
+    st_be["sl_pct"] = 10.0
+    st_be["tp_pct"] = 20.0
+    st_be["be_trigger_pct"] = 5.0     # jauh lebih tinggi dari BE_TRIGGER_PCT config
+    st_be["be_lock_pct"] = 1.0
+    st_be["trail_start_pct"] = 8.0
+    st_be["trail_step_pct"] = 3.0
+    cfg_be_cfg = dict(cfg_exit)
+    cfg_be_cfg["BE_TRIGGER_PCT"] = 1.0   # nilai config yang TIDAK boleh terpakai
+    # Profit +2%: sudah lewat BE config (1%) tapi BELUM lewat BE state (5%).
+    # Kalau integrasi benar, Breakeven belum boleh aktif.
+    manage_exit(FakeTradeClient(), cfg_be_cfg, filters_cache, st_be, 102.0)
+    assert not st_be["be_active"], \
+        "Breakeven memakai BE_TRIGGER_PCT config, seharusnya memakai be_trigger_pct dari state"
+    print("  Profit +2% -> BE belum aktif (pakai trigger state 5%, bukan config 1%) -> OK")
+
+    # Profit +6%: sudah lewat BE state (5%), Breakeven harus aktif.
+    manage_exit(FakeTradeClient(), cfg_be_cfg, filters_cache, st_be, 106.0)
+    assert st_be["be_active"], "Breakeven harus aktif setelah melewati trigger dari state"
+    assert abs(st_be["be_stop_price"] - 101.0) < 1e-6, \
+        f"BE stop harus entry x (1 + be_lock 1%) = 101.0, dapat {st_be['be_stop_price']}"
+    print(f"  Profit +6% -> BE aktif, stop dikunci di {st_be['be_stop_price']:.2f} -> OK")
 
     print("\n=== SELFTEST: perintah manual 'Jual Sekarang' dari dashboard (control file) ===")
     import tempfile
 
     with tempfile.TemporaryDirectory() as tmpdir:
         control_path = f"{tmpdir}/pump_bot_control.json"
-        cfg_ctrl = dict(cfg)
+        cfg_ctrl = dict(cfg_exit)
         cfg_ctrl["CONTROL_FILE"] = control_path
 
         # Skenario A: ada posisi terbuka, perintah CLOSE_POSITION untuk simbol
@@ -754,7 +1099,7 @@ def selftest() -> None:
         state_mod.save_control(control_path, {
             "action": "CLOSE_POSITION", "symbol": "TESTUSDT", "requested_at": state_mod.now_ms(),
         })
-        check_manual_control(None, cfg_ctrl, filters_cache, state3, dry_run=True)
+        check_manual_control(FakeTradeClient(), cfg_ctrl, filters_cache, state3)
         assert state3["current_symbol"] is None, "Posisi harusnya tertutup oleh perintah manual yang valid"
         assert not state_mod.load_control(control_path), "Control file harus terhapus setelah diproses"
         print("  Perintah valid untuk simbol yang sesuai -> posisi ditutup, control file dibersihkan -> OK")
@@ -770,7 +1115,7 @@ def selftest() -> None:
             "action": "CLOSE_POSITION", "symbol": "TESTUSDT",
             "requested_at": state_mod.now_ms() - 10 * 60 * 1000,  # 10 menit lalu
         })
-        check_manual_control(None, cfg_ctrl, filters_cache, state4, dry_run=True)
+        check_manual_control(FakeTradeClient(), cfg_ctrl, filters_cache, state4)
         assert state4["current_symbol"] == "TESTUSDT", "Perintah kadaluarsa (>2 menit) harus DIABAIKAN"
         print("  Perintah kadaluarsa (10 menit lalu) -> diabaikan, posisi tetap terbuka -> OK")
 
@@ -784,7 +1129,7 @@ def selftest() -> None:
         state_mod.save_control(control_path, {
             "action": "CLOSE_POSITION", "symbol": "TESTUSDT", "requested_at": state_mod.now_ms(),
         })
-        check_manual_control(None, cfg_ctrl, filters_cache, state5, dry_run=True)
+        check_manual_control(FakeTradeClient(), cfg_ctrl, filters_cache, state5)
         assert state5["current_symbol"] == "LAINUSDT", "Perintah untuk simbol berbeda dari posisi aktif harus DIABAIKAN"
         print("  Perintah untuk simbol yang sudah tidak dipegang -> diabaikan, posisi lain tetap aman -> OK")
 
@@ -794,7 +1139,7 @@ def selftest() -> None:
         state_mod.save_control(control_path, {
             "action": "CLOSE_POSITION", "symbol": "TESTUSDT", "requested_at": state_mod.now_ms(),
         })
-        check_manual_control(None, cfg_ctrl, filters_cache, state6, dry_run=True)
+        check_manual_control(FakeTradeClient(), cfg_ctrl, filters_cache, state6)
         assert state6["current_symbol"] is None, "Tanpa posisi terbuka, perintah manual harus diabaikan dengan aman"
         print("  Tidak ada posisi terbuka saat perintah diproses -> diabaikan dengan aman, tidak error -> OK")
 
@@ -823,19 +1168,23 @@ def selftest() -> None:
             return {"totalTransfered": "0.0001", "totalServiceCharge": "0.000002", "transferResult": []}
 
     assert cfg["USE_DUST_SWEEP"], "USE_DUST_SWEEP harusnya True di config default"
+    # Dust sweep hanya aktif di mode LIVE, jadi skenario di bawah memakai
+    # salinan config dengan MODE="LIVE" (tanpa menyentuh config asli).
+    cfg = dict(cfg)
+    cfg["MODE"] = "LIVE"
 
     # Skenario A: base asset dari simbol yang baru ditutup MEMANG terdaftar
     # sebagai dust convertible -> harus dikonversi (convert_dust dipanggil
     # persis dengan asset itu saja).
     fake_a = FakeDustClient(convertible_assets=["PEPE"])
-    try_dust_sweep(fake_a, cfg, "PEPEUSDT", dry_run=False)
+    try_dust_sweep(fake_a, cfg, "PEPEUSDT")
     assert fake_a.convert_calls == [["PEPE"]], f"Harusnya convert PEPE saja, dapat: {fake_a.convert_calls}"
     print("  Sisa PEPE terdaftar dust convertible -> convert_dust(['PEPE']) dipanggil -> OK")
 
     # Skenario B: base asset TIDAK terdaftar sebagai dust convertible (mis.
     # saldo sudah nol atau di atas ambang) -> convert_dust TIDAK boleh dipanggil.
     fake_b = FakeDustClient(convertible_assets=[])
-    try_dust_sweep(fake_b, cfg, "PEPEUSDT", dry_run=False)
+    try_dust_sweep(fake_b, cfg, "PEPEUSDT")
     assert fake_b.convert_calls == [], "Tidak boleh convert kalau asset tidak terdaftar sebagai dust"
     print("  Sisa PEPE TIDAK terdaftar dust convertible -> convert_dust tidak dipanggil -> OK")
 
@@ -845,23 +1194,25 @@ def selftest() -> None:
     # asset "USDT" atau "BNB" TIDAK PERNAH dikonversi walau seandainya lolos
     # sampai ke fungsi ini.
     fake_c = FakeDustClient(convertible_assets=["USDT", "BNB"])
-    try_dust_sweep(fake_c, cfg, "BNBUSDT", dry_run=False)  # base asset = "BNB"
+    try_dust_sweep(fake_c, cfg, "BNBUSDT")  # base asset = "BNB"
     assert fake_c.convert_calls == [], "BNB tidak boleh pernah dikonversi (proteksi keras)"
     print("  Simbol dengan base asset BNB -> TIDAK PERNAH dikonversi (proteksi modal) -> OK")
 
-    # Skenario D: DRY_RUN=True -> tidak boleh ada panggilan API sama sekali,
-    # walaupun asset-nya terdaftar convertible.
+    # Skenario D: MODE=TESTNET -> endpoint /sapi tidak ada di Spot Test
+    # Network, jadi convert_dust TIDAK boleh dipanggil sama sekali.
+    cfg_testnet = dict(cfg)
+    cfg_testnet["MODE"] = "TESTNET"
     fake_d = FakeDustClient(convertible_assets=["PEPE"])
-    try_dust_sweep(fake_d, cfg, "PEPEUSDT", dry_run=True)
-    assert fake_d.convert_calls == [], "Mode DRY_RUN tidak boleh memanggil convert_dust sama sekali"
-    print("  Mode DRY_RUN aktif -> tidak ada panggilan API sungguhan -> OK")
+    try_dust_sweep(fake_d, cfg_testnet, "PEPEUSDT")
+    assert fake_d.convert_calls == [], "Mode TESTNET tidak boleh memanggil convert_dust (endpoint /sapi tidak ada)"
+    print("  Mode TESTNET -> dust sweep dilewati, tidak ada panggilan /sapi -> OK")
 
     # Skenario E: endpoint convert_dust gagal (mis. kena rate limit Binance)
     # -> harus ditangani dengan aman, TIDAK boleh melempar exception ke pemanggil.
     fake_e = FakeDustClient(convertible_assets=["PEPE"])
     fake_e.fail_convert = True
     try:
-        try_dust_sweep(fake_e, cfg, "PEPEUSDT", dry_run=False)
+        try_dust_sweep(fake_e, cfg, "PEPEUSDT")
         gagal_ditangani = True
     except BinanceAPIError:
         gagal_ditangani = False
@@ -873,7 +1224,7 @@ def selftest() -> None:
     cfg_no_dust = dict(cfg)
     cfg_no_dust["USE_DUST_SWEEP"] = False
     fake_f = FakeDustClient(convertible_assets=["PEPE"])
-    try_dust_sweep(fake_f, cfg_no_dust, "PEPEUSDT", dry_run=False)
+    try_dust_sweep(fake_f, cfg_no_dust, "PEPEUSDT")
     assert fake_f.convert_calls == [], "USE_DUST_SWEEP=False harusnya menonaktifkan fitur ini sepenuhnya"
     print("  USE_DUST_SWEEP=False -> fitur nonaktif total -> OK")
 

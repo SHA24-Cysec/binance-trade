@@ -121,6 +121,20 @@
   .bt-field label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;font-weight:600}
   .bt-field input{background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:9px 10px;color:var(--txt);font-size:13px;font-family:inherit}
   .bt-field input:focus{outline:none;border-color:var(--accent)}
+  .bt-field.dim{opacity:.4}
+  .bt-field.dim input{cursor:not-allowed}
+  .bt-sub{margin-top:14px;padding-top:14px;border-top:1px dashed var(--border)}
+  .bt-sub h3{font-size:12px;margin:0 0 4px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)}
+  .bt-sub p{font-size:11.5px;color:var(--muted);margin:0 0 12px;line-height:1.5}
+  .bt-toggle{display:flex;align-items:center;gap:9px;padding:10px 12px;background:var(--panel2);
+             border:1px solid var(--border);border-radius:8px;cursor:pointer;user-select:none}
+  .bt-toggle input{width:16px;height:16px;accent-color:var(--accent);cursor:pointer;flex:none}
+  .bt-toggle span{font-size:12.5px;font-weight:600}
+  .bt-cmp{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:10px}
+  .bt-cmp th,.bt-cmp td{padding:7px 10px;border-bottom:1px solid var(--border);text-align:right}
+  .bt-cmp th:first-child,.bt-cmp td:first-child{text-align:left;color:var(--muted)}
+  .bt-cmp thead th{font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--muted)}
+  .bt-cmp td.win{color:var(--green);font-weight:700}
   .bt-actions{justify-content:flex-end}
   .bt-actions button{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;border:none;border-radius:8px;padding:10px 14px;font-size:13px;font-weight:700;cursor:pointer;transition:opacity .15s}
   .bt-actions button:hover{opacity:.9}
@@ -170,7 +184,7 @@
     </div>
   </header>
 
-  <div class="banner dry" id="dryBanner"><span>⚠️</span><span>Mode <b>DRY_RUN</b> aktif — bot tidak mengirim order sungguhan. Data posisi di bawah adalah simulasi.</span></div>
+  <div class="banner dry" id="testnetBanner"><span>🧪</span><span>Mode <b>TESTNET</b> aktif — order benar-benar dikirim ke Binance Spot Test Network memakai dana virtual (bukan uang asli). Alur kerjanya sama persis dengan mode LIVE.</span></div>
   <div class="banner err" id="errBanner"><span>⚠️</span><span id="errText"></span></div>
 
   <!-- KARTU RINGKASAN -->
@@ -297,6 +311,51 @@
         <button id="btRunBtn" onclick="startBacktest()">▶ Jalankan Backtest</button>
       </div>
     </div>
+
+    <div class="bt-sub">
+      <h3>⚡ Exit berbasis ATR</h3>
+      <p>
+        Kalau dinyalakan, <b>keenam</b> level exit dihitung dari volatilitas koin (ATR), bukan
+        dari angka tetap di atas. Field Stop Loss dan Take Profit otomatis diredupkan karena
+        nilainya akan ditimpa. Breakeven dan Trailing juga ikut skala ATR, supaya tidak pincang.
+        <br>Trailing di bawah 1,0&times; ATR mudah terpicu noise, jadi 1,5&times; adalah titik aman.
+      </p>
+      <div class="bt-form">
+        <div class="bt-field" style="justify-content:flex-end">
+          <label>Mode Exit</label>
+          <label class="bt-toggle" for="btUseAtr">
+            <input type="checkbox" id="btUseAtr" onchange="btSyncAtrUi()">
+            <span>Pakai ATR</span>
+          </label>
+        </div>
+        <div class="bt-field"><label>Periode ATR</label>
+          <input type="number" id="btAtrPeriod" step="1" min="2"></div>
+        <div class="bt-field"><label>Pengali SL</label>
+          <input type="number" id="btAtrMult" step="0.1"></div>
+        <div class="bt-field"><label>Batas Bawah SL %</label>
+          <input type="number" id="btAtrMin" step="0.1"></div>
+        <div class="bt-field"><label>Batas Atas SL %</label>
+          <input type="number" id="btAtrMax" step="0.1"></div>
+        <div class="bt-field"><label>Rasio TP (RR)</label>
+          <input type="number" id="btAtrRr" step="0.1"></div>
+        <div class="bt-field"><label>Pengali BE Trigger</label>
+          <input type="number" id="btAtrBeTrig" step="0.1"></div>
+        <div class="bt-field"><label>Pengali BE Lock</label>
+          <input type="number" id="btAtrBeLock" step="0.1"></div>
+        <div class="bt-field"><label>Pengali Trail Start</label>
+          <input type="number" id="btAtrTrStart" step="0.1"></div>
+        <div class="bt-field"><label>Pengali Trail Step</label>
+          <input type="number" id="btAtrTrStep" step="0.1"></div>
+        <div class="bt-field bt-actions">
+          <label>&nbsp;</label>
+          <button id="btCmpBtn" onclick="startBacktest(true)"
+                  title="Menjalankan dua backtest pada data candle yang sama persis: sekali SL/TP tetap, sekali berbasis ATR. Toggle di atas diabaikan.">
+            ⚖ Bandingkan Tetap vs ATR
+          </button>
+        </div>
+      </div>
+      <div id="btAtrPreview" class="mut" style="font-size:11.5px;margin-top:10px;line-height:1.6"></div>
+    </div>
     <div id="btError" class="banner err" style="margin-top:12px"></div>
     <div id="btProgressWrap" style="display:none;margin-top:14px" class="bt-loading">
       <div class="bt-loading-top">
@@ -326,6 +385,7 @@
           <div class="posbox" id="btInfoBox"></div>
         </div>
       </div>
+      <div class="panel" id="btCompareWrap" style="background:var(--panel2);margin-bottom:14px;display:none"></div>
       <div class="panel" style="background:var(--panel2);margin-bottom:14px">
         <h2 style="font-size:13px">⚠️ Keterbatasan Backtest Ini</h2>
         <ul id="btLimitList" style="padding-left:18px;font-size:12px;color:var(--muted);line-height:1.9"></ul>
@@ -370,8 +430,9 @@ function reasonTag(r){
 function renderStatus(s){
   // mode
   const mp=document.getElementById('modePill'), md=mp.querySelector('.dot');
-  if(s.dry_run){mp.className='pill dry';document.getElementById('modeText').textContent='DRY RUN';md.className='dot warn';document.getElementById('dryBanner').classList.add('show');}
-  else{mp.className='pill live';document.getElementById('modeText').textContent='LIVE';md.className='dot on';document.getElementById('dryBanner').classList.remove('show');}
+  var isTestnet = (s.mode==='TESTNET') || !!s.testnet;
+  if(isTestnet){mp.className='pill dry';document.getElementById('modeText').textContent='TESTNET';md.className='dot warn';document.getElementById('testnetBanner').classList.add('show');}
+  else{mp.className='pill live';document.getElementById('modeText').textContent='LIVE';md.className='dot on';document.getElementById('testnetBanner').classList.remove('show');}
   // conn
   const cd=document.getElementById('connDot'), ct=document.getElementById('connText');
   if(s.live_connected){cd.className='dot on';ct.textContent=s.has_api_key?'Binance terhubung':'Harga live (tanpa API key)';}
@@ -557,7 +618,7 @@ function renderTrades(trades, quote){
   if(!closed.length){tb.innerHTML='<tr><td colspan="8" class="empty">Belum ada trade yang selesai.</td></tr>';return;}
   tb.innerHTML=closed.map(t=>`
     <tr>
-      <td class="mono mut">${t.sell_time||'—'}${t.dry?' <span class="tag dry">SIM</span>':''}</td>
+      <td class="mono mut">${t.sell_time||'—'}${t.testnet?' <span class="tag dry">TESTNET</span>':''}</td>
       <td><b>${t.symbol}</b></td>
       <td class="mono">${fmtP(t.entry||t.buy_price)}</td>
       <td class="mono">${fmtP(t.sell_price)}</td>
@@ -643,8 +704,58 @@ async function loadBacktestDefaults(){
     document.getElementById('btMaxHold').value = d.MAX_HOLD_MINUTES;
     document.getElementById('btMinPump').value = d.MIN_PUMP_PCT_24H;
     document.getElementById('btVwapExt').value = d.VWAP_MAX_EXTENSION_PCT;
+    document.getElementById('btUseAtr').checked = !!d.USE_ATR_EXITS;
+    document.getElementById('btAtrPeriod').value = d.ATR_PERIOD;
+    document.getElementById('btAtrMult').value = d.ATR_MULTIPLIER_SL;
+    document.getElementById('btAtrMin').value = d.ATR_SL_MIN_PCT;
+    document.getElementById('btAtrMax').value = d.ATR_SL_MAX_PCT;
+    document.getElementById('btAtrRr').value = d.ATR_TP_RR_RATIO;
+    document.getElementById('btAtrBeTrig').value = d.ATR_BE_TRIGGER_MULT;
+    document.getElementById('btAtrBeLock').value = d.ATR_BE_LOCK_MULT;
+    document.getElementById('btAtrTrStart').value = d.ATR_TRAILING_START_MULT;
+    document.getElementById('btAtrTrStep').value = d.ATR_TRAILING_STEP_MULT;
     document.getElementById('btSymbol').placeholder = 'mis. SOL' + d.quote_asset;
+    btSyncAtrUi();
   }catch(e){ /* form tetap kosong, tidak fatal */ }
+}
+
+// Saat ATR aktif, SL% dan TP% tidak dipakai (ditimpa hasil hitungan ATR).
+// Diredupkan supaya tidak menyesatkan, plus preview level yang sebenarnya.
+function btSyncAtrUi(){
+  const on = document.getElementById('btUseAtr').checked;
+  ['btSl','btTp'].forEach(id=>{
+    const inp = document.getElementById(id);
+    if(!inp) return;
+    inp.disabled = on;
+    inp.parentElement.classList.toggle('dim', on);
+    inp.title = on ? 'Tidak dipakai saat ATR aktif -- nilainya dihitung dari ATR.' : '';
+  });
+  const box = document.getElementById('btAtrPreview');
+  if(!on){ box.innerHTML = '<b>Mode TETAP.</b> Semua level memakai angka persen di atas.'; return; }
+
+  const num = (id, def) => { const v = parseFloat(document.getElementById(id).value); return isFinite(v)? v : def; };
+  const mult=num('btAtrMult',2), lo=num('btAtrMin',1.2), hi=num('btAtrMax',4), rr=num('btAtrRr',2);
+  const mBe=num('btAtrBeTrig',.5), mLock=num('btAtrBeLock',.1),
+        mTs=num('btAtrTrStart',1), mStep=num('btAtrTrStep',1.5);
+  if(lo > hi){
+    box.innerHTML = '<span style="color:var(--amber)">⚠ Batas bawah SL lebih besar dari batas atas. Perbaiki dulu.</span>';
+    return;
+  }
+  let rows = [0.5,1,2,3,5].map(atr=>{
+    const sl = Math.min(Math.max(atr*mult, lo), hi);
+    const step = Math.min(atr*mStep, sl);           // trailing tak boleh melebihi SL
+    const trStart = atr*mTs;
+    const be = Math.min(atr*mBe, trStart);          // BE harus terpicu sebelum trailing
+    const f = (x)=>x.toFixed(2);
+    return `<tr><td>${f(atr)}%</td><td>${f(sl)}</td><td>${f(sl*rr)}</td><td>${f(be)}</td>
+            <td>${f(atr*mLock)}</td><td>${f(trStart)}</td><td>${f(step)}</td></tr>`;
+  }).join('');
+  box.innerHTML = `<b>Level yang akan berlaku</b> (dihitung ulang otomatis):
+    <table class="bt-cmp" style="max-width:640px">
+      <thead><tr><th>ATR koin</th><th>SL%</th><th>TP%</th><th>BE trig</th>
+        <th>BE lock</th><th>Trail@</th><th>Step</th></tr></thead>
+      <tbody>${rows}</tbody></table>
+    <span class="mut">Step otomatis dibatasi tidak melebihi SL, dan BE dipaksa terpicu sebelum Trailing.</span>`;
 }
 
 function btShowError(msg){
@@ -654,7 +765,17 @@ function btShowError(msg){
   el.classList.add('show');
 }
 
-async function startBacktest(){
+// Kedua tombol dikunci bersamaan supaya tidak bisa menjalankan dua job sekaligus.
+function btBusy(busy, compare){
+  const run = document.getElementById('btRunBtn');
+  const cmp = document.getElementById('btCmpBtn');
+  run.disabled = busy; cmp.disabled = busy;
+  run.textContent = (busy && !compare) ? 'Menjalankan…' : '▶ Jalankan Backtest';
+  cmp.textContent = (busy && compare) ? 'Membandingkan…' : '⚖ Bandingkan Tetap vs ATR';
+}
+
+async function startBacktest(compare){
+  compare = !!compare;
   btShowError('');
   document.getElementById('btResult').style.display = 'none';
   const symbol = document.getElementById('btSymbol').value.trim().toUpperCase();
@@ -672,10 +793,24 @@ async function startBacktest(){
     MAX_HOLD_MINUTES: document.getElementById('btMaxHold').value,
     MIN_PUMP_PCT_24H: document.getElementById('btMinPump').value,
     VWAP_MAX_EXTENSION_PCT: document.getElementById('btVwapExt').value,
+    USE_ATR_EXITS: document.getElementById('btUseAtr').checked,
+    ATR_PERIOD: document.getElementById('btAtrPeriod').value,
+    ATR_MULTIPLIER_SL: document.getElementById('btAtrMult').value,
+    ATR_SL_MIN_PCT: document.getElementById('btAtrMin').value,
+    ATR_SL_MAX_PCT: document.getElementById('btAtrMax').value,
+    ATR_TP_RR_RATIO: document.getElementById('btAtrRr').value,
+    ATR_BE_TRIGGER_MULT: document.getElementById('btAtrBeTrig').value,
+    ATR_BE_LOCK_MULT: document.getElementById('btAtrBeLock').value,
+    ATR_TRAILING_START_MULT: document.getElementById('btAtrTrStart').value,
+    ATR_TRAILING_STEP_MULT: document.getElementById('btAtrTrStep').value,
+    compare: compare,
   };
 
-  const btn = document.getElementById('btRunBtn');
-  btn.disabled = true; btn.textContent = 'Menjalankan…';
+  // SL/TP dinonaktifkan saat ATR aktif, jadi .value bisa kosong -- jangan kirim.
+  if(payload.SL_PCT === '') delete payload.SL_PCT;
+  if(payload.TP_PCT === '') delete payload.TP_PCT;
+
+  btBusy(true, compare);
   document.getElementById('btProgressWrap').style.display = 'flex';
   document.getElementById('btProgressBar').style.width = '2%';
   document.getElementById('btStage').textContent = 'Mengirim permintaan';
@@ -694,7 +829,7 @@ async function startBacktest(){
     pollBacktest(d.job_id);
   }catch(e){
     btShowError(e.message);
-    btn.disabled = false; btn.textContent = '▶ Jalankan Backtest';
+    btBusy(false, compare);
     document.getElementById('btProgressWrap').style.display = 'none';
   }
 }
@@ -759,9 +894,80 @@ function pollBacktest(jobId){
 }
 
 function finishBacktestUI(){
-  const btn = document.getElementById('btRunBtn');
-  btn.disabled = false; btn.textContent = '▶ Jalankan Backtest';
+  btBusy(false, false);
   document.getElementById('btProgressWrap').style.display = 'none';
+}
+
+// Tabel banding TETAP vs ATR. Dua backtest pada candle yang sama persis,
+// jadi selisihnya benar-benar dari metode exit.
+function renderCompareBlock(res){
+  const wrap = document.getElementById('btCompareWrap');
+  if(!res.compare){ wrap.style.display = 'none'; wrap.innerHTML = ''; return; }
+  const f = res.compare.fixed, a = res.compare.atr, info = res.compare.atr_info || {};
+  const n2 = (x,d=2) => (x==null||!isFinite(x)) ? '∞' : Number(x).toFixed(d);
+
+  // higher=true berarti angka lebih besar itu lebih bagus.
+  const rows = [
+    ['Total trade',        f.total_trades,       a.total_trades,       0, null],
+    ['Win rate (%)',       f.win_rate,           a.win_rate,           1, true],
+    ['Return total (%)',   f.total_return_pct,   a.total_return_pct,   2, true],
+    ['Profit factor',      f.profit_factor,      a.profit_factor,      2, true],
+    ['Max drawdown (%)',   f.max_drawdown_pct,   a.max_drawdown_pct,   2, false],
+    ['Rata-rata menang (%)',f.avg_win_pct,       a.avg_win_pct,        2, true],
+    ['Rata-rata kalah (%)',f.avg_loss_pct,       a.avg_loss_pct,       2, true],
+    ['Rata-rata hold (mnt)',f.avg_hold_minutes,  a.avg_hold_minutes,   0, null],
+  ].map(([label, fv, av, dec, higher])=>{
+    let cf='', ca='';
+    if(higher !== null && isFinite(fv) && isFinite(av) && Math.abs(fv-av) > 1e-9){
+      const fWins = higher ? (fv > av) : (fv < av);
+      if(fWins) cf='win'; else ca='win';
+    }
+    return `<tr><td>${label}</td><td class="mono ${cf}">${n2(fv,dec)}</td><td class="mono ${ca}">${n2(av,dec)}</td></tr>`;
+  }).join('');
+
+  const reasons = Array.from(new Set([
+    ...Object.keys(f.reason_counts||{}), ...Object.keys(a.reason_counts||{})
+  ])).sort().map(k=>
+    `<tr><td>Exit: ${btReasonLabel(k)}</td><td class="mono">${(f.reason_counts||{})[k]||0}x</td>`+
+    `<td class="mono">${(a.reason_counts||{})[k]||0}x</td></tr>`).join('');
+
+  const nMin = Math.min(f.real_trades||0, a.real_trades||0);
+  const caution = nMin < 30
+    ? `<span style="color:var(--amber)">⚠ Hanya ${nMin} trade. Ini TERLALU SEDIKIT untuk menyimpulkan apa pun.
+       Selisih sebesar apa pun pada sampel sekecil ini kemungkinan besar kebetulan.
+       Perpanjang rentang hari, atau uji beberapa simbol lalu gabungkan.</span>`
+    : `${nMin} trade. Ini indikasi awal, bukan bukti kuat. Uji beberapa simbol dan
+       beberapa periode berbeda sebelum mengubah config yang dipakai uang asli.`;
+
+  const infoHtml = (info && info.trades_with_atr) ? `
+    <div style="margin-top:10px;font-size:11.5px;line-height:1.7" class="mut">
+      <b>Sebaran stop ATR:</b>
+      ATR rata-rata ${n2(info.avg_atr_pct)}% dari harga &middot;
+      SL rata-rata ${n2(info.avg_sl_pct)}% (terkecil ${n2(info.min_sl_pct)}%, terbesar ${n2(info.max_sl_pct)}%) &middot;
+      kena batas bawah ${info.clamped_low||0} trade &middot;
+      kena batas atas ${info.clamped_high||0} trade &middot;
+      gagal hitung ATR ${info.trades_fallback||0} trade (pakai SL/TP tetap).
+    </div>` : '';
+
+  wrap.style.display = 'block';
+  wrap.innerHTML = `
+    <h2 style="font-size:13px">⚖ Perbandingan: SL/TP Tetap vs ATR</h2>
+    <p class="mut" style="font-size:11.5px;line-height:1.5;margin:4px 0 0">
+      Dua backtest dijalankan pada candle yang <b>sama persis</b>, dengan filter entry dan
+      max hold identik. Jadi selisihnya benar-benar berasal dari metode exit, bukan dari
+      perbedaan data. Angka <span style="color:var(--green);font-weight:700">hijau</span>
+      menandai sisi yang lebih unggul di baris itu.
+    </p>
+    <table class="bt-cmp">
+      <thead><tr><th>Metrik</th><th>TETAP</th><th>ATR</th></tr></thead>
+      <tbody>${rows}
+        <tr><td colspan="3" style="border-bottom:none;padding-top:12px"></td></tr>
+        ${reasons}</tbody>
+    </table>
+    ${infoHtml}
+    <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border);font-size:11.5px;line-height:1.6">
+      ${caution}
+    </div>`;
 }
 
 function btReasonTagClass(r){ return (r||'').toLowerCase(); }
@@ -804,10 +1010,17 @@ function renderBacktestResult(res){
     <div class="posrow"><span class="k">SL / TP / BE (trig,lock) / Trail (start,step)</span><span class="v mono" style="font-size:11.5px">${p.SL_PCT}% / ${p.TP_PCT}% / ${p.BE_TRIGGER_PCT}%,${p.BE_LOCK_PCT}% / ${p.TRAILING_START_PCT}%,${p.TRAILING_STEP_PCT}%</span></div>
     <div class="posrow"><span class="k">Maks hold / Min pump 24h</span><span class="v mono">${p.MAX_HOLD_MINUTES} mnt / ${p.MIN_PUMP_PCT_24H}%</span></div>
     <div class="posrow"><span class="k">Maks ekstensi VWAP</span><span class="v mono">${p.VWAP_MAX_EXTENSION_PCT}%</span></div>
+    <div class="posrow"><span class="k">Mode exit</span><span class="v mono">${res.compare? 'BANDING (tetap vs ATR)' : (p.USE_ATR_EXITS? 'ATR' : 'TETAP')}</span></div>
+    ${(p.USE_ATR_EXITS || res.compare) ? `
+      <div class="posrow"><span class="k">ATR: periode / pengali SL / RR</span><span class="v mono">${p.ATR_PERIOD} / ${p.ATR_MULTIPLIER_SL}x / ${p.ATR_TP_RR_RATIO}x</span></div>
+      <div class="posrow"><span class="k">ATR: batas SL</span><span class="v mono">${p.ATR_SL_MIN_PCT}% .. ${p.ATR_SL_MAX_PCT}%</span></div>
+      <div class="posrow"><span class="k">ATR: pengali BE (trig,lock) / Trail (start,step)</span><span class="v mono" style="font-size:11.5px">${p.ATR_BE_TRIGGER_MULT}x,${p.ATR_BE_LOCK_MULT}x / ${p.ATR_TRAILING_START_MULT}x,${p.ATR_TRAILING_STEP_MULT}x</span></div>` : ''}
     <div style="border-top:1px solid var(--border);margin:4px 0"></div>
     ${reasonRows || '<div class="posrow"><span class="k mut">Tidak ada trade terjadi pada rentang & parameter ini.</span></div>'}
     ${(res.warnings&&res.warnings.length)? '<div style="border-top:1px solid var(--border);margin:4px 0"></div>'+res.warnings.map(w=>`<div class="posrow"><span class="k" style="color:var(--amber)">⚠ ${w}</span></div>`).join('') : ''}
   `;
+
+  renderCompareBlock(res);
 
   document.getElementById('btLimitList').innerHTML = (res.limitations||[]).map(l=>`<li>${l}</li>`).join('');
 

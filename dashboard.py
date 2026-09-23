@@ -39,7 +39,7 @@ from datetime import datetime, timezone
 
 from flask import Flask, jsonify, render_template, request
 
-from config import PUMP_CONFIG
+from config import PUMP_CONFIG, get_mode, get_base_url, is_testnet
 import state as state_mod
 
 try:
@@ -80,7 +80,7 @@ def get_client():
             _client = BinanceSpotClient(
                 PUMP_CONFIG.get("API_KEY", ""),
                 PUMP_CONFIG.get("API_SECRET", ""),
-                PUMP_CONFIG.get("BASE_URL", "https://api.binance.com"),
+                get_base_url(PUMP_CONFIG),
             )
         except Exception:
             _client = None
@@ -148,13 +148,6 @@ _RE_SELL = re.compile(
     r"^(?P<ts>[\d\-]+ [\d:]+).*?SELL FILLED (?P<sym>\w+) \((?P<reason>[^)]+)\): qty=(?P<qty>[\d.]+) @ avg "
     r"(?P<price>[\d.]+) \| entry=(?P<entry>[\d.]+) \| estimasi PnL=(?P<pnl>[+\-\d.]+)"
 )
-_RE_DRYBUY = re.compile(
-    r"^(?P<ts>[\d\-]+ [\d:]+).*?\[DRY_RUN\] BUY MARKET (?P<sym>\w+) qty=(?P<qty>[\d.]+).*?@ (?P<price>[\d.]+)\)"
-    r".*?24h=(?P<pct>[+\-\d.]+)%"
-)
-_RE_DRYSELL = re.compile(
-    r"^(?P<ts>[\d\-]+ [\d:]+).*?\[DRY_RUN\] SELL MARKET (?P<sym>\w+) qty=(?P<qty>[\d.]+) \(alasan: (?P<reason>[^)]+)\)"
-)
 
 
 def parse_log(max_lines: int = 4000):
@@ -180,7 +173,7 @@ def parse_log(max_lines: int = 4000):
                 level_count[lvl] += 1
                 break
 
-        m = _RE_BUY.search(ln) or _RE_DRYBUY.search(ln)
+        m = _RE_BUY.search(ln)
         if m:
             d = m.groupdict()
             open_pos = {
@@ -189,7 +182,7 @@ def parse_log(max_lines: int = 4000):
                 "buy_price": float(d["price"]),
                 "qty": float(d["qty"]),
                 "pct24h": float(d.get("pct") or 0),
-                "dry": "[DRY_RUN]" in ln,
+                "testnet": is_testnet(PUMP_CONFIG),
             }
             continue
 
@@ -204,7 +197,7 @@ def parse_log(max_lines: int = 4000):
                 "entry": float(d["entry"]),
                 "pnl": float(d["pnl"]),
                 "reason": d["reason"],
-                "dry": False,
+                "testnet": is_testnet(PUMP_CONFIG),
             })
             if "buy_price" not in t:
                 t["buy_price"] = float(d["entry"])
@@ -212,25 +205,6 @@ def parse_log(max_lines: int = 4000):
             trades.append(t)
             open_pos = None
             continue
-
-        m = _RE_DRYSELL.search(ln)
-        if m:
-            d = m.groupdict()
-            t = dict(open_pos or {})
-            sell_price = get_live_price(d["sym"]) or t.get("buy_price", 0.0)
-            t.update({
-                "symbol": d["sym"],
-                "sell_time": d["ts"],
-                "sell_price": sell_price,
-                "reason": d["reason"],
-                "dry": True,
-            })
-            bp = t.get("buy_price", 0.0)
-            t["entry"] = bp
-            t["pnl_pct"] = (sell_price / bp - 1.0) * 100.0 if bp else 0.0
-            t["pnl"] = (sell_price - bp) * t.get("qty", 0.0) if bp else 0.0
-            trades.append(t)
-            open_pos = None
 
     for ln in lines[-120:]:
         ln = ln.rstrip("\n")
@@ -283,7 +257,8 @@ def build_status():
 
     return {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
-        "dry_run": bool(PUMP_CONFIG.get("DRY_RUN")),
+        "mode": get_mode(PUMP_CONFIG),
+        "testnet": is_testnet(PUMP_CONFIG),
         "live_connected": live_price is not None or balances is not None,
         "bot_alive": _bot_looks_alive(),
         "has_api_key": bool(PUMP_CONFIG.get("API_KEY")),
@@ -316,8 +291,25 @@ def build_status():
             "cooldown_left_sec": cooldown_left,
         },
         "config": {
-            "sl_pct": PUMP_CONFIG.get("SL_PCT") if PUMP_CONFIG.get("USE_STOP_LOSS") else None,
-            "tp_pct": PUMP_CONFIG.get("TP_PCT"),
+            # Kalau ada posisi terbuka, tampilkan level yang BENAR-BENAR
+            # berlaku untuk posisi itu (dikunci saat entry, bisa dari ATR),
+            # bukan nilai config. Kalau ditampilkan nilai config sementara
+            # posisi memakai level ATR yang berbeda, dashboard akan
+            # menyesatkan justru saat informasinya paling dibutuhkan.
+            "sl_pct": (
+                (state.get("sl_pct") or PUMP_CONFIG.get("SL_PCT"))
+                if PUMP_CONFIG.get("USE_STOP_LOSS") else None
+            ),
+            "tp_pct": state.get("tp_pct") or PUMP_CONFIG.get("TP_PCT"),
+            "exit_source": state.get("exit_source") or (
+                "ATR" if PUMP_CONFIG.get("USE_ATR_EXITS") else "FIXED"),
+            "atr_pct_at_entry": state.get("atr_pct_at_entry") or None,
+            # BE/Trailing juga mengikuti ATR, jadi tampilkan level yang
+            # benar-benar berlaku untuk posisi terbuka, bukan nilai config.
+            "be_trigger_pct": state.get("be_trigger_pct") or PUMP_CONFIG.get("BE_TRIGGER_PCT"),
+            "trail_start_pct": state.get("trail_start_pct") or PUMP_CONFIG.get("TRAILING_START_PCT"),
+            "trail_step_pct": state.get("trail_step_pct") or PUMP_CONFIG.get("TRAILING_STEP_PCT"),
+            "use_atr_exits": bool(PUMP_CONFIG.get("USE_ATR_EXITS")),
             "be_trigger_pct": PUMP_CONFIG.get("BE_TRIGGER_PCT"),
             "trailing_start_pct": PUMP_CONFIG.get("TRAILING_START_PCT"),
             "max_hold_minutes": PUMP_CONFIG.get("MAX_HOLD_MINUTES"),
@@ -361,6 +353,14 @@ def build_trade_summary(trades):
 # candle dari Binance lalu mensimulasikan di memori. Job berjalan di thread
 # terpisah karena bisa memakan waktu (mengambil ribuan candle dengan paging).
 
+BT_PARAM_KEYS = (
+    "USE_ATR_EXITS",
+    "SL_PCT", "TP_PCT", "BE_TRIGGER_PCT", "BE_LOCK_PCT", "TRAILING_START_PCT",
+    "TRAILING_STEP_PCT", "MAX_HOLD_MINUTES", "MIN_PUMP_PCT_24H", "VWAP_MAX_EXTENSION_PCT",
+    "ATR_PERIOD", "ATR_MULTIPLIER_SL", "ATR_SL_MIN_PCT", "ATR_SL_MAX_PCT", "ATR_TP_RR_RATIO",
+    "ATR_BE_TRIGGER_MULT", "ATR_BE_LOCK_MULT", "ATR_TRAILING_START_MULT", "ATR_TRAILING_STEP_MULT",
+)
+
 _bt_jobs: dict = {}
 _bt_jobs_lock = threading.Lock()
 BT_JOB_TTL_SECONDS = 3600  # buang hasil job lama dari memori setelah 1 jam
@@ -374,7 +374,7 @@ def _bt_cleanup_old_jobs():
             _bt_jobs.pop(jid, None)
 
 
-def _bt_run_job(job_id: str, symbol: str, days: int, overrides: dict):
+def _bt_run_job(job_id: str, symbol: str, days: int, overrides: dict, compare: bool = False):
     def set_progress(frac, stage=""):
         with _bt_jobs_lock:
             if job_id in _bt_jobs:
@@ -414,12 +414,23 @@ def _bt_run_job(job_id: str, symbol: str, days: int, overrides: dict):
                 "Kemungkinan simbol salah/tidak ada di Binance Spot, atau rentang hari terlalu pendek."
             )
 
-        set_progress(0.75, "menjalankan simulasi...")
-        result = bt.run_backtest(
-            klines, cfg, warmup_bars=window_bars,
-            progress_cb=lambda f: set_progress(0.75 + f * 0.24, "menjalankan simulasi..."),
-        )
-        summary = bt.summarize(result)
+        if compare:
+            # Dua simulasi pada candle yang SAMA PERSIS: sekali SL/TP tetap,
+            # sekali berbasis ATR. Semua parameter lain identik, jadi selisih
+            # hasil benar-benar berasal dari metode exit.
+            set_progress(0.75, "menjalankan simulasi TETAP lalu ATR...")
+            cmp_out = bt.compare_fixed_vs_atr(klines, cfg, warmup_bars=window_bars)
+            set_progress(0.99, "menyusun perbandingan...")
+            result = cmp_out["result_atr"]
+            summary = cmp_out["atr"]
+        else:
+            set_progress(0.75, "menjalankan simulasi...")
+            result = bt.run_backtest(
+                klines, cfg, warmup_bars=window_bars,
+                progress_cb=lambda f: set_progress(0.75 + f * 0.24, "menjalankan simulasi..."),
+            )
+            summary = bt.summarize(result)
+            cmp_out = None
 
         trades_out = [{
             "entry_time": datetime.fromtimestamp(t.entry_time / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M"),
@@ -439,11 +450,13 @@ def _bt_run_job(job_id: str, symbol: str, days: int, overrides: dict):
             "bars_usable": result.bars_usable,
             "start_time": datetime.fromtimestamp(result.start_time / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if result.start_time else None,
             "end_time": datetime.fromtimestamp(result.end_time / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if result.end_time else None,
-            "params_used": {k: cfg.get(k) for k in (
-                "SL_PCT", "TP_PCT", "BE_TRIGGER_PCT", "BE_LOCK_PCT", "TRAILING_START_PCT",
-                "TRAILING_STEP_PCT", "MAX_HOLD_MINUTES", "MIN_PUMP_PCT_24H", "VWAP_MAX_EXTENSION_PCT",
-            )},
+            "params_used": {k: cfg.get(k) for k in BT_PARAM_KEYS},
             "summary": summary,
+            "compare": None if not compare else {
+                "fixed": cmp_out["fixed"],
+                "atr": cmp_out["atr"],
+                "atr_info": cmp_out.get("atr_info") or {},
+            },
             "trades": trades_out,
             "warnings": result.warnings,
             "limitations": [
@@ -504,10 +517,12 @@ def api_backtest_start():
     if days < 1:
         return jsonify({"error": "Jumlah hari minimal 1."}), 400
 
-    overrides = {k: data.get(k) for k in (
-        "SL_PCT", "TP_PCT", "BE_TRIGGER_PCT", "BE_LOCK_PCT", "TRAILING_START_PCT",
-        "TRAILING_STEP_PCT", "MAX_HOLD_MINUTES", "MIN_PUMP_PCT_24H", "VWAP_MAX_EXTENSION_PCT",
-    )}
+    compare = bool(data.get("compare"))
+    overrides = {k: data.get(k) for k in BT_PARAM_KEYS}
+    if compare:
+        # Mode banding mengatur USE_ATR_EXITS sendiri (dijalankan dua kali),
+        # jadi toggle dari form tidak relevan dan sengaja diabaikan.
+        overrides.pop("USE_ATR_EXITS", None)
     try:
         cfg_preview = bt.apply_overrides(PUMP_CONFIG, overrides)
         bt.validate_params(cfg_preview)
@@ -529,7 +544,8 @@ def api_backtest_start():
             "symbol": symbol, "days": days,
         }
 
-    thread = threading.Thread(target=_bt_run_job, args=(job_id, symbol, days, overrides), daemon=True)
+    thread = threading.Thread(target=_bt_run_job,
+                              args=(job_id, symbol, days, overrides, compare), daemon=True)
     thread.start()
     return jsonify({"job_id": job_id})
 
@@ -568,19 +584,10 @@ def api_backtest_status(job_id):
 def api_backtest_defaults():
     """Nilai default form backtest, diambil langsung dari config.py yang
     sedang dipakai bot supaya form selalu mencerminkan konfigurasi terkini."""
-    return jsonify({
-        "SL_PCT": PUMP_CONFIG.get("SL_PCT"),
-        "TP_PCT": PUMP_CONFIG.get("TP_PCT"),
-        "BE_TRIGGER_PCT": PUMP_CONFIG.get("BE_TRIGGER_PCT"),
-        "BE_LOCK_PCT": PUMP_CONFIG.get("BE_LOCK_PCT"),
-        "TRAILING_START_PCT": PUMP_CONFIG.get("TRAILING_START_PCT"),
-        "TRAILING_STEP_PCT": PUMP_CONFIG.get("TRAILING_STEP_PCT"),
-        "MAX_HOLD_MINUTES": PUMP_CONFIG.get("MAX_HOLD_MINUTES"),
-        "MIN_PUMP_PCT_24H": PUMP_CONFIG.get("MIN_PUMP_PCT_24H"),
-        "VWAP_MAX_EXTENSION_PCT": PUMP_CONFIG.get("VWAP_MAX_EXTENSION_PCT"),
-        "quote_asset": QUOTE,
-        "default_days": 90,
-    })
+    out = {k: PUMP_CONFIG.get(k) for k in BT_PARAM_KEYS}
+    out["quote_asset"] = QUOTE
+    out["default_days"] = 90
+    return jsonify(out)
 
 
 @app.route("/")
@@ -636,7 +643,7 @@ def api_manual_close():
     dashboard menulis "perintah" ke CONTROL_FILE, lalu proses bot
     (pump_scanner_bot.py, terpisah) yang membaca & mengeksekusinya lewat
     jalur close_position() yang SAMA PERSIS dipakai Stop Loss/Take Profit,
-    supaya perilakunya konsisten (hormat DRY_RUN, update cooldown, dst)."""
+    supaya perilakunya konsisten (update cooldown, dst)."""
     now = time.time()
     if now - _last_manual_close_request["ts"] < _MANUAL_CLOSE_COOLDOWN_SECONDS:
         return jsonify({"error": "Tunggu sebentar, permintaan sebelumnya baru saja dikirim."}), 429
