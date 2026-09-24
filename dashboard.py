@@ -39,10 +39,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import threading
 import time
 import uuid
 from datetime import datetime, timezone
+from hmac import compare_digest
 from typing import Optional
 
 from flask import Flask, jsonify, render_template, request
@@ -85,6 +87,16 @@ QUOTE = PUMP_CONFIG.get("QUOTE_ASSET", "USDT")
 # toh cuma file terakhir yang dibaca bot, ini juga mencegah spam UI).
 _MANUAL_CLOSE_COOLDOWN_SECONDS = 5.0
 _last_manual_close_request = {"ts": 0.0}
+
+# Token acak PER PROSES untuk melindungi endpoint POST /api/manual/close dari
+# CSRF (perbaikan audit 2026-09-24, temuan S-05). Tanpa ini, situs jahat yang
+# kebetulan dibuka di browser yang sama bisa mengirim POST ke
+# 127.0.0.1:8080 dan menutup posisi Anda. Token dibuat ulang setiap
+# dashboard dinyalakan dan hanya diketahu halaman dashboard itu sendiri
+# (disisipkan ke template), lalu wajib dikirim balik lewat header
+# X-Admin-Token. Permintaan cross-site dari situs lain tidak membawa token
+# ini, sehingga ditolak 403.
+_ADMIN_TOKEN = secrets.token_urlsafe(32)
 
 # --- Cache klien & harga supaya tidak spam Binance tiap refresh ---
 _client = None
@@ -487,12 +499,20 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
         start_ms = end_ms - days * bt.MS_PER_DAY
         fetch_start_ms = start_ms - warmup_ms
 
-        client = get_client()
-        if client is None:
+        # Sumber data backtest (perbaikan audit 2026-09-24, temuan S-04):
+        # SELALU endpoint publik produksi (api.binance.com), TIDAK PERNAH
+        # testnet. Data candle testnet adalah data sintetis -- jawaban resmi
+        # Binance Developer Community menyatakan data testnet "should not be
+        # assumed to match production at any point" -- sehingga kalibrasi
+        # parameter di atasnya tidak punya makna untuk LIVE. Endpoint market
+        # data bersifat publik sehingga tidak butuh API key, dan client ini
+        # sengaja dipisah dari client dashboard (yang ikut MODE aktif).
+        if not _HAS_CLIENT:
             raise bt.BacktestError(
                 "Klien Binance tidak tersedia (modul 'requests' tidak termuat). "
                 "Backtest butuh akses ke data historis publik Binance."
             )
+        client = BinanceSpotClient("", "", PUMP_CONFIG["LIVE_BASE_URL"])
 
         # --- Tahap 1: tentukan semesta simbol -------------------------
         set_progress(0.01, "mengambil daftar pasar...")
@@ -767,7 +787,7 @@ def api_backtest_defaults():
 
 @app.route("/")
 def index():
-    return render_template("dashboard.html")
+    return render_template("dashboard.html", admin_token=_ADMIN_TOKEN)
 
 
 def build_watchlist() -> dict:
@@ -968,8 +988,16 @@ def _bot_has_open_position() -> bool:
         return True
     if not isinstance(st, dict):
         return True
-    pos = st.get("position")
-    return bool(pos) and bool(pos.get("symbol"))
+    # Skema yang BENAR adalah kunci top-level "current_symbol" + "qty",
+    # persis seperti yang ditulis DEFAULT_STATE di pump_scanner_bot.py.
+    # Versi lama fungsi ini membaca "position.symbol" -- kunci yang TIDAK
+    # PERNAH ditulis bot -- sehingga rem keamanan ini selalu bernilai False
+    # dan tidak pernah benar-benar aktif (temuan audit T-02, 2026-09-24).
+    try:
+        qty = float(st.get("qty", 0) or 0)
+    except (TypeError, ValueError):
+        return True
+    return bool(st.get("current_symbol")) and qty > 0
 
 
 def start_auto_refresher() -> None:
@@ -1045,6 +1073,13 @@ def api_manual_close():
     (pump_scanner_bot.py, terpisah) yang membaca & mengeksekusinya lewat
     jalur close_position() yang SAMA PERSIS dipakai Stop Loss/Take Profit,
     supaya perilakunya konsisten (update cooldown, dst)."""
+    # Anti-CSRF (temuan S-05): perintah jual hanya diterima kalau request
+    # membawa header X-Admin-Token yang cocok dengan token acak per proses
+    # yang disisipkan ke halaman dashboard. compare_digest dipakai supaya
+    # perbandingan tidak bocor lewat timing.
+    if not compare_digest(request.headers.get("X-Admin-Token", ""), _ADMIN_TOKEN):
+        return jsonify({"error": "Token admin tidak valid atau tidak ada."}), 403
+
     now = time.time()
     if now - _last_manual_close_request["ts"] < _MANUAL_CLOSE_COOLDOWN_SECONDS:
         return jsonify({"error": "Tunggu sebentar, permintaan sebelumnya baru saja dikirim."}), 429

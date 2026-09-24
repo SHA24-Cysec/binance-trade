@@ -2,14 +2,13 @@
 Klien REST Binance Spot minimal, dibuat manual (bukan pakai SDK pihak ketiga).
 
 Kenapa tidak pakai SDK resmi `binance-sdk-spot`?
-- Saat diaudit, versi SDK terbaru (per Sep 2026) punya bug pada parsing
-  filter simbol di exchangeInfo (field oneOf `filters` gagal ter-parse jadi
-  None saat divalidasi dari JSON respons asli), yang krusial untuk
-  menghitung pembulatan quantity (LOT_SIZE) dan minimum notional. Daripada
-  mewariskan bug itu ke bot yang menyentuh uang sungguhan, klien REST ini
-  dibuat manual dan sederhana, memakai endpoint resmi yang didokumentasikan
-  di developers.binance.com, dan sudah diuji cocok dengan contoh signature
-  resmi Binance.
+- Keputusan ini dibuat berdasarkan temuan saat klien ini pertama ditulis
+  (bug parse filter simbol oneOf di exchangeInfo). CATATAN AUDIT 2026-09-24:
+  klaim tersebut TIDAK berhasil diverifikasi ulang dari sumber publik
+  (SDK resmi ada dan aktif, versi 11.2.0). Statusnya: PERLU VERIFIKASI
+  DOKUMENTASI. Apa pun hasilnya, klien manual ini tetap aman dipakai: ia
+  memakai endpoint resmi yang didokumentasikan di developers.binance.com dan
+  sudah diuji cocok dengan contoh signature resmi Binance.
 
 Aturan signature (berlaku sejak 2026-01-15): payload harus di-percent-encode
 dulu sebelum dihitung HMAC SHA256, atau request ditolak dengan -1022
@@ -21,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import math
 import time
 import urllib.parse
 from decimal import Decimal, ROUND_DOWN
@@ -68,6 +68,23 @@ def _build_query(params: dict) -> str:
             f"{urllib.parse.quote_plus(str(k))}={urllib.parse.quote_plus(str(v))}"
         )
     return "&".join(items)
+
+
+def _fmt_num(value) -> str:
+    """Format angka untuk parameter API Binance tanpa notasi ilmiah.
+
+    str(float) di Python beralih ke notasi ilmiah untuk nilai < 1e-4
+    (mis. str(0.0000833) -> '8.33e-05'), dan Binance menolak parameter
+    quantity dalam bentuk itu (error -1100/-1013). Lewat Decimal + format
+    'f' hasilnya selalu bentuk desimal biasa, berapa pun kecil nilainya.
+    Nilai non-finite (NaN/inf) ditolak keras supaya bug harga/qty di hulu
+    tidak pernah terkirim sebagai order.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"nilai non-finite tidak boleh dikirim ke API: {value!r}")
+    if isinstance(value, Decimal):
+        return format(value, "f")
+    return format(Decimal(str(value)), "f")
 
 
 class BinanceSpotClient:
@@ -176,7 +193,13 @@ class BinanceSpotClient:
                 # Kena 429/418: hormati Retry-After dari server, jangan pakai
                 # backoff tebakan sendiri yang bisa jauh lebih pendek.
                 if isinstance(exc, BinanceRateLimitError):
-                    wait = exc.retry_after if exc.retry_after else min(60 * attempt, 180)
+                    # Lantai 5 detik diterapkan DI SINI (bukan di parser, yang
+                    # sengaja dibiarkan setia pada header asli karena diuji
+                    # terpisah). Ada laporan Binance pernah mengirim
+                    # Retry-After bernilai 0/1; retry secepat itu justru bisa
+                    # mempercepat eskalasi ke ban IP (HTTP 418) yang
+                    # eskalatif 2 menit sampai 3 hari menurut dokumen resmi.
+                    wait = max(5.0, float(exc.retry_after)) if exc.retry_after else min(60 * attempt, 180)
                     logger.error(
                         "Kena batas rate Binance (HTTP %s) pada %s %s. "
                         "Mundur %ds sesuai instruksi server (percobaan %d/%d).",
@@ -190,8 +213,15 @@ class BinanceSpotClient:
                             "ke depan. Permintaan dihentikan, tidak dicoba ulang.", wait,
                         )
                         raise
-                    time.sleep(wait)
-                    continue
+                    # Tidur hanya DI ANTARA percobaan (temuan S-10): kalau ini
+                    # percobaan TERAKHIR (mis. jalur kritis posisi dengan
+                    # max_retries=1), jangan tertahan sampai ratusan detik di
+                    # sini -- lempar saja dan biarkan pemanggil (loop bot)
+                    # yang mengatur jadwal coba-ulang berikutnya.
+                    if attempt < max_retries:
+                        time.sleep(wait)
+                        continue
+                    raise
 
                 # -1021 = timestamp di luar recvWindow -> re-sync lalu retry
                 if isinstance(exc, BinanceAPIError) and exc.code == -1021:
@@ -287,8 +317,24 @@ class BinanceSpotClient:
     def get_book_ticker(self, symbol: str) -> dict:
         return self._request("GET", "/api/v3/ticker/bookTicker", {"symbol": symbol})
 
-    def get_price(self, symbol: str) -> float:
-        data = self._request("GET", "/api/v3/ticker/price", {"symbol": symbol})
+    def get_book_ticker_all(self) -> list:
+        """bookTicker untuk SEMUA simbol dalam satu request (dipakai modul
+        penyegar watchlist). Dibungkus metode publik supaya modul lain tidak
+        perlu memanggil _request (API privat) secara langsung."""
+        return self._request("GET", "/api/v3/ticker/bookTicker")
+
+    def get_price(self, symbol: str, max_retries: int = 3) -> float:
+        """Ambil harga terakhir satu simbol.
+
+        max_retries diteruskan ke _request. Jalur KRITIS posisi (manage_exit
+        di loop utama) memanggil ini dengan max_retries=1 (perbaikan audit,
+        temuan S-10): kegagalan cepat lebih baik daripada tertahan sampai
+        180 detik di dalam retry panjang, karena selama tertahan SL/TP/BE/
+        Trailing sama sekali tidak dievaluasi. Loop utama sudah mencoba lagi
+        sendiri tiap LOOP_INTERVAL_SECONDS.
+        """
+        data = self._request("GET", "/api/v3/ticker/price", {"symbol": symbol},
+                             max_retries=max_retries)
         return float(data["price"])
 
     # ---------------------------------------------------------------
@@ -300,10 +346,14 @@ class BinanceSpotClient:
     def new_market_order(self, symbol: str, side: str, quantity: Optional[float] = None,
                           quote_order_qty: Optional[float] = None) -> dict:
         params = {"symbol": symbol, "side": side, "type": "MARKET"}
+        # _fmt_num WAJIB di sini: str(float) berubah jadi notasi ilmiah untuk
+        # nilai < 1e-4 (mis. '8.33e-05') dan Binance menolak quantity dalam
+        # bentuk itu (-1100/-1013). Pada order SELL ini bisa menahan posisi
+        # tanpa proteksi. AUDIT 2026-09-24 (temuan T-03).
         if quantity is not None:
-            params["quantity"] = quantity
+            params["quantity"] = _fmt_num(quantity)
         if quote_order_qty is not None:
-            params["quoteOrderQty"] = quote_order_qty
+            params["quoteOrderQty"] = _fmt_num(quote_order_qty)
         return self._request("POST", "/api/v3/order", params, signed=True)
 
     def get_dust_convertible(self, account_type: str = "SPOT") -> dict:
@@ -327,10 +377,11 @@ class BinanceSpotClient:
         beberapa laporan pengguna komunitas python-binance yang membuktikan
         format array/berulang menghasilkan error -1022 (signature tidak
         valid), sedangkan format string dipisah koma berhasil.
-        Binance sendiri MEMBATASI FREKUENSI endpoint ini per akun (dilaporkan
-        sekitar tiap 6-24 jam sekali, bukan dibatasi kode ini) -- error dari
-        batas tersebut harus ditangani oleh pemanggil sebagai hal wajar,
-        bukan bug.
+        Binance sendiri MEMBATASI FREKUENSI endpoint ini per akun. Angka
+        persisnya TIDAK ada di dokumentasi resmi yang bisa diverifikasi
+        (laporan komunitas menyebut sekitar tiap 24 jam sekali -- status:
+        PERLU VERIFIKASI DOKUMENTASI); yang jelas error dari batas tersebut
+        harus ditangani oleh pemanggil sebagai hal wajar, bukan bug.
         Referensi resmi: developers.binance.com/docs/wallet/asset/dust-transfer
         (dicek 2026-09-23)."""
         params = {"asset": ",".join(assets), "accountType": account_type}

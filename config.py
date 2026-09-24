@@ -144,7 +144,7 @@ PUMP_CONFIG = {
     # --- Scan & seleksi kandidat ---
     "MARKET_SCAN_INTERVAL_SECONDS": 300,     # scan seluruh pasar tiap 5 menit
     "LOOP_INTERVAL_SECONDS": 15,             # cek TP/BE/trailing tiap 15 detik
-    "MIN_PUMP_PCT_24H": 13.0,                 # minimal naik 8% dalam 24 jam utk dianggap kandidat
+    "MIN_PUMP_PCT_24H": 13.0,                 # minimal naik 13% dalam 24 jam utk dianggap kandidat
     "MIN_QUOTE_VOLUME_USDT_24H": 2_000_000,  # minimal volume 24 jam (hindari koin ilikuid/rawan manipulasi)
     "TOP_N_CANDIDATES_TO_CONFIRM": 10,       # dari hasil ranking, cek candle utk N teratas
     "CONFIRM_INTERVAL": "5m",
@@ -175,9 +175,20 @@ PUMP_CONFIG = {
     # Proteksi keras: mode entry baru tidak boleh mengirim order LIVE sebelum
     # lulus validasi out-of-sample yang disepakati. TESTNET dan backtest tetap
     # diizinkan. Jangan ubah ke True hanya karena satu hasil backtest bagus.
-    "ALLOW_EXPERIMENTAL_ENTRY_LIVE": True,
+    # DEFAULT False (hasil audit 2026-09-24): dengan ENTRY_MODEL saat ini masih
+    # berstatus hipotesis, pagar ini HARUS aktif. Ubah ke True hanya setelah
+    # Anda sadar penuh sudah memvalidasi model entry di data produksi.
+    "ALLOW_EXPERIMENTAL_ENTRY_LIVE": False,
 
     "EXTRA_EXCLUDE_SYMBOLS": [],             # mis. ["SOMEUSDT"] kalau mau blacklist manual
+
+    # --- Filter usia listing (proteksi koin baru) ---
+    # Koin yang baru listing beberapa hari punya riwayat tipis, spread lebar,
+    # dan sering menjadi pump artifisial "hari listing" yang langsung kolaps.
+    # Bot menolak entry ke pair yang usianya di bawah ambang ini, dicek dari
+    # candle harian pertamanya (1 panggilan klines weight 2 per kandidat,
+    # di-cache permanen). 0 = nonaktifkan filter ini.
+    "MIN_LISTING_AGE_DAYS": 7,
 
     # ==================================================================
     # WATCHLIST PEMANTAUAN (READ-ONLY, TIDAK MEMENGARUHI KEPUTUSAN TRADE)
@@ -320,8 +331,16 @@ PUMP_CONFIG = {
     ],
 
     # --- Ukuran posisi (tanpa martingale -- sekali entry per rotasi) ---
+    #
+    # PERINGATAN HASIL AUDIT 2026-09-24 (temuan K-01): RISK_PERCENT=100.0
+    # berarti SELURUH modal dipertaruhkan di setiap trade. Dengan SL plafon
+    # ATR 4%, setiap rugi menggerus ~4% dari TOTAL akun, dan 10 rugi beruntun
+    # (biasa pada strategi momentum) menghapus lebih dari sepertiga akun.
+    # Default di bawah (25%) adalah titik awal yang lebih masuk akal untuk
+    # LIVE; naikkan bertahap HANYA dari data hasil nyata, bukan karena satu
+    # backtest terlihat bagus.
     "USE_RISK_PERCENT": True,               # True = ukuran posisi % dari saldo USDT free
-    "RISK_PERCENT": 100.0,                     # dipakai jika USE_RISK_PERCENT = True
+    "RISK_PERCENT": 25.0,                      # dipakai jika USE_RISK_PERCENT = True
     "POSITION_SIZE_USDT": 5.0,              # dipakai jika USE_RISK_PERCENT = False
 
     # --- Plafon nominal per posisi ---
@@ -341,7 +360,11 @@ PUMP_CONFIG = {
     # mengisi ulang plafon ini dengan angka > 0, PASTIKAN itu memang yang
     # Anda maksud, dan bot akan memperingatkan di log kalau plafon
     # membatalkan RISK_PERCENT Anda.
-    "MAX_POSITION_USDT": 0,                  # 0 = tanpa plafon (ikuti RISK_PERCENT sepenuhnya)
+    # 0 = tanpa plafon (ikuti RISK_PERCENT sepenuhnya). Default 100: untuk
+    # hari-hari pertama LIVE, plafon keras ini membatasi nominal maksimum
+    # yang dipertaruhkan per posisi berapa pun saldo Anda. Naikkan/0-kan
+    # hanya setelah bot terbukti berperilaku benar dengan uang asli.
+    "MAX_POSITION_USDT": 100,
 
     # Bantalan saldo (persen) yang TIDAK ikut dibelanjakan, dipotong dari
     # saldo USDT free sebelum RISK_PERCENT dihitung. Gunanya teknis, bukan
@@ -349,15 +372,14 @@ PUMP_CONFIG = {
     # fee taker 0,1% dipotong dari saldo yang sama. Kalau bot mencoba
     # membelanjakan 100% saldo persis, order sering ditolak bursa dengan
     # error -2010 "Account has insufficient balance".
-    # Dengan RISK_PERCENT 95 bantalan ini praktis tidak terasa; ia baru
-    # penting kalau Anda menaikkan RISK_PERCENT mendekati 100.
+    # Makin dekat RISK_PERCENT ke 100, makin penting bantalan ini.
     "BALANCE_BUFFER_PCT": 0.5,
 
     # --- Exit ---
     "USE_TP": True,
     "TP_PCT": 4.0,
     "USE_STOP_LOSS": True,                   # kerugian maksimum per-trade dari harga entry, exit paksa di harga pasar
-    "SL_PCT": 1.8,                            # contoh: 3.0 = keluar kalau rugi >= 3% dari entry (SEBELUM Breakeven/Trailing aktif)
+    "SL_PCT": 1.8,                            # keluar paksa kalau rugi >= nilai ini (%) dari entry (SEBELUM Breakeven/Trailing aktif)
 
     # --- Stop Loss & Take Profit adaptif berbasis ATR (opsional) ---
     #
@@ -456,13 +478,28 @@ PUMP_CONFIG = {
     "MIN_SECONDS_BETWEEN_TRADES": 60,
 
     # --- Kontrol risiko ---
-    "USE_EQUITY_STOP": False,              # matikan (False) utk nonaktifkan DD Stop
-    "MAX_DRAWDOWN_PERCENT": 20.0,
-    "USE_DAILY_STOP": False,               # matikan (False) utk nonaktifkan Daily Stop
-    "MAX_DAILY_LOSS_PERCENT": 5.0,
+    #
+    # JARING PENGAMAN MODAL. Sebelum audit 2026-09-24 semua saklar ini MATI
+    # (False) sehingga tidak ada satu pun mekanisme yang menghentikan bot
+    # saat kerugian menumpuk (temuan K-01), dan CLOSE_ALL_AT_LIMIT tidak punya
+    # implementasi di kode (temuan T-06) -- sekarang parameter itu benar-benar
+    # bekerja: saat DD stop / daily stop memicu, posisi terbuka ditutup paksa
+    # satu kali per episode.
+    "USE_EQUITY_STOP": True,               # matikan (False) utk nonaktifkan DD Stop
+    "MAX_DRAWDOWN_PERCENT": 15.0,
+    "USE_DAILY_STOP": True,                # matikan (False) utk nonaktifkan Daily Stop
+    "MAX_DAILY_LOSS_PERCENT": 3.0,
     "DAILY_PROFIT_TARGET_PERCENT": 10.0,
     "CLOSE_ALL_AT_LIMIT": True,
     "DD_COOLDOWN_HOURS": 24,
+
+    # Berapa error API berturut-turut sebelum bot berhenti total. Posisi yang
+    # sedang terbuka saat itu berhenti dikelola (SL/TP bot ini pengecekan
+    # lokal tiap 15 detik), jadi WAJIB jalankan bot di bawah supervisor yang
+    # menyalakannya kembali otomatis (contoh unit systemd ada di
+    # pump-bot.service di repo ini). Dengan supervisor aktif, berhenti total
+    # hanya berarti jeda singkat, bukan posisi telanjang berjam-jam.
+    "MAX_CONSECUTIVE_ERRORS": 20,
 
     # --- File state & log (OTOMATIS dipisah per mode, lihat catatan) ---
     # Nilai di bawah adalah NAMA DASAR. Saat config.py di-import, nama final

@@ -466,8 +466,13 @@ class TestRateLimitClient(unittest.TestCase):
             with self.assertRaises(self.bc.BinanceRateLimitError) as cm:
                 c._request("GET", "/api/v3/ping", max_retries=2)
         self.assertEqual(cm.exception.retry_after, 3)
-        # harus tidur sesuai Retry-After, bukan backoff tebakan 2-10 detik
-        self.assertIn(3, tidur)
+        # harus tidur sesuai Retry-After, bukan backoff tebakan 2-10 detik --
+        # dengan LANTAI 5 detik di titik sleep (perbaikan S-09): ada laporan
+        # Retry-After bernilai 0/1, dan retry secepat itu justru mempercepat
+        # eskalasi ke ban IP 418. Parser (diuji terpisah di atas) tetap setia
+        # pada nilai header asli.
+        self.assertIn(5.0, tidur)
+        self.assertNotIn(3, tidur)
 
     def test_418_tidak_dicoba_ulang(self):
         """IP sudah diblokir; mencoba lagi hanya memperpanjang hukuman."""
@@ -654,12 +659,25 @@ class TestDashboardAutoIntegrasi(unittest.TestCase):
         self.dash._watchlist_cache.update({"data": None, "ts": 0, "error": None})
 
     def test_rem_posisi_terbuka_terbaca_dari_state(self):
+        # Skema state yang BENAR (ditulis pump_scanner_bot.DEFAULT_STATE):
+        # kunci top-level current_symbol + qty. Versi uji sebelumnya memakai
+        # {"position": {"symbol": ...}} -- skema yang tidak pernah ditulis
+        # bot -- sehingga uji mengunci bug, bukan perilaku benar (temuan T-02).
         with mock.patch.object(self.dash, "load_state",
-                               lambda: {"position": {"symbol": "ARBUSDT"}}):
+                               lambda: {"current_symbol": "ARBUSDT", "qty": 1.0}):
             self.assertTrue(self.dash._bot_has_open_position())
-        with mock.patch.object(self.dash, "load_state", lambda: {"position": None}):
+        with mock.patch.object(self.dash, "load_state",
+                               lambda: {"current_symbol": "XUSDT", "qty": "2.0"}):
+            self.assertTrue(self.dash._bot_has_open_position())
+        with mock.patch.object(self.dash, "load_state",
+                               lambda: {"current_symbol": "XUSDT", "qty": 0.0}):
             self.assertFalse(self.dash._bot_has_open_position())
         with mock.patch.object(self.dash, "load_state", lambda: {}):
+            self.assertFalse(self.dash._bot_has_open_position())
+        # Skema LAMA yang keliru (position.symbol) tidak boleh dianggap
+        # posisi terbuka -- kunci itu tidak pernah ditulis bot.
+        with mock.patch.object(self.dash, "load_state",
+                               lambda: {"position": {"symbol": "ARBUSDT"}}):
             self.assertFalse(self.dash._bot_has_open_position())
 
     def test_state_rusak_dianggap_ada_posisi(self):

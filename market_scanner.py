@@ -36,6 +36,10 @@ STABLE_BASE_ASSETS = {
     "USD1", "RLUSD",
 }
 
+# CATATAN AUDIT 2026-09-24: Binance telah menghapus SEMUA leveraged token
+# (BTCUP, ETHDOWN, dsb) per 3 April 2024, jadi daftar ini kini murni pagar
+# pengaman. Kalau suatu hari Binance menghidupkan produk serupa, suffix ini
+# kembali relevan.
 LEVERAGED_TOKEN_SUFFIXES = ("UP", "DOWN", "BULL", "BEAR")
 
 ENTRY_MODEL_LEGACY = "LEGACY_MOMENTUM"
@@ -55,7 +59,18 @@ class Candidate:
 
 
 def _looks_leveraged(base_asset: str) -> bool:
-    return base_asset.endswith(LEVERAGED_TOKEN_SUFFIXES)
+    """Deteksi leveraged token Binance lama (BTCUP, ETHDOWN, dsb).
+
+    Binance sudah menghapus SEMUA leveraged token per 3 April 2024, jadi
+    fungsi ini kini murni pagar pengaman. Syarat awalan minimal 2 huruf
+    mencegah koin SAH seperti JUP (awalan 'J' hanya 1 huruf) ikut tertolak
+    -- sebelum perbaikan audit 2026-09-24, JUPUSDT salah ditolak oleh
+    heuristik ini.
+    """
+    for sfx in LEVERAGED_TOKEN_SUFFIXES:
+        if base_asset.endswith(sfx) and len(base_asset) - len(sfx) >= 2:
+            return True
+    return False
 
 
 def _entry_model(config: dict) -> str:

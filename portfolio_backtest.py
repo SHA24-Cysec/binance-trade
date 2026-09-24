@@ -657,7 +657,11 @@ def selftest() -> bool:
     # --- satu posisi saja pada satu waktu ---
     cfg = {
         "CONFIRM_LOOKBACK_BARS": 10, "MIN_PUMP_PCT_24H": 5.0,
-        "CONFIRM_MIN_CLOSE_POSITION": 0.0,
+        # Nama kunci yang BENAR (perbaikan audit temuan R-03): sebelumnya
+        # tertulis "CONFIRM_MIN_CLOSE_POSITION" -- kunci yang tidak pernah
+        # dibaca scanner -- sehingga relaksasi gerbang ini tidak pernah
+        # berlaku dan tes diam-diam memakai default 0.35.
+        "MIN_CLOSE_POSITION_IN_RANGE": 0.0,
         "MIN_QUOTE_VOLUME_USDT_24H": 0, "TOP_N_CANDIDATES_TO_CONFIRM": 10,
         "COOLDOWN_MINUTES_AFTER_CLOSE": 0, "MAX_HOLD_MINUTES": 10_000,
         "USE_STOP_LOSS": True, "USE_TP": True, "USE_BREAKEVEN": False,

@@ -15,16 +15,18 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger("state")
 
+# Dirampingkan pada audit 2026-09-24 (temuan R-02): kunci sisa bot grid
+# martingale lama ("layers", "avg_price", "total_qty", "last_signal_bar_time")
+# dan "last_order_time" tidak dibaca satu baris pun di kode aktif, jadi
+# dihapus supaya tidak menyesatkan. Skema posisi lengkap milik pump scanner
+# ada di DEFAULT_STATE pump_scanner_bot.py (yang digabung di atas hasil
+# load_state di sini); dashboard membaca file state dengan .get() yang aman,
+# jadi kunci yang hilang tidak merusak apa pun.
 DEFAULT_STATE = {
-    "layers": [],                 # list of {"price": float, "qty": float, "time": int}
-    "avg_price": 0.0,
-    "total_qty": 0.0,
     "be_active": False,
     "be_stop_price": 0.0,
     "trailing_active": False,
     "trailing_stop_price": 0.0,
-    "last_order_time": 0,
-    "last_signal_bar_time": 0,
     "cooldown_until": 0,
     "day_start_equity": None,
     "day_start_date": None,

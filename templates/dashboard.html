@@ -662,6 +662,10 @@
 // Format angka memakai locale id-ID (pemisah ribuan titik, desimal koma).
 // Hanya memengaruhi TAMPILAN; nilai yang dikirim ke server tetap angka mentah.
 const LOCALE = 'id-ID';
+// Token anti-CSRF per proses dashboard (temuan S-05): disisipkan server saat
+// halaman dirender, dan WAJIB dikirim balik di header X-Admin-Token untuk
+// endpoint POST /api/manual/close. Situs lain tidak mengetahui nilai ini.
+const ADMIN_TOKEN = {{ admin_token | tojson }};
 const fmt = (n,d=2)=> (n===null||n===undefined||isNaN(n))?'—':Number(n).toLocaleString(LOCALE,{minimumFractionDigits:d,maximumFractionDigits:d});
 const fmtP = (n,d=6)=> (n===null||n===undefined||isNaN(n))?'—':Number(n).toLocaleString(LOCALE,{minimumFractionDigits:2,maximumFractionDigits:d});
 const sign = n => (n>0?'+':'');
@@ -903,7 +907,7 @@ async function confirmManualClose(){
   try{
     const r = await fetch('/api/manual/close', {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      headers: {'Content-Type': 'application/json', 'X-Admin-Token': ADMIN_TOKEN},
       body: JSON.stringify({symbol: sym}),
     });
     const d = await r.json();

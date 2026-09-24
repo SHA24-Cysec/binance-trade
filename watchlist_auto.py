@@ -390,7 +390,11 @@ def refresh_once(client, config: dict,
     try:
         if budget.can_spend(WEIGHT_BOOK_ALL):
             prog("mengambil spread bid-ask...", 0.05)
-            books = client._request("GET", "/api/v3/ticker/bookTicker")
+            # Metadata dipanggil lewat metode PUBLIK klien (perbaikan audit
+            # temuan R-06): memanggil _request (API privat) dari modul lain
+            # membuat watchlist rawan patah diam-diam kalau internal klien
+            # berubah.
+            books = client.get_book_ticker_all()
             budget.spend(WEIGHT_BOOK_ALL)
             for b in books if isinstance(books, list) else []:
                 try:
