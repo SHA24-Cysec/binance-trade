@@ -1,0 +1,123 @@
+"""Utilitas I/O atomik lintas Windows dan POSIX.
+
+Semua file teks ditulis sebagai UTF-8. Penggantian target memakai os.replace
+karena atomik jika temporary file berada pada filesystem yang sama. Windows
+dapat menolak replace sementara bila target sedang dibuka proses lain, jadi
+replace dicoba ulang dengan backoff singkat.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+
+
+_REPLACE_DELAYS = (0.02, 0.04, 0.08, 0.16, 0.32, 0.50)
+
+
+def timestamp_tag() -> str:
+    return time.strftime("%Y%m%d-%H%M%S", time.localtime())
+
+
+def replace_with_retry(source: os.PathLike | str, target: os.PathLike | str,
+                       delays: tuple[float, ...] = _REPLACE_DELAYS) -> None:
+    """Ganti target secara atomik, dengan retry khusus kegagalan sharing.
+
+    PermissionError adalah bentuk umum kegagalan sharing Windows. Beberapa
+    build Python melaporkan sharing violation sebagai OSError dengan winerror
+    5 atau 32, jadi keduanya diperlakukan sama hanya di Windows.
+    """
+    src = os.fspath(source)
+    dst = os.fspath(target)
+    last: BaseException | None = None
+    for attempt in range(len(delays) + 1):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError as exc:
+            last = exc
+        except OSError as exc:
+            if os.name == "nt" and getattr(exc, "winerror", None) in (5, 32):
+                last = exc
+            else:
+                raise
+        if attempt < len(delays):
+            time.sleep(delays[attempt])
+    assert last is not None
+    raise last
+
+
+def atomic_write_text(path: os.PathLike | str, text: str, *, mode: int | None = None) -> None:
+    """Tulis teks UTF-8 ke temporary unik lalu replace target."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f".{target.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}")
+    try:
+        if mode is not None and os.name == "posix":
+            # Buat temp langsung dengan 0600. Jangan pernah memberi jendela
+            # singkat di mana secret .env sudah tertulis tetapi masih 0644.
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+            handle_cm = os.fdopen(fd, "w", encoding="utf-8", newline="")
+        else:
+            handle_cm = open(tmp, "x", encoding="utf-8", newline="")
+        with handle_cm as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if mode is not None and os.name == "posix":
+            os.chmod(tmp, mode)
+        replace_with_retry(tmp, target)
+        if mode is not None and os.name == "posix":
+            os.chmod(target, mode)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def atomic_write_json(path: os.PathLike | str, data: Any, *, mode: int | None = None) -> None:
+    text = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=False) + "\n"
+    atomic_write_text(path, text, mode=mode)
+
+
+def read_json(path: os.PathLike | str, default: Any = None) -> Any:
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except FileNotFoundError:
+        return default
+
+
+def archive_corrupt(path: os.PathLike | str) -> Path | None:
+    """Pindahkan file rusak ke *.corrupt-<timestamp>, tanpa menimpanya."""
+    source = Path(path)
+    if not source.exists():
+        return None
+    base = source.with_name(f"{source.name}.corrupt-{timestamp_tag()}")
+    backup = base
+    index = 1
+    while backup.exists():
+        backup = Path(f"{base}-{index}")
+        index += 1
+    replace_with_retry(source, backup)
+    return backup
+
+
+def append_json_line(path: os.PathLike | str, data: Any) -> None:
+    """Tambahkan satu JSON object UTF-8 per baris dan paksa flush ke disk.
+
+    Pemanggil wajib melakukan serialisasi antar-thread. Fungsi ini dipakai
+    dashboard yang berjalan sebagai satu proses, bukan sebagai database umum.
+    """
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n"
+    with open(target, "a", encoding="utf-8", newline="") as handle:
+        handle.write(line)
+        handle.flush()
+        os.fsync(handle.fileno())

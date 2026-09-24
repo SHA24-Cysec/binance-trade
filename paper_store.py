@@ -39,6 +39,8 @@ from decimal import Decimal
 from typing import Any, Callable, Optional
 import threading
 
+from atomic_io import archive_corrupt, atomic_write_json
+
 logger = logging.getLogger("paper_store")
 
 SCHEMA_VERSION = 1
@@ -138,12 +140,11 @@ class PaperStore:
                 self._save_locked()
 
     def _backup_corrupt(self, exc: Exception) -> None:
-        backup = f"{self.path}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
         try:
-            os.replace(self.path, backup)
+            backup = archive_corrupt(self.path)
             logger.error(
                 "File state PAPER %s RUSAK (%s). Cadangan disimpan ke %s. "
-                "State direset ke saldo awal -- file lama TIDAK ditimpa diam-diam.",
+                "State direset ke saldo awal, file lama tidak ditimpa diam-diam.",
                 self.path, exc, backup,
             )
         except OSError as move_exc:
@@ -196,12 +197,7 @@ class PaperStore:
     # Penyimpanan atomik
     # ------------------------------------------------------------------
     def _save_locked(self) -> None:
-        tmp = f"{self.path}.tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(self.state, f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, self.path)  # atomik
+        atomic_write_json(self.path, self.state)
 
     def save(self) -> None:
         with self.lock:

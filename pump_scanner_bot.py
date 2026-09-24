@@ -16,11 +16,13 @@ CARA PAKAI (sama seperti bot.py):
     python pump_scanner_bot.py --selftest      # audit logika, tanpa jaringan
     python pump_scanner_bot.py                 # jalan (MODE="PAPER" dulu, default)
 
-MODE DI config.py:
+MODE RUNTIME:
     "PAPER" -> simulasi eksekusi lokal penuh; data pasar ASLI dari Binance
                produksi publik (REST + WebSocket), tanpa API key. Saldo/order
                virtual disimpan ke file. (default, aman)
     "LIVE"  -> order sungguhan ke Binance produksi (uang asli)
+Mode dipilih lewat tab Kontrol dan disimpan di pump_bot_runtime.json. Nilai
+config.py tetap menjadi default immutable.
 Keduanya memakai jalur LOGIKA STRATEGI yang SAMA PERSIS lewat antarmuka
 ExchangeClient; yang berbeda hanya lapisan eksekusi order dan sumber saldo.
 
@@ -37,11 +39,14 @@ import logging.handlers
 import os
 import signal
 import sys
+import threading
 import time
 
 from binance_client import BinanceAPIError, SymbolFilters, build_filters_cache
 from exchange_client import ExchangeClient, create_exchange_client
-from config import PUMP_CONFIG, get_base_url, is_paper, require_valid_mode
+from config import (
+    PUMP_CONFIG, CONFIG_LOAD_ERRORS, get_base_url, is_paper, require_valid_mode,
+)
 import market_scanner as scanner
 import state as state_mod
 import strategy
@@ -49,6 +54,7 @@ import strategy
 
 logger = logging.getLogger("pump_bot")
 _shutdown_requested = False
+_shutdown_event = threading.Event()
 
 DEFAULT_STATE = {
     "current_symbol": None,
@@ -109,6 +115,7 @@ def _handle_signal(signum, frame):
     global _shutdown_requested
     logger.info("Menerima sinyal berhenti (%s). Bot akan berhenti setelah iterasi ini selesai.", signum)
     _shutdown_requested = True
+    _shutdown_event.set()
 
 
 def load_pump_state(path: str) -> dict:
@@ -723,10 +730,22 @@ def manage_exit(client: ExchangeClient, config: dict, filters_cache: dict,
         close_position(client, config, filters_cache, state, "+".join(reasons))
 
 
-def run(config: dict) -> None:
+def run(config: dict, lifecycle=None) -> int:
+    global _shutdown_requested
+    _shutdown_requested = False
+    _shutdown_event.clear()
     setup_logging(config)
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
+    # Windows hanya dapat mengirim CTRL_BREAK_EVENT secara graceful ke child
+    # yang dibuat dengan CREATE_NEW_PROCESS_GROUP.
+    if os.name == "nt" and hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, _handle_signal)
+
+    if CONFIG_LOAD_ERRORS:
+        logger.critical("Konfigurasi runtime tidak aman untuk dipakai: %s",
+                        "; ".join(CONFIG_LOAD_ERRORS))
+        return 2
 
     # Validasi MODE secara KETAT paling awal: nilai tak dikenal/kosong/typo
     # menghentikan bot dengan pesan jelas, TIDAK pernah jatuh diam-diam ke LIVE.
@@ -735,7 +754,7 @@ def run(config: dict) -> None:
         mode = require_valid_mode(config)
     except InvalidModeError as exc:
         logger.critical(str(exc))
-        sys.exit(2)
+        return 2
     base_url = get_base_url(config)
 
     if mode == "LIVE" and (not config["API_KEY"] or not config["API_SECRET"]):
@@ -744,7 +763,7 @@ def run(config: dict) -> None:
             "jadi kredensial produksi wajib ada di file .env. Bot dihentikan. "
             "(Mode PAPER tidak memerlukan API key.)"
         )
-        sys.exit(1)
+        return 1
 
     logger.info("=" * 70)
     logger.info("Pump Scanner Bot mulai berjalan. MODE=%s | endpoint=%s", mode, base_url)
@@ -802,6 +821,8 @@ def run(config: dict) -> None:
     # manual membuat bot mengelola "posisi hantu" dan SL/TP-nya menembak
     # order yang tidak masuk akal.
     reconcile_state_with_exchange(client, config, state)
+    if lifecycle is not None:
+        lifecycle.write("RUNNING")
 
     consecutive_errors = 0
     last_time_sync = time.time()
@@ -825,9 +846,21 @@ def run(config: dict) -> None:
         closed = [k for k in strategy.parse_klines(raw) if k.close_time < now_ms]
         return closed[-lookback:]
 
+    exit_code = 0
     while not _shutdown_requested:
         loop_start = time.time()
         try:
+            # Jalur shutdown utama di Windows dan Linux: file perintah stop.
+            # Dipisahkan dari file CLOSE_POSITION agar kedua perintah tidak
+            # saling menimpa.
+            if state_mod.consume_stop_request(config["CONTROL_FILE"]):
+                _shutdown_requested = True
+                _shutdown_event.set()
+                if lifecycle is not None:
+                    lifecycle.write("STOPPING", reason="Permintaan stop dari dashboard.")
+                state_mod.save_state(config["STATE_FILE"], state)
+                break
+
             if time.time() - last_time_sync > TIME_SYNC_INTERVAL_SECONDS:
                 client.sync_time()
                 last_time_sync = time.time()
@@ -958,6 +991,8 @@ def run(config: dict) -> None:
                             equity_str, config["QUOTE_ASSET"], posisi_info, flag_str)
 
             state_mod.save_state(config["STATE_FILE"], state)
+            if lifecycle is not None:
+                lifecycle.heartbeat("RUNNING")
             consecutive_errors = 0
 
         except BinanceAPIError as exc:
@@ -976,10 +1011,23 @@ def run(config: dict) -> None:
                 "Restart=always) supaya proses otomatis hidup kembali.",
                 max_errors,
             )
+            exit_code = 1
             break
 
         elapsed = time.time() - loop_start
-        time.sleep(max(1.0, config["LOOP_INTERVAL_SECONDS"] - elapsed))
+        # Event membuat SIGTERM/SIGBREAK membangunkan sleep segera, sehingga
+        # state masih sempat disimpan sebelum timeout fallback berakhir.
+        _shutdown_event.wait(max(1.0, config["LOOP_INTERVAL_SECONDS"] - elapsed))
+
+    if lifecycle is not None and _shutdown_requested:
+        lifecycle.write("STOPPING", reason="Shutdown graceful sedang menyimpan state.")
+    # Simpan sekali lagi setelah loop agar perubahan iterasi terakhir tidak
+    # hilang saat sinyal datang di antara dua operasi.
+    try:
+        state_mod.save_state(config["STATE_FILE"], state)
+    except OSError as exc:
+        logger.error("Gagal menyimpan state saat shutdown: %s", exc)
+        exit_code = 1
 
     # Tutup sumber daya klien (mis. thread WebSocket di PAPER/LIVE) dengan
     # rapi. Aman dipanggil untuk klien apa pun (default no-op).
@@ -988,6 +1036,7 @@ def run(config: dict) -> None:
     except Exception:  # noqa: BLE001 - penutupan best-effort saat shutdown
         pass
     logger.info("Bot berhenti.")
+    return exit_code
 
 
 def selftest() -> None:
@@ -1623,16 +1672,37 @@ def selftest() -> None:
     print("(Selftest ini TIDAK menghubungi Binance sama sekali -- murni logika lokal.)")
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(description="Pump Scanner Bot Binance Spot")
     parser.add_argument("--selftest", action="store_true",
                          help="Jalankan audit logika murni (tanpa jaringan) lalu keluar.")
     args = parser.parse_args()
     if args.selftest:
         selftest()
-        return
-    run(PUMP_CONFIG)
+        return 0
+
+    from config import InvalidModeError
+    from runtime_control import BotAlreadyRunningError, BotRuntime
+
+    if CONFIG_LOAD_ERRORS:
+        print("Konfigurasi runtime rusak: " + "; ".join(CONFIG_LOAD_ERRORS), file=sys.stderr)
+        return 2
+    try:
+        mode = require_valid_mode(PUMP_CONFIG)
+    except InvalidModeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    runtime = BotRuntime(mode)
+    try:
+        with runtime as lifecycle:
+            code = run(PUMP_CONFIG, lifecycle=lifecycle)
+            runtime.finish(code, None if code == 0 else "Bot berhenti dengan kode error.")
+            return code
+    except BotAlreadyRunningError as exc:
+        print(str(exc), file=sys.stderr)
+        return 3
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

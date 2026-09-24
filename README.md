@@ -12,7 +12,8 @@ hold / momentum pudar. **Tidak ada averaging-down/martingale.**
 
 ## Mode PAPER dan LIVE
 
-Bot ini punya dua mode, diatur lewat `"MODE"` di `config.py`:
+Bot ini punya dua mode. Mode runtime dipilih lewat tab **Kontrol** dan disimpan
+atomik di `pump_bot_runtime.json`. Default tetap PAPER:
 
 | | `MODE="PAPER"` (default) | `MODE="LIVE"` |
 |---|---|---|
@@ -26,7 +27,10 @@ Bot ini punya dua mode, diatur lewat `"MODE"` di `config.py`:
 | File state posisi | `pump_bot_state_paper.json` | `pump_bot_state_live.json` |
 | File state akun simulasi | `pump_paper_account_paper.json` | (tidak dipakai) |
 | File log | `pump_bot_paper.log` | `pump_bot_live.log` |
-| File kontrol (dashboard) | `pump_bot_control_paper.json` | `pump_bot_control_live.json` |
+| File kontrol jual manual | `pump_bot_control_paper.json` | `pump_bot_control_live.json` |
+| File perintah Stop | `pump_bot_control_paper.stop.json` | `pump_bot_control_live.stop.json` |
+| File settings override | `pump_bot_settings_paper.json` | `pump_bot_settings_live.json` |
+| File lock/lifecycle | `pump_bot_lock_paper.json` / `pump_bot_process_paper.json` | `pump_bot_lock_live.json` / `pump_bot_process_live.json` |
 
 Perbedaan PAPER vs LIVE **hanya** ada di lapisan eksekusi order dan sumber
 saldo. Semua logika strategi (scan, konfirmasi, sizing, SL/TP/BE/Trailing,
@@ -77,21 +81,19 @@ Hasil PAPER **bukan jaminan** hasil LIVE. Yang **tidak** dimodelkan:
 
 ### Cara reset state PAPER
 
-Cukup **hapus atau pindahkan** file state, lalu jalankan ulang bot:
+Gunakan **Kontrol > Reset Akun PAPER**. Reset hanya diizinkan saat mode aktif
+PAPER dan bot sudah `STOPPED` atau `CRASHED`. Masukkan saldo awal positif,
+ketik `RESET`, tinjau konfirmasi, lalu lanjutkan.
 
-```bash
-# hapus (mulai bersih dengan saldo awal dari config)
-rm pump_paper_account_paper.json pump_bot_state_paper.json
+Dashboard memindahkan file akun dan state menjadi
+`*.bak-<timestamp>` sebelum menyimpan saldo awal baru. File lama tidak dihapus.
+Jika pengarsipan atau penyimpanan settings gagal, reset dibatalkan dan file
+dikembalikan sebisa mungkin.
 
-# atau arsipkan dulu (lebih aman)
-mv pump_paper_account_paper.json pump_paper_account_paper.json.bak
-mv pump_bot_state_paper.json      pump_bot_state_paper.json.bak
-```
-
-Saat start, jika file akun tidak ada, bot membuat saldo awal dari
-`PAPER_INITIAL_BALANCES`. Jika file state **rusak**, bot membuat cadangan
-`*.corrupt-<timestamp>` lalu memberi tahu di log dan mulai dari saldo awal
-(file rusak TIDAK ditimpa diam-diam).
+Saat Start berikutnya, jika file akun tidak ada, bot membuat saldo awal dari
+`PAPER_INITIAL_BALANCES`. Jika file state rusak, bot membuat cadangan
+`*.corrupt-<timestamp>` dan memberi tahu di log. File rusak tidak ditimpa
+diam-diam.
 
 ### Pengaman mode
 
@@ -129,19 +131,19 @@ dilonggarkan setelah posisi dibuka, hanya bisa mengetat lewat Breakeven dan
 Trailing. Kalau ATR gagal dihitung (candle kurang), bot otomatis jatuh ke
 SL_PCT/TP_PCT tetap, jadi posisi tidak pernah dibiarkan tanpa stop.
 
-### Mengubah parameter: ada 3 tempat
+### Mengubah parameter
 
 | Tempat | Cakupan | Sifat |
 |---|---|---|
-| **Dashboard** (form Backtest) | Semua parameter exit + semua parameter ATR | Sementara, sekali jalan |
+| **Dashboard, tab Backtest** | Parameter uji exit dan ATR | Sementara, sekali jalan |
 | **CLI** `backtest.py` | Sama, lewat flag | Sementara, sekali jalan |
-| **`config.py`** | Semua | Permanen, dipakai bot live |
+| **Dashboard, tab Kontrol** | Schema lengkap strategi, risiko, sistem, dan watchlist | Persisten, terpisah PAPER/LIVE |
+| **`config.py`** | Nilai bawaan immutable | Default aplikasi |
 
-Dashboard dan CLI **tidak pernah menulis ke `config.py`**. Kalau sudah ketemu
-angka yang bagus, pindahkan sendiri ke `config.py`.
-
-Nilai default form dashboard dibaca langsung dari `config.py`, jadi form selalu
-mencerminkan konfigurasi bot yang sedang berlaku.
+Tab Backtest dan CLI tidak menyimpan settings. Tab Kontrol menulis hanya file
+override per mode, bukan mengubah source `config.py`. Nilai efektif adalah
+default `config.py` yang digabung dengan override mode aktif. Tombol default
+per field atau grup menghapus perbedaan terhadap default tersebut.
 
 **Tombol Bandingkan Tetap vs ATR** menjalankan dua backtest pada candle yang
 sama persis lalu menampilkan tabelnya berdampingan. Setara dengan:
@@ -312,11 +314,11 @@ itu praktis tidak pernah terpakai:
 | 1.000 USDT | 950,00 | 10,00 (1% saldo) |
 | 5.000 USDT | 4.750,00 | 10,00 (0,2% saldo) |
 
-Makin besar saldo, makin kecil persentase sesungguhnya. Sekarang defaultnya
-`MAX_POSITION_USDT = 0` yang berarti **tanpa plafon**, sehingga `RISK_PERCENT`
-benar-benar terpakai. Kalau Anda mengisinya dengan angka di atas 0 dan plafon
-itu memotong ukuran posisi, bot akan **memperingatkan di log** lengkap dengan
-persentase sesungguhnya, supaya tidak terulang diam-diam.
+Makin besar saldo, makin kecil persentase sesungguhnya. Default saat ini adalah
+`MAX_POSITION_USDT = 100`. Nilai `0` berarti tanpa plafon dan hanya diizinkan
+untuk PAPER. Settings LIVE mewajibkan angka lebih besar dari nol agar uang asli
+tidak dapat dijalankan tanpa plafon eksplisit. Jika plafon memotong hasil
+`RISK_PERCENT`, bot memperingatkan di log lengkap dengan persentase efektifnya.
 
 ### `BALANCE_BUFFER_PCT`
 
@@ -378,15 +380,20 @@ Dua cara menekannya:
 
 | File | Fungsi |
 |---|---|
-| `config.py` | Semua parameter strategi, risiko, dan kredensial (`PUMP_CONFIG`) |
-| `binance_client.py` | Klien REST Binance Spot (dibuat manual, signature sudah diverifikasi cocok dengan contoh resmi Binance) |
-| `market_scanner.py` | Filter & ranking koin "pump" + konfirmasi momentum |
-| `pump_scanner_bot.py` | Program utama: scan pasar, rotasi 1 koin (`--selftest` tersedia juga) |
-| `strategy.py` | Struktur candle (`Kline`) + parser klines |
-| `state.py` | Penyimpanan state posisi ke file JSON (tahan restart) |
-| `run.py` | Peluncur gabungan: jalankan bot + dashboard sekaligus dalam satu perintah |
-| `dashboard.py` | Dashboard web untuk memantau bot + tombol "Jual Sekarang" manual (Flask) |
-| `templates/dashboard.html` | Tampilan dashboard (self-contained, tanpa CDN) |
+| `config.py` | Default immutable dan penggabungan runtime/settings per mode |
+| `settings_schema.py` | Schema lengkap, validasi, diff, override, dan audit |
+| `runtime_control.py` | Lock, lifecycle, Start/Stop/Restart, dan pemilik child bot |
+| `procctl.py` | Abstraksi sinyal, process group, dan Windows Job Object |
+| `atomic_io.py` | Write/replace atomik dengan retry Windows |
+| `credential_store.py` | Penyimpanan `.env` dan verifikasi izin/ACL |
+| `binance_client.py` | Klien REST Binance Spot |
+| `market_scanner.py` | Filter dan ranking koin pump serta konfirmasi momentum |
+| `pump_scanner_bot.py` | Program bot (`--selftest` tersedia) |
+| `strategy.py` | Struktur candle (`Kline`) dan parser klines |
+| `state.py` | State posisi dan kanal kontrol terpisah |
+| `run.py` | Dashboard utama sekaligus auto-start bot terkelola |
+| `dashboard.py` | API pemantauan dan kontrol lokal berbasis Flask |
+| `templates/dashboard.html` | UI responsif self-contained tanpa CDN |
 | `backtest.py` | Mesin backtest parameter (dipanggil dashboard, bisa juga `python backtest.py` untuk selftest) |
 | `requirements.txt` | Dependency Python |
 
@@ -436,101 +443,100 @@ Dua cara menekannya:
 ```bash
 pip install -r requirements.txt
 
-# 1) Audit logika inti tanpa koneksi apa pun (wajib dijalankan dulu)
+# Audit logika inti tanpa koneksi dan tanpa order
 python pump_scanner_bot.py --selftest
 
-# 2) Set kredensial API lewat file .env (jangan taruh langsung di file config.py)
-#    Salin .env.example jadi .env, lalu isi API key/secret Anda di dalamnya.
-#    Linux/macOS: cp .env.example .env      |      Windows: copy .env.example .env
-#    Detail lengkap dan opsi lain ada di komentar paling atas config.py
-
-# 3) Uji dulu di PAPER (default). Di config.py pastikan "MODE": "PAPER".
-#    Tidak perlu API key: data pasar diambil dari Binance produksi publik,
-#    eksekusi/fee/saldo disimulasikan lokal. Saldo awal virtual diatur di
-#    PAPER_INITIAL_BALANCES (default 10.000 USDT).
-python pump_scanner_bot.py
-
-# 4) Setelah yakin, ubah "MODE": "LIVE" di config.py, isi .env dengan API key
-#    PRODUKSI Binance Anda, lalu jalankan lagi (mulai dari modal kecil).
-#    Ingat: hasil PAPER BUKAN jaminan hasil LIVE.
-python pump_scanner_bot.py
-```
-
-### Menjalankan bot + dashboard sekaligus (satu perintah)
-
-Kalau Anda mau bot DAN dashboard jalan bersamaan tanpa buka dua terminal
-terpisah, pakai `run.py`:
-
-```bash
+# Jalankan dashboard sekaligus auto-start bot
 python run.py
-# Dashboard otomatis tersedia di http://localhost:8080
-# Ctrl+C sekali akan mematikan KEDUANYA sekaligus
+# Buka http://localhost:8080
 ```
 
-Cara kerjanya:
-- Log bot (BUY/SELL/scan/error) dan log akses dashboard tercampur tampil di
-  satu layar terminal yang sama, dengan urutan waktu apa adanya.
-- **Kebijakan "semua atau tidak sama sekali":** kalau salah satu proses
-  (bot ATAU dashboard) berhenti/crash karena sebab apa pun, proses yang
-  satunya otomatis ikut dihentikan, lalu `run.py` keluar. Ini supaya Anda
-  tidak salah kira dashboard masih "hidup" memantau bot padahal botnya
-  sudah lama mati, atau sebaliknya.
-- Ganti port dashboard: `DASHBOARD_PORT=9000 python run.py`
-- Di `MODE="LIVE"`, kalau API key belum di-set, `run.py` menolak jalan dari
-  awal (order LIVE memakai uang asli). Di `MODE="PAPER"` API key tidak
-  diperlukan, jadi `run.py` tetap jalan tanpa `.env`.
+`python run.py` menjalankan dashboard sebagai proses utama. Bot menjadi child
+process yang dimiliki dashboard. Menekan Stop atau Restart pada tab **Kontrol**
+tidak mematikan dashboard. Jika bot crash, dashboard tetap hidup dan menampilkan
+status `CRASHED`, kode keluar, serta tombol Start.
 
-Menjalankan keduanya terpisah (dua terminal) masih tetap bisa kalau Anda
-lebih suka begitu:
+`Ctrl+C` pada terminal `run.py` menghentikan child bot secara graceful lalu
+menutup dashboard. Stop normal memakai file perintah khusus per mode. Jika bot
+tidak merespons sampai timeout, fallback-nya adalah process-group `SIGTERM` di
+Linux atau `CTRL_BREAK_EVENT` di Windows, kemudian force-kill sebagai langkah
+terakhir.
+
+Pilihan standalone tetap didukung:
+
 ```bash
-python pump_scanner_bot.py     # terminal 1
-python dashboard.py            # terminal 2
+python dashboard.py          # dashboard hidup, bot awalnya STOPPED
+python pump_scanner_bot.py   # bot saja, mengambil lock mode yang sama
 ```
 
-### Menjalankan 24/7 di VPS
+Hanya satu bot boleh berjalan untuk setiap mode. Lock O_EXCL dan identitas
+proses mencegah Start ganda dari dashboard atau terminal lain.
 
-Gunakan `systemd`, `tmux`, atau `screen` supaya proses tidak mati saat sesi
-SSH terputus. Contoh sederhana dengan `tmux` (memakai `run.py` supaya bot +
-dashboard jalan bersamaan dalam satu sesi):
+### Konfigurasi awal melalui tab Kontrol
+
+1. Mulai di PAPER. Mode default tetap PAPER.
+2. Buka **Kontrol > Parameter Strategi dan Risiko**. Settings PAPER dan LIVE
+   disimpan terpisah. Simpan settings yang valid, tinjau diff, lalu konfirmasi.
+3. Untuk kredensial, gunakan panel **Kredensial Binance**. Secret bersifat
+   write-only. Kolom kosong berarti tidak diubah.
+4. Jalankan **Uji Koneksi Read-only**. Uji ini memakai endpoint account signed
+   dan tidak mengirim order.
+5. Sebelum menuju LIVE, isi `MAX_POSITION_USDT` LIVE dengan angka lebih besar
+   dari nol. Periksa seluruh checklist, ketik `LIVE`, lalu konfirmasi lagi.
+
+Settings tersimpan baru berlaku setelah restart. Jika bot sedang berjalan,
+dashboard otomatis melakukan restart setelah commit. Jika ada posisi terbuka,
+Anda wajib memilih **Jual dulu** atau **Pertahankan posisi**. Mempertahankan
+posisi berarti SL/TP yang dikelola bot tidak aktif selama bot berhenti.
+
+Kredensial disimpan atomik ke `.env`. Di Linux izinnya dipaksa dan diverifikasi
+sebagai `0600`. Di Windows dashboard memakai `icacls` dan menampilkan peringatan
+jujur bila ACL tidak dapat diverifikasi. Nilai `.env` dashboard mengalahkan
+nilai environment proses yang lama.
+
+### Port, bind, dan akses jarak jauh
+
+- Port: Linux `DASHBOARD_PORT=9000 python run.py`.
+- Port PowerShell: `$env:DASHBOARD_PORT='9000'; python run.py`.
+- Bind default selalu `127.0.0.1` dan dashboard tidak memiliki login.
+- Jika `DASHBOARD_HOST` sengaja diubah ke alamat non-loopback, semua endpoint
+  tulis dinonaktifkan. UI hanya read-only.
+- Untuk VPS, biarkan bind loopback dan gunakan tunnel SSH:
+  `ssh -L 8080:localhost:8080 user@ip_vps`.
+- Jangan mengekspos dashboard langsung ke internet.
+
+### Menjalankan 24/7
+
+Gunakan service manager seperti `systemd`, Task Scheduler, `tmux`, atau
+`screen`. Contoh Linux sederhana:
 
 ```bash
 tmux new -s pumpbot
 python run.py
-# Ctrl+B lalu D untuk detach; sesi tetap berjalan di background
+# Ctrl+B lalu D untuk detach
 ```
 
-State dan log tersimpan di `pump_bot_state_<mode>.json` dan
-`pump_bot_<mode>.log` (otomatis terpisah untuk PAPER dan LIVE, lihat
-bagian "Mode PAPER dan LIVE"), sehingga posisi yang sedang berjalan dan
-level BE/trailing selamat dari restart/crash.
+State dan log berada di `pump_bot_state_<mode>.json` dan
+`pump_bot_<mode>.log`. Lifecycle dan lock juga dipisah per mode. Posisi dan
+level BE/trailing tetap tersimpan setelah restart atau crash.
 
-## Dashboard pemantauan (web)
+## Dashboard pemantauan dan kontrol (web)
 
-Dashboard web untuk memantau bot: posisi terbuka + PnL live,
-equity & saldo, riwayat trade, win rate, kurva PnL kumulatif, log aktivitas,
-dan parameter strategi. Dashboard **hampir sepenuhnya read-only** -- satu-satunya
-perintah yang bisa dikirim ke bot adalah tombol **"Jual Sekarang (Manual)"**
-untuk menutup paksa posisi yang sedang terbuka (lihat bagian "Jual Sekarang"
-di bawah). Di luar itu dashboard hanya membaca file state/log mode aktif
-(`pump_bot_state_<mode>.json`, `pump_bot_<mode>.log`), dan (opsional) data
-live Binance (harga real-time + saldo bila API key tersedia).
+Dashboard menampilkan posisi dan PnL, equity, saldo, riwayat trade, kurva PnL,
+log, watchlist, dan backtest. Tab **Kontrol** menyediakan:
 
-```bash
-pip install -r requirements.txt
-python dashboard.py
-# buka http://localhost:8080  (atau http://IP_VPS_ANDA:8080)
-```
+- Start, Stop, dan Restart dengan status `STARTING`, `RUNNING`, `STOPPING`,
+  `STOPPED`, atau `CRASHED`.
+- PID aktif, uptime, PID terakhir, dan kode keluar.
+- Settings lengkap per mode, editor watchlist, default per field/grup, diff,
+  validasi server, peringatan risiko LIVE, dan riwayat audit.
+- Perpindahan PAPER/LIVE dengan checklist dan konfirmasi ketik `LIVE`.
+- Penyimpanan serta pengujian kredensial tanpa menampilkan secret.
+- Reset akun PAPER yang mengarsipkan akun dan state lama lebih dulu.
 
-- Port bisa diganti: `DASHBOARD_PORT=9000 python dashboard.py`
-- Refresh otomatis tiap 5 detik.
-- Kalau Binance tak terjangkau atau API key kosong, dashboard tetap jalan
-  dengan data dari file (harga/saldo live ditampilkan sebagai "—").
-- **Keamanan:** dashboard menampilkan saldo & aktivitas trading Anda, dan
-  bisa mengirim 1 jenis perintah (jual paksa posisi terbuka). Kalau di-expose
-  ke internet (bukan hanya localhost), lindungi dengan firewall / reverse
-  proxy + autentikasi -- siapa pun yang bisa mengakses dashboard bisa menutup
-  posisi Anda kapan saja. Bisa juga dijalankan di VPS yang sama dengan bot
-  lalu diakses lewat SSH tunnel: `ssh -L 8080:localhost:8080 user@ip_vps`.
+Semua request tulis dilindungi token acak per proses, pemeriksaan Host,
+Origin/Referer, alamat loopback, rate limit, dan cooldown tindakan berbahaya.
+Tidak ada CORS yang dibuka.
 
 ### Jual Sekarang (tutup posisi manual dari dashboard)
 
@@ -857,12 +863,21 @@ Skenario yang tercakup di `tests/`:
 - Restart di tengah posisi terbuka (state termuat kembali).
 - File state korup (dibuat cadangan, tidak ditimpa diam-diam) + migrasi skema.
 - Guard menolak endpoint bertanda tangan di PAPER (walau API key terisi).
-- `MODE` tidak valid membuat bot berhenti (tidak jatuh ke LIVE) + idempotensi
+- `MODE` tidak valid membuat bot berhenti (tidak jatuh ke LIVE) dan idempotensi
   `clientOrderId`.
+- Schema 82 parameter lengkap, merge override per mode, validasi relasi, dan
+  deteksi pelonggaran risiko LIVE.
+- Lock O_EXCL, lock stale, lifecycle, Start/Restart/Stop PAPER di Linux, dan
+  pemisahan perintah Stop dari `CLOSE_POSITION`.
+- Host, Origin, token admin, bind non-loopback read-only, rate limit, dan
+  respons kredensial tanpa secret.
+- Perpindahan mode dua arah saat posisi terbuka, reset PAPER, arsip state,
+  CRLF/LF `.env`, mode 0600 POSIX, serta test Windows dengan `skipif`.
 
 ## Contoh konfigurasi PAPER
 
-Di `config.py` (nilai default sudah aman untuk PAPER):
+Default sumber berada di `config.py`, sedangkan perubahan pengguna sebaiknya
+dilakukan melalui tab Kontrol:
 
 ```python
 "MODE": "PAPER",
@@ -884,20 +899,74 @@ Di `config.py` (nilai default sudah aman untuk PAPER):
 
 1. Tarik kode baru, lalu `pip install -r requirements.txt`
    (menambah `websocket-client` dan `pytest`).
-2. Pastikan `"MODE": "PAPER"` di `config.py` (ini sudah default).
-3. Hapus/arsipkan file lama `*_testnet.*` (tidak lagi dipakai).
-4. API key TIDAK diperlukan untuk PAPER; `.env` boleh dikosongkan.
-5. Jalankan `pytest -q` (semua lulus) lalu `python run.py`. Cek banner
-   "MODE PAPER AKTIF" di log.
-6. Verifikasi saldo virtual muncul di dashboard (default 10.000 USDT).
+2. Jalankan `python dashboard.py`, buka tab Kontrol, dan pastikan mode PAPER.
+3. Hapus atau arsipkan file lama `*_testnet.*` karena tidak lagi dipakai.
+4. API key tidak diperlukan untuk PAPER. `.env` boleh kosong.
+5. Jalankan `pytest -q` lalu `python run.py`. Periksa mode PAPER pada header.
+6. Verifikasi saldo virtual muncul di dashboard, default 10.000 USDT.
 
 ### Sebelum pindah ke LIVE
 
-1. Isi `.env` dengan API key/secret **produksi** Binance (permission Spot
-   Trading saja; JANGAN aktifkan Withdrawals).
-2. Set `"MODE": "LIVE"` di `config.py`.
-3. Periksa kontrol risiko: `RISK_PERCENT`, `MAX_POSITION_USDT`,
-   `USE_EQUITY_STOP`, `MAX_DAILY_LOSS_PERCENT`, `CLOSE_ALL_AT_LIMIT`.
-4. Mulai dari **modal kecil**, pantau beberapa rotasi trade pertama.
-5. Sadari: **hasil PAPER bukan jaminan hasil LIVE** (slippage, antrean order
-   book, dan likuiditas nyata bisa berbeda).
+1. Simpan API key/secret produksi melalui panel Kredensial. Aktifkan izin Spot
+   Trading saja dan jangan aktifkan Withdrawals.
+2. Tekan **Uji Koneksi Read-only** dan pastikan berhasil.
+3. Pilih settings LIVE. Periksa `RISK_PERCENT`, isi `MAX_POSITION_USDT` dengan
+   nilai positif, dan periksa Stop Loss, equity stop, daily stop, serta
+   `CLOSE_ALL_AT_LIMIT`.
+4. Pastikan bot STOPPED dan tidak ada posisi di mode aktif.
+5. Buka checklist mode, baca ringkasan risiko, ketik `LIVE`, lalu konfirmasi.
+6. Mulai dari modal kecil dan pantau rotasi trade pertama.
+7. Hasil PAPER bukan jaminan hasil LIVE. Slippage, antrean order book, dan
+   likuiditas nyata dapat berbeda.
+
+## Checklist manual lintas OS
+
+### Linux
+
+- [ ] Jalankan `python run.py`, pastikan dashboard hidup dan bot auto-start.
+- [ ] Stop bot dari UI, pastikan dashboard tetap hidup dan status menjadi
+  `STOPPED` tanpa fallback signal.
+- [ ] Start lalu Restart, pastikan PID berubah dan tidak ada dua lock mode sama.
+- [ ] Dengan posisi PAPER, uji kedua pilihan Stop: `SELL_FIRST` dan `KEEP_OPEN`.
+- [ ] Ubah settings PAPER, tinjau diff, commit, dan pastikan restart otomatis.
+- [ ] Coba bind non-loopback pada jaringan uji. Pastikan UI menunjukkan
+  read-only dan semua POST ditolak.
+- [ ] Simpan kredensial dummy pada salinan repo, lalu periksa `.env` mode 0600.
+- [ ] Reset PAPER dan pastikan dua arsip `.bak-<timestamp>` terbentuk.
+- [ ] Hentikan terminal dengan Ctrl+C dan pastikan tidak ada child bot tertinggal.
+
+### Windows 11
+
+- [ ] Jalankan dari PowerShell dengan `python run.py`. Pastikan console UTF-8
+  tidak membuat proses gagal.
+- [ ] Ulangi Start, Stop, Restart, status, PID, dan dashboard tetap hidup.
+- [ ] Paksa bot tidak merespons file Stop pada salinan uji. Pastikan fallback
+  `CTRL_BREAK_EVENT` bekerja sebelum force-kill.
+- [ ] Periksa Task Manager setelah Stop dan setelah menutup dashboard. Pastikan
+  tidak ada child Python tertinggal.
+- [ ] Simpan `.env` dummy dan pastikan panel melaporkan ACL `icacls` terverifikasi,
+  atau menampilkan warning jujur jika verifikasi gagal.
+- [ ] Uji CRLF `.env`, path yang mengandung spasi, reset PAPER, settings per mode,
+  Host/Origin/token, dan bind non-loopback read-only.
+- [ ] Jalankan `pytest -q`. Test khusus Linux harus `skipped`, bukan gagal.
+
+Jangan menjalankan checklist dengan mode LIVE atau API key produksi. Gunakan
+PAPER, salinan repo, dan kredensial dummy kecuali saat uji account read-only
+yang memang Anda setujui.
+
+## Dokumentasi resmi yang menjadi acuan
+
+- Flask: konfigurasi `TRUSTED_HOSTS` dan keamanan web
+  <https://flask.palletsprojects.com/en/stable/config/>
+  <https://flask.palletsprojects.com/en/stable/web-security/>
+- Werkzeug: validasi host dan `ProxyFix`
+  <https://werkzeug.palletsprojects.com/en/stable/wsgi/>
+  <https://werkzeug.palletsprojects.com/en/stable/middleware/proxy_fix/>
+- Python: subprocess dan sinyal Windows
+  <https://docs.python.org/3/library/subprocess.html>
+- python-dotenv: format `.env` dan precedence `override=True`
+  <https://bbc2.github.io/python-dotenv/>
+  <https://bbc2.github.io/python-dotenv/reference/>
+- Binance Spot API: endpoint account signed read-only dan kode error
+  <https://developers.binance.com/docs/binance-spot-api-docs/rest-api/account-endpoints>
+  <https://developers.binance.com/docs/binance-spot-api-docs/errors>

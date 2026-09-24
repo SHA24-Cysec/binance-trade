@@ -9,9 +9,11 @@ from __future__ import annotations
 import json
 import logging
 import os
-import shutil
 import time
 from datetime import datetime, timezone
+from pathlib import Path
+
+from atomic_io import archive_corrupt, atomic_write_json
 
 logger = logging.getLogger("state")
 
@@ -47,18 +49,23 @@ def load_state(path: str) -> dict:
         merged = dict(DEFAULT_STATE)
         merged.update(data)
         return merged
-    except (json.JSONDecodeError, OSError) as exc:
+    except json.JSONDecodeError as exc:
+        try:
+            backup = archive_corrupt(path)
+        except OSError as backup_exc:
+            backup = None
+            logger.error("State %s rusak dan gagal diarsipkan: %s", path, backup_exc)
+        logger.error("Gagal membaca %s (%s). Cadangan: %s. Membuat state default.",
+                     path, exc, backup)
+        return dict(DEFAULT_STATE)
+    except OSError as exc:
         logger.error("Gagal membaca %s (%s). Membuat state baru dari default.", path, exc)
         return dict(DEFAULT_STATE)
 
 
 def save_state(path: str, state: dict) -> None:
-    """Tulis atomik: tulis ke file sementara dulu baru rename, supaya file
-    state tidak pernah setengah-tertulis kalau proses mati di tengah jalan."""
-    tmp_path = f"{path}.tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2)
-    shutil.move(tmp_path, path)
+    """Tulis JSON atomik dengan retry sharing violation Windows."""
+    atomic_write_json(path, state)
 
 
 def today_str() -> str:
@@ -83,18 +90,22 @@ def load_control(path: str) -> dict:
         return {}
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError):
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError as exc:
+        try:
+            backup = archive_corrupt(path)
+            logger.error("File kontrol %s rusak (%s), diarsipkan ke %s.", path, exc, backup)
+        except OSError as backup_exc:
+            logger.error("File kontrol %s rusak dan gagal diarsipkan: %s", path, backup_exc)
+        return {}
+    except OSError:
         return {}
 
 
 def save_control(path: str, data: dict) -> None:
-    """Tulis atomik, sama seperti save_state() -- tulis ke file sementara
-    dulu baru rename, supaya tidak pernah terbaca setengah-tertulis."""
-    tmp_path = f"{path}.tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-    shutil.move(tmp_path, path)
+    """Tulis kontrol atomik dengan temporary unik dan retry Windows."""
+    atomic_write_json(path, data)
 
 
 def clear_control(path: str) -> None:
@@ -103,4 +114,53 @@ def clear_control(path: str) -> None:
             os.remove(path)
     except OSError:
         pass
+
+
+def get_stop_control_file(control_path: str) -> str:
+    """Path khusus perintah STOP, terpisah dari CLOSE_POSITION.
+
+    Pemisahan mencegah klik Stop menimpa perintah Jual Sekarang yang sedang
+    menunggu diproses bot. Keduanya tetap memakai kanal file kontrol state.py.
+    """
+    path = Path(control_path)
+    return str(path.with_name(f"{path.stem}.stop{path.suffix or '.json'}"))
+
+
+def request_stop(control_path: str, *, requested_by: str = "dashboard") -> str:
+    stop_path = get_stop_control_file(control_path)
+    atomic_write_json(stop_path, {
+        "action": "STOP_BOT",
+        "requested_at": now_ms(),
+        "requested_by": str(requested_by)[:80],
+    })
+    return stop_path
+
+
+def clear_stop_request(control_path: str) -> None:
+    clear_control(get_stop_control_file(control_path))
+
+
+def consume_stop_request(control_path: str, max_age_seconds: int = 300) -> bool:
+    """Ambil dan hapus permintaan stop satu kali.
+
+    Permintaan stale dibuang agar bot yang dinyalakan berjam-jam kemudian
+    tidak langsung berhenti karena file lama.
+    """
+    stop_path = get_stop_control_file(control_path)
+    cmd = load_control(stop_path)
+    if not cmd:
+        return False
+    clear_control(stop_path)
+    if cmd.get("action") != "STOP_BOT":
+        logger.warning("Perintah stop tidak dikenal di %s: %s", stop_path, cmd)
+        return False
+    try:
+        requested_at = int(cmd.get("requested_at", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    age = (now_ms() - requested_at) / 1000.0
+    if requested_at <= 0 or age < -30 or age > max_age_seconds:
+        logger.warning("Perintah stop diabaikan karena stale/tidak valid (umur %.1f detik).", age)
+        return False
+    return True
 

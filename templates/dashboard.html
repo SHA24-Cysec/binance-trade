@@ -61,7 +61,9 @@
   .dot.warn{background:var(--amber)}
   @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(74,222,128,.55)}70%{box-shadow:0 0 0 7px rgba(74,222,128,0)}100%{box-shadow:0 0 0 0 rgba(74,222,128,0)}}
   .pill.dry{background:rgba(245,158,11,.12);border-color:rgba(245,158,11,.32);color:var(--amber)}
-  .pill.live{background:rgba(74,222,128,.12);border-color:rgba(74,222,128,.32);color:var(--green)}
+  .pill.live{background:rgba(244,63,94,.16);border-color:rgba(244,63,94,.48);color:#fda4af;box-shadow:0 0 0 2px rgba(244,63,94,.08)}
+  .dot.live-dot{background:var(--red);animation:pulseLive 1.4s infinite}
+  @keyframes pulseLive{0%{box-shadow:0 0 0 0 rgba(244,63,94,.65)}70%{box-shadow:0 0 0 8px rgba(244,63,94,0)}100%{box-shadow:0 0 0 0 rgba(244,63,94,0)}}
 
   /* ---------- tab navigasi ---------- */
   .tabs{display:flex;gap:3px;padding:4px;border-radius:12px;background:var(--panel2);
@@ -301,6 +303,50 @@
   .toast.warn{border-left:3px solid var(--amber)} .toast.warn b{color:var(--amber)}
   .toast.info{border-left:3px solid var(--info)} .toast.info b{color:var(--info)}
 
+  /* ---------- panel kontrol ---------- */
+  .ctl-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+  .ctl-full{grid-column:1/-1}
+  .ctl-actions{display:flex;gap:9px;flex-wrap:wrap}
+  .btn{border:1px solid var(--border2);background:rgba(148,163,184,.1);color:var(--txt);
+    border-radius:8px;padding:9px 13px;font:inherit;font-size:12.5px;font-weight:700;cursor:pointer}
+  .btn:hover:not(:disabled){border-color:var(--accent);transform:translateY(-1px)}
+  .btn:disabled{opacity:.42;cursor:not-allowed}
+  .btn.primary{background:rgba(74,222,128,.14);border-color:rgba(74,222,128,.35);color:var(--green)}
+  .btn.warn{background:rgba(245,158,11,.13);border-color:rgba(245,158,11,.32);color:var(--amber)}
+  .btn.danger{background:rgba(244,63,94,.13);border-color:rgba(244,63,94,.35);color:#fda4af}
+  .ctl-status{padding:11px;border:1px solid var(--border);border-radius:8px;background:var(--panel2);
+    font-size:12.5px;line-height:1.75;margin-bottom:12px}
+  .ctl-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+  .ctl-field{display:flex;flex-direction:column;gap:5px;min-width:0}
+  .ctl-field label{font-size:10.5px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.5px}
+  .ctl-field input,.ctl-field select,.ctl-field textarea{width:100%;background:rgba(14,17,22,.65);
+    color:var(--txt);border:1px solid var(--border);border-radius:8px;padding:8px 9px;font:inherit;font-size:12.5px}
+  .ctl-field textarea{min-height:76px;resize:vertical;font-family:var(--mono)}
+  .ctl-field input:focus,.ctl-field select:focus,.ctl-field textarea:focus{outline:none;border-color:var(--accent);
+    box-shadow:0 0 0 3px rgba(74,222,128,.12)}
+  .ctl-field.dirty{padding:7px;border-radius:8px;background:rgba(245,158,11,.07);border:1px solid rgba(245,158,11,.2)}
+  .ctl-help{font-size:10.5px;color:var(--muted);line-height:1.5}
+  .ctl-help .default{color:#94a3b8}
+  .settings-group{border:1px solid var(--border);border-radius:10px;margin-bottom:10px;overflow:hidden}
+  .settings-group summary{cursor:pointer;padding:10px 12px;background:var(--panel2);font-size:12.5px;font-weight:700}
+  .settings-fields{padding:12px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+  .setting-row{min-width:0}
+  .setting-row .ctl-field{height:100%}
+  .setting-head{display:flex;align-items:center;justify-content:space-between;gap:6px}
+  .setting-reset{border:0;background:transparent;color:var(--muted);cursor:pointer;font-size:10px}
+  .setting-reset:hover{color:var(--amber)}
+  .diffbox{margin-top:12px;padding:11px;border:1px solid var(--border);border-radius:8px;background:rgba(14,17,22,.45);
+    font-size:12px;line-height:1.75;display:none;max-height:300px;overflow:auto}
+  .diffbox.show{display:block}
+  .readonly-warning{display:none;padding:11px 14px;margin-bottom:14px;border:1px solid rgba(244,63,94,.35);
+    border-left:3px solid var(--red);border-radius:8px;background:rgba(244,63,94,.09);color:#fda4af;font-size:12.5px}
+  .readonly-warning.show{display:block}
+  .wl-edit-row{display:grid;grid-template-columns:1fr 150px auto;gap:7px;margin-bottom:7px}
+  .history-list{max-height:300px;overflow:auto;font-size:11.5px;font-family:var(--mono)}
+  .history-item{padding:7px 8px;border-bottom:1px solid var(--grid);word-break:break-word}
+  @media(max-width:1000px){.settings-fields{grid-template-columns:repeat(2,minmax(0,1fr))}}
+  @media(max-width:760px){.ctl-grid{grid-template-columns:1fr}.ctl-full{grid-column:auto}.settings-fields,.ctl-form{grid-template-columns:1fr}}
+
   /* ---------- responsif ---------- */
   @media(max-width:1200px){.bt-form{grid-template-columns:repeat(3,1fr)}}
   @media(max-width:1080px){
@@ -361,6 +407,7 @@
   <nav class="tabs" role="tablist" aria-label="Bagian dashboard" style="margin-bottom:14px">
     <button role="tab" aria-selected="true" aria-controls="paneIkhtisar" data-tab="Ikhtisar">Ikhtisar</button>
     <button role="tab" aria-selected="false" aria-controls="paneRiwayat" data-tab="Riwayat">Riwayat<span class="mut" id="tabTradeBadge"></span></button>
+    <button role="tab" aria-selected="false" aria-controls="paneKontrol" data-tab="Kontrol">Kontrol</button>
     <button role="tab" aria-selected="false" aria-controls="paneBacktest" data-tab="Backtest">Backtest</button>
   </nav>
 
@@ -431,6 +478,95 @@
   </div>
 
   </div><!-- /paneRiwayat -->
+
+  <div class="tabpane" id="paneKontrol" role="tabpanel" hidden>
+    <div id="controlReadOnlyWarning" class="readonly-warning">
+      Dashboard tidak terikat ke loopback. Semua kontrol tulis dinonaktifkan dan halaman ini hanya read-only.
+    </div>
+    <div class="ctl-grid">
+      <section class="panel ctl-full">
+        <h2>🧭 Status dan Proses</h2>
+        <div id="processStatusBox" class="ctl-status">Memuat status proses...</div>
+        <div id="openPositionWarning" class="banner err" style="margin-bottom:12px"></div>
+        <div class="ctl-actions">
+          <button class="btn primary ctl-write" onclick="openBotAction('START')">▶ Start</button>
+          <button class="btn danger ctl-write" onclick="openBotAction('STOP')">■ Stop</button>
+          <button class="btn warn ctl-write" onclick="openBotAction('RESTART')">↻ Restart</button>
+          <button class="btn" onclick="loadControlStatus()">Muat ulang status</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>🔀 Mode PAPER atau LIVE</h2>
+        <p class="mut" style="font-size:12px;margin-bottom:10px">State PAPER dan LIVE selalu terpisah. Semua perpindahan mode mensyaratkan bot STOPPED dan posisi mode aktif kosong.</p>
+        <div class="ctl-field">
+          <label>Target mode</label>
+          <select id="modeTarget" onchange="loadModeChecklist()"><option>PAPER</option><option>LIVE</option></select>
+        </div>
+        <div id="modeChecklist" class="ctl-status" style="margin-top:10px">Pilih target untuk melihat checklist.</div>
+        <div class="ctl-field" style="margin-top:9px">
+          <label>Konfirmasi, wajib ketik LIVE untuk menuju LIVE</label>
+          <input id="modePhrase" autocomplete="off" placeholder="LIVE">
+        </div>
+        <div class="ctl-actions" style="margin-top:10px">
+          <button class="btn warn ctl-write" onclick="prepareModeSwitch()">Tinjau dan Ganti Mode</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>🔑 Kredensial Binance</h2>
+        <p class="mut" style="font-size:11.5px;margin-bottom:10px">Secret bersifat write-only. Kosong berarti tidak diubah. Buat key tanpa izin withdrawal dan gunakan pembatasan IP bila tersedia.</p>
+        <div class="ctl-form">
+          <div class="ctl-field"><label>API key baru</label><input id="credKey" autocomplete="off"></div>
+          <div class="ctl-field"><label>API secret baru</label><input id="credSecret" type="password" autocomplete="new-password"></div>
+        </div>
+        <div id="credentialStatus" class="ctl-status" style="margin-top:10px">Memuat status kredensial...</div>
+        <div class="ctl-actions">
+          <button class="btn primary ctl-write" onclick="saveCredentials()">Simpan Kredensial</button>
+          <button class="btn ctl-write" onclick="testCredentials()">Uji Koneksi Read-only</button>
+          <button class="btn danger ctl-write" onclick="clearCredentials()">Kosongkan Kredensial</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>🧪 Reset Akun PAPER</h2>
+        <p class="mut" style="font-size:11.5px;margin-bottom:10px">File akun dan state tidak dihapus. Keduanya diarsipkan dengan stempel waktu.</p>
+        <div class="ctl-form">
+          <div class="ctl-field"><label>Aset saldo awal</label><input id="paperAsset" value="USDT"></div>
+          <div class="ctl-field"><label>Jumlah saldo awal</label><input id="paperBalance" type="number" min="0.00000001" step="any" value="10000"></div>
+        </div>
+        <div class="ctl-field" style="margin-top:9px"><label>Ketik RESET</label><input id="paperResetPhrase" autocomplete="off"></div>
+        <div id="paperResetStatus" class="ctl-status" style="margin-top:10px">Reset hanya tersedia saat PAPER dan bot STOPPED.</div>
+        <button class="btn danger ctl-write" onclick="preparePaperReset()">Arsipkan dan Reset PAPER</button>
+      </section>
+
+      <section class="panel ctl-full">
+        <h2>⚙️ Parameter Strategi dan Risiko</h2>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:end;margin-bottom:12px">
+          <div class="ctl-field" style="min-width:180px"><label>Edit settings mode</label>
+            <select id="settingsMode" onchange="loadSettings()"><option>PAPER</option><option>LIVE</option></select></div>
+          <div class="ctl-field" style="min-width:240px"><label>Jika restart dan ada posisi</label>
+            <select id="settingsPositionPolicy"><option value="REQUIRE_EMPTY">Minta pilihan dulu</option><option value="SELL_FIRST">Jual dulu</option><option value="KEEP_OPEN">Pertahankan posisi</option></select></div>
+          <span id="settingsDirty" class="mut" style="font-size:12px">Tidak ada perubahan.</span>
+        </div>
+        <div id="settingsContainer"><div class="empty">Memuat skema parameter...</div></div>
+        <div class="ctl-actions" style="margin-top:12px">
+          <button class="btn primary ctl-write" onclick="previewSettings()">Validasi dan Tinjau Perubahan</button>
+          <button class="btn ctl-write" onclick="loadSettings()">Batalkan Perubahan</button>
+        </div>
+        <div id="settingsDiff" class="diffbox"></div>
+        <div id="settingsRiskPhraseWrap" class="ctl-field" style="display:none;margin-top:10px;max-width:320px">
+          <label>Ketik SAYA PAHAM untuk pelonggaran risiko LIVE</label><input id="settingsRiskPhrase" autocomplete="off">
+        </div>
+        <button id="settingsCommitBtn" class="btn danger ctl-write" style="display:none;margin-top:10px" onclick="commitSettings()">Konfirmasi Simpan dan Restart</button>
+      </section>
+
+      <section class="panel ctl-full">
+        <h2>🧾 Riwayat Perubahan</h2>
+        <div id="settingsHistory" class="history-list"><div class="empty">Belum ada riwayat.</div></div>
+      </section>
+    </div>
+  </div><!-- /paneKontrol -->
 
   <div class="tabpane" id="paneBacktest" role="tabpanel" hidden>
   <!-- BACKTEST -->
@@ -605,6 +741,22 @@
 
   </div><!-- /paneBacktest -->
 
+  <!-- MODAL KONFIRMASI START / STOP / RESTART -->
+  <div class="modal-overlay" id="botActionModal">
+    <div class="modal-box">
+      <h3 id="botActionTitle">Konfirmasi Aksi Bot</h3>
+      <p id="botActionText"></p>
+      <div id="botPositionChoice" style="display:none;margin-bottom:14px">
+        <label class="bt-toggle" style="margin-bottom:7px"><input type="radio" name="botPosPolicy" value="SELL_FIRST" checked><span>Jual posisi dulu, lalu lanjutkan</span></label>
+        <label class="bt-toggle"><input type="radio" name="botPosPolicy" value="KEEP_OPEN"><span>Pertahankan posisi terbuka tanpa pengelolaan bot</span></label>
+      </div>
+      <div class="modal-actions">
+        <button class="modal-cancel" onclick="closeBotActionModal()">Batal</button>
+        <button class="modal-confirm" id="botActionConfirmBtn" onclick="confirmBotAction()">Konfirmasi</button>
+      </div>
+    </div>
+  </div>
+
   <!-- MODAL KONFIRMASI JUAL MANUAL -->
   <div class="modal-overlay" id="manualCloseModal">
     <div class="modal-box">
@@ -621,7 +773,7 @@
     </div>
   </div>
 
-  <footer id="footer">Dashboard bersifat pemantauan · satu-satunya perintah yang bisa dikirim ke bot adalah "Jual Sekarang (Manual)" saat ada posisi terbuka.</footer>
+  <footer id="footer">Dashboard kontrol lokal · perubahan settings disimpan per mode dan diterapkan melalui restart bot.</footer>
 </div>
 
 <script>
@@ -632,6 +784,13 @@ const LOCALE = 'id-ID';
 // halaman dirender, dan WAJIB dikirim balik di header X-Admin-Token untuk
 // endpoint POST /api/manual/close. Situs lain tidak mengetahui nilai ini.
 const ADMIN_TOKEN = {{ admin_token | tojson }};
+async function adminFetch(url, options){
+  const opts = Object.assign({}, options || {});
+  opts.method = opts.method || 'POST';
+  opts.headers = Object.assign({'X-Admin-Token': ADMIN_TOKEN}, opts.headers || {});
+  if(opts.body && !opts.headers['Content-Type']) opts.headers['Content-Type'] = 'application/json';
+  return fetch(url, opts);
+}
 const fmt = (n,d=2)=> (n===null||n===undefined||isNaN(n))?'—':Number(n).toLocaleString(LOCALE,{minimumFractionDigits:d,maximumFractionDigits:d});
 const fmtP = (n,d=6)=> (n===null||n===undefined||isNaN(n))?'—':Number(n).toLocaleString(LOCALE,{minimumFractionDigits:2,maximumFractionDigits:d});
 const sign = n => (n>0?'+':'');
@@ -757,7 +916,7 @@ function renderStatus(s){
   const mp=document.getElementById('modePill'), md=mp.querySelector('.dot');
   var isPaper = (s.mode==='PAPER') || !!s.paper;
   if(isPaper){mp.className='pill dry';document.getElementById('modeText').textContent='PAPER';md.className='dot warn';document.getElementById('paperBanner').classList.add('show');}
-  else{mp.className='pill live';document.getElementById('modeText').textContent='LIVE';md.className='dot on';document.getElementById('paperBanner').classList.remove('show');}
+  else{mp.className='pill live';document.getElementById('modeText').textContent='LIVE · UANG ASLI';md.className='dot live-dot';document.getElementById('paperBanner').classList.remove('show');}
   // Backtest boleh tampil atau tidak (diputuskan server). Kalau field-nya
   // tidak ada -- misalnya dashboard.py versi lama -- anggap aktif supaya
   // perilakunya tidak berubah diam-diam.
@@ -790,7 +949,7 @@ function renderStatus(s){
   if(s.flags.dd_stopped) flags.push('🛑 DD-STOP aktif');
   if(s.flags.daily_stopped) flags.push('🛑 DAILY-STOP aktif');
   if(s.flags.cooldown_left_sec>1) flags.push('⏳ cooldown '+Math.round(s.flags.cooldown_left_sec)+'s');
-  document.getElementById('footer').innerHTML='Dashboard bersifat pemantauan · satu-satunya perintah yang bisa dikirim ke bot adalah "Jual Sekarang (Manual)" saat ada posisi terbuka.'+(flags.length?' &nbsp;|&nbsp; '+flags.join(' · '):'');
+  document.getElementById('footer').innerHTML='Dashboard kontrol lokal · settings PAPER dan LIVE disimpan terpisah.'+(flags.length?' &nbsp;|&nbsp; '+flags.join(' · '):'');
 
   // position box
   const pb=document.getElementById('positionBox');
@@ -1166,6 +1325,267 @@ async function refresh(){
 refresh();
 setInterval(refresh, 5000);
 
+// ============================ KONTROL BOT ============================
+const esc = v => String(v===null||v===undefined?'':v).replace(/[&<>"']/g, c=>({
+  '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+}[c]));
+let _controlState = null;
+let _pendingBotAction = null;
+let _settingsFields = [];
+let _settingsValues = {};
+let _settingsOriginal = {};
+let _settingsDefaults = {};
+let _settingsDirtyKeys = new Set();
+let _settingsConfirmation = null;
+
+function processLabel(p){
+  const code = p.exit_code===null||p.exit_code===undefined ? 'tidak tersedia' : p.exit_code;
+  const up = p.uptime_seconds==null ? '—' : fmtDuration(p.uptime_seconds);
+  const pidText=p.pid||'—';
+  return `<b>${esc(p.status)}</b> · PID <b>${esc(pidText)}</b>`+(p.pid?'':(p.last_pid?` · PID terakhir <b>${esc(p.last_pid)}</b>`:''))+` · uptime <b>${esc(up)}</b>`+
+    (p.status==='CRASHED'?` · kode keluar <b>${esc(code)}</b>`:'')+
+    (p.reason?`<br><span class="mut">${esc(p.reason)}</span>`:'')+
+    (p.job_warning?`<br><span style="color:var(--amber)">Proteksi child tree Windows tidak aktif: ${esc(p.job_warning)}</span>`:'');
+}
+
+async function loadControlStatus(){
+  try{
+    const r=await fetch('/api/control/status',{cache:'no-store'}), d=await r.json();
+    if(!r.ok) throw new Error(d.error||'Status gagal dimuat.');
+    _controlState=d;
+    document.getElementById('processStatusBox').innerHTML=processLabel(d.process)+
+      `<br>Mode aktif <b>${esc(d.mode)}</b>`+(d.read_only?' · <b style="color:var(--red)">READ-ONLY</b>':'');
+    const rw=document.getElementById('controlReadOnlyWarning');
+    rw.classList.toggle('show',!!d.read_only);
+    document.querySelectorAll('.ctl-write').forEach(x=>x.disabled=!!d.read_only);
+    const w=document.getElementById('openPositionWarning');
+    if(d.position&&d.position.has_position){
+      w.classList.add('show');
+      w.innerHTML=`<span>⚠️</span><span>Posisi terbuka <b>${esc(d.position.symbol)}</b>, qty ${esc(d.position.qty)}. Stop dengan posisi dipertahankan membuat SL/TP bot tidak aktif.</span>`;
+    }else{w.classList.remove('show');w.textContent='';}
+    const target=document.getElementById('modeTarget');
+    if(!target.dataset.touched){target.value=d.mode==='PAPER'?'LIVE':'PAPER';target.dataset.touched='1';}
+  }catch(e){
+    document.getElementById('processStatusBox').textContent='Gagal memuat status: '+e.message;
+  }
+}
+
+function openBotAction(action){
+  _pendingBotAction=action;
+  const pos=_controlState&&_controlState.position;
+  document.getElementById('botActionTitle').textContent='Konfirmasi '+action;
+  document.getElementById('botActionText').textContent=action==='START'
+    ? 'Bot akan dimulai memakai mode dan settings aktif.'
+    : (action==='STOP'?'Bot akan dihentikan secara graceful.':'Bot akan dihentikan secara graceful lalu dimulai kembali.');
+  document.getElementById('botPositionChoice').style.display=(pos&&pos.has_position&&action!=='START')?'block':'none';
+  document.getElementById('botActionModal').classList.add('show');
+}
+function closeBotActionModal(){document.getElementById('botActionModal').classList.remove('show');_pendingBotAction=null;}
+async function confirmBotAction(){
+  if(!_pendingBotAction)return;
+  const btn=document.getElementById('botActionConfirmBtn');btn.disabled=true;btn.textContent='Memproses...';
+  let policy='REQUIRE_EMPTY';
+  const selected=document.querySelector('input[name="botPosPolicy"]:checked');
+  if(selected&&document.getElementById('botPositionChoice').style.display!=='none')policy=selected.value;
+  try{
+    let r=await adminFetch('/api/control/prepare',{body:JSON.stringify({action:_pendingBotAction,position_policy:policy})});
+    let d=await r.json();if(!r.ok)throw new Error(d.error||'Persiapan aksi gagal.');
+    r=await adminFetch('/api/control/execute',{body:JSON.stringify({confirmation_id:d.confirmation_id})});
+    d=await r.json();if(!r.ok)throw new Error(d.error||'Aksi proses gagal.');
+    toast('ok','Aksi proses berhasil',d.process.status+' · PID '+(d.process.pid||'—'));
+    closeBotActionModal();await loadControlStatus();
+  }catch(e){toast('err','Aksi proses gagal',e.message,9000);}
+  finally{btn.disabled=false;btn.textContent='Konfirmasi';}
+}
+
+async function loadModeChecklist(){
+  const target=document.getElementById('modeTarget').value;
+  try{
+    const r=await fetch('/api/mode/checklist?target='+encodeURIComponent(target),{cache:'no-store'}),d=await r.json();
+    if(!r.ok)throw new Error(d.error||'Checklist gagal.');
+    const labels={different_mode:'Target berbeda dari mode aktif',bot_stopped:'Bot sudah STOPPED',no_open_position:'Posisi mode aktif kosong',credentials_complete:'API key dan secret terisi',connection_tested:'Kredensial lulus Uji Koneksi sesi ini',settings_valid:'Settings target valid',max_position_positive:'Plafon posisi LIVE positif'};
+    let html=Object.entries(d.checks).map(([k,v])=>`<div>${v?'✅':'❌'} ${esc(labels[k]||k)}</div>`).join('');
+    html+=`<div style="margin-top:8px"><b>Ringkasan risiko target</b><br>${Object.entries(d.risk||{}).map(([k,v])=>esc(k)+'='+esc(v)).join(' · ')}</div>`;
+    html+=`<div class="mut" style="margin-top:7px">${esc(d.state_separation_note)}</div>`;
+    document.getElementById('modeChecklist').innerHTML=html;
+  }catch(e){document.getElementById('modeChecklist').textContent='Gagal: '+e.message;}
+}
+async function prepareModeSwitch(){
+  const target=document.getElementById('modeTarget').value;
+  try{
+    let r=await adminFetch('/api/mode/prepare',{body:JSON.stringify({target})}),d=await r.json();
+    if(!r.ok)throw new Error(d.error||'Mode belum siap diganti.');
+    const risk=Object.entries(d.risk||{}).map(([k,v])=>k+'='+v).join('\n');
+    if(!window.confirm(`Konfirmasi tahap kedua: ganti mode ke ${target}?\n\n${risk}`))return;
+    r=await adminFetch('/api/mode/commit',{body:JSON.stringify({confirmation_id:d.confirmation_id,phrase:document.getElementById('modePhrase').value})});
+    d=await r.json();if(!r.ok)throw new Error(d.error||'Ganti mode gagal.');
+    toast(d.audit_warning?'warn':'ok','Mode berhasil diganti',d.message+(d.audit_warning?' '+d.audit_warning:''),9000);
+    document.getElementById('modePhrase').value='';await loadControlStatus();await loadModeChecklist();await loadSettings();
+  }catch(e){toast('err','Ganti mode ditolak',e.message,9000);}
+}
+
+async function loadCredentialStatus(){
+  try{
+    const r=await fetch('/api/credentials/status',{cache:'no-store'}),d=await r.json();
+    document.getElementById('credentialStatus').innerHTML=
+      `API key: <b>${d.api_key_set?'terisi (...'+esc(d.api_key_last4)+')':'kosong'}</b><br>`+
+      `API secret: <b>${d.api_secret_set?'terisi':'kosong'}</b><br>`+
+      `Uji koneksi sesi ini: <b>${d.connection_tested?'lulus':'belum lulus'}</b><br>`+
+      `Izin file: <span class="${d.permissions&&d.permissions.ok?'pos':'neg'}">${esc(d.permissions&&d.permissions.message||'tidak diketahui')}</span>`;
+  }catch(e){document.getElementById('credentialStatus').textContent='Gagal memuat status kredensial.';}
+}
+async function saveCredentials(){
+  if(!window.confirm('Simpan perubahan kredensial ke .env? Secret tidak akan ditampilkan kembali.'))return;
+  try{
+    const payload={api_key:document.getElementById('credKey').value,api_secret:document.getElementById('credSecret').value};
+    const r=await adminFetch('/api/credentials/save',{body:JSON.stringify(payload)}),d=await r.json();
+    if(!r.ok)throw new Error(d.error||'Gagal menyimpan.');
+    document.getElementById('credKey').value='';document.getElementById('credSecret').value='';
+    toast(d.audit_warning?'warn':'ok','Kredensial disimpan','Lakukan Uji Koneksi sebelum pindah ke LIVE.'+(d.audit_warning?' '+d.audit_warning:''),9000);await loadCredentialStatus();
+  }catch(e){toast('err','Kredensial gagal disimpan',e.message,9000);}
+}
+async function clearCredentials(){
+  if(!window.confirm('Kosongkan API key dan secret di .env? Bot LIVE harus tetap STOPPED.'))return;
+  try{
+    const r=await adminFetch('/api/credentials/save',{body:JSON.stringify({clear_api_key:true,clear_api_secret:true})}),d=await r.json();
+    if(!r.ok)throw new Error(d.error||'Gagal mengosongkan.');
+    toast('ok','Kredensial dikosongkan','Mode LIVE tidak dapat dimulai.');await loadCredentialStatus();
+  }catch(e){toast('err','Gagal',e.message,9000);}
+}
+async function testCredentials(){
+  try{
+    const r=await adminFetch('/api/credentials/test',{body:JSON.stringify({api_key:document.getElementById('credKey').value,api_secret:document.getElementById('credSecret').value})}),d=await r.json();
+    if(!r.ok)throw new Error((d.binance_code?`Binance ${d.binance_code}: `:'')+(d.binance_message||d.error||'Uji gagal.'));
+    toast('ok','Uji koneksi berhasil',d.message+' Key ...'+d.api_key_last4,7000);await loadCredentialStatus();await loadModeChecklist();
+  }catch(e){toast('err','Uji koneksi gagal',e.message,9000);}
+}
+
+function settingComparable(v){return JSON.stringify(v===undefined?null:v);}
+function markSettingDirty(key,value,el){
+  _settingsValues[key]=value;
+  if(settingComparable(value)!==settingComparable(_settingsOriginal[key]))_settingsDirtyKeys.add(key);else _settingsDirtyKeys.delete(key);
+  if(el)el.closest('.setting-row')?.querySelector('.ctl-field')?.classList.toggle('dirty',_settingsDirtyKeys.has(key));
+  document.getElementById('settingsDirty').textContent=_settingsDirtyKeys.size?`${_settingsDirtyKeys.size} parameter belum disimpan.`:'Tidak ada perubahan.';
+  document.getElementById('settingsDiff').classList.remove('show');document.getElementById('settingsCommitBtn').style.display='none';
+  _settingsConfirmation=null;
+}
+function resetSetting(key){
+  const field=_settingsFields.find(x=>x.key===key);if(!field||field.read_only)return;
+  _settingsValues[key]=JSON.parse(JSON.stringify(_settingsDefaults[key]));
+  renderSettingsFields();markSettingDirty(key,_settingsValues[key]);
+}
+function resetSettingsGroup(group){
+  _settingsFields.filter(x=>x.group===group&&!x.read_only).forEach(f=>{_settingsValues[f.key]=JSON.parse(JSON.stringify(_settingsDefaults[f.key]));});
+  renderSettingsFields();_settingsFields.filter(x=>x.group===group&&!x.read_only).forEach(f=>markSettingDirty(f.key,_settingsValues[f.key]));
+}
+function updateWatchValue(key,host){
+  const rows=[...host.querySelectorAll('.wl-edit-row')].map(row=>({symbol:row.querySelector('.wsym').value.trim().toUpperCase(),tier:row.querySelector('.wtier').value}));
+  markSettingDirty(key,rows,host);
+}
+function addWatchRow(key){
+  const list=Array.isArray(_settingsValues[key])?_settingsValues[key].slice():[];list.push({symbol:'',tier:'INTI'});_settingsValues[key]=list;renderSettingsFields();markSettingDirty(key,list);
+}
+function renderWatchEditor(field,wrap){
+  const host=document.createElement('div');host.dataset.watch=field.key;
+  const rows=Array.isArray(_settingsValues[field.key])?_settingsValues[field.key]:[];
+  rows.forEach((item,index)=>{
+    const row=document.createElement('div');row.className='wl-edit-row';
+    const sym=document.createElement('input');sym.className='wsym';sym.value=item.symbol||'';sym.placeholder='ARBUSDT';
+    const tier=document.createElement('select');tier.className='wtier';['INTI','MOMENTUM','SPEKULATIF'].forEach(t=>{const o=document.createElement('option');o.value=t;o.textContent=t;o.selected=t===item.tier;tier.appendChild(o);});
+    const del=document.createElement('button');del.className='btn danger';del.textContent='Hapus';del.type='button';
+    sym.oninput=tier.onchange=()=>updateWatchValue(field.key,host);
+    del.onclick=()=>{_settingsValues[field.key].splice(index,1);renderSettingsFields();markSettingDirty(field.key,_settingsValues[field.key]);};
+    row.append(sym,tier,del);host.appendChild(row);
+  });
+  const add=document.createElement('button');add.type='button';add.className='btn';add.textContent='+ Tambah simbol';add.onclick=()=>addWatchRow(field.key);host.appendChild(add);wrap.appendChild(host);
+}
+function renderSettingsFields(){
+  const container=document.getElementById('settingsContainer');container.textContent='';
+  const groups=[...new Set(_settingsFields.map(f=>f.group))];
+  groups.forEach((group,gi)=>{
+    const details=document.createElement('details');details.className='settings-group';if(gi<2)details.open=true;
+    const summary=document.createElement('summary');summary.textContent=group;details.appendChild(summary);
+    const body=document.createElement('div');body.className='settings-fields';
+    const reset=document.createElement('button');reset.className='btn';reset.type='button';reset.textContent='Kembalikan grup ke default';reset.onclick=()=>resetSettingsGroup(group);body.appendChild(reset);
+    _settingsFields.filter(f=>f.group===group).forEach(field=>{
+      const row=document.createElement('div');row.className='setting-row';
+      const box=document.createElement('div');box.className='ctl-field';
+      const head=document.createElement('div');head.className='setting-head';
+      const label=document.createElement('label');label.textContent=field.label+(field.dangerous?' ⚠':'');head.appendChild(label);
+      if(!field.read_only){const rb=document.createElement('button');rb.type='button';rb.className='setting-reset';rb.textContent='default';rb.onclick=()=>resetSetting(field.key);head.appendChild(rb);}box.appendChild(head);
+      const value=_settingsValues[field.key];
+      if(field.editor==='watchlist'&&!field.read_only){renderWatchEditor(field,box);}
+      else if(field.editor==='symbols'&&!field.read_only){const inp=document.createElement('textarea');inp.value=(value||[]).join(', ');inp.oninput=()=>markSettingDirty(field.key,inp.value.split(',').map(x=>x.trim().toUpperCase()).filter(Boolean),inp);box.appendChild(inp);}
+      else if(field.read_only){const div=document.createElement('div');div.className='ctl-status';div.style.margin='0';div.textContent=field.managed_by?`Dikelola melalui ${field.managed_by}.`:(value===null?'dirahasiakan':typeof value==='object'?JSON.stringify(value):String(value));box.appendChild(div);}
+      else if(field.type==='bool'){const inp=document.createElement('input');inp.type='checkbox';inp.checked=!!value;inp.onchange=()=>markSettingDirty(field.key,inp.checked,inp);box.appendChild(inp);}
+      else if(field.editor==='select'){const sel=document.createElement('select');(field.options||[]).forEach(v=>{const o=document.createElement('option');o.value=v;o.textContent=v;o.selected=v===value;sel.appendChild(o);});sel.onchange=()=>markSettingDirty(field.key,sel.value,sel);box.appendChild(sel);}
+      else{const inp=document.createElement('input');inp.type=(field.type==='int'||field.type==='float')?'number':'text';if(inp.type==='number')inp.step=field.type==='int'?'1':'any';if(field.min!==null)inp.min=field.min;if(field.max!==null)inp.max=field.max;inp.value=value??'';inp.oninput=()=>{let v=inp.value;if(field.type==='int')v=inp.value===''?'':parseInt(inp.value,10);if(field.type==='float')v=inp.value===''?'':parseFloat(inp.value);markSettingDirty(field.key,v,inp);};box.appendChild(inp);}
+      const help=document.createElement('div');help.className='ctl-help';help.textContent=field.description+' Default: '+(field.default===null?'dirahasiakan':typeof field.default==='object'?JSON.stringify(field.default):field.default)+(field.unit?' '+field.unit:'');box.appendChild(help);
+      row.appendChild(box);body.appendChild(row);
+    });
+    details.appendChild(body);container.appendChild(details);
+  });
+}
+async function loadSettings(){
+  const mode=document.getElementById('settingsMode').value;
+  try{
+    const r=await fetch('/api/settings?mode='+encodeURIComponent(mode),{cache:'no-store'}),d=await r.json();if(!r.ok)throw new Error(d.error||'Settings gagal.');
+    _settingsFields=d.fields;_settingsValues={};_settingsOriginal={};_settingsDefaults={};_settingsDirtyKeys.clear();
+    d.fields.forEach(f=>{_settingsValues[f.key]=JSON.parse(JSON.stringify(f.value));_settingsOriginal[f.key]=JSON.parse(JSON.stringify(f.value));_settingsDefaults[f.key]=JSON.parse(JSON.stringify(f.default));});
+    renderSettingsFields();document.getElementById('settingsDirty').textContent='Tidak ada perubahan.';
+    document.getElementById('settingsDiff').classList.remove('show');document.getElementById('settingsCommitBtn').style.display='none';_settingsConfirmation=null;
+    if(d.load_errors&&d.load_errors.length)toast('err','Override rusak',d.load_errors.join('; '),12000);
+  }catch(e){document.getElementById('settingsContainer').textContent='Gagal memuat settings: '+e.message;}
+}
+async function previewSettings(){
+  if(!_settingsDirtyKeys.size){toast('warn','Tidak ada perubahan','Ubah minimal satu parameter terlebih dahulu.');return;}
+  const values={};_settingsDirtyKeys.forEach(k=>values[k]=_settingsValues[k]);
+  try{
+    const r=await adminFetch('/api/settings/preview',{body:JSON.stringify({mode:document.getElementById('settingsMode').value,values,position_policy:document.getElementById('settingsPositionPolicy').value})}),d=await r.json();
+    if(!r.ok){const extra=d.fields?' '+Object.entries(d.fields).map(([k,v])=>k+': '+v).join('; '):'';throw new Error((d.error||'Validasi gagal.')+extra);}
+    _settingsConfirmation=d.confirmation_id;
+    const box=document.getElementById('settingsDiff');box.innerHTML='<b>Ringkasan perubahan</b><br>'+d.diff.map(x=>`${esc(x.label)}: <span class="mut">${esc(JSON.stringify(x.old))}</span> → <b>${esc(JSON.stringify(x.new))}</b>`).join('<br>')+
+      (d.risk_warnings&&d.risk_warnings.length?'<br><br><b style="color:var(--red)">Peringatan LIVE:</b><br>'+d.risk_warnings.map(esc).join('<br>'):'');box.classList.add('show');
+    document.getElementById('settingsRiskPhraseWrap').style.display=d.requires_risk_phrase?'flex':'none';
+    document.getElementById('settingsCommitBtn').style.display='inline-block';
+  }catch(e){toast('err','Settings ditolak',e.message,12000);}
+}
+async function commitSettings(){
+  if(!_settingsConfirmation)return;
+  try{
+    const r=await adminFetch('/api/settings/commit',{body:JSON.stringify({confirmation_id:_settingsConfirmation,risk_phrase:document.getElementById('settingsRiskPhrase').value})}),d=await r.json();
+    if(!r.ok)throw new Error(d.restart_error||d.error||'Simpan gagal.');
+    toast(d.audit_warning?'warn':'ok','Settings disimpan',(d.restarted?'Bot berhasil direstart.':'Bot tetap STOPPED. Tekan Start bila siap.')+(d.audit_warning?' '+d.audit_warning:''),10000);
+    document.getElementById('settingsRiskPhrase').value='';await loadSettings();await loadControlStatus();await loadHistory();
+  }catch(e){toast('err','Simpan atau restart gagal',e.message,10000);}
+}
+async function loadHistory(){
+  try{const r=await fetch('/api/settings/history',{cache:'no-store'}),d=await r.json();const box=document.getElementById('settingsHistory');
+    if(!d.items||!d.items.length){box.innerHTML='<div class="empty">Belum ada riwayat.</div>';return;}
+    box.innerHTML=d.items.map(x=>`<div class="history-item">${esc(x.time||'')} · ${esc(x.mode||'')} · <b>${esc(x.event||x.key||'')}</b>${x.key?' · '+esc(x.key):''}${'old' in x?' · '+esc(JSON.stringify(x.old))+' → '+esc(JSON.stringify(x.new)):''}</div>`).join('');
+  }catch(e){document.getElementById('settingsHistory').textContent='Riwayat gagal dimuat.';}
+}
+async function loadPaperResetStatus(){
+  try{
+    const r=await fetch('/api/paper/reset/status',{cache:'no-store'}),d=await r.json();
+    document.getElementById('paperResetStatus').innerHTML=`Mode <b>${esc(d.mode)}</b> · bot <b>${esc(d.process.status)}</b> · reset ${d.eligible?'<span class="pos">tersedia</span>':'<span class="neg">tidak tersedia</span>'}`;
+    const entries=Object.entries(d.default_balances||{});if(entries.length&&!document.getElementById('paperAsset').dataset.loaded){document.getElementById('paperAsset').value=entries[0][0];document.getElementById('paperBalance').value=entries[0][1];document.getElementById('paperAsset').dataset.loaded='1';}
+  }catch(e){document.getElementById('paperResetStatus').textContent='Status reset gagal dimuat.';}
+}
+async function preparePaperReset(){
+  const asset=document.getElementById('paperAsset').value.trim().toUpperCase(), amount=parseFloat(document.getElementById('paperBalance').value);
+  try{
+    let r=await adminFetch('/api/paper/reset/prepare',{body:JSON.stringify({balances:{[asset]:amount}})}),d=await r.json();if(!r.ok)throw new Error(d.error||'Reset belum siap.');
+    document.getElementById('paperResetStatus').textContent='Arsip yang akan dibuat: '+((d.archives||[]).join(', ')||'file belum ada, tidak ada arsip');
+    if(!window.confirm('Konfirmasi tahap kedua: arsipkan state PAPER dan mulai saldo baru?'))return;
+    r=await adminFetch('/api/paper/reset/commit',{body:JSON.stringify({confirmation_id:d.confirmation_id,phrase:document.getElementById('paperResetPhrase').value})});d=await r.json();if(!r.ok)throw new Error(d.error||'Reset gagal.');
+    toast(d.audit_warning?'warn':'ok','Reset PAPER selesai',d.message+(d.audit_warning?' '+d.audit_warning:''),9000);document.getElementById('paperResetPhrase').value='';await loadHistory();await loadSettings();await loadPaperResetStatus();
+  }catch(e){toast('err','Reset PAPER ditolak',e.message,10000);}
+}
+window.addEventListener('beforeunload',e=>{if(_settingsDirtyKeys.size){e.preventDefault();e.returnValue='';}});
+loadControlStatus();loadCredentialStatus();loadModeChecklist();loadSettings();loadHistory();loadPaperResetStatus();
+setInterval(loadControlStatus,4000);
+
 // ============================ BACKTEST ============================
 let btPolling = null;
 
@@ -1269,7 +1689,7 @@ async function cancelBacktest(){
   const btn = document.getElementById('btCancelBtn');
   if(btn){ btn.disabled = true; btn.textContent = 'Membatalkan…'; }
   try{
-    await fetch('/api/backtest/cancel/' + encodeURIComponent(_btJobId), {method:'POST'});
+    await adminFetch('/api/backtest/cancel/' + encodeURIComponent(_btJobId), {method:'POST'});
     toast('info','Pembatalan dikirim','Backtest akan berhenti pada titik pemeriksaan berikutnya.');
   }catch(e){
     toast('err','Gagal membatalkan', e.message);
@@ -1359,7 +1779,7 @@ async function startBacktest(){
   document.getElementById('btEtaClock').textContent = '—';
 
   try{
-    const r = await fetch('/api/backtest/start', {
+    const r = await adminFetch('/api/backtest/start', {
       method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload)
     });
     const d = await r.json();

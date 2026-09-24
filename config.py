@@ -17,8 +17,8 @@ Kredensial diambil dari file .env, JANGAN taruh langsung di file config.py ini
 jadi besar). Baris "API_KEY" dan "API_SECRET" di bawah otomatis membaca dari
 file .env di folder yang sama dengan config.py ini, lewat library
 python-dotenv (sudah ada di requirements.txt). Kalau file .env belum ada atau
-isinya kosong, nilainya jadi string kosong dan bot akan gagal autentikasi ke
-Binance (tapi dashboard tetap bisa jalan mode read-only).
+isinya kosong, nilainya menjadi string kosong dan bot LIVE akan menolak Start.
+Dashboard tetap bisa berjalan dan mode PAPER tetap tidak memerlukan key.
 
 ============================================================
 CARA MENAMBAHKAN API KEY LEWAT FILE .env (Windows maupun Linux/macOS)
@@ -57,11 +57,10 @@ Catatan penting:
 - File ".env" sudah didaftarkan di .gitignore, jadi TIDAK akan pernah
   ter-commit ke Git secara tidak sengaja. Yang aman di-commit hanya
   ".env.example" (isinya cuma contoh format, bukan kredensial asli).
-- Kalau butuh cara lama (lewat environment variable OS, tanpa file .env),
-  itu tetap didukung sebagai cadangan -- kalau BINANCE_API_KEY /
-  BINANCE_API_SECRET sudah ada sebagai environment variable OS, python-dotenv
-  TIDAK akan menimpanya; nilai dari file .env hanya dipakai untuk variabel
-  yang belum di-set di level OS.
+- Environment variable OS tetap didukung bila `.env` belum berisi nilai.
+  Jika dashboard menyimpan kredensial ke `.env`, nilai file itu sengaja
+  mengalahkan environment proses lama (`override=True`) agar perubahan UI
+  benar-benar berlaku pada restart bot.
 
 ============================================================
 PERINGATAN KEAMANAN
@@ -84,13 +83,18 @@ PERINGATAN KEAMANAN
 """
 
 import os
+from copy import deepcopy
 
 try:
     from dotenv import load_dotenv
     # Cari file .env di folder yang sama dengan config.py ini, apapun dari
     # mana skrip dijalankan (run.py, dashboard.py, backtest.py, dll).
     _ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-    load_dotenv(dotenv_path=_ENV_PATH, override=False)
+    # Kredensial yang disimpan dashboard di .env adalah sumber aktif. Ini
+    # sengaja override environment proses supaya perubahan dari UI benar-benar
+    # berlaku setelah restart bot, termasuk bila terminal lama masih memiliki
+    # BINANCE_API_KEY/BINANCE_API_SECRET.
+    load_dotenv(dotenv_path=_ENV_PATH, override=True)
 except ImportError:
     # python-dotenv belum terpasang (mis. requirements.txt belum di-install).
     # Bot tetap bisa jalan kalau BINANCE_API_KEY/SECRET sudah di-set manual
@@ -113,7 +117,9 @@ PUMP_CONFIG = {
     # LIVE memerlukan BINANCE_API_KEY/BINANCE_API_SECRET produksi di file .env.
     #
     # Pengaman: nilai MODE yang tidak dikenal / typo / kosong TIDAK pernah
-    # diam-diam dianggap LIVE. Default aman adalah "PAPER" (lihat get_mode()).
+    # diam-diam dianggap LIVE. Nilai di sini adalah default immutable. Pilihan
+    # dashboard disimpan terpisah di pump_bot_runtime.json dan digabung saat
+    # config dimuat. Default aman tetap PAPER.
     "MODE": "PAPER",                          # "PAPER" (default, aman) atau "LIVE"
 
     # Tampilkan fitur Backtest di dashboard saat MODE="LIVE"?
@@ -550,6 +556,64 @@ PUMP_CONFIG = {
     "USE_DUST_SWEEP": True,
 }
 
+# Salinan default tidak pernah ditulis ulang oleh dashboard. Override per mode
+# dimuat dari file JSON terpisah sebelum helper mode menghitung path final.
+PUMP_DEFAULTS = deepcopy(PUMP_CONFIG)
+# BASE_URL adalah alias read-only yang biasanya dihitung saat finalisasi, tetapi
+# harus tersedia juga ketika validator memeriksa layer pada import pertama.
+PUMP_DEFAULTS["BASE_URL"] = PUMP_DEFAULTS["LIVE_BASE_URL"]
+CONFIG_LOAD_ERRORS: list[str] = []
+
+
+def _load_runtime_layers(explicit_mode: str | None = None) -> None:
+    """Bangun ulang PUMP_CONFIG dari default + mode runtime + override.
+
+    Dictionary global dimutasi in-place agar modul yang sudah melakukan
+    ``from config import PUMP_CONFIG`` tetap melihat nilai baru setelah
+    perpindahan mode dashboard.
+    """
+    from settings_schema import load_mode_override, load_runtime_mode, validate_candidate
+
+    cfg = deepcopy(PUMP_DEFAULTS)
+    # Kredensial dapat berubah dari dashboard saat proses masih hidup.
+    cfg["API_KEY"] = os.environ.get("BINANCE_API_KEY", "")
+    cfg["API_SECRET"] = os.environ.get("BINANCE_API_SECRET", "")
+    errors: list[str] = []
+    if explicit_mode is None:
+        active_mode, runtime_errors = load_runtime_mode(str(cfg.get("MODE", "PAPER")))
+        errors.extend(runtime_errors)
+    else:
+        active_mode = explicit_mode
+    cfg["MODE"] = active_mode
+
+    # Mode invalid tetap dipertahankan supaya require_valid_mode() menghentikan
+    # bot. Jangan menormalkannya diam-diam ke LIVE atau PAPER di sini.
+    normalized = str(active_mode).strip().upper()
+    if normalized in ("PAPER", "LIVE"):
+        override, override_errors = load_mode_override(normalized)
+        errors.extend(override_errors)
+        cfg.update(override)
+        cfg["MODE"] = normalized
+        cleaned, validation_errors, _ = validate_candidate(cfg, normalized)
+        if validation_errors:
+            errors.extend(
+                f"{key}: {message}" for key, message in validation_errors.items()
+            )
+        else:
+            cfg = cleaned
+    else:
+        errors.append(
+            f"Mode runtime tidak valid: {active_mode!r}. Hanya PAPER atau LIVE yang diizinkan."
+        )
+
+    PUMP_CONFIG.clear()
+    PUMP_CONFIG.update(cfg)
+    CONFIG_LOAD_ERRORS.clear()
+    CONFIG_LOAD_ERRORS.extend(errors)
+
+
+_load_runtime_layers()
+
 
 # ---------------------------------------------------------------------
 # Helper mode PAPER / LIVE
@@ -592,8 +656,9 @@ def require_valid_mode(config: dict = None) -> str:
     if mode not in VALID_MODES:
         raise InvalidModeError(
             f"MODE tidak valid: {raw!r}. Nilai yang diizinkan hanya "
-            f"{', '.join(VALID_MODES)}. Perbaiki MODE di config.py. "
-            "Bot TIDAK akan berjalan dengan mode yang tidak dikenal demi keamanan."
+            f"{', '.join(VALID_MODES)}. Perbaiki pump_bot_runtime.json atau "
+            "hapus file itu agar default PAPER dipakai. Bot TIDAK akan berjalan "
+            "dengan mode yang tidak dikenal demi keamanan."
         )
     return mode
 
@@ -712,22 +777,75 @@ def get_control_file(config: dict = None) -> str:
     return _mode_filename(str(cfg.get("CONTROL_FILE", "pump_bot_control.json")), get_mode(cfg))
 
 
-# Disediakan supaya kode lama yang membaca PUMP_CONFIG["BASE_URL"] tetap jalan.
-PUMP_CONFIG["BASE_URL"] = get_base_url(PUMP_CONFIG)
+_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
-# Nama file state/log/kontrol FINAL (sudah mengandung akhiran mode aktif,
-# mis. 'pump_bot_state_paper.json') ditulis balik ke PUMP_CONFIG supaya
-# semua kode yang membaca PUMP_CONFIG["STATE_FILE"] / ["LOG_FILE"] /
-# ["CONTROL_FILE"] -- pump_scanner_bot.py, dashboard.py, state.py --
-# otomatis memakai file yang benar untuk mode aktif tanpa perlu diubah
-# satu per satu. Helper di atas bersifat idempoten terhadap nilai yang
-# sudah berakhiran mode, jadi aman dipanggil ulang kapan pun.
-PUMP_CONFIG["STATE_FILE"] = get_state_file(PUMP_CONFIG)
-PUMP_CONFIG["LOG_FILE"] = get_log_file(PUMP_CONFIG)
-PUMP_CONFIG["CONTROL_FILE"] = get_control_file(PUMP_CONFIG)
-# File state akun simulasi PAPER, juga otomatis berakhiran mode. Meski hanya
-# ditulis di PAPER, nama finalnya tetap dihitung di sini supaya konsisten.
-PUMP_CONFIG["PAPER_ACCOUNT_STATE_FILE"] = get_paper_account_file(PUMP_CONFIG)
+
+def _runtime_path(path: str) -> str:
+    """Jadikan path runtime absolut terhadap folder repo.
+
+    Path custom absolut dari pengujian tetap dipertahankan. Ini mencegah bot
+    langsung menulis state ke folder acak hanya karena dijalankan dari cwd
+    yang berbeda.
+    """
+    return path if os.path.isabs(path) else os.path.join(_PROJECT_ROOT, path)
+
+
+def _finalize_config_dict(cfg: dict) -> dict:
+    cfg["BASE_URL"] = get_base_url(cfg)
+    cfg["STATE_FILE"] = _runtime_path(get_state_file(cfg))
+    cfg["LOG_FILE"] = _runtime_path(get_log_file(cfg))
+    cfg["CONTROL_FILE"] = _runtime_path(get_control_file(cfg))
+    cfg["PAPER_ACCOUNT_STATE_FILE"] = _runtime_path(get_paper_account_file(cfg))
+    return cfg
+
+
+def reload_config(explicit_mode: str | None = None) -> dict:
+    """Muat ulang mode dan override, lalu mutasi PUMP_CONFIG in-place."""
+    _load_runtime_layers(explicit_mode)
+    _finalize_config_dict(PUMP_CONFIG)
+    return PUMP_CONFIG
+
+
+def default_config_for_mode(mode: str) -> dict:
+    cfg = deepcopy(PUMP_DEFAULTS)
+    cfg["MODE"] = str(mode).strip().upper()
+    cfg["API_KEY"] = os.environ.get("BINANCE_API_KEY", "")
+    cfg["API_SECRET"] = os.environ.get("BINANCE_API_SECRET", "")
+    return _finalize_config_dict(cfg)
+
+
+def build_config_for_mode(mode: str, *, validate: bool = True) -> tuple[dict, list[str]]:
+    """Bangun config suatu mode tanpa mengubah mode dashboard aktif.
+
+    ``validate=False`` hanya dipakai editor agar konfigurasi lama yang invalid
+    masih dapat dibuka dan diperbaiki. Start dan checklist selalu memvalidasi.
+    """
+    from settings_schema import load_mode_override, validate_candidate
+
+    raw = str(mode).strip().upper()
+    cfg = default_config_for_mode(raw)
+    errors: list[str] = []
+    if raw in VALID_MODES:
+        override, errors = load_mode_override(raw)
+        cfg.update(override)
+        cfg["MODE"] = raw
+        if validate:
+            cleaned, validation_errors, _ = validate_candidate(cfg, raw)
+            if validation_errors:
+                errors.extend(
+                    f"{key}: {message}" for key, message in validation_errors.items()
+                )
+            else:
+                cfg = cleaned
+        _finalize_config_dict(cfg)
+    return cfg, errors
+
+
+# Finalisasi import pertama.
+_finalize_config_dict(PUMP_CONFIG)
+# Alias juga perlu ada pada salinan default agar tes kelengkapan skema dan UI
+# dapat menampilkan nilai default semua kunci final.
+PUMP_DEFAULTS["BASE_URL"] = PUMP_DEFAULTS["LIVE_BASE_URL"]
 
 
 # ---------------------------------------------------------------------
