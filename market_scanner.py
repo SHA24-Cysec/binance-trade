@@ -27,6 +27,13 @@ from strategy import Kline
 STABLE_BASE_ASSETS = {
     "USDC", "BUSD", "TUSD", "FDUSD", "DAI", "USDP", "EUR", "GBP", "TRY",
     "BRL", "AEUR", "USTC", "USDD", "PYUSD", "USDE",
+    # Ditambahkan 2026-09-24 setelah pemeriksaan ticker 24 jam Binance Spot:
+    # USD1USDT dan RLUSDUSDT aktif diperdagangkan dengan volume besar
+    # (219 juta dan 88 juta USDT) namun perubahan 24 jamnya persis 0,00%,
+    # karena keduanya stablecoin yang dipatok ke USD. Pair seperti ini
+    # tidak akan pernah lolos MIN_PUMP_PCT_24H, jadi membuangnya lebih awal
+    # hanya menghemat pekerjaan; ini bukan perubahan perilaku trading.
+    "USD1", "RLUSD",
 }
 
 LEVERAGED_TOKEN_SUFFIXES = ("UP", "DOWN", "BULL", "BEAR")

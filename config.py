@@ -179,9 +179,149 @@ PUMP_CONFIG = {
 
     "EXTRA_EXCLUDE_SYMBOLS": [],             # mis. ["SOMEUSDT"] kalau mau blacklist manual
 
+    # ==================================================================
+    # WATCHLIST PEMANTAUAN (READ-ONLY, TIDAK MEMENGARUHI KEPUTUSAN TRADE)
+    # ==================================================================
+    #
+    # PENTING, BACA DULU: daftar ini MURNI UNTUK DITAMPILKAN DI DASHBOARD.
+    # Bot TETAP memindai SELURUH pair USDT seperti sebelumnya. Tidak ada satu
+    # baris pun di market_scanner.py / pump_scanner_bot.py yang membaca
+    # daftar ini, jadi menambah atau menghapus simbol di sini TIDAK mengubah
+    # koin apa yang dibeli bot, tidak mengubah ranking kandidat, dan tidak
+    # mengubah hasil backtest. Kalau suatu hari Anda ingin watchlist ikut
+    # menyaring entry, itu perubahan terpisah yang harus dilakukan sadar.
+    #
+    # Gunanya: saat memantau dashboard Anda tidak perlu menebak koin mana
+    # yang sedang "dekat" dengan kondisi masuk bot. Panel watchlist
+    # menampilkan harga, perubahan 24 jam, volume, dan status tiap koin
+    # terhadap dua gerbang pertama scanner (MIN_PUMP_PCT_24H dan
+    # MIN_QUOTE_VOLUME_USDT_24H).
+    #
+    # ------------------------------------------------------------------
+    # DARI MANA DAFTAR INI BERASAL (metodologi, bukan tebakan)
+    # ------------------------------------------------------------------
+    # Disusun 2026-09-24 dari data pasar Binance Spot yang sesungguhnya,
+    # bukan dari daftar "koin populer" atau opini. Datanya:
+    #
+    #   - 3.710 simbol exchangeInfo + ticker 24 jam + bookTicker, ditarik dari
+    #     endpoint data publik resmi Binance (data-api.binance.vision).
+    #   - 487 pair USDT lolos aturan struktural bot (status TRADING, spot
+    #     diizinkan, bukan stablecoin, bukan leveraged token).
+    #   - 182 pair lolos MIN_QUOTE_VOLUME_USDT_24H, ditarik candle 1 jam
+    #     selama 120 hari untuk mengukur frekuensi pump.
+    #   - 110 pair shortlist ditarik candle 5 menit selama 45 hari
+    #     (= CONFIRM_INTERVAL bot, 12.960 candle per simbol).
+    #   - Pada tiap candle 5 menit itu dijalankan confirm_entry() ASLI dari
+    #     market_scanner.py dengan ENTRY_MODEL yang sedang aktif, plus
+    #     atr_percent() asli dari strategy.py. Jadi angka "berapa kali koin
+    #     ini memicu sinyal" adalah hasil menjalankan logika keputusan bot
+    #     itu sendiri, bukan perkiraan.
+    #
+    # Skor 0-100 menimbang empat hal yang benar-benar menentukan apakah
+    # sebuah koin cocok dengan mesin ini:
+    #   35 poin  frekuensi sinyal entry nyata per 30 hari
+    #   25 poin  likuiditas: berapa persen waktu volume 24 jam koin itu
+    #            berada di atas MIN_QUOTE_VOLUME_USDT_24H, plus volume median
+    #   20 poin  spread bid-ask sekarang dibanding MAX_SPREAD_PCT
+    #   20 poin  kecocokan ATR 5 menit dengan rentang
+    #            ATR_SL_MIN_PCT..ATR_SL_MAX_PCT (SL yang selalu mentok di
+    #            lantai atau plafon berarti mekanisme ATR tidak bekerja)
+    #
+    # Yang SENGAJA dibuang dari daftar:
+    #   - 9 saham tokenisasi Binance (bStocks, mis. MSTRB, CRCLB, SOXLB).
+    #     Terdeteksi dari data: porsi volume akhir pekan hanya 4-14%,
+    #     sementara median crypto 24/7 adalah 25,6%. Harganya ditambatkan ke
+    #     bursa saham AS yang tutup akhir pekan, sehingga asumsi pasar
+    #     24/7 milik bot ini tidak berlaku untuk mereka.
+    #   - Pair dengan spread saat ini melewati MAX_SPREAD_PCT.
+    #   - Pair dengan riwayat kurang dari 90 hari (belum cukup bukti).
+    #   - Pair dengan kurang dari 3 sinyal dalam 45 hari (terlalu jarang).
+    #
+    # BATAS KEJUJURAN DATA INI: frekuensi sinyal TIDAK sama dengan
+    # profitabilitas. Yang diukur adalah seberapa sering koin memicu kondisi
+    # masuk bot, bukan seberapa sering trade-nya berakhir untung. Pasar juga
+    # berputar; koin yang aktif hari ini bisa sepi dalam dua bulan. Tinjau
+    # ulang daftar ini secara berkala.
+    "WATCHLIST_ENABLED": True,               # False = panel watchlist disembunyikan dari dashboard
+
+    # ------------------------------------------------------------------
+    # PENYEGARAN DAFTAR OTOMATIS (opsional)
+    # ------------------------------------------------------------------
+    # Kalau True, dashboard menyusun ULANG daftar di bawah secara berkala
+    # dari data Binance terbaru, memakai metodologi yang sama. Hasilnya
+    # ditulis ke file terpisah (watchlist_auto_<mode>.json) dan TIDAK
+    # PERNAH menimpa config.py -- daftar manual di bawah tetap utuh sebagai
+    # cadangan kalau penyegaran gagal atau dimatikan.
+    #
+    # Tetap tidak memengaruhi keputusan trading apa pun.
+    #
+    # SOAL BEBAN KE BINANCE (alasan angka-angka di bawah dipilih):
+    # Batas resmi 6000 request weight per menit, dihitung PER IP bukan per
+    # API key (developers.binance.com, General REST API Information/LIMITS,
+    # dicek 2026-09-24). Jadi dashboard dan bot berbagi jatah yang sama.
+    # Anggaran default di bawah menghabiskan sekitar 684 weight per siklus,
+    # disebar ~15 menit = 0,76% anggaran. Sisanya tetap milik bot.
+    #
+    # Tiga rem keamanan TIDAK bisa dimatikan lewat config karena menyangkut
+    # keselamatan posisi Anda:
+    #   1. penyegaran dilewati selama bot memegang posisi terbuka
+    #   2. berhenti sendiri kalau sisa kuota weight menipis
+    #   3. berhenti total kalau kena 429/418, tidak mencoba ulang
+    "WATCHLIST_AUTO_REFRESH": True,          # False = daftar statis, hanya dari WATCHLIST di bawah
+    "WATCHLIST_AUTO_INTERVAL_HOURS": 6,      # jarak antar penyegaran
+    "WATCHLIST_AUTO_MAX_SYMBOLS": 60,        # kandidat teratas (by likuiditas) yang dinilai
+    "WATCHLIST_AUTO_DAYS": 14,               # panjang riwayat candle 5m untuk menilai
+    "WATCHLIST_AUTO_KEEP": 26,               # berapa simbol dipertahankan di daftar akhir
+    "WATCHLIST_AUTO_MAX_WEIGHT": 900,        # plafon keras weight per siklus
+    "WATCHLIST_AUTO_PACE_SECONDS": 2.0,      # jeda antar panggilan (menyebar beban)
+    "WATCHLIST_AUTO_MIN_HEADROOM": 0.5,      # berhenti kalau sisa kuota menit ini < 50%
+    "WATCHLIST_AUTO_STARTUP_DELAY_SECONDS": 60,  # jangan menyegarkan tepat saat start
+    "WATCHLIST": [
+        # --- INTI: likuiditas di atas ambang bot >= 90% waktu ---
+        # Sinyal di sini paling mungkin benar-benar bisa dieksekusi karena
+        # koinnya hampir selalu memenuhi filter volume bot.
+        {"symbol": "ZECUSDT",     "tier": "INTI",      "score": 93.0, "note": "33 sinyal/45h, spread 0,001% (tersempit), volume median 109 juta"},
+        {"symbol": "ENAUSDT",     "tier": "INTI",      "score": 92.5, "note": "34 sinyal/45h, ATR 1,04% pas di tengah rentang SL"},
+        {"symbol": "ARBUSDT",     "tier": "INTI",      "score": 89.6, "note": "44 sinyal/45h, terbanyak di tier ini"},
+        {"symbol": "NEARUSDT",    "tier": "INTI",      "score": 87.1, "note": "28 sinyal/45h, volume median 32 juta"},
+        {"symbol": "UNIUSDT",     "tier": "INTI",      "score": 86.5, "note": "27 sinyal/45h, spread 0,011%"},
+        {"symbol": "PENGUUSDT",   "tier": "INTI",      "score": 82.3, "note": "26 sinyal/45h, likuiditas 100% waktu"},
+        {"symbol": "DASHUSDT",    "tier": "INTI",      "score": 80.3, "note": "27 sinyal/45h, ATR 0,88%"},
+        {"symbol": "PUMPUSDT",    "tier": "INTI",      "score": 79.1, "note": "21 sinyal/45h, volume median 11,5 juta"},
+        {"symbol": "FILUSDT",     "tier": "INTI",      "score": 78.5, "note": "22 sinyal/45h, spread 0,011%"},
+        {"symbol": "INJUSDT",     "tier": "INTI",      "score": 78.4, "note": "23 sinyal/45h, ATR 0,72%"},
+        {"symbol": "AVAXUSDT",    "tier": "INTI",      "score": 76.9, "note": "17 sinyal/45h, likuiditas sangat stabil"},
+        {"symbol": "SUIUSDT",     "tier": "INTI",      "score": 74.5, "note": "13 sinyal/45h, volume median 25 juta"},
+
+        # --- MOMENTUM: likuiditas di atas ambang 60-90% waktu ---
+        # Aktif berkala. Sinyal cukup sering, tapi ada periode koin ini
+        # tidak memenuhi filter volume sehingga bot mengabaikannya.
+        {"symbol": "CHIPUSDT",    "tier": "MOMENTUM",  "score": 76.5, "note": "32 sinyal/45h, tapi likuiditas cukup hanya 61% waktu"},
+        {"symbol": "ZAMAUSDT",    "tier": "MOMENTUM",  "score": 71.7, "note": "18 sinyal/45h, pump tertinggi 51% dalam 120 hari"},
+        {"symbol": "CRVUSDT",     "tier": "MOMENTUM",  "score": 69.2, "note": "24 sinyal/45h, ATR 0,61% agak rendah untuk SL bot"},
+        {"symbol": "TIAUSDT",     "tier": "MOMENTUM",  "score": 65.2, "note": "16 sinyal/45h, likuiditas cukup 72% waktu"},
+        {"symbol": "ETHFIUSDT",   "tier": "MOMENTUM",  "score": 64.4, "note": "16 sinyal/45h, ATR 0,65%"},
+        {"symbol": "ZROUSDT",     "tier": "MOMENTUM",  "score": 60.8, "note": "19 sinyal/45h, spread 0,133% relatif lebar"},
+        {"symbol": "POLUSDT",     "tier": "MOMENTUM",  "score": 59.6, "note": "hanya 7 sinyal/45h, tapi spread 0,010% dan likuid"},
+        {"symbol": "SEIUSDT",     "tier": "MOMENTUM",  "score": 59.5, "note": "11 sinyal/45h, likuiditas cukup 64% waktu"},
+
+        # --- SPEKULATIF: likuiditas di atas ambang < 60% waktu ---
+        # PERHATIAN: koin di tier ini paling sering memicu sinyal, tapi
+        # justru karena volumenya naik-turun ekstrem. Volume median mereka
+        # ADA DI BAWAH MIN_QUOTE_VOLUME_USDT_24H, artinya di hari biasa bot
+        # memang tidak akan menyentuhnya; mereka hanya lolos saat sedang
+        # ramai. Risiko slippage pada order MARKET di sini nyata.
+        {"symbol": "MUBARAKUSDT", "tier": "SPEKULATIF", "score": 79.8, "note": "39 sinyal/45h tapi likuiditas cukup hanya 26% waktu"},
+        {"symbol": "NILUSDT",     "tier": "SPEKULATIF", "score": 77.6, "note": "35 sinyal/45h, likuiditas cukup 34% waktu"},
+        {"symbol": "WIFUSDT",     "tier": "SPEKULATIF", "score": 74.3, "note": "33 sinyal/45h, likuiditas cukup 42% waktu"},
+        {"symbol": "ARUSDT",      "tier": "SPEKULATIF", "score": 68.6, "note": "24 sinyal/45h, pump tertinggi 58%"},
+        {"symbol": "PROMUSDT",    "tier": "SPEKULATIF", "score": 66.8, "note": "26 sinyal/45h, volume median hanya 0,9 juta"},
+        {"symbol": "FFUSDT",      "tier": "SPEKULATIF", "score": 65.8, "note": "21 sinyal/45h, likuiditas cukup 45% waktu"},
+    ],
+
     # --- Ukuran posisi (tanpa martingale -- sekali entry per rotasi) ---
     "USE_RISK_PERCENT": True,               # True = ukuran posisi % dari saldo USDT free
-    "RISK_PERCENT": 95.0,                     # dipakai jika USE_RISK_PERCENT = True
+    "RISK_PERCENT": 100.0,                     # dipakai jika USE_RISK_PERCENT = True
     "POSITION_SIZE_USDT": 5.0,              # dipakai jika USE_RISK_PERCENT = False
 
     # --- Plafon nominal per posisi ---
@@ -482,6 +622,94 @@ PUMP_CONFIG["BASE_URL"] = get_base_url(PUMP_CONFIG)
 PUMP_CONFIG["STATE_FILE"] = get_state_file(PUMP_CONFIG)
 PUMP_CONFIG["LOG_FILE"] = get_log_file(PUMP_CONFIG)
 PUMP_CONFIG["CONTROL_FILE"] = get_control_file(PUMP_CONFIG)
+
+
+# ---------------------------------------------------------------------
+# Helper watchlist pemantauan (READ-ONLY)
+# ---------------------------------------------------------------------
+VALID_WATCHLIST_TIERS = ("INTI", "MOMENTUM", "SPEKULATIF")
+
+
+def watchlist_enabled(config: dict = None) -> bool:
+    """Apakah panel watchlist ditampilkan di dashboard.
+
+    Dibaca longgar (True/False, "true"/"1"/"ya") supaya tidak gampang salah
+    pasang. Nilai yang tidak jelas berarti "ya" dianggap False, konsisten
+    dengan sikap default aman di helper lain pada file ini.
+    """
+    cfg = PUMP_CONFIG if config is None else config
+    raw = cfg.get("WATCHLIST_ENABLED", False)
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in ("true", "1", "yes", "ya", "on")
+
+
+def get_watchlist(config: dict = None) -> list:
+    """Kembalikan watchlist yang sudah dibersihkan dan divalidasi.
+
+    Fungsi ini TIDAK memengaruhi keputusan trading apa pun. Ia hanya
+    menyiapkan data untuk ditampilkan dashboard.
+
+    Toleran terhadap isi yang tidak rapi, karena daftar ini memang untuk
+    diedit manusia:
+      - entry boleh berupa string ("ARBUSDT") atau dict lengkap
+      - simbol dinormalisasi jadi huruf besar tanpa spasi
+      - entry kosong, duplikat, dan tipe yang salah dibuang diam-diam
+      - tier yang tidak dikenal jatuh ke "LAINNYA" (bukan bikin error)
+      - score yang tidak bisa dibaca jadi None (bukan bikin error)
+
+    Sikap ini disengaja: satu baris yang salah ketik tidak boleh membuat
+    dashboard gagal dimuat, apalagi mengganggu proses bot.
+    """
+    cfg = PUMP_CONFIG if config is None else config
+    raw = cfg.get("WATCHLIST", [])
+    if not isinstance(raw, (list, tuple)):
+        return []
+
+    out = []
+    seen = set()
+    for item in raw:
+        if isinstance(item, str):
+            item = {"symbol": item}
+        if not isinstance(item, dict):
+            continue
+
+        symbol = str(item.get("symbol", "")).strip().upper()
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+
+        tier = str(item.get("tier", "")).strip().upper()
+        if tier not in VALID_WATCHLIST_TIERS:
+            tier = "LAINNYA"
+
+        try:
+            score = float(item["score"]) if item.get("score") is not None else None
+        except (TypeError, ValueError):
+            score = None
+
+        out.append({
+            "symbol": symbol,
+            "tier": tier,
+            "score": score,
+            "note": str(item.get("note", "")).strip(),
+        })
+    return out
+
+
+def watchlist_auto_enabled(config: dict = None) -> bool:
+    """Apakah penyegaran daftar otomatis aktif.
+
+    Hanya berlaku kalau panel watchlist sendiri aktif. Dibaca longgar
+    dengan sikap default aman, sama seperti helper lain di file ini.
+    """
+    if not watchlist_enabled(config):
+        return False
+    cfg = PUMP_CONFIG if config is None else config
+    raw = cfg.get("WATCHLIST_AUTO_REFRESH", False)
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in ("true", "1", "yes", "ya", "on")
 
 
 def get_taker_fee_pct(config: dict = None) -> float:

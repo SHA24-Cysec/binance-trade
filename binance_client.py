@@ -39,6 +39,22 @@ class BinanceAPIError(Exception):
         super().__init__(f"HTTP {status_code} | code={code} | {msg}")
 
 
+class BinanceRateLimitError(BinanceAPIError):
+    """HTTP 429 (batas rate terlampaui) atau 418 (IP diblokir otomatis).
+
+    Dipisahkan dari error biasa karena penanganannya berbeda secara
+    fundamental: error biasa boleh dicoba ulang cepat, sedangkan ini WAJIB
+    ditunggu sesuai header Retry-After. Dokumen resmi Binance menyebut ban
+    IP "scale in duration for repeat offenders, from 2 minutes to 3 days",
+    jadi mencoba ulang terlalu cepat justru memperburuk keadaan.
+    """
+
+    def __init__(self, status_code: int, code: Optional[int], msg: str,
+                 retry_after: Optional[int] = None):
+        super().__init__(status_code, code, msg)
+        self.retry_after = retry_after
+
+
 def _build_query(params: dict) -> str:
     """Percent-encode key & value lalu gabungkan jadi query string.
     Urutan dict di Python 3.7+ terjaga (insertion order), jadi urutan
@@ -63,6 +79,11 @@ class BinanceSpotClient:
         self.session = requests.Session()
         self.session.headers.update({"X-MBX-APIKEY": self.api_key})
         self._time_offset_ms = 0
+
+        # Pelacakan kuota rate limit. Diisi dari header respons Binance.
+        self.used_weight_1m = 0      # weight terpakai pada menit berjalan
+        self.used_weight_ts = 0.0    # kapan angka di atas terakhir dibaca
+        self.blocked_until = 0.0     # kapan IP boleh dipakai lagi setelah 429/418
 
     # ---------------------------------------------------------------
     # Infrastruktur dasar
@@ -113,6 +134,12 @@ class BinanceSpotClient:
             try:
                 url = build_url()
                 resp = self.session.request(method, url, timeout=self.timeout)
+
+                # Binance mengirim sisa pemakaian kuota di SETIAP respons.
+                # Dicatat supaya pemanggil yang rakus (mis. penyegar
+                # watchlist otomatis) bisa mengerem sendiri SEBELUM kena 429.
+                self._record_used_weight(resp.headers)
+
                 if resp.status_code >= 400:
                     try:
                         body = resp.json()
@@ -121,12 +148,51 @@ class BinanceSpotClient:
                     except ValueError:
                         code = None
                         msg = resp.text
+
+                    # 429 = melanggar batas rate. 418 = IP sudah di-ban otomatis
+                    # karena terus mengirim setelah kena 429.
+                    #
+                    # PENTING: ini TIDAK boleh diperlakukan seperti error biasa.
+                    # Dokumen resmi Binance menyatakan ban IP "scale in duration
+                    # for repeat offenders, from 2 minutes to 3 days", dan
+                    # kewajiban klien adalah mundur, bukan mencoba lagi cepat.
+                    # Backoff lama (maks 10 detik) justru mempercepat eskalasi.
+                    # Sumber: developers.binance.com, General REST API
+                    # Information / LIMITS (dicek 2026-09-24).
+                    if resp.status_code in (429, 418):
+                        retry_after = self._parse_retry_after(resp.headers)
+                        self._note_rate_limited(resp.status_code, retry_after)
+                        raise BinanceRateLimitError(
+                            resp.status_code, code, msg, retry_after=retry_after
+                        )
+
                     raise BinanceAPIError(resp.status_code, code, msg)
                 if resp.text == "":
                     return {}
                 return resp.json()
             except (requests.exceptions.RequestException, BinanceAPIError) as exc:
                 last_exc = exc
+
+                # Kena 429/418: hormati Retry-After dari server, jangan pakai
+                # backoff tebakan sendiri yang bisa jauh lebih pendek.
+                if isinstance(exc, BinanceRateLimitError):
+                    wait = exc.retry_after if exc.retry_after else min(60 * attempt, 180)
+                    logger.error(
+                        "Kena batas rate Binance (HTTP %s) pada %s %s. "
+                        "Mundur %ds sesuai instruksi server (percobaan %d/%d).",
+                        exc.status_code, method, path, wait, attempt, max_retries,
+                    )
+                    # HTTP 418 berarti IP sudah diblokir; mencoba lagi dalam
+                    # proses yang sama hanya memperpanjang hukuman.
+                    if exc.status_code == 418:
+                        logger.error(
+                            "HTTP 418: IP ini sedang diblokir Binance sampai %ds "
+                            "ke depan. Permintaan dihentikan, tidak dicoba ulang.", wait,
+                        )
+                        raise
+                    time.sleep(wait)
+                    continue
+
                 # -1021 = timestamp di luar recvWindow -> re-sync lalu retry
                 if isinstance(exc, BinanceAPIError) and exc.code == -1021:
                     logger.warning("Timestamp meleset, sinkronisasi ulang jam server...")
@@ -138,6 +204,56 @@ class BinanceSpotClient:
                 )
                 time.sleep(wait)
         raise last_exc
+
+    # ---------------------------------------------------------------
+    # Pelacakan kuota rate limit (dipakai penyegar watchlist otomatis)
+    # ---------------------------------------------------------------
+    def _record_used_weight(self, headers) -> None:
+        """Simpan nilai header x-mbx-used-weight-1m kalau ada.
+
+        Header ini dikirim Binance pada setiap respons dan berisi total
+        weight yang sudah terpakai IP ini dalam menit berjalan. Batasnya
+        6000/menit (dibaca dari exchangeInfo, dicek 2026-09-24).
+        """
+        try:
+            raw = headers.get("x-mbx-used-weight-1m") or headers.get("X-MBX-USED-WEIGHT-1M")
+            if raw is not None:
+                self.used_weight_1m = int(raw)
+                self.used_weight_ts = time.time()
+        except (TypeError, ValueError):
+            pass
+
+    @staticmethod
+    def _parse_retry_after(headers) -> Optional[int]:
+        try:
+            raw = headers.get("Retry-After") or headers.get("retry-after")
+            if raw is not None:
+                return max(1, int(float(raw)))
+        except (TypeError, ValueError):
+            pass
+        return None
+
+    def _note_rate_limited(self, status_code: int, retry_after: Optional[int]) -> None:
+        """Catat kapan IP boleh dipakai lagi, supaya pemanggil lain ikut diam."""
+        wait = retry_after if retry_after else (300 if status_code == 418 else 60)
+        self.blocked_until = max(getattr(self, "blocked_until", 0.0), time.time() + wait)
+
+    def is_rate_limited(self) -> bool:
+        """True kalau IP sedang dalam masa tunggu akibat 429/418."""
+        return time.time() < getattr(self, "blocked_until", 0.0)
+
+    def weight_headroom(self, limit: int = 6000) -> float:
+        """Perkiraan sisa kuota weight menit ini, sebagai pecahan 0..1.
+
+        Dipakai penyegar watchlist untuk mengerem sendiri. Kalau header
+        belum pernah terbaca, dianggap penuh (1.0) supaya tidak menghambat
+        operasi normal bot secara tidak perlu.
+        """
+        ts = getattr(self, "used_weight_ts", 0.0)
+        if not ts or time.time() - ts > 60:
+            return 1.0
+        used = getattr(self, "used_weight_1m", 0)
+        return max(0.0, 1.0 - used / float(limit or 6000))
 
     # ---------------------------------------------------------------
     # Public endpoints (tidak butuh API key)

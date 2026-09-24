@@ -550,6 +550,159 @@ Cara kerja:
    peringatan bahwa tombol ini tidak akan diproses sampai bot dijalankan
    lagi -- supaya Anda tahu harus mengecek `run.py`/proses bot dulu.
 
+### Watchlist Pantau (`WATCHLIST`, `WATCHLIST_ENABLED`)
+
+Panel di tab Ikhtisar berisi daftar koin pilihan beserta harga, perubahan 24
+jam, volume, posisi harga dalam rentang harian, dan status koin itu terhadap
+gerbang awal scanner.
+
+**Panel ini TIDAK mengubah perilaku bot sama sekali.** Bot tetap memindai
+SELURUH pair USDT persis seperti sebelumnya. Tidak ada satu baris pun di
+`market_scanner.py`, `pump_scanner_bot.py`, `portfolio_backtest.py`, atau
+`backtest.py` yang membaca daftar ini (ada pengujian otomatis yang menjaga
+janji tersebut, lihat `test_watchlist.py`). Menambah atau menghapus simbol di
+`WATCHLIST` tidak mengubah koin apa yang dibeli bot, tidak mengubah ranking
+kandidat, dan tidak mengubah hasil backtest.
+
+Arti kolom Status:
+
+| Status | Arti |
+|---|---|
+| **SIAP** | Lolos kedua gerbang 24 jam: naik >= `MIN_PUMP_PCT_24H` DAN volume >= `MIN_QUOTE_VOLUME_USDT_24H` |
+| **TIPIS** | Kenaikan cukup, tapi volume 24 jam di bawah ambang |
+| **MENUNGGU** | Volume cukup, tapi kenaikan belum sampai ambang |
+| **DIAM** | Dua-duanya belum terpenuhi |
+| **TIDAK ADA DATA** | Simbol tidak ditemukan di ticker Binance (salah ketik, atau pair sudah delisting) |
+
+**Status SIAP bukan berarti bot pasti membeli.** Panel ini hanya memeriksa dua
+gerbang 24 jam. Bot masih menjalankan konfirmasi candle 5 menit (retest VWAP +
+RVOL pada `ENTRY_MODEL` aktif), cek spread, cooldown, dan hanya mengambil SATU
+kandidat terbaik dari seluruh pasar. Konfirmasi candle sengaja tidak dihitung
+di panel ini, karena itu berarti mengunduh candle per simbol setiap refresh dan
+memakan jatah rate-limit IP yang sama dengan yang dipakai bot untuk mengirim
+order.
+
+Beban jaringannya kecil: panel memakai SATU panggilan `ticker/24hr` untuk
+seluruh pasar (bukan satu per simbol) dengan cache 20 detik, jadi paling
+banyak 3 request per menit berapa pun panjang daftarnya.
+
+Matikan panel dengan `WATCHLIST_ENABLED: False`. Kalau Binance tidak
+terjangkau, panel tetap tampil memakai data terakhir yang berhasil diambil,
+bukan mematikan dashboard.
+
+#### Dari mana daftar bawaannya berasal
+
+Daftar 26 simbol bawaan disusun 2026-09-24 dari data pasar Binance Spot yang
+sesungguhnya, bukan dari daftar "koin populer":
+
+1. 3.710 simbol `exchangeInfo` + `ticker/24hr` + `bookTicker` ditarik dari
+   endpoint data publik resmi Binance.
+2. 487 pair USDT lolos aturan struktural bot (status TRADING, spot diizinkan,
+   bukan stablecoin, bukan leveraged token).
+3. 182 pair lolos `MIN_QUOTE_VOLUME_USDT_24H`, lalu ditarik candle 1 jam
+   selama 120 hari untuk mengukur frekuensi pump.
+4. 110 pair shortlist ditarik candle 5 menit selama 45 hari (12.960 candle per
+   simbol, sama dengan `CONFIRM_INTERVAL` bot).
+5. Pada tiap candle itu dijalankan `confirm_entry()` ASLI dari
+   `market_scanner.py` dan `atr_percent()` asli dari `strategy.py`. Jadi angka
+   "berapa kali koin ini memicu sinyal" adalah hasil menjalankan logika
+   keputusan bot itu sendiri, bukan perkiraan. Total 1.391 sinyal terukur.
+
+Skor 0-100 menimbang empat hal: frekuensi sinyal nyata (35), likuiditas dan
+konsistensinya (25), spread terhadap `MAX_SPREAD_PCT` (20), dan kecocokan ATR
+5 menit dengan rentang `ATR_SL_MIN_PCT`..`ATR_SL_MAX_PCT` (20).
+
+Tier dibagi berdasarkan **uptime likuiditas**, yaitu berapa persen waktu
+volume 24 jam koin itu berada di atas ambang bot:
+
+| Tier | Uptime | Sifat |
+|---|---|---|
+| **INTI** | >= 90% | Sinyal paling mungkin benar-benar bisa dieksekusi |
+| **MOMENTUM** | 60-90% | Aktif berkala, ada periode diabaikan bot |
+| **SPEKULATIF** | < 60% | Sinyal paling sering, tapi likuiditas putus-putus |
+
+Koin SPEKULATIF punya volume median DI BAWAH `MIN_QUOTE_VOLUME_USDT_24H`,
+artinya di hari biasa bot memang tidak menyentuhnya; mereka hanya lolos saat
+sedang ramai. Risiko slippage pada order MARKET di sana nyata.
+
+Yang sengaja dibuang: 9 saham tokenisasi Binance (bStocks seperti `MSTRB`,
+`CRCLB`, `SOXLB`). Terdeteksi dari data, bukan dari nama: porsi volume akhir
+pekan mereka hanya 4-14%, sementara median crypto 24/7 adalah 25,6%. Harganya
+ditambatkan ke bursa saham AS yang tutup akhir pekan, sehingga asumsi pasar
+24/7 milik bot ini tidak berlaku.
+
+#### Penyegaran daftar otomatis (`WATCHLIST_AUTO_REFRESH`)
+
+Aktif secara default. Dashboard menyusun ULANG daftar simbol secara berkala
+(default tiap 6 jam) dari data Binance terbaru memakai metodologi yang sama.
+Hasilnya ditulis ke `watchlist_auto_<mode>.json` dan **tidak pernah menimpa
+`config.py`** -- daftar manual tetap utuh sebagai cadangan kalau penyegaran
+gagal, belum sempat berjalan, atau dimatikan.
+
+Panel menampilkan sumber daftar yang sedang dipakai, kapan terakhir
+disegarkan, dan jadwal berikutnya.
+
+**Soal beban ke Binance.** Batas resmi adalah 6.000 request weight per menit
+dan dihitung **per IP, bukan per API key** (sumber: developers.binance.com,
+General REST API Information / LIMITS, dicek 2026-09-24). Artinya dashboard
+dan bot berbagi jatah yang sama persis. Karena itu ruang lingkupnya
+dikecilkan dari metodologi penuh:
+
+| | Metodologi penuh | Penyegaran berkala |
+|---|---|---|
+| Simbol dinilai | 110 | 60 |
+| Riwayat candle 5m | 45 hari | 14 hari |
+| Weight per siklus | 2.944 | 684 |
+| Beban (disebar 15 menit) | 3,3% anggaran | **0,76% anggaran** |
+
+Diukur langsung saat pengujian: 14 simbol menghabiskan 224 weight dan
+menyisakan 96,6% kuota menit itu (dibaca dari header `x-mbx-used-weight-1m`
+milik Binance).
+
+**Tiga rem keamanan yang TIDAK bisa dimatikan lewat config**, karena
+menyangkut keselamatan posisi Anda:
+
+1. **Penyegaran dilewati selama bot memegang posisi terbuka.** Itu saat
+   paling kritis, ketika bot harus bisa mengirim order jual kapan saja.
+   Kalau file state tidak terbaca, bot dianggap punya posisi (sikap aman).
+2. **Berhenti sendiri kalau sisa kuota menipis**, dibaca dari header
+   Binance, sebelum kena 429 bukan sesudah.
+3. **Berhenti total kalau kena 429/418**, tidak mencoba ulang.
+
+Parameter yang bisa diatur:
+
+| Kunci | Bawaan | Arti |
+|---|---|---|
+| `WATCHLIST_AUTO_REFRESH` | `True` | `False` = daftar statis dari config saja |
+| `WATCHLIST_AUTO_INTERVAL_HOURS` | `6` | jarak antar penyegaran |
+| `WATCHLIST_AUTO_MAX_SYMBOLS` | `60` | kandidat teratas yang dinilai |
+| `WATCHLIST_AUTO_DAYS` | `14` | panjang riwayat candle |
+| `WATCHLIST_AUTO_KEEP` | `26` | jumlah simbol di daftar akhir |
+| `WATCHLIST_AUTO_MAX_WEIGHT` | `900` | plafon keras weight per siklus |
+| `WATCHLIST_AUTO_PACE_SECONDS` | `2.0` | jeda antar panggilan |
+| `WATCHLIST_AUTO_MIN_HEADROOM` | `0.5` | berhenti kalau sisa kuota < 50% |
+
+Sebagai bagian dari fitur ini, penanganan rate limit di `binance_client.py`
+juga diperbaiki: HTTP 429 dan 418 kini punya kelas error sendiri
+(`BinanceRateLimitError`), menghormati header `Retry-After`, dan HTTP 418
+tidak pernah dicoba ulang. Sebelumnya keduanya diperlakukan seperti error
+biasa dan dicoba lagi setelah 2-10 detik, yang justru perilaku pemicu ban IP
+bertingkat (Binance menyebutnya "scale in duration for repeat offenders,
+from 2 minutes to 3 days"). Perbaikan ini menguntungkan bot juga, bukan
+hanya watchlist.
+
+**Batas kejujuran data ini:** frekuensi sinyal TIDAK sama dengan
+profitabilitas. Yang diukur adalah seberapa sering koin memicu kondisi masuk
+bot, bukan seberapa sering trade-nya berakhir untung. Pasar juga berputar;
+koin yang aktif hari ini bisa sepi dalam dua bulan. Tinjau ulang daftarnya
+secara berkala.
+
+Audit fitur ini tanpa jaringan:
+
+```bash
+python test_watchlist.py
+```
+
 ## Dust sweep ke BNB (`USE_DUST_SWEEP`)
 
 Aktif secara default (`USE_DUST_SWEEP: True`). Setelah SEBUAH posisi ditutup

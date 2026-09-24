@@ -43,12 +43,14 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
+from typing import Optional
 
 from flask import Flask, jsonify, render_template, request
 
 from config import (
     PUMP_CONFIG, get_mode, get_base_url, is_testnet, backtest_enabled,
     get_state_file, get_log_file, get_control_file,
+    get_watchlist, watchlist_enabled, watchlist_auto_enabled,
 )
 import state as state_mod
 
@@ -60,6 +62,11 @@ except Exception:  # pragma: no cover - kalau requests tidak ada, tetap jalan ta
 
 import backtest as bt
 import portfolio_backtest as pbt
+
+try:
+    import watchlist_auto as wl_auto
+except Exception:  # pragma: no cover - panel tetap jalan dengan daftar statis
+    wl_auto = None
 
 app = Flask(__name__)
 
@@ -83,8 +90,17 @@ _last_manual_close_request = {"ts": 0.0}
 _client = None
 _price_cache: dict = {}          # {symbol: (price, ts)}
 _balance_cache: dict = {"data": None, "ts": 0}
+_watchlist_cache: dict = {"data": None, "ts": 0, "error": None}
+_auto_refresher = None           # diisi start_auto_refresher() saat dashboard start
 PRICE_TTL = 5.0                  # detik
 BALANCE_TTL = 30.0              # detik
+
+# Watchlist memakai SATU panggilan ticker/24hr untuk SELURUH pasar, bukan
+# satu panggilan per simbol. Dengan cache 20 detik, panel ini menambah
+# paling banyak 3 request per menit ke Binance berapa pun panjang daftarnya.
+# Ini penting karena bot berbagi jatah rate-limit IP yang sama; panel pantau
+# tidak boleh sampai mengganggu kemampuan bot menutup posisi tepat waktu.
+WATCHLIST_TTL = 20.0            # detik
 
 
 def get_client():
@@ -754,6 +770,232 @@ def index():
     return render_template("dashboard.html")
 
 
+def build_watchlist() -> dict:
+    """Data panel watchlist: harga, perubahan 24 jam, volume, status filter.
+
+    PANEL INI SEPENUHNYA READ-ONLY dan tidak memengaruhi bot sama sekali.
+    Ia hanya membandingkan kondisi pasar tiap simbol di daftar dengan DUA
+    gerbang pertama scanner (MIN_PUMP_PCT_24H dan MIN_QUOTE_VOLUME_USDT_24H),
+    supaya Anda bisa melihat koin mana yang sedang mendekati kondisi masuk.
+
+    Yang TIDAK diperiksa di sini, dan sengaja tidak diklaim:
+      - konfirmasi candle 5 menit (confirm_entry): butuh unduhan candle per
+        simbol setiap refresh, yang justru memakan rate-limit yang dipakai
+        bot untuk mengirim order. Jadi status "SIAP" di panel ini berarti
+        "lolos gerbang 24 jam", BUKAN "bot pasti membeli".
+      - spread saat ini dan ranking terhadap seluruh pasar.
+
+    Degradasi anggun: kalau Binance tidak terjangkau, panel tetap tampil
+    dengan daftar simbol dan tanda strip, bukan error yang mematikan
+    dashboard. Data lama dari cache dipakai kalau ada.
+    """
+    if not watchlist_enabled(PUMP_CONFIG):
+        return {"enabled": False, "items": [], "summary": {}, "error": None}
+
+    # Sumber daftar: hasil penyegaran otomatis kalau ada dan aktif,
+    # kalau tidak jatuh ke daftar manual di config.py. Daftar manual
+    # selalu jadi cadangan, jadi panel tidak pernah kosong hanya karena
+    # penyegaran belum sempat berjalan atau gagal.
+    source = "config"
+    auto_meta = None
+    entries = None
+    if watchlist_auto_enabled(PUMP_CONFIG) and wl_auto is not None:
+        prev = wl_auto.load_result(PUMP_CONFIG)
+        if prev and prev.get("items"):
+            entries = get_watchlist({"WATCHLIST": prev["items"]})
+            source = "auto"
+            auto_meta = {
+                "generated_at": prev.get("generated_at"),
+                "days": prev.get("days"),
+                "symbols_examined": prev.get("symbols_examined"),
+                "weight_spent": prev.get("weight_spent"),
+                "duration_seconds": prev.get("duration_seconds"),
+                "stopped_reason": prev.get("stopped_reason"),
+            }
+    if not entries:
+        entries = get_watchlist(PUMP_CONFIG)
+
+    if not entries:
+        return {"enabled": True, "items": [], "summary": {}, "error": None,
+                "config": _watchlist_config(), "source": source,
+                "auto": _auto_status(auto_meta)}
+
+    now = time.time()
+    cache = _watchlist_cache
+    tickers = None
+    error = None
+
+    if cache["data"] is not None and now - cache["ts"] < WATCHLIST_TTL:
+        tickers = cache["data"]
+        error = cache["error"]
+    else:
+        client = get_client()
+        if client is None:
+            error = "Klien Binance tidak tersedia (requests belum terpasang?)."
+            tickers = cache["data"]
+        else:
+            try:
+                raw = client.get_ticker_24hr_all()
+                tickers = {t["symbol"]: t for t in raw if isinstance(t, dict) and "symbol" in t}
+                cache["data"] = tickers
+                cache["ts"] = now
+                cache["error"] = None
+                error = None
+            except Exception as exc:  # noqa: BLE001
+                # Pakai data lama kalau ada, supaya panel tidak berkedip
+                # kosong setiap kali ada satu request gagal.
+                error = f"Gagal mengambil data pasar: {str(exc)[:120]}"
+                tickers = cache["data"]
+                cache["error"] = error
+
+    min_pump = float(PUMP_CONFIG.get("MIN_PUMP_PCT_24H", 0))
+    min_vol = float(PUMP_CONFIG.get("MIN_QUOTE_VOLUME_USDT_24H", 0))
+
+    items = []
+    for e in entries:
+        sym = e["symbol"]
+        t = (tickers or {}).get(sym)
+        row = {
+            "symbol": sym, "tier": e["tier"], "score": e["score"], "note": e["note"],
+            "price": None, "change_24h": None, "quote_volume_24h": None,
+            "high_24h": None, "low_24h": None, "trades_24h": None,
+            "pass_pump": None, "pass_volume": None, "status": "TIDAK ADA DATA",
+            "pump_gap": None, "range_position": None,
+        }
+        if t:
+            try:
+                price = float(t.get("lastPrice", 0) or 0)
+                chg = float(t.get("priceChangePercent", 0) or 0)
+                qv = float(t.get("quoteVolume", 0) or 0)
+                hi = float(t.get("highPrice", 0) or 0)
+                lo = float(t.get("lowPrice", 0) or 0)
+            except (TypeError, ValueError):
+                price = chg = qv = hi = lo = 0.0
+
+            if price > 0:
+                pass_pump = chg >= min_pump
+                pass_vol = qv >= min_vol
+                if pass_pump and pass_vol:
+                    status = "SIAP"          # lolos kedua gerbang 24 jam
+                elif pass_vol:
+                    status = "MENUNGGU"      # likuid, tapi belum cukup naik
+                elif pass_pump:
+                    status = "TIPIS"         # naik cukup, tapi volume kurang
+                else:
+                    status = "DIAM"
+
+                # Posisi harga dalam rentang 24 jam: 1,0 berarti di puncak
+                # hari ini, 0,0 di dasar. Berguna karena bot menolak harga
+                # yang sudah terlalu jauh di atas VWAP.
+                rng = hi - lo
+                rpos = ((price - lo) / rng) if rng > 0 else None
+
+                row.update({
+                    "price": price, "change_24h": chg, "quote_volume_24h": qv,
+                    "high_24h": hi, "low_24h": lo,
+                    "trades_24h": int(t.get("count", 0) or 0),
+                    "pass_pump": pass_pump, "pass_volume": pass_vol,
+                    "status": status,
+                    "pump_gap": round(min_pump - chg, 2),
+                    "range_position": round(rpos, 3) if rpos is not None else None,
+                })
+        items.append(row)
+
+    # Urutkan: yang paling dekat kondisi masuk tampil di atas, karena itu
+    # yang benar-benar ingin dilihat saat memantau. Simbol tanpa data
+    # didorong ke bawah alih-alih dibuang, supaya Anda sadar datanya hilang.
+    order = {"SIAP": 0, "TIPIS": 1, "MENUNGGU": 2, "DIAM": 3, "TIDAK ADA DATA": 4}
+    items.sort(key=lambda r: (order.get(r["status"], 9),
+                              -(r["change_24h"] if r["change_24h"] is not None else -1e9)))
+
+    counts = {}
+    for r in items:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+
+    return {
+        "enabled": True,
+        "items": items,
+        "summary": {
+            "total": len(items),
+            "counts": counts,
+            "with_data": sum(1 for r in items if r["price"] is not None),
+        },
+        "config": _watchlist_config(),
+        "source": source,
+        "auto": _auto_status(auto_meta),
+        "error": error,
+    }
+
+
+def _auto_status(meta: Optional[dict]) -> dict:
+    """Status penyegar otomatis untuk ditampilkan di panel."""
+    out = {
+        "enabled": watchlist_auto_enabled(PUMP_CONFIG),
+        "interval_hours": PUMP_CONFIG.get("WATCHLIST_AUTO_INTERVAL_HOURS"),
+        "meta": meta,
+        "state": "off", "message": "", "progress": 0.0,
+        "last_run": None, "next_run": None, "last_error": None,
+    }
+    if _auto_refresher is not None:
+        out.update(_auto_refresher.get_status())
+    return out
+
+
+def _watchlist_config() -> dict:
+    """Ambang yang dipakai panel, ditampilkan supaya angkanya tidak misterius."""
+    return {
+        "min_pump_pct_24h": PUMP_CONFIG.get("MIN_PUMP_PCT_24H"),
+        "min_quote_volume_24h": PUMP_CONFIG.get("MIN_QUOTE_VOLUME_USDT_24H"),
+        "quote_asset": PUMP_CONFIG.get("QUOTE_ASSET", "USDT"),
+    }
+
+
+def _bot_has_open_position() -> bool:
+    """REM KEAMANAN: apakah bot sedang memegang posisi terbuka.
+
+    Dibaca dari file state bot. Saat ada posisi terbuka, bot harus bisa
+    mengirim order jual kapan saja (Stop Loss/TP/trailing), jadi penyegaran
+    watchlist WAJIB mengalah dan tidak ikut memakan jatah rate-limit IP
+    yang sama.
+
+    Kalau file state tidak terbaca karena alasan apa pun, fungsi ini
+    mengembalikan True (anggap ada posisi). Sikap aman: lebih baik
+    penyegaran tertunda daripada mengganggu bot yang sedang pegang uang.
+    """
+    try:
+        st = load_state()
+    except Exception:  # noqa: BLE001
+        return True
+    if not isinstance(st, dict):
+        return True
+    pos = st.get("position")
+    return bool(pos) and bool(pos.get("symbol"))
+
+
+def start_auto_refresher() -> None:
+    """Nyalakan penjadwal penyegaran daftar di thread latar.
+
+    Aman dipanggil berkali-kali; kalau sudah jalan, tidak membuat thread
+    kedua. Dipanggil sekali saat dashboard start.
+    """
+    global _auto_refresher
+    if wl_auto is None or not watchlist_auto_enabled(PUMP_CONFIG):
+        return
+    if _auto_refresher is not None:
+        return
+    _auto_refresher = wl_auto.AutoRefresher(
+        client_getter=get_client,
+        config=PUMP_CONFIG,
+        has_open_position=_bot_has_open_position,
+    )
+    _auto_refresher.start()
+
+
+@app.route("/api/watchlist")
+def api_watchlist():
+    return jsonify(build_watchlist())
+
+
 @app.route("/api/status")
 def api_status():
     return jsonify(build_status())
@@ -871,11 +1113,22 @@ def api_all():
         "trades": trades[:100],
         "events": events,
         "log_levels": level_count,
+        "watchlist": build_watchlist(),
     })
 
 
 if __name__ == "__main__":
     port = int(os.environ.get("DASHBOARD_PORT", "8080"))
+
+    # Penyegar daftar watchlist berjalan di thread latar. Sengaja dinyalakan
+    # di sini (bukan saat modul di-import) supaya proses lain yang hanya
+    # meng-import dashboard, misalnya pengujian, tidak ikut memicu lalu
+    # lintas jaringan ke Binance.
+    start_auto_refresher()
+    if watchlist_auto_enabled(PUMP_CONFIG):
+        print(f"Penyegaran watchlist otomatis AKTIF "
+              f"(tiap {PUMP_CONFIG.get('WATCHLIST_AUTO_INTERVAL_HOURS')} jam, "
+              f"dilewati saat ada posisi terbuka).")
 
     # KEAMANAN: dashboard ini TIDAK punya login, dan punya endpoint yang
     # bisa menjual posisi sungguhan (/api/manual/close). Sebelumnya host

@@ -118,6 +118,40 @@
   .tag.stop_loss{background:rgba(244,63,94,.13);color:var(--red);border-color:rgba(244,63,94,.3)}
   .mono{font-variant-numeric:tabular-nums;font-family:var(--mono)}
 
+  /* ---------- watchlist (panel pantau, read-only) ---------- */
+  .wl-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+  .wl-chip{font-size:10.5px;font-weight:700;padding:3px 9px;border-radius:20px;
+    border:1px solid var(--border);background:var(--panel2);color:var(--muted);white-space:nowrap}
+  .wl-chip b{color:var(--txt);font-variant-numeric:tabular-nums}
+  .wl-chip.siap{background:rgba(74,222,128,.13);color:var(--green);border-color:rgba(74,222,128,.32)}
+  .wl-chip.siap b{color:var(--green)}
+  .wl-note{font-size:11px;color:var(--muted);line-height:1.65;margin-bottom:12px}
+  .wl-note b{color:#cbd5e1}
+  .wl-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  table.wl{min-width:680px}
+  table.wl td{padding:8px 10px;font-size:12px}
+  table.wl th{padding:8px 10px}
+  table.wl tr.siap{background:rgba(74,222,128,.045)}
+  table.wl tr.siap:hover{background:rgba(74,222,128,.09)}
+  .wl-sym{font-weight:700;letter-spacing:.2px}
+  .tag.st-siap{background:rgba(74,222,128,.15);color:var(--green);border-color:rgba(74,222,128,.35)}
+  .tag.st-tipis{background:rgba(245,158,11,.13);color:var(--amber);border-color:rgba(245,158,11,.3)}
+  .tag.st-menunggu{background:rgba(56,189,248,.12);color:var(--info);border-color:rgba(56,189,248,.28)}
+  .tag.st-diam{background:rgba(148,163,184,.1);color:var(--muted);border-color:var(--border)}
+  .tag.st-nodata{background:rgba(148,163,184,.08);color:var(--muted);border-color:var(--border)}
+  .tag.ti-inti{background:rgba(74,222,128,.12);color:var(--green);border-color:rgba(74,222,128,.28)}
+  .tag.ti-momentum{background:rgba(56,189,248,.12);color:var(--info);border-color:rgba(56,189,248,.26)}
+  .tag.ti-spekulatif{background:rgba(245,158,11,.12);color:var(--amber);border-color:rgba(245,158,11,.28)}
+  .tag.ti-lainnya{background:rgba(148,163,184,.1);color:var(--muted);border-color:var(--border)}
+  /* bar jarak menuju ambang pump: penuh = sudah lolos */
+  .wl-bar{position:relative;height:5px;border-radius:3px;background:rgba(148,163,184,.14);
+    overflow:hidden;min-width:52px}
+  .wl-bar span{position:absolute;inset:0 auto 0 0;border-radius:3px;background:var(--info);
+    transition:width .3s ease}
+  .wl-bar.full span{background:var(--green)}
+  .wl-gap{font-size:10.5px;color:var(--muted);margin-top:3px;font-variant-numeric:tabular-nums}
+  @media(max-width:640px){ table.wl{min-width:600px} }
+
   /* ---------- kotak posisi ---------- */
   .posbox{display:flex;flex-direction:column;gap:2px}
   .posrow{display:flex;justify-content:space-between;align-items:baseline;gap:12px;font-size:12.5px;
@@ -351,6 +385,22 @@
       <div id="positionBox"><div class="empty"><div class="big">💤</div>Tidak ada posisi terbuka.<br>Bot sedang memindai pasar…</div></div>
       <button id="manualCloseBtn" class="btn-danger" style="display:none" onclick="openManualCloseModal()">🔴 Jual Sekarang (Manual)</button>
       <div id="manualStatus" class="manual-status"></div>
+    </div>
+  </div>
+
+  <!-- WATCHLIST PANTAU (READ-ONLY, TIDAK MEMENGARUHI BOT) -->
+  <div class="panel" id="watchlistPanel" style="display:none;margin-bottom:16px">
+    <h2>👁️ Watchlist Pantau <span class="mut" style="font-weight:400;font-size:11.5px" id="wlCount"></span></h2>
+    <div class="wl-head" id="wlChips"></div>
+    <div class="wl-note" id="wlNote"></div>
+    <div class="wl-scroll">
+      <table class="wl" id="wlTable">
+        <thead><tr>
+          <th>Simbol</th><th>Tier</th><th>Harga</th><th>24 Jam</th>
+          <th>Menuju Ambang</th><th>Volume 24J</th><th>Posisi Range</th><th>Status</th>
+        </tr></thead>
+        <tbody id="wlBody"><tr><td colspan="8" class="empty">Memuat watchlist…</td></tr></tbody>
+      </table>
     </div>
   </div>
 
@@ -983,6 +1033,141 @@ function renderChart(trades){
   </svg>`;
 }
 
+// ======================= WATCHLIST (READ-ONLY) =======================
+// Panel ini MURNI MEMANTAU. Tidak ada satu pun elemen di sini yang
+// mengirim perintah ke bot, dan status "SIAP" hanya berarti koin itu
+// lolos dua gerbang 24 jam scanner, BUKAN jaminan bot akan membeli:
+// konfirmasi candle 5 menit (retest VWAP + RVOL) tidak dihitung di sini.
+
+// Volume ditulis ringkas supaya kolomnya tidak melebar: 1,2 jt / 340 rb.
+function wlVol(v){
+  if(v===null||v===undefined||isNaN(v)) return '—';
+  if(v>=1e9) return fmt(v/1e9,2)+' M';   // miliar
+  if(v>=1e6) return fmt(v/1e6,2)+' jt';
+  if(v>=1e3) return fmt(v/1e3,0)+' rb';
+  return fmt(v,0);
+}
+
+function renderWatchlist(w){
+  const panel=document.getElementById('watchlistPanel');
+  if(!panel) return;
+  if(!w||!w.enabled){ panel.style.display='none'; return; }
+  panel.style.display='';
+
+  const items=w.items||[];
+  const cfg=w.config||{};
+  const sum=w.summary||{};
+  const counts=sum.counts||{};
+
+  document.getElementById('wlCount').textContent =
+    items.length ? `${items.length} simbol dipantau` : '';
+
+  // Ringkasan status. "SIAP" ditonjolkan karena itu yang dicari saat memantau.
+  const chipOrder=[['SIAP','siap'],['TIPIS',''],['MENUNGGU',''],['DIAM',''],['TIDAK ADA DATA','']];
+  let chips=chipOrder.filter(([k])=>counts[k])
+    .map(([k,c])=>`<span class="wl-chip ${c}">${k} <b>${counts[k]}</b></span>`).join('');
+  chips+=`<span class="wl-chip">ambang naik <b>${fmt(cfg.min_pump_pct_24h,1)}%</b></span>`;
+  chips+=`<span class="wl-chip">ambang volume <b>${wlVol(cfg.min_quote_volume_24h)}</b></span>`;
+  document.getElementById('wlChips').innerHTML=chips;
+
+  // Status penyegar daftar otomatis. Dibedakan dari data harga: harga
+  // SELALU live, sedangkan DAFTAR simbolnya yang disegarkan berkala.
+  const a=w.auto||{};
+  if(a.enabled){
+    let st='';
+    if(a.state==='running'){
+      st=`<span class="wl-chip siap">menyegarkan daftar… ${fmt((a.progress||0)*100,0)}%</span>`;
+    }else if(a.last_run){
+      const jam=(Date.now()/1000-a.last_run)/3600;
+      st=`<span class="wl-chip">daftar disegarkan <b>${jam<1?'<1':fmt(jam,1)} jam lalu</b></span>`;
+    }else{
+      st=`<span class="wl-chip">penyegaran otomatis menunggu jadwal</span>`;
+    }
+    if(a.next_run&&a.state!=='running'){
+      const sisa=(a.next_run-Date.now()/1000)/3600;
+      if(sisa>0) st+=`<span class="wl-chip">berikutnya <b>${sisa<1?'<1':fmt(sisa,1)} jam</b></span>`;
+    }
+    document.getElementById('wlChips').insertAdjacentHTML('beforeend',st);
+  }
+
+  const note=document.getElementById('wlNote');
+  const sumberTxt = (w.source==='auto')
+    ? `Daftar ini <b>disusun otomatis</b> dari data Binance terbaru`
+    : `Daftar ini diambil dari <b>config.py</b>`;
+  let extra='';
+  if(a.enabled&&a.meta){
+    extra=` Penilaian terakhir memeriksa ${a.meta.symbols_examined||0} simbol `+
+      `memakai riwayat ${a.meta.days||0} hari (${a.meta.weight_spent||0} weight, `+
+      `${fmt(a.meta.duration_seconds||0,0)} detik).`;
+    if(a.meta.stopped_reason) extra+=` Catatan: ${a.meta.stopped_reason}.`;
+  }else if(a.enabled&&!a.last_run){
+    extra=` Penyegaran otomatis aktif tapi belum pernah selesai, `+
+      `jadi yang tampil masih daftar cadangan dari config.py.`;
+  }
+  if(a.enabled&&a.last_error){
+    extra+=` <b style="color:var(--amber)">Penyegaran terakhir gagal: ${String(a.last_error).replace(/</g,'&lt;')}</b>`;
+  }
+
+  if(w.error){
+    note.innerHTML=`<b style="color:var(--amber)">⚠️ ${w.error.replace(/</g,'&lt;')}</b><br>`+
+      `Daftar tetap ditampilkan memakai data terakhir yang berhasil diambil.`;
+  }else{
+    note.innerHTML=`${sumberTxt} dan <b>hanya untuk dipantau</b>, tidak mengubah perilaku bot. `+
+      `Bot tetap memindai seluruh pair ${cfg.quote_asset||'USDT'}. `+
+      `Status <b>SIAP</b> berarti koin lolos dua gerbang 24 jam (naik ≥ ${fmt(cfg.min_pump_pct_24h,1)}% `+
+      `dan volume ≥ ${wlVol(cfg.min_quote_volume_24h)}), <b>bukan</b> berarti bot pasti membeli. `+
+      `Konfirmasi candle 5 menit tidak dihitung di panel ini.${extra}`;
+  }
+
+  const tb=document.getElementById('wlBody');
+  if(!items.length){
+    tb.innerHTML='<tr><td colspan="8" class="empty">Watchlist kosong. Isi <code>WATCHLIST</code> di config.py.</td></tr>';
+    return;
+  }
+
+  const stCls={'SIAP':'st-siap','TIPIS':'st-tipis','MENUNGGU':'st-menunggu',
+               'DIAM':'st-diam','TIDAK ADA DATA':'st-nodata'};
+
+  tb.innerHTML=items.map(r=>{
+    const tierCls='ti-'+String(r.tier||'lainnya').toLowerCase();
+    const st=r.status||'TIDAK ADA DATA';
+    const rowCls=(st==='SIAP')?' class="siap"':'';
+
+    // Bar progres menuju ambang pump. Penuh berarti syarat kenaikan
+    // sudah terpenuhi; angka di bawahnya menyebut sisa jaraknya.
+    let bar='<span class="mut">—</span>';
+    if(r.change_24h!==null&&r.change_24h!==undefined&&cfg.min_pump_pct_24h){
+      const ratio=Math.max(0,Math.min(1,r.change_24h/cfg.min_pump_pct_24h));
+      const full=r.pass_pump?' full':'';
+      const gap=r.pass_pump
+        ? `<span class="pos">lolos +${fmt(r.change_24h-cfg.min_pump_pct_24h,1)}%</span>`
+        : `kurang ${fmt(r.pump_gap,1)}%`;
+      bar=`<div class="wl-bar${full}"><span style="width:${(ratio*100).toFixed(1)}%"></span></div>`+
+          `<div class="wl-gap">${gap}</div>`;
+    }
+
+    const rp=(r.range_position===null||r.range_position===undefined)
+      ? '<span class="mut">—</span>'
+      : `<span class="mono">${fmt(r.range_position*100,0)}%</span>`;
+
+    const volCls=r.pass_volume===false?' class="mut"':'';
+    const title=(r.note||'').replace(/"/g,'&quot;');
+    const scoreTxt=(r.score===null||r.score===undefined)?'':` · skor ${fmt(r.score,1)}`;
+
+    return `<tr${rowCls}>
+      <td><span class="wl-sym">${r.symbol}</span>
+          <div class="wl-gap" title="${title}">${title.slice(0,58)}${title.length>58?'…':''}</div></td>
+      <td><span class="tag ${tierCls}" title="tier${scoreTxt}">${r.tier}</span></td>
+      <td class="mono">${fmtP(r.price)}</td>
+      <td class="mono ${cls(r.change_24h)}">${r.change_24h===null?'—':sign(r.change_24h)+fmt(r.change_24h,2)+'%'}</td>
+      <td>${bar}</td>
+      <td${volCls}><span class="mono">${wlVol(r.quote_volume_24h)}</span></td>
+      <td>${rp}</td>
+      <td><span class="tag ${stCls[st]||'st-nodata'}">${st}</span></td>
+    </tr>`;
+  }).join('');
+}
+
 async function refresh(){
   try{
     const r=await fetch('/api/all',{cache:'no-store'});
@@ -998,6 +1183,7 @@ async function refresh(){
     renderTrades(d.trades, d.status.quote);
     renderLogs(d.events);
     renderChart(d.trades);
+    renderWatchlist(d.watchlist);
     const t=new Date();
     document.getElementById('lastUpdate').textContent='diperbarui '+t.toLocaleTimeString('id-ID');
   }catch(e){
