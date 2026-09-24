@@ -592,10 +592,10 @@ class TestAutoRefreshKeamanan(unittest.TestCase):
         self.assertLess(laju, 600, f"laju {laju:.0f} weight/menit terlalu tinggi")
 
     def test_file_hasil_terpisah_per_mode(self):
-        t = dict(cfg_mod.PUMP_CONFIG); t["MODE"] = "TESTNET"
+        t = dict(cfg_mod.PUMP_CONFIG); t["MODE"] = "PAPER"
         l = dict(cfg_mod.PUMP_CONFIG); l["MODE"] = "LIVE"
         self.assertNotEqual(self.wa._auto_file(t), self.wa._auto_file(l))
-        self.assertIn("testnet", self.wa._auto_file(t))
+        self.assertIn("paper", self.wa._auto_file(t))
         self.assertIn("live", self.wa._auto_file(l))
 
     def test_load_result_tahan_file_rusak(self):

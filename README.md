@@ -10,59 +10,103 @@ hold / momentum pudar. **Tidak ada averaging-down/martingale.**
 > bot pump scanner.
 
 
-## Mode TESTNET dan LIVE
+## Mode PAPER dan LIVE
 
 Bot ini punya dua mode, diatur lewat `"MODE"` di `config.py`:
 
-| | `MODE="TESTNET"` (default) | `MODE="LIVE"` |
+| | `MODE="PAPER"` (default) | `MODE="LIVE"` |
 |---|---|---|
-| Endpoint REST | `https://testnet.binance.vision` | `https://api.binance.com` |
-| Order | Sungguhan, dana virtual | Sungguhan, uang asli |
-| API key | Dibuat di testnet.binance.vision | Binance produksi |
-| Dust sweep (`/sapi/*`) | Dilewati otomatis (tidak tersedia di testnet) | Aktif |
-| Jalur kode | Sama persis | Sama persis |
-| File state | `pump_bot_state_testnet.json` | `pump_bot_state_live.json` |
-| File log | `pump_bot_testnet.log` (+ rotasi `.log.1` dst.) | `pump_bot_live.log` (+ rotasi `.log.1` dst.) |
-| File kontrol (perintah dashboard) | `pump_bot_control_testnet.json` | `pump_bot_control_live.json` |
+| Eksekusi order | **Disimulasikan lokal** (tidak ada order sungguhan) | Sungguhan, **uang asli** |
+| Saldo | Virtual, dari `PAPER_INITIAL_BALANCES` (default 10.000 USDT) | Saldo Spot asli akun Anda |
+| Data pasar | **ASLI** dari Binance produksi publik (REST + WebSocket) | Sama, ASLI dari produksi |
+| API key | **Tidak perlu** (semua data publik, tanpa tanda tangan) | Wajib, key produksi di `.env` |
+| Fee | Disimulasikan (`TAKER_FEE_PCT` + diskon BNB) | Dipotong Binance sungguhan |
+| Dust sweep (`/sapi/*`) | Dilewati (endpoint bertanda tangan, dilarang di PAPER) | Aktif |
+| Jalur LOGIKA strategi | **Sama persis** (lewat antarmuka `ExchangeClient`) | Sama persis |
+| File state posisi | `pump_bot_state_paper.json` | `pump_bot_state_live.json` |
+| File state akun simulasi | `pump_paper_account_paper.json` | (tidak dipakai) |
+| File log | `pump_bot_paper.log` | `pump_bot_live.log` |
+| File kontrol (dashboard) | `pump_bot_control_paper.json` | `pump_bot_control_live.json` |
 
-File state, log, dan kontrol otomatis mengikuti mode aktif, jadi data
-TESTNET dan LIVE tidak pernah tercampur: posisi testnet yang sedang terbuka
-tidak akan "dilanjutkan" bot ketika Anda pindah ke LIVE (atau sebaliknya),
-dan riwayat trade di dashboard hanya berasal dari mode yang sedang aktif.
-File lama tanpa akhiran (`pump_bot_state.json`, `pump_bot.log`,
-`pump_bot_control.json`) TIDAK dipindahkan/dihapus otomatis; dibiarkan apa
-adanya dan mode yang aktif memulai dengan file barunya sendiri.
+Perbedaan PAPER vs LIVE **hanya** ada di lapisan eksekusi order dan sumber
+saldo. Semua logika strategi (scan, konfirmasi, sizing, SL/TP/BE/Trailing,
+momentum fade) identik. Data pasar juga identik: keduanya menarik harga, order
+book, kline, dan `exchangeInfo` dari Binance **produksi publik**.
 
-Poin pentingnya: **tidak ada lagi jalur simulasi lokal**. Mode DRY_RUN yang
-dulu ada sudah dihapus, karena jalur simulasi itu melewatkan hal-hal yang
-justru paling sering bikin masalah di live, seperti pembulatan `LOT_SIZE`,
-`MIN_NOTIONAL`, slippage market order, dan error autentikasi. Di TESTNET
-semua itu benar-benar diuji oleh server Binance.
+### Arsitektur singkat
 
-Cara pindah mode:
+- `ExchangeClient` (antarmuka) -> `PaperClient` (simulasi) / `LiveClient` (asli).
+  Bot hanya bicara ke antarmuka, tidak tahu mode mana yang aktif.
+- `MarketDataProvider` (dipakai bersama) = WebSocket (primer, real-time) +
+  REST publik keyless (untuk `exchangeInfo`, kline historis, snapshot depth,
+  dan fallback saat WS basi/putus). REST di sini **allow_signed=False** sehingga
+  mustahil menyentuh endpoint bertanda tangan.
+- `PaperMatchingEngine` + `PaperStore` = mesin eksekusi simulasi + penyimpanan
+  saldo/order/riwayat virtual (JSON atomik).
 
-1. Buka `config.py`, ubah `"MODE"` jadi `"TESTNET"` atau `"LIVE"`.
-2. Ganti isi `.env` dengan pasangan key yang sesuai. Kedua mode membaca
-   variabel yang sama (`BINANCE_API_KEY` / `BINANCE_API_SECRET`), dan key
-   produksi TIDAK berlaku di testnet begitu pula sebaliknya (akan muncul
-   error `-2015 Invalid API-key`).
-3. Jalankan ulang bot DAN dashboard (nama file state/log/kontrol per mode
-   dibaca keduanya sekali saat start).
+### Kelebihan mode PAPER
 
-Hal yang perlu diketahui soal Spot Test Network (sumber: Binance Developer
-Docs, Testnet General Info, dicek 2026-09-23):
+- Meniru realita yang biasa dilewatkan simulator lama (mode DRY_RUN yang sudah
+  dihapus): pembulatan `LOT_SIZE`/`MARKET_LOT_SIZE`, `MIN_NOTIONAL`, slippage
+  market order (dihitung dengan **berjalan melalui kedalaman order book asli**),
+  partial fill, fee yang dipotong dari aset yang benar, dan bentuk respons +
+  kode error yang identik dengan Binance (mis. `-1013`, `-2010`).
+- Tidak perlu API key dan tidak ada risiko uang asli.
+- Data pasar tetap nyata, jadi perilaku bot terhadap kondisi pasar sungguhan
+  ikut teruji.
+- State persisten: setelah restart, saldo virtual, posisi, dan order terbuka
+  tetap ada.
 
-- Saldo virtual diberikan otomatis saat mendaftar, tidak bisa
-  ditarik/disetor.
-- Testnet **di-reset sekitar sebulan sekali**, semua order dan saldo hilang.
-  API key tetap dipertahankan saat reset.
-- Likuiditas dan pergerakan harga di testnet **tidak sama** dengan pasar
-  asli, jadi profit/loss di sana bukan prediksi hasil live. Yang divalidasi
-  di testnet adalah kebenaran mekanis bot (order terkirim, terisi, exit
-  jalan), bukan profitabilitas strategi.
-- Nilai kalau salah ketik: `MODE` yang tidak dikenali otomatis dianggap
-  `TESTNET`, bukan `LIVE`. Ini disengaja supaya typo tidak berujung order
-  pakai uang asli.
+### Batasan mode PAPER (jujur)
+
+Hasil PAPER **bukan jaminan** hasil LIVE. Yang **tidak** dimodelkan:
+
+- **Latensi jaringan** antara bot dan Binance.
+- **Posisi antrean** Anda di dalam order book (untuk limit order).
+- **Dampak pasar (market impact)** dari order Anda sendiri.
+- **Perbedaan likuiditas** dan pergerakan harga saat order "dalam perjalanan".
+- **Sisa market order** yang tak terisi karena kedalaman order book habis
+  diperlakukan sebagai `EXPIRED` (penyederhanaan yang realistis).
+- **Diskon BNB** dimodelkan sebagai **tarif fee lebih rendah** (0,075%) namun
+  tetap dipotong dari aset yang diperdagangkan, bukan dari saldo BNB terpisah.
+  Ini disengaja agar perilaku "fee mengurangi qty yang diterima" tetap terjaga
+  sehingga qty jual tidak pernah melebihi saldo.
+- Order book untuk mengisi order diambil dari **snapshot depth REST yang segar**
+  saat order dikirim (bukan order book lokal dari depth-diff WebSocket), karena
+  snapshot segar lebih setia untuk simulasi fill.
+
+### Cara reset state PAPER
+
+Cukup **hapus atau pindahkan** file state, lalu jalankan ulang bot:
+
+```bash
+# hapus (mulai bersih dengan saldo awal dari config)
+rm pump_paper_account_paper.json pump_bot_state_paper.json
+
+# atau arsipkan dulu (lebih aman)
+mv pump_paper_account_paper.json pump_paper_account_paper.json.bak
+mv pump_bot_state_paper.json      pump_bot_state_paper.json.bak
+```
+
+Saat start, jika file akun tidak ada, bot membuat saldo awal dari
+`PAPER_INITIAL_BALANCES`. Jika file state **rusak**, bot membuat cadangan
+`*.corrupt-<timestamp>` lalu memberi tahu di log dan mulai dari saldo awal
+(file rusak TIDAK ditimpa diam-diam).
+
+### Pengaman mode
+
+- `MODE` yang **tidak dikenal / kosong / typo** membuat bot **berhenti** dengan
+  pesan jelas (`InvalidModeError`), TIDAK pernah jatuh diam-diam ke LIVE.
+- Default `MODE` adalah `"PAPER"` (aman).
+- Di PAPER, **tidak ada satu pun** request bertanda tangan yang dikirim, bahkan
+  jika `BINANCE_API_KEY` kebetulan terisi di environment. Ada guard yang melempar
+  `SignedEndpointBlockedError` bila ada kode yang mencoba.
+
+### Peringatan
+
+**Hasil PAPER bukan jaminan hasil LIVE.** PAPER menguji kebenaran mekanis dan
+reaksi bot terhadap data pasar nyata, bukan menjamin profitabilitas dengan uang
+asli. Slippage nyata, antrean order book, dan likuiditas riil bisa berbeda.
 
 
 
@@ -429,14 +473,15 @@ python pump_scanner_bot.py --selftest
 #    Linux/macOS: cp .env.example .env      |      Windows: copy .env.example .env
 #    Detail lengkap dan opsi lain ada di komentar paling atas config.py
 
-# 3) Uji dulu di TESTNET. Di config.py pastikan "MODE": "TESTNET" (ini default),
-#    lalu isi .env dengan API key dari https://testnet.binance.vision.
-#    Bot mengirim order SUNGGUHAN, tapi ke Spot Test Network memakai dana
-#    virtual -- alur kodenya sama persis dengan mode LIVE.
+# 3) Uji dulu di PAPER (default). Di config.py pastikan "MODE": "PAPER".
+#    Tidak perlu API key: data pasar diambil dari Binance produksi publik,
+#    eksekusi/fee/saldo disimulasikan lokal. Saldo awal virtual diatur di
+#    PAPER_INITIAL_BALANCES (default 10.000 USDT).
 python pump_scanner_bot.py
 
-# 4) Setelah yakin, ubah "MODE": "LIVE" di config.py, ganti isi .env dengan API
-#    key produksi Binance Anda, lalu jalankan lagi (mulai dari modal kecil)
+# 4) Setelah yakin, ubah "MODE": "LIVE" di config.py, isi .env dengan API key
+#    PRODUKSI Binance Anda, lalu jalankan lagi (mulai dari modal kecil).
+#    Ingat: hasil PAPER BUKAN jaminan hasil LIVE.
 python pump_scanner_bot.py
 ```
 
@@ -460,9 +505,9 @@ Cara kerjanya:
   tidak salah kira dashboard masih "hidup" memantau bot padahal botnya
   sudah lama mati, atau sebaliknya.
 - Ganti port dashboard: `DASHBOARD_PORT=9000 python run.py`
-- Kalau API key belum di-set, `run.py` menolak jalan dari awal (sama seperti
-  proteksi yang sudah ada di `pump_scanner_bot.py`). Ini berlaku di kedua
-  mode, karena TESTNET pun mengirim order sungguhan ke Spot Test Network.
+- Di `MODE="LIVE"`, kalau API key belum di-set, `run.py` menolak jalan dari
+  awal (order LIVE memakai uang asli). Di `MODE="PAPER"` API key tidak
+  diperlukan, jadi `run.py` tetap jalan tanpa `.env`.
 
 Menjalankan keduanya terpisah (dua terminal) masih tetap bisa kalau Anda
 lebih suka begitu:
@@ -484,8 +529,8 @@ python run.py
 ```
 
 State dan log tersimpan di `pump_bot_state_<mode>.json` dan
-`pump_bot_<mode>.log` (otomatis terpisah untuk TESTNET dan LIVE, lihat
-bagian "Mode TESTNET dan LIVE"), sehingga posisi yang sedang berjalan dan
+`pump_bot_<mode>.log` (otomatis terpisah untuk PAPER dan LIVE, lihat
+bagian "Mode PAPER dan LIVE"), sehingga posisi yang sedang berjalan dan
 level BE/trailing selamat dari restart/crash.
 
 ## Dashboard pemantauan (web)
@@ -537,8 +582,8 @@ Cara kerja:
    lewat file.
 4. Penjualan ini SELALU order SELL MARKET sungguhan lewat jalur
    `close_position()` yang sama dengan SL/TP. Bedanya cuma tujuannya: di
-   `MODE="TESTNET"` order dikirim ke Spot Test Network (dana virtual), di
-   `MODE="LIVE"` ke Binance produksi (uang asli).
+   `MODE="PAPER"` order disimulasikan lokal (saldo virtual), di
+   `MODE="LIVE"` dikirim ke Binance produksi (uang asli).
 5. Dashboard menampilkan status "terkirim, menunggu diproses" lalu
    otomatis polling sampai posisi hilang dari state (maksimal ~2 menit),
    dan alasan trade di riwayat akan tertulis `MANUAL_CLOSE_DASHBOARD`.
@@ -727,12 +772,12 @@ dimatikan lewat config):**
   boleh menyapu aset apa saja, ada risiko nyata **modal USDT (atau BNB)
   Anda ikut ter-convert**. Karena itu quote asset (USDT) dan BNB itu
   sendiri dikecualikan secara eksplisit di kode, apa pun isi config.
-- Di mode `TESTNET`, fitur ini **otomatis dilewati** (hanya dicatat di log).
-  Alasannya bukan pilihan desain: Binance Spot Test Network memang hanya
-  menyediakan endpoint `/api/*`, sedangkan dust convert memakai
-  `/sapi/v1/asset/dust` yang tidak tersedia di sana
-  (sumber: developers.binance.com, Testnet General Info, dicek 2026-09-23).
-  Di mode `LIVE` fitur ini tetap berjalan penuh.
+- Di mode `PAPER`, fitur ini **otomatis dilewati** (hanya dicatat di log).
+  Alasannya: konversi dust memakai `/sapi/v1/asset/dust` yang **bertanda
+  tangan**, sedangkan PAPER dilarang keras mengirim request bertanda tangan
+  apa pun (ada guard yang melempar `SignedEndpointBlockedError`). Konversi
+  dust bukan bagian dari simulasi eksekusi. Di mode `LIVE` fitur ini tetap
+  berjalan penuh.
 - Binance sendiri **membatasi frekuensi** endpoint dust-nya per akun
   (dilaporkan komunitas sekitar tiap 6-24 jam sekali, bukan dibatasi oleh
   kode ini). Kalau bot mencoba dust sweep tapi kena batas ini, itu dianggap
@@ -816,3 +861,80 @@ Audit logika backtest tanpa jaringan (data sintetis):
 ```bash
 python backtest.py
 ```
+
+## Menjalankan tes (PAPER)
+
+Unit test mesin simulasi, penyimpanan, dan pengaman mode/guard ada di folder
+`tests/` dan **tidak menghubungi jaringan** (data pasar di-inject sebagai data
+palsu, jadi deterministik).
+
+```bash
+pip install -r requirements.txt   # termasuk pytest
+pytest -q
+```
+
+Selftest logika strategi lama (juga tanpa jaringan) tetap tersedia:
+
+```bash
+python pump_scanner_bot.py --selftest
+```
+
+Skenario yang tercakup di `tests/`:
+
+- Penolakan order akibat `LOT_SIZE` dan `MIN_NOTIONAL`.
+- Market order berjalan melewati beberapa level order book (harga rata-rata +
+  slippage).
+- Partial fill saat kedalaman kurang (sisa `EXPIRED`).
+- Limit order tidak terisi lalu timeout (dana terkunci dikembalikan).
+- Gap harga melewati stop-loss (isi pada harga pasca-gap, bukan `stopPrice`).
+- Fee terpotong dari aset yang benar (BUY: base, SELL: quote) + diskon BNB;
+  qty jual tidak pernah melebihi saldo.
+- Restart di tengah posisi terbuka (state termuat kembali).
+- File state korup (dibuat cadangan, tidak ditimpa diam-diam) + migrasi skema.
+- Guard menolak endpoint bertanda tangan di PAPER (walau API key terisi).
+- `MODE` tidak valid membuat bot berhenti (tidak jatuh ke LIVE) + idempotensi
+  `clientOrderId`.
+
+## Contoh konfigurasi PAPER
+
+Di `config.py` (nilai default sudah aman untuk PAPER):
+
+```python
+"MODE": "PAPER",
+"PAPER_INITIAL_BALANCES": {"USDT": 10000.0},
+"TAKER_FEE_PCT": 0.1,
+"MAKER_FEE_PCT": 0.1,
+"USE_BNB_FEE_DISCOUNT": True,     # 0,1% -> 0,075%
+"USE_WEBSOCKET": True,            # WS primer + REST fallback (hybrid)
+"WS_BASE_URL": "wss://stream.binance.com:9443",
+"MAX_MARKET_DATA_AGE_SECONDS": 10.0,
+"PAPER_DEPTH_LIMIT": 100,
+```
+
+`.env` boleh kosong di PAPER.
+
+## Checklist migrasi
+
+### Dari TESTNET ke PAPER
+
+1. Tarik kode baru, lalu `pip install -r requirements.txt`
+   (menambah `websocket-client` dan `pytest`).
+2. Pastikan `"MODE": "PAPER"` di `config.py` (ini sudah default).
+3. Hapus/arsipkan file lama `*_testnet.*` (tidak lagi dipakai).
+4. API key TIDAK diperlukan untuk PAPER; `.env` boleh dikosongkan.
+5. Jalankan `pytest -q` (semua lulus) lalu `python run.py`. Cek banner
+   "MODE PAPER AKTIF" di log.
+6. Verifikasi saldo virtual muncul di dashboard (default 10.000 USDT).
+
+### Sebelum pindah ke LIVE
+
+1. Isi `.env` dengan API key/secret **produksi** Binance (permission Spot
+   Trading saja; JANGAN aktifkan Withdrawals).
+2. Set `"MODE": "LIVE"` di `config.py`.
+3. Periksa kontrol risiko: `RISK_PERCENT`, `MAX_POSITION_USDT`,
+   `USE_EQUITY_STOP`, `MAX_DAILY_LOSS_PERCENT`, `CLOSE_ALL_AT_LIMIT`.
+4. Periksa `ALLOW_EXPERIMENTAL_ENTRY_LIVE` sesuai kebijakan Anda
+   (default `False` memblokir entry model eksperimen di LIVE).
+5. Mulai dari **modal kecil**, pantau beberapa rotasi trade pertama.
+6. Sadari: **hasil PAPER bukan jaminan hasil LIVE** (slippage, antrean order
+   book, dan likuiditas nyata bisa berbeda).

@@ -9,16 +9,16 @@ adalah tombol "Jual Sekarang" untuk menutup paksa posisi yang sedang
 terbuka (lihat check_manual_close() dan endpoint /api/manual/close di bawah).
 Di luar itu, sumber datanya:
 
-1. File state bot   -> pump_bot_state_testnet.json / pump_bot_state_live.json
+1. File state bot   -> pump_bot_state_paper.json / pump_bot_state_live.json
                        (posisi, level BE/trailing, equity)
-2. File log bot     -> pump_bot_testnet.log / pump_bot_live.log
+2. File log bot     -> pump_bot_paper.log / pump_bot_live.log
                        (riwayat trade + kejadian)
 3. Data live Binance (opsional) -> harga real-time koin yang dipegang, saldo
    akun (kalau API key tersedia). Kalau Binance tak terjangkau atau API key
    kosong, dashboard tetap jalan dengan data dari file saja (degradasi anggun).
 
 File state/log/kontrol OTOMATIS mengikuti MODE yang aktif di config.py
-(TESTNET atau LIVE) dan terpisah per mode, jadi dashboard hanya menampilkan
+(PAPER atau LIVE) dan terpisah per mode, jadi dashboard hanya menampilkan
 data mode yang sedang dijalankan bot. Kalau MODE diubah, jalankan ulang bot
 DAN dashboard ini (nama file dibaca sekali saat start).
 
@@ -50,7 +50,7 @@ from typing import Optional
 from flask import Flask, jsonify, render_template, request
 
 from config import (
-    PUMP_CONFIG, get_mode, get_base_url, is_testnet, backtest_enabled,
+    PUMP_CONFIG, get_mode, get_base_url, is_paper, backtest_enabled,
     get_state_file, get_log_file, get_control_file,
     get_watchlist, watchlist_enabled, watchlist_auto_enabled,
 )
@@ -61,6 +61,33 @@ try:
     _HAS_CLIENT = True
 except Exception:  # pragma: no cover - kalau requests tidak ada, tetap jalan tanpa live
     _HAS_CLIENT = False
+
+
+class _PaperDashboardClient:
+    """Klien READ-ONLY untuk dashboard saat MODE=PAPER.
+
+    Dashboard adalah proses TERPISAH dari bot. Untuk menghindari balapan tulis
+    pada file state PAPER, klien ini TIDAK memakai PaperStore/engine (yang
+    menulis) dan TIDAK membuka WebSocket kedua. Saldo virtual dibaca langsung
+    dari file state (read-only), sedangkan harga/ticker diambil dari REST
+    publik keyless (allow_signed=False) -- mustahil menyentuh endpoint signed.
+    """
+
+    def __init__(self) -> None:
+        self._market = BinanceSpotClient(
+            "", "", get_base_url(PUMP_CONFIG), allow_signed=False)
+        self._account_file = PUMP_CONFIG.get("PAPER_ACCOUNT_STATE_FILE",
+                                             "pump_paper_account_paper.json")
+
+    def get_price(self, symbol, max_retries: int = 3):
+        return self._market.get_price(symbol, max_retries=max_retries)
+
+    def get_ticker_24hr_all(self):
+        return self._market.get_ticker_24hr_all()
+
+    def get_account(self):
+        from paper_store import load_account_snapshot
+        return load_account_snapshot(self._account_file)
 
 import backtest as bt
 import portfolio_backtest as pbt
@@ -73,7 +100,7 @@ except Exception:  # pragma: no cover - panel tetap jalan dengan daftar statis
 app = Flask(__name__)
 
 # Nama file state/log/kontrol sudah otomatis mengandung akhiran mode aktif
-# (mis. pump_bot_state_testnet.json), dihitung sekali di config.py saat
+# (mis. pump_bot_state_paper.json), dihitung sekali di config.py saat
 # di-import. Fallback get_state_file() dst. hanya terpakai kalau kunci config
 # hilang, dan tetap mode-aware supaya dashboard tidak diam-diam membaca file
 # mode yang salah.
@@ -121,11 +148,17 @@ def get_client():
         return None
     if _client is None:
         try:
-            _client = BinanceSpotClient(
-                PUMP_CONFIG.get("API_KEY", ""),
-                PUMP_CONFIG.get("API_SECRET", ""),
-                get_base_url(PUMP_CONFIG),
-            )
+            if is_paper(PUMP_CONFIG):
+                # PAPER: klien read-only (saldo virtual dari file, market data
+                # REST publik keyless). Tidak pernah menyentuh endpoint signed.
+                _client = _PaperDashboardClient()
+            else:
+                # LIVE: klien bertanda tangan untuk menampilkan saldo asli.
+                _client = BinanceSpotClient(
+                    PUMP_CONFIG.get("API_KEY", ""),
+                    PUMP_CONFIG.get("API_SECRET", ""),
+                    get_base_url(PUMP_CONFIG),
+                )
         except Exception:
             _client = None
     return _client
@@ -226,7 +259,7 @@ def parse_log(max_lines: int = 4000):
                 "buy_price": float(d["price"]),
                 "qty": float(d["qty"]),
                 "pct24h": float(d.get("pct") or 0),
-                "testnet": is_testnet(PUMP_CONFIG),
+                "paper": is_paper(PUMP_CONFIG),
             }
             continue
 
@@ -241,7 +274,7 @@ def parse_log(max_lines: int = 4000):
                 "entry": float(d["entry"]),
                 "pnl": float(d["pnl"]),
                 "reason": d["reason"],
-                "testnet": is_testnet(PUMP_CONFIG),
+                "paper": is_paper(PUMP_CONFIG),
             })
             if "buy_price" not in t:
                 t["buy_price"] = float(d["entry"])
@@ -302,7 +335,7 @@ def build_status():
     return {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
         "mode": get_mode(PUMP_CONFIG),
-        "testnet": is_testnet(PUMP_CONFIG),
+        "paper": is_paper(PUMP_CONFIG),
         # Dipakai dashboard untuk menyembunyikan tab Backtest. Ini hanya
         # petunjuk untuk UI -- penegakan sebenarnya ada di endpoint
         # /api/backtest/* lewat _reject_if_backtest_disabled().
@@ -501,18 +534,17 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
 
         # Sumber data backtest (perbaikan audit 2026-09-24, temuan S-04):
         # SELALU endpoint publik produksi (api.binance.com), TIDAK PERNAH
-        # testnet. Data candle testnet adalah data sintetis -- jawaban resmi
-        # Binance Developer Community menyatakan data testnet "should not be
-        # assumed to match production at any point" -- sehingga kalibrasi
-        # parameter di atasnya tidak punya makna untuk LIVE. Endpoint market
-        # data bersifat publik sehingga tidak butuh API key, dan client ini
-        # sengaja dipisah dari client dashboard (yang ikut MODE aktif).
+        # Backtest SELALU memakai data historis PRODUKSI publik (bukan sumber
+        # lain), supaya kalibrasi parameter benar-benar relevan untuk LIVE.
+        # Endpoint market data bersifat publik sehingga tidak butuh API key,
+        # dan client ini sengaja dipisah dari client dashboard (yang ikut MODE
+        # aktif) serta dibuat keyless (allow_signed=False).
         if not _HAS_CLIENT:
             raise bt.BacktestError(
                 "Klien Binance tidak tersedia (modul 'requests' tidak termuat). "
                 "Backtest butuh akses ke data historis publik Binance."
             )
-        client = BinanceSpotClient("", "", PUMP_CONFIG["LIVE_BASE_URL"])
+        client = BinanceSpotClient("", "", PUMP_CONFIG["LIVE_BASE_URL"], allow_signed=False)
 
         # --- Tahap 1: tentukan semesta simbol -------------------------
         set_progress(0.01, "mengambil daftar pasar...")

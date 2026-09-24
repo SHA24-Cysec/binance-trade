@@ -73,9 +73,9 @@ PERINGATAN KEAMANAN
 - JANGAN commit file ".env" (yang berisi kredensial asli) ke Git atau
   bagikan ke siapa pun. Yang boleh dibagikan/di-commit hanya
   ".env.example".
-- Kalau bikin API key di Binance, aktifkan HANYA permission yang benar-benar
-  dipakai bot ini (Enable Spot Trading, karena bot mengirim order sungguhan
-  baik di mode TESTNET maupun LIVE). JANGAN
+- Kalau bikin API key di Binance (hanya diperlukan untuk mode LIVE),
+  aktifkan HANYA permission yang benar-benar dipakai bot ini (Enable Spot
+  Trading, karena di LIVE bot mengirim order sungguhan). JANGAN
   aktifkan permission "Enable Withdrawals" sama sekali. Permission yang sama
   ini juga sudah cukup untuk fitur dust sweep (USE_DUST_SWEEP di bawah) --
   tidak perlu permission tambahan apa pun.
@@ -101,45 +101,86 @@ except ImportError:
 PUMP_CONFIG = {
     "QUOTE_ASSET": "USDT",
 
-    # --- Pemilihan lingkungan: TESTNET atau LIVE ---
-    # "TESTNET" = order SUNGGUHAN dikirim, tapi ke Binance Spot Test Network
-    #             (https://testnet.binance.vision) memakai dana virtual. Alur
-    #             kodenya sama persis dengan LIVE (tidak ada jalur simulasi
-    #             terpisah), jadi yang Anda uji benar-benar perilaku bot live.
-    # "LIVE"    = order sungguhan ke Binance produksi memakai uang asli.
+    # --- Pemilihan mode: PAPER atau LIVE ---
+    # "PAPER" = SIMULASI penuh lokal. Data pasar (harga, order book, kline,
+    #           exchangeInfo) diambil ASLI dari Binance produksi lewat endpoint
+    #           publik (REST + WebSocket) TANPA API key dan TANPA tanda tangan,
+    #           tetapi eksekusi order, fee, dan saldo disimulasikan lokal dan
+    #           disimpan ke file. Jalur LOGIKA STRATEGI sama persis dengan LIVE;
+    #           yang berbeda hanya lapisan eksekusi dan sumber saldo.
+    # "LIVE"  = order sungguhan ke Binance produksi memakai UANG ASLI.
     #
-    # API key testnet BERBEDA dengan key produksi dan dibuat gratis di
-    # https://testnet.binance.vision (login pakai akun GitHub). Karena kedua
-    # mode membaca variabel .env yang sama (BINANCE_API_KEY/SECRET), isi .env
-    # harus diganti sesuai mode yang sedang dipakai.
-    "MODE": "TESTNET",                        # "TESTNET" (default, aman) atau "LIVE"
+    # PAPER TIDAK memerlukan API key (semua data dari endpoint publik).
+    # LIVE memerlukan BINANCE_API_KEY/BINANCE_API_SECRET produksi di file .env.
+    #
+    # Pengaman: nilai MODE yang tidak dikenal / typo / kosong TIDAK pernah
+    # diam-diam dianggap LIVE. Default aman adalah "PAPER" (lihat get_mode()).
+    "MODE": "PAPER",                          # "PAPER" (default, aman) atau "LIVE"
 
     # Tampilkan fitur Backtest di dashboard saat MODE="LIVE"?
     #
     # False (default) = tab Backtest DISEMBUNYIKAN saat mode LIVE, dan
     #                   endpoint /api/backtest/* menolak permintaan dengan
-    #                   HTTP 403. Di mode TESTNET backtest tetap tersedia
+    #                   HTTP 403. Di mode PAPER backtest tetap tersedia
     #                   seperti biasa.
     # True            = backtest tetap tersedia di kedua mode.
     #
     # Alasan defaultnya False: backtest menarik data historis dalam jumlah
     # besar dari endpoint publik Binance (paging /api/v3/klines). Saat bot
-    # sedang jalan dengan uang asli, beban itu ikut menghabiskan jatah
+    # sedang jalan dengan uang asli (LIVE), beban itu ikut menghabiskan jatah
     # rate-limit IP yang sama dengan yang dipakai bot untuk memindai pasar
     # dan mengirim order. Kalau jatah habis, Binance membalas HTTP 429 dan
     # dapat berlanjut ke blokir IP sementara (HTTP 418), yang berarti bot
-    # bisa gagal menutup posisi tepat waktu. Di testnet risikonya tidak ada
-    # karena tidak ada uang asli yang dipertaruhkan.
+    # bisa gagal menutup posisi tepat waktu. Di PAPER risiko uang asli tidak
+    # ada, jadi backtest dibiarkan tersedia.
     #
     # Ini murni soal pemisahan alat analisis dari operasional live. Kalau
     # Anda memang perlu backtest sambil live (misalnya dashboard berjalan
     # di mesin terpisah dengan IP berbeda dari bot), ubah saja ke True.
     "SHOW_BACKTEST_IN_LIVE": False,
 
+    # Base URL REST produksi publik. Dipakai KEDUA mode untuk DATA PASAR
+    # (PAPER: hanya data; LIVE: data + order bertanda tangan).
     "LIVE_BASE_URL": "https://api.binance.com",
-    "TESTNET_BASE_URL": "https://testnet.binance.vision",
-    "API_KEY": os.environ.get("BINANCE_API_KEY", ""),    # diisi otomatis dari file .env (lihat panduan di atas)
-    "API_SECRET": os.environ.get("BINANCE_API_SECRET", ""),  # diisi otomatis dari file .env (lihat panduan di atas)
+    "API_KEY": os.environ.get("BINANCE_API_KEY", ""),    # hanya WAJIB untuk LIVE; PAPER mengabaikannya
+    "API_SECRET": os.environ.get("BINANCE_API_SECRET", ""),  # hanya WAJIB untuk LIVE; PAPER mengabaikannya
+
+    # ============================================================
+    # --- Pengaturan mode PAPER (simulasi eksekusi lokal) ---
+    # Semua kunci di bawah HANYA berpengaruh saat MODE="PAPER". Di LIVE
+    # diabaikan. Tarif fee memakai TAKER_FEE_PCT + USE_BNB_FEE_DISCOUNT yang
+    # sudah ada di bawah (satu sumber kebenaran, dipakai backtest juga).
+    # ============================================================
+    # Saldo virtual awal per aset. Bot memakai QUOTE_ASSET (USDT) sebagai modal.
+    "PAPER_INITIAL_BALANCES": {"USDT": 10000.0},
+    # File state akun simulasi (saldo, order, riwayat trade, total fee).
+    # OTOMATIS diberi akhiran mode -> pump_paper_account_paper.json. Hanya
+    # ditulis di PAPER; LIVE tidak pernah menyentuh file ini.
+    "PAPER_ACCOUNT_STATE_FILE": "pump_paper_account.json",
+    # Kedalaman order book (level) yang diambil untuk "berjalan" saat mengisi
+    # market order. Semakin dalam, semakin realistis slippage-nya.
+    "PAPER_DEPTH_LIMIT": 100,
+    # Timeout default (detik) untuk order LIMIT yang tak kunjung terisi
+    # (didukung mesin simulasi; bot pump sendiri hanya memakai MARKET).
+    "PAPER_LIMIT_ORDER_TIMEOUT_SECONDS": 60,
+
+    # --- Data pasar: WebSocket (primer) + REST (wajib untuk yang tak ada WS) ---
+    # True (default) = HYBRID. WebSocket jadi sumber utama harga/bookTicker/
+    #                  depth/kline real-time; REST hanya dipakai untuk
+    #                  exchangeInfo, kline historis, depth snapshot awal, dan
+    #                  fallback saat WS basi/putus. Loop utama berhenti nge-poll
+    #                  REST berulang.
+    # False          = REST polling penuh (perilaku lama), berguna untuk debug
+    #                  atau lingkungan yang memblokir WebSocket.
+    "USE_WEBSOCKET": True,
+    # Base endpoint WebSocket market data produksi (dicek 2026-09-24 dari
+    # developers.binance.com/docs/binance-spot-api-docs/web-socket-streams).
+    # Mirror khusus market data: wss://data-stream.binance.vision
+    "WS_BASE_URL": "wss://stream.binance.com:9443",
+    # Usia MAKSIMUM data pasar (detik) yang boleh dipakai untuk mengisi order
+    # simulasi. Data yang lebih tua dari ini memicu fallback REST; kalau REST
+    # juga gagal, order simulasi DITOLAK agar tidak jalan di atas data basi.
+    "MAX_MARKET_DATA_AGE_SECONDS": 10.0,
 
     # --- Scan & seleksi kandidat ---
     "MARKET_SCAN_INTERVAL_SECONDS": 300,     # scan seluruh pasar tiap 5 menit
@@ -173,7 +214,7 @@ PUMP_CONFIG = {
     "RVOL_LOOKBACK_BARS": 10,                 # pembanding volume = 10 candle sebelum candle sinyal
     "MIN_RELATIVE_QUOTE_VOLUME": 1.50,        # quote volume sinyal minimal 1,5x rata-rata pembanding
     # Proteksi keras: mode entry baru tidak boleh mengirim order LIVE sebelum
-    # lulus validasi out-of-sample yang disepakati. TESTNET dan backtest tetap
+    # lulus validasi out-of-sample yang disepakati. PAPER dan backtest tetap
     # diizinkan. Jangan ubah ke True hanya karena satu hasil backtest bagus.
     # DEFAULT False (hasil audit 2026-09-24): dengan ENTRY_MODEL saat ini masih
     # berstatus hipotesis, pagar ini HARUS aktif. Ubah ke True hanya setelah
@@ -472,8 +513,9 @@ PUMP_CONFIG = {
     # (Sumber: halaman fee resmi Binance & beberapa ringkasan independen,
     # dicek 2026-09-23.)
     # Bot SELALU memakai order MARKET, jadi yang relevan adalah TAKER.
-    "TAKER_FEE_PCT": 0.1,                    # ubah ke 0.075 kalau Anda membayar fee dengan BNB
-    "USE_BNB_FEE_DISCOUNT": True,           # True = otomatis pakai 0,075% (diskon 25%)
+    "TAKER_FEE_PCT": 0.1,                    # taker (order MARKET) Spot VIP0 = 0,1%
+    "MAKER_FEE_PCT": 0.1,                    # maker (limit yang mengendap) Spot VIP0 = 0,1%
+    "USE_BNB_FEE_DISCOUNT": True,           # True = diskon 25% (0,1% -> 0,075%)
     "COOLDOWN_MINUTES_AFTER_CLOSE": 10,
     "MIN_SECONDS_BETWEEN_TRADES": 60,
 
@@ -504,12 +546,12 @@ PUMP_CONFIG = {
     # --- File state & log (OTOMATIS dipisah per mode, lihat catatan) ---
     # Nilai di bawah adalah NAMA DASAR. Saat config.py di-import, nama final
     # otomatis disisipkan akhiran mode aktif SEBELUM ekstensinya:
-    #   MODE="TESTNET" -> pump_bot_state_testnet.json, pump_bot_testnet.log,
-    #                     pump_bot_control_testnet.json
-    #   MODE="LIVE"    -> pump_bot_state_live.json, pump_bot_live.log,
-    #                     pump_bot_control_live.json
-    # Tujuannya: data TESTNET dan LIVE tidak pernah tertukar/tercampur.
-    # Posisi testnet yang sedang terbuka tidak mungkin "dilanjutkan" bot
+    #   MODE="PAPER" -> pump_bot_state_paper.json, pump_bot_paper.log,
+    #                   pump_bot_control_paper.json
+    #   MODE="LIVE"  -> pump_bot_state_live.json, pump_bot_live.log,
+    #                   pump_bot_control_live.json
+    # Tujuannya: data PAPER dan LIVE tidak pernah tertukar/tercampur.
+    # Posisi paper yang sedang terbuka tidak mungkin "dilanjutkan" bot
     # saat pindah ke LIVE (atau sebaliknya), dan riwayat trade di dashboard
     # hanya berasal dari mode yang sedang aktif.
     # File versi LAMA tanpa akhiran (pump_bot_state.json, pump_bot.log,
@@ -530,42 +572,75 @@ PUMP_CONFIG = {
     # menyentuh base asset dari simbol yang baru saja ditutup, TIDAK PERNAH
     # "menyapu semua aset kecil di akun" -- modal USDT/BNB Anda tidak pernah
     # ikut disentuh fitur ini (proteksi ini di kode, bukan bisa
-    # dimatikan lewat config). Di mode TESTNET fitur ini otomatis DILEWATI
-    # karena Binance Spot Test Network tidak menyediakan endpoint /sapi/*
-    # sama sekali (sumber: developers.binance.com/docs/binance-spot-api-docs/
-    # testnet/general-info, dicek 2026-09-23) -- jadi tidak ada gunanya
-    # dipanggil di sana dan kegagalannya bukan bug.
+    # dimatikan lewat config). Di mode PAPER fitur ini otomatis DILEWATI
+    # karena dust convert memakai endpoint /sapi/* yang BERTANDA TANGAN,
+    # sedangkan PAPER dilarang keras mengirim request bertanda tangan apa pun
+    # (lihat guard di paper_client.py). Konversi dust bukan bagian dari
+    # simulasi eksekusi, jadi ketiadaannya di PAPER bukan bug.
     "USE_DUST_SWEEP": True,
 }
 
 
 # ---------------------------------------------------------------------
-# Helper mode TESTNET / LIVE
+# Helper mode PAPER / LIVE
 # ---------------------------------------------------------------------
-VALID_MODES = ("TESTNET", "LIVE")
+VALID_MODES = ("PAPER", "LIVE")
+
+
+class InvalidModeError(ValueError):
+    """MODE di config tidak dikenal / kosong / typo.
+
+    Dilempar oleh require_valid_mode() supaya bot berhenti dengan pesan jelas,
+    BUKAN jatuh diam-diam ke LIVE (yang berisiko uang asli) atau ke mode acak.
+    """
 
 
 def get_mode(config: dict = None) -> str:
-    """Kembalikan mode yang dinormalisasi ("TESTNET" atau "LIVE").
+    """Kembalikan mode yang dinormalisasi ("PAPER" atau "LIVE").
 
     Nilai yang tidak dikenal TIDAK pernah diam-diam dianggap LIVE -- selalu
-    jatuh ke TESTNET, supaya salah ketik di config tidak berujung order
-    memakai uang asli.
+    jatuh ke default aman "PAPER", supaya salah ketik di config tidak berujung
+    order memakai uang asli. Untuk MENGHENTIKAN bot pada MODE tak valid (bukan
+    diam-diam jatuh ke PAPER), pakai require_valid_mode() di titik start.
     """
     cfg = PUMP_CONFIG if config is None else config
-    mode = str(cfg.get("MODE", "TESTNET")).strip().upper()
-    return mode if mode in VALID_MODES else "TESTNET"
+    mode = str(cfg.get("MODE", "PAPER")).strip().upper()
+    return mode if mode in VALID_MODES else "PAPER"
 
 
-def is_testnet(config: dict = None) -> bool:
-    return get_mode(config) == "TESTNET"
+def require_valid_mode(config: dict = None) -> str:
+    """Validasi MODE secara ketat dan kembalikan nilainya, atau lempar
+    InvalidModeError kalau tidak dikenal/kosong.
+
+    Dipanggil di awal start bot & dashboard. Berbeda dari get_mode() yang
+    'memaafkan' (default aman ke PAPER untuk pembacaan biasa), fungsi ini
+    SENGAJA berhenti keras supaya typo pada MODE tidak lewat begitu saja.
+    """
+    cfg = PUMP_CONFIG if config is None else config
+    raw = cfg.get("MODE", None)
+    mode = str(raw).strip().upper() if raw is not None else ""
+    if mode not in VALID_MODES:
+        raise InvalidModeError(
+            f"MODE tidak valid: {raw!r}. Nilai yang diizinkan hanya "
+            f"{', '.join(VALID_MODES)}. Perbaiki MODE di config.py. "
+            "Bot TIDAK akan berjalan dengan mode yang tidak dikenal demi keamanan."
+        )
+    return mode
+
+
+def is_paper(config: dict = None) -> bool:
+    return get_mode(config) == "PAPER"
+
+
+def is_live(config: dict = None) -> bool:
+    return get_mode(config) == "LIVE"
 
 
 def backtest_enabled(config: dict = None) -> bool:
     """Apakah fitur backtest boleh dipakai pada mode yang sedang aktif.
 
-    Di TESTNET selalu boleh. Di LIVE hanya boleh kalau
-    SHOW_BACKTEST_IN_LIVE diset True secara eksplisit.
+    Di PAPER selalu boleh. Di LIVE hanya boleh kalau SHOW_BACKTEST_IN_LIVE
+    diset True secara eksplisit.
 
     Nilai config dibaca longgar (menerima True/False, "true"/"false",
     1/0) supaya tidak gampang salah pasang, tetapi apa pun yang tidak
@@ -573,7 +648,7 @@ def backtest_enabled(config: dict = None) -> bool:
     konsisten dengan get_mode() yang juga tidak pernah diam-diam
     menganggap nilai asing sebagai LIVE.
     """
-    if is_testnet(config):
+    if is_paper(config):
         return True
     cfg = PUMP_CONFIG if config is None else config
     raw = cfg.get("SHOW_BACKTEST_IN_LIVE", False)
@@ -583,42 +658,63 @@ def backtest_enabled(config: dict = None) -> bool:
 
 
 def get_base_url(config: dict = None) -> str:
-    """Base URL REST sesuai mode.
+    """Base URL REST produksi publik.
 
-    Testnet: https://testnet.binance.vision (hanya endpoint /api/* tersedia).
-    Live   : https://api.binance.com
-    Sumber: developers.binance.com/docs/binance-spot-api-docs/testnet/general-info
-    (dicek 2026-09-23).
+    Dipakai KEDUA mode. Data pasar (harga, order book, kline, exchangeInfo)
+    selalu berasal dari Binance produksi publik https://api.binance.com, baik
+    di PAPER (hanya data, keyless/unsigned) maupun LIVE (data + order signed).
+    Sumber: developers.binance.com/docs/binance-spot-api-docs/rest-api
+    (dicek 2026-09-24).
     """
     cfg = PUMP_CONFIG if config is None else config
-    if is_testnet(cfg):
-        return cfg.get("TESTNET_BASE_URL", "https://testnet.binance.vision")
     return cfg.get("LIVE_BASE_URL", "https://api.binance.com")
+
+
+def use_websocket(config: dict = None) -> bool:
+    """Apakah lapisan data pasar memakai WebSocket sebagai sumber primer
+    (mode hybrid). False = REST polling penuh (perilaku lama)."""
+    cfg = PUMP_CONFIG if config is None else config
+    raw = cfg.get("USE_WEBSOCKET", True)
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in ("true", "1", "yes", "ya", "on")
+
+
+def get_paper_account_file(config: dict = None) -> str:
+    """Nama file state akun simulasi PAPER (sudah berakhiran mode)."""
+    cfg = PUMP_CONFIG if config is None else config
+    return _mode_filename(
+        str(cfg.get("PAPER_ACCOUNT_STATE_FILE", "pump_paper_account.json")),
+        get_mode(cfg),
+    )
 
 
 # ---------------------------------------------------------------------
 # Nama file state/log/kontrol TERPISAH per mode
 # ---------------------------------------------------------------------
 def _mode_filename(base: str, mode: str) -> str:
-    """Sisipkan akhiran mode ('_testnet' / '_live') sebelum ekstensi file.
+    """Sisipkan akhiran mode ('_paper' / '_live') sebelum ekstensi file.
 
     Contoh:
-        pump_bot_state.json + TESTNET -> pump_bot_state_testnet.json
-        pump_bot.log       + LIVE     -> pump_bot_live.log
+        pump_bot_state.json + PAPER -> pump_bot_state_paper.json
+        pump_bot.log        + LIVE  -> pump_bot_live.log
 
     Idempoten DAN mengganti akhiran mode lama: kalau nama dasar sudah
-    mengandung akhiran mode (mis. 'pump_bot_state_testnet.json' lalu mode
+    mengandung akhiran mode (mis. 'pump_bot_state_paper.json' lalu mode
     diganti LIVE), akhiran lama dibuang dulu sebelum akhiran baru disisipkan,
     sehingga hasilnya 'pump_bot_state_live.json' -- bukan menumpuk jadi
-    '..._testnet_live.json'. Ini penting kalau PUMP_CONFIG (yang nama
+    '..._paper_live.json'. Ini penting kalau PUMP_CONFIG (yang nama
     file-nya SUDAH final berakhiran mode) disalin lalu MODE-nya diubah,
     misalnya oleh kode pengujian.
+
+    Akhiran '_testnet' yang lama juga ikut dikenali dan dibuang agar file
+    yang tercatat dari versi lama tidak menumpuk saat migrasi ke PAPER.
     """
     if not base:
         return base
-    tag = mode.lower()  # "testnet" atau "live"
+    tag = mode.lower()  # "paper" atau "live"
     root, ext = os.path.splitext(base)
-    for old_tag in ("_testnet", "_live"):
+    for old_tag in ("_paper", "_live", "_testnet"):
         if root.lower().endswith(old_tag):
             root = root[: -len(old_tag)]
             break
@@ -626,14 +722,14 @@ def _mode_filename(base: str, mode: str) -> str:
 
 
 def get_state_file(config: dict = None) -> str:
-    """Nama file state posisi sesuai mode aktif (pump_bot_state_testnet.json
+    """Nama file state posisi sesuai mode aktif (pump_bot_state_paper.json
     atau pump_bot_state_live.json)."""
     cfg = PUMP_CONFIG if config is None else config
     return _mode_filename(str(cfg.get("STATE_FILE", "pump_bot_state.json")), get_mode(cfg))
 
 
 def get_log_file(config: dict = None) -> str:
-    """Nama file log sesuai mode aktif (pump_bot_testnet.log atau
+    """Nama file log sesuai mode aktif (pump_bot_paper.log atau
     pump_bot_live.log)."""
     cfg = PUMP_CONFIG if config is None else config
     return _mode_filename(str(cfg.get("LOG_FILE", "pump_bot.log")), get_mode(cfg))
@@ -641,7 +737,7 @@ def get_log_file(config: dict = None) -> str:
 
 def get_control_file(config: dict = None) -> str:
     """Nama file kontrol (perintah manual dari dashboard) sesuai mode aktif
-    (pump_bot_control_testnet.json atau pump_bot_control_live.json)."""
+    (pump_bot_control_paper.json atau pump_bot_control_live.json)."""
     cfg = PUMP_CONFIG if config is None else config
     return _mode_filename(str(cfg.get("CONTROL_FILE", "pump_bot_control.json")), get_mode(cfg))
 
@@ -650,7 +746,7 @@ def get_control_file(config: dict = None) -> str:
 PUMP_CONFIG["BASE_URL"] = get_base_url(PUMP_CONFIG)
 
 # Nama file state/log/kontrol FINAL (sudah mengandung akhiran mode aktif,
-# mis. 'pump_bot_state_testnet.json') ditulis balik ke PUMP_CONFIG supaya
+# mis. 'pump_bot_state_paper.json') ditulis balik ke PUMP_CONFIG supaya
 # semua kode yang membaca PUMP_CONFIG["STATE_FILE"] / ["LOG_FILE"] /
 # ["CONTROL_FILE"] -- pump_scanner_bot.py, dashboard.py, state.py --
 # otomatis memakai file yang benar untuk mode aktif tanpa perlu diubah
@@ -659,6 +755,9 @@ PUMP_CONFIG["BASE_URL"] = get_base_url(PUMP_CONFIG)
 PUMP_CONFIG["STATE_FILE"] = get_state_file(PUMP_CONFIG)
 PUMP_CONFIG["LOG_FILE"] = get_log_file(PUMP_CONFIG)
 PUMP_CONFIG["CONTROL_FILE"] = get_control_file(PUMP_CONFIG)
+# File state akun simulasi PAPER, juga otomatis berakhiran mode. Meski hanya
+# ditulis di PAPER, nama finalnya tetap dihitung di sini supaya konsisten.
+PUMP_CONFIG["PAPER_ACCOUNT_STATE_FILE"] = get_paper_account_file(PUMP_CONFIG)
 
 
 # ---------------------------------------------------------------------
@@ -757,6 +856,18 @@ def get_taker_fee_pct(config: dict = None) -> float:
     """
     cfg = PUMP_CONFIG if config is None else config
     fee = float(cfg.get("TAKER_FEE_PCT", 0.1))
+    if cfg.get("USE_BNB_FEE_DISCOUNT"):
+        fee *= 0.75
+    return fee
+
+
+def get_maker_fee_pct(config: dict = None) -> float:
+    """Fee maker efektif dalam persen (order limit yang mengendap), sudah
+    memperhitungkan diskon BNB. Spot VIP0 = 0,1%; diskon BNB 25% -> 0,075%
+    (dicek 2026-09-24). Bot pump SELALU market (taker), maker dipakai mesin
+    simulasi hanya untuk order limit yang terisi sebagai maker."""
+    cfg = PUMP_CONFIG if config is None else config
+    fee = float(cfg.get("MAKER_FEE_PCT", cfg.get("TAKER_FEE_PCT", 0.1)))
     if cfg.get("USE_BNB_FEE_DISCOUNT"):
         fee *= 0.75
     return fee

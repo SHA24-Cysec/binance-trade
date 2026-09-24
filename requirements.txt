@@ -6,3 +6,9 @@ requests>=2.32.4
 flask>=3.1.1
 werkzeug>=3.1.5
 python-dotenv>=1.0.0
+# WebSocket market data (mode PAPER/LIVE hybrid). Diuji dengan 1.9.0.
+websocket-client>=1.7
+
+# --- Dependensi PENGEMBANGAN/TES (opsional untuk menjalankan bot) ---
+# Jalankan tes dengan: pytest -q
+pytest>=8.0

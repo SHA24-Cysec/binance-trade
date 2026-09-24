@@ -6,7 +6,7 @@ index -1 = candle paling baru), sesuai perilaku default endpoint
 GET /api/v3/klines.
 
 Catatan: modul ini dulu juga berisi indikator SuperTrend + EMA + ATR untuk bot
-grid martingale. Bot grid sudah dihapus, jadi modul ini kini hanya menyisakan
+grid martingale lama (sudah dihapus). Modul ini kini hanya menyisakan
 struktur candle dan parser yang masih dipakai oleh pump scanner.
 """
 

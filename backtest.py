@@ -1187,13 +1187,13 @@ def main():
     print(f"Mengambil {total_bars} candle {interval} untuk {args.symbol} "
           f"({args.days} hari + warmup 1 hari)...")
     # Sumber data backtest SELALU endpoint publik produksi (perbaikan audit
-    # 2026-09-24, temuan S-04), BUKAN ikut MODE aktif. Data candle testnet
+    # 2026-09-24, temuan S-04), BUKAN ikut MODE aktif. Backtest wajib memakai
     # adalah data sintetis; jawaban resmi Binance Developer Community
-    # menegaskan data testnet "should not be assumed to match production at
-    # any point". Backtest yang dihitung di atas data testnet tidak bisa
+    # data historis PRODUKSI publik agar kalibrasi parameter relevan untuk
+    # LIVE. Data dari sumber non-produksi tidak bisa
     # dipakai mengkalibrasi parameter untuk LIVE. Endpoint market data
     # bersifat publik, jadi tidak butuh API key.
-    client = BinanceSpotClient("", "", cfg["LIVE_BASE_URL"])
+    client = BinanceSpotClient("", "", cfg["LIVE_BASE_URL"], allow_signed=False)
     end_ms = int(time.time() * 1000)
     start_ms = end_ms - (args.days + 1) * MS_PER_DAY
     klines = fetch_full_klines(client, args.symbol, interval, start_ms, end_ms)

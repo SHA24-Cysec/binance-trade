@@ -39,6 +39,18 @@ class BinanceAPIError(Exception):
         super().__init__(f"HTTP {status_code} | code={code} | {msg}")
 
 
+class SignedEndpointBlockedError(RuntimeError):
+    """Dilempar bila kode mencoba mengirim request BERTANDA TANGAN dari klien
+    yang dibuat dengan allow_signed=False.
+
+    Ini pengaman keras mode PAPER: lapisan data pasar PAPER memakai klien
+    keyless (allow_signed=False), sehingga upaya apa pun untuk menembak
+    endpoint order/akun bertanda tangan -- bahkan bila API key kebetulan
+    terisi di environment -- gagal keras alih-alih diam-diam menghubungi
+    Binance dengan uang/akun asli.
+    """
+
+
 class BinanceRateLimitError(BinanceAPIError):
     """HTTP 429 (batas rate terlampaui) atau 418 (IP diblokir otomatis).
 
@@ -88,13 +100,21 @@ def _fmt_num(value) -> str:
 
 
 class BinanceSpotClient:
-    def __init__(self, api_key: str, api_secret: str, base_url: str, timeout: float = 10.0):
+    def __init__(self, api_key: str, api_secret: str, base_url: str, timeout: float = 10.0,
+                 allow_signed: bool = True):
+        """allow_signed=False membuat klien ini MENOLAK setiap request
+        bertanda tangan (melempar SignedEndpointBlockedError). Dipakai lapisan
+        data pasar mode PAPER agar tidak mungkin menyentuh endpoint order/akun.
+        Header X-MBX-APIKEY sengaja TIDAK dipasang saat allow_signed=False
+        supaya request publik benar-benar keyless."""
         self.api_key = api_key
         self.api_secret = api_secret
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.allow_signed = allow_signed
         self.session = requests.Session()
-        self.session.headers.update({"X-MBX-APIKEY": self.api_key})
+        if allow_signed and self.api_key:
+            self.session.headers.update({"X-MBX-APIKEY": self.api_key})
         self._time_offset_ms = 0
 
         # Pelacakan kuota rate limit. Diisi dari header respons Binance.
@@ -124,6 +144,14 @@ class BinanceSpotClient:
         signed: bool = False,
         max_retries: int = 3,
     ) -> Any:
+        # Pengaman keras mode PAPER: klien keyless tidak boleh mengirim request
+        # bertanda tangan, apa pun isi environment. Gagal keras di sini, JAUH
+        # sebelum menyentuh jaringan.
+        if signed and not self.allow_signed:
+            raise SignedEndpointBlockedError(
+                f"Request bertanda tangan ke {method} {path} diblokir: klien ini "
+                "dibuat dengan allow_signed=False (mode data pasar publik/PAPER)."
+            )
         base_params = dict(params or {})
 
         def build_url() -> str:
@@ -316,6 +344,23 @@ class BinanceSpotClient:
 
     def get_book_ticker(self, symbol: str) -> dict:
         return self._request("GET", "/api/v3/ticker/bookTicker", {"symbol": symbol})
+
+    def get_depth(self, symbol: str, limit: int = 100, max_retries: int = 3) -> dict:
+        """Order book (kedalaman) satu simbol -- GET /api/v3/depth.
+
+        Dipakai simulasi PAPER untuk "berjalan" melalui level order book saat
+        mengisi market order (bid untuk SELL, ask untuk BUY) sehingga harga
+        rata-rata isi & slippage realistis. Juga dipakai sebagai snapshot awal
+        untuk menyemai order book lokal berbasis WebSocket depth stream.
+
+        Bobot request tergantung limit (dokumentasi Binance, dicek 2026-09-24):
+        limit 1-100 -> weight 5; 101-500 -> 25; 501-1000 -> 50; 1001-5000 -> 250.
+        Nilai limit yang diterima Binance: 5,10,20,50,100,500,1000,5000.
+        Respons: {"lastUpdateId": int, "bids": [[price, qty], ...],
+                  "asks": [[price, qty], ...]} (harga & qty berupa string).
+        """
+        return self._request("GET", "/api/v3/depth",
+                             {"symbol": symbol, "limit": limit}, max_retries=max_retries)
 
     def get_book_ticker_all(self) -> list:
         """bookTicker untuk SEMUA simbol dalam satu request (dipakai modul

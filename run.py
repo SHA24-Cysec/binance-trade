@@ -120,7 +120,7 @@ def main() -> int:
 
     _log("=" * 70)
     _log("Menjalankan Pump Scanner Bot + Dashboard dalam satu perintah.")
-    mode_label = ("TESTNET (order sungguhan, dana virtual)" if mode == "TESTNET"
+    mode_label = ("PAPER (simulasi lokal, data pasar asli)" if mode == "PAPER"
                   else "LIVE (order sungguhan, UANG ASLI!)")
     _log(f"Mode bot: {mode_label} | endpoint={base_url} | RISK_PERCENT={risk_pct}%")
     # Ikuti pengaturan yang sama dengan dashboard.py. Bawaannya hanya
@@ -134,11 +134,10 @@ def main() -> int:
     _log("Tekan Ctrl+C untuk menghentikan KEDUANYA sekaligus.")
     _log("=" * 70)
 
-    if not PUMP_CONFIG.get("API_KEY") or not PUMP_CONFIG.get("API_SECRET"):
+    if mode == "LIVE" and (not PUMP_CONFIG.get("API_KEY") or not PUMP_CONFIG.get("API_SECRET")):
         _log("BERHENTI: BINANCE_API_KEY/BINANCE_API_SECRET belum di-set di file .env. "
-             f"Mode {mode} tetap mengirim order sungguhan, jadi kredensial wajib ada. "
-             "Untuk mode TESTNET, buat key gratis di https://testnet.binance.vision "
-             "(key produksi TIDAK berlaku di testnet, dan sebaliknya).")
+             "Mode LIVE mengirim order dengan UANG ASLI, jadi kredensial produksi wajib ada. "
+             "Untuk uji coba tanpa risiko, jalankan MODE=\"PAPER\" (tidak perlu API key).")
         return 1
 
     bot_proc = _start("Pump Scanner Bot", "pump_scanner_bot.py")

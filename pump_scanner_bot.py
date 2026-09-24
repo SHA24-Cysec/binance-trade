@@ -14,17 +14,19 @@ CARA PAKAI (sama seperti bot.py):
     pip install -r requirements.txt
     set BINANCE_API_KEY / BINANCE_API_SECRET (lihat README.md)
     python pump_scanner_bot.py --selftest      # audit logika, tanpa jaringan
-    python pump_scanner_bot.py                 # jalan (MODE="TESTNET" dulu, default)
+    python pump_scanner_bot.py                 # jalan (MODE="PAPER" dulu, default)
 
 MODE DI config.py:
-    "TESTNET" -> order sungguhan ke Binance Spot Test Network (dana virtual)
-    "LIVE"    -> order sungguhan ke Binance produksi (uang asli)
-Keduanya memakai jalur kode yang SAMA PERSIS; yang berbeda hanya base URL
-dan API key yang dipakai. Tidak ada lagi jalur simulasi lokal (DRY_RUN).
+    "PAPER" -> simulasi eksekusi lokal penuh; data pasar ASLI dari Binance
+               produksi publik (REST + WebSocket), tanpa API key. Saldo/order
+               virtual disimpan ke file. (default, aman)
+    "LIVE"  -> order sungguhan ke Binance produksi (uang asli)
+Keduanya memakai jalur LOGIKA STRATEGI yang SAMA PERSIS lewat antarmuka
+ExchangeClient; yang berbeda hanya lapisan eksekusi order dan sumber saldo.
 
 File state, log, dan kontrol otomatis DIPISAH per mode (contoh:
-pump_bot_state_testnet.json vs pump_bot_state_live.json), dihitung di
-config.py, jadi data posisi/riwayat TESTNET dan LIVE tidak pernah tercampur.
+pump_bot_state_paper.json vs pump_bot_state_live.json), dihitung di
+config.py, jadi data posisi/riwayat PAPER dan LIVE tidak pernah tercampur.
 """
 
 from __future__ import annotations
@@ -37,8 +39,9 @@ import signal
 import sys
 import time
 
-from binance_client import BinanceSpotClient, BinanceAPIError, SymbolFilters, build_filters_cache
-from config import PUMP_CONFIG, get_mode, get_base_url, is_testnet
+from binance_client import BinanceAPIError, SymbolFilters, build_filters_cache
+from exchange_client import ExchangeClient, create_exchange_client
+from config import PUMP_CONFIG, get_mode, get_base_url, is_paper, require_valid_mode
 import market_scanner as scanner
 import state as state_mod
 import strategy
@@ -134,7 +137,7 @@ def get_balance(account: dict, asset: str) -> float:
     return 0.0
 
 
-def get_equity(client: BinanceSpotClient, config: dict, state: dict) -> "float | None":
+def get_equity(client: ExchangeClient, config: dict, state: dict) -> "float | None":
     """Equity total (USDT free + nilai posisi saat ini).
 
     Return None kalau harga posisi TIDAK bisa diambil dari API. Ini disengaja
@@ -196,7 +199,7 @@ def update_equity_controls(state: dict, equity: float, config: dict) -> bool:
     return bool(state.get("dd_stopped") or state.get("daily_stopped"))
 
 
-def maybe_force_close_at_risk_limit(client: BinanceSpotClient, config: dict,
+def maybe_force_close_at_risk_limit(client: ExchangeClient, config: dict,
                                      filters_cache: dict, state: dict,
                                      entries_paused: bool, current_price) -> None:
     """Implementasi CLOSE_ALL_AT_LIMIT (perbaikan audit 2026-09-24, temuan
@@ -231,13 +234,13 @@ def maybe_force_close_at_risk_limit(client: BinanceSpotClient, config: dict,
         state["_limit_close_done"] = False
 
 
-def reconcile_state_with_exchange(client: BinanceSpotClient, config: dict, state: dict) -> None:
+def reconcile_state_with_exchange(client: ExchangeClient, config: dict, state: dict) -> None:
     """Selaraskan state posisi dengan saldo asli di exchange, dipanggil SEKALI
     saat startup sebelum loop utama (perbaikan audit 2026-09-24, temuan S-02).
 
     Kasus yang ditangani:
       a. State mengira ada posisi, tapi saldo base asset di exchange 0
-         (testnet di-reset berkala -- ini wajar dan didokumentasikan Binance,
+         (riwayat/posisi bisa berubah di luar bot -- ini wajar,
          atau posisi dijual manual lewat aplikasi): posisi "hantu" direset
          supaya bot tidak mengelola SL/TP untuk koin yang sudah tidak ada.
       b. Qty di state lebih besar dari saldo nyata (fee memotong aset dasar,
@@ -270,7 +273,7 @@ def reconcile_state_with_exchange(client: BinanceSpotClient, config: dict, state
     if free_base <= 0:
         logger.warning(
             "REKONSILIASI: state bilang pegang %s qty=%.8f, tapi saldo %s di exchange = 0. "
-            "Posisi hantu direset (kemungkinan testnet reset atau penjualan manual).",
+            "Posisi hantu direset (kemungkinan penjualan manual atau reset state).",
             symbol, qty_state, base_asset,
         )
         reset_position(state)
@@ -291,7 +294,7 @@ def reconcile_state_with_exchange(client: BinanceSpotClient, config: dict, state
 _listing_age_cache: dict = {}
 
 
-def listing_age_days(client: BinanceSpotClient, symbol: str, now_ms: int) -> float:
+def listing_age_days(client: ExchangeClient, symbol: str, now_ms: int) -> float:
     """Usia pair sejak candle harian pertamanya, dalam hari (perbaikan audit
     2026-09-24, temuan S-08).
 
@@ -326,7 +329,7 @@ def reset_position(state: dict) -> None:
     state["atr_pct_at_entry"] = 0.0
 
 
-def try_dust_sweep(client: BinanceSpotClient, config: dict, symbol: "str | None") -> None:
+def try_dust_sweep(client: ExchangeClient, config: dict, symbol: "str | None") -> None:
     """Dipanggil SETELAH posisi `symbol` ditutup (SL/TP/BE/Trailing/manual/dsb)
     untuk mengecek apakah masih ada sisa saldo kecil (dust) dari koin itu di
     akun -- biasanya muncul karena pembulatan qty ke LOT_SIZE bursa, atau
@@ -346,11 +349,11 @@ def try_dust_sweep(client: BinanceSpotClient, config: dict, symbol: "str | None"
     2. Quote asset (USDT) dan BNB itu sendiri SELALU dikecualikan secara
        eksplisit di kode ini, apa pun isi config -- bukan cuma "defaultnya
        tidak termasuk", tapi memang tidak mungkin lolos pengecekan di bawah.
-    3. Di mode TESTNET, fungsi ini otomatis DILEWATI: Binance Spot Test
+    3. Di mode PAPER, fungsi ini otomatis DILEWATI: konversi dust memakai
        Network hanya menyediakan endpoint /api/*, sedangkan dust convert
        memakai /sapi/v1/asset/dust yang memang tidak ada di sana (sumber:
-       developers.binance.com/docs/binance-spot-api-docs/testnet/general-info,
-       dicek 2026-09-23). Memanggilnya di testnet pasti gagal, jadi tidak
+       endpoint /sapi/* yang BERTANDA TANGAN, sedangkan PAPER dilarang keras
+       mengirim request bertanda tangan. Bukan bagian dari simulasi, jadi tidak
        dipanggil sama sekali dan cukup dicatat di log.
     4. Kegagalan (rate limit Binance untuk endpoint ini -- dilaporkan sekitar
        tiap 6-24 jam sekali per akun, aset tidak/belum diakui sebagai dust,
@@ -369,10 +372,10 @@ def try_dust_sweep(client: BinanceSpotClient, config: dict, symbol: "str | None"
         # Proteksi keras: tidak pernah convert quote asset (modal) atau BNB itu sendiri.
         return
 
-    if is_testnet(config):
+    if is_paper(config):
         logger.info(
-            "[TESTNET] Dust sweep dilewati untuk %s: endpoint /sapi/v1/asset/dust "
-            "tidak tersedia di Binance Spot Test Network. Di mode LIVE fitur ini tetap jalan.",
+            "[PAPER] Dust sweep dilewati untuk %s: konversi dust memakai endpoint "
+            "/sapi/* bertanda tangan yang dilarang di mode PAPER. Di mode LIVE fitur ini tetap jalan.",
             base_asset,
         )
         return
@@ -408,7 +411,7 @@ def try_dust_sweep(client: BinanceSpotClient, config: dict, symbol: "str | None"
                 base_asset, transferred)
 
 
-def close_position(client: BinanceSpotClient, config: dict, filters_cache: dict,
+def close_position(client: ExchangeClient, config: dict, filters_cache: dict,
                     state: dict, reason: str) -> None:
     symbol = state["current_symbol"]
     if not symbol:
@@ -499,7 +502,7 @@ def close_position(client: BinanceSpotClient, config: dict, filters_cache: dict,
     try_dust_sweep(client, config, symbol)
 
 
-def open_position(client: BinanceSpotClient, config: dict, filters_cache: dict,
+def open_position(client: ExchangeClient, config: dict, filters_cache: dict,
                    state: dict, candidate: "scanner.Candidate",
                    klines: "list | None" = None,
                    reference_price: "float | None" = None) -> None:
@@ -609,7 +612,7 @@ def open_position(client: BinanceSpotClient, config: dict, filters_cache: dict,
                 candidate.symbol, levels["source"], levels["note"])
 
 
-def check_manual_control(client: BinanceSpotClient, config: dict, filters_cache: dict,
+def check_manual_control(client: ExchangeClient, config: dict, filters_cache: dict,
                           state: dict) -> None:
     """Cek "control file" yang bisa ditulis dashboard.py (proses terpisah)
     untuk perintah manual, mis. tombol "Jual Sekarang". Dipanggil tiap
@@ -620,9 +623,9 @@ def check_manual_control(client: BinanceSpotClient, config: dict, filters_cache:
     berjalan sebagai DUA PROSES terpisah (lihat run.py) supaya crash di satu
     proses tidak menjatuhkan proses lain. Satu-satunya cara komunikasi antar
     proses yang sudah dipakai di proyek ini adalah file (file state, mis.
-    pump_bot_state_testnet.json), jadi kontrol manual memakai pola yang sama
+    pump_bot_state_paper.json), jadi kontrol manual memakai pola yang sama
     demi konsistensi."""
-    # Nama file kontrol ikut terpisah per mode (pump_bot_control_testnet.json
+    # Nama file kontrol ikut terpisah per mode (pump_bot_control_paper.json
     # vs ..._live.json), sudah otomatis dihitung di config.py. Fallback ke
     # get_control_file() supaya dict config custom tanpa kunci ini pun tetap
     # mendapat nama yang benar untuk mode aktif, bukan nama tanpa akhiran.
@@ -673,7 +676,7 @@ def check_manual_control(client: BinanceSpotClient, config: dict, filters_cache:
     close_position(client, config, filters_cache, state, "MANUAL_CLOSE_DASHBOARD")
 
 
-def manage_exit(client: BinanceSpotClient, config: dict, filters_cache: dict,
+def manage_exit(client: ExchangeClient, config: dict, filters_cache: dict,
                  state: dict, current_price: float) -> None:
     if not state["current_symbol"] or state["qty"] <= 0 or state["entry_price"] <= 0:
         return
@@ -735,28 +738,35 @@ def run(config: dict) -> None:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
-    mode = get_mode(config)
+    # Validasi MODE secara KETAT paling awal: nilai tak dikenal/kosong/typo
+    # menghentikan bot dengan pesan jelas, TIDAK pernah jatuh diam-diam ke LIVE.
+    from config import InvalidModeError
+    try:
+        mode = require_valid_mode(config)
+    except InvalidModeError as exc:
+        logger.critical(str(exc))
+        sys.exit(2)
     base_url = get_base_url(config)
 
     # Retest VWAP + RVOL baru berupa hipotesis setelah model momentum lama
-    # gagal pada validasi panjang. Backtest dan TESTNET tetap boleh supaya
+    # gagal pada validasi panjang. Backtest dan PAPER tetap boleh supaya
     # dapat diuji, tetapi order uang asli diblokir sampai pengguna secara
     # eksplisit mengizinkannya SETELAH validasi out-of-sample yang memadai.
     entry_model = str(config.get("ENTRY_MODEL", scanner.ENTRY_MODEL_LEGACY)).strip().upper()
     if experimental_entry_live_blocked(config):
         logger.critical(
             "ENTRY_MODEL=%s masih eksperimen dan diblokir di MODE=LIVE. "
-            "Jalankan backtest/TESTNET lebih dulu; setelah ada validasi yang memadai, "
+            "Jalankan backtest/PAPER lebih dulu; setelah ada validasi yang memadai, "
             "set ALLOW_EXPERIMENTAL_ENTRY_LIVE=True secara sadar.",
             entry_model,
         )
         sys.exit(1)
 
-    if not config["API_KEY"] or not config["API_SECRET"]:
+    if mode == "LIVE" and (not config["API_KEY"] or not config["API_SECRET"]):
         logger.error(
-            "API key/secret belum di-set. Mode %s tetap mengirim order sungguhan "
-            "(di testnet memakai dana virtual), jadi kredensial wajib ada. Bot dihentikan.",
-            mode,
+            "API key/secret belum di-set. Mode LIVE mengirim order dengan UANG ASLI, "
+            "jadi kredensial produksi wajib ada di file .env. Bot dihentikan. "
+            "(Mode PAPER tidak memerlukan API key.)"
         )
         sys.exit(1)
 
@@ -765,10 +775,11 @@ def run(config: dict) -> None:
     logger.info("File data (otomatis per mode) -> state=%s | log=%s | kontrol=%s",
                 config["STATE_FILE"], config["LOG_FILE"],
                 config.get("CONTROL_FILE", "-"))
-    if mode == "TESTNET":
+    if mode == "PAPER":
         logger.warning(
-            "MODE TESTNET AKTIF: order benar-benar dikirim ke Binance Spot Test Network "
-            "memakai dana virtual. Pakai API key dari testnet.binance.vision, bukan key produksi."
+            "MODE PAPER AKTIF: eksekusi order, fee, dan saldo DISIMULASIKAN lokal. "
+            "Data pasar tetap ASLI dari Binance produksi publik (REST + WebSocket), tanpa API key. "
+            "Tidak ada order sungguhan yang dikirim. Hasil PAPER BUKAN jaminan hasil LIVE."
         )
     else:
         logger.warning("MODE LIVE AKTIF: order memakai UANG ASLI di Binance produksi.")
@@ -797,7 +808,7 @@ def run(config: dict) -> None:
                     config.get("SL_PCT", 0), config.get("TP_PCT", 0))
     logger.info("=" * 70)
 
-    client = BinanceSpotClient(config["API_KEY"], config["API_SECRET"], base_url)
+    client = create_exchange_client(config)
     client.sync_time()
 
     logger.info("Mengambil exchangeInfo untuk semua simbol (sekali di awal)...")
@@ -811,7 +822,7 @@ def run(config: dict) -> None:
         logger.info("Melanjutkan posisi yang sudah ada: %s qty=%.8f @ %.6f",
                     state["current_symbol"], state["qty"], state["entry_price"])
     # Rekonsiliasi startup (temuan S-02): pastikan posisi di state benar-benar
-    # masih ada di exchange. Tanpa ini, reset testnet berkala atau penjualan
+    # masih ada di exchange. Tanpa ini, penjualan manual atau reset state atau penjualan
     # manual membuat bot mengelola "posisi hantu" dan SL/TP-nya menembak
     # order yang tidak masuk akal.
     reconcile_state_with_exchange(client, config, state)
@@ -994,6 +1005,12 @@ def run(config: dict) -> None:
         elapsed = time.time() - loop_start
         time.sleep(max(1.0, config["LOOP_INTERVAL_SECONDS"] - elapsed))
 
+    # Tutup sumber daya klien (mis. thread WebSocket di PAPER/LIVE) dengan
+    # rapi. Aman dipanggil untuk klien apa pun (default no-op).
+    try:
+        client.close()
+    except Exception:  # noqa: BLE001 - penutupan best-effort saat shutdown
+        pass
     logger.info("Bot berhenti.")
 
 
@@ -1007,7 +1024,7 @@ def selftest() -> None:
     # (yang memakai client tiruan) akan MENULIS state palsu ke file state asli
     # dan bisa merusak state bot yang sedang berjalan.
     cfg["STATE_FILE"] = os.path.join(tempfile.gettempdir(), "pump_bot_selftest_state.json")
-    assert not experimental_entry_live_blocked(cfg), "TESTNET tidak boleh diblokir"
+    assert not experimental_entry_live_blocked(cfg), "PAPER tidak boleh diblokir"
     cfg_live_experimental = dict(cfg, MODE="LIVE", ENTRY_MODEL=scanner.ENTRY_MODEL_VWAP_RETEST_RVOL,
                                 ALLOW_EXPERIMENTAL_ENTRY_LIVE=False)
     assert experimental_entry_live_blocked(cfg_live_experimental), "Entry eksperimen harus diblokir di LIVE"
@@ -1158,9 +1175,9 @@ def selftest() -> None:
     class FakeTradeClient:
         """Client palsu untuk selftest exit/kontrol manual.
 
-        Sejak mode DRY_RUN dihapus, close_position() SELALU benar-benar
-        memanggil get_account() lalu new_market_order() -- persis seperti di
-        testnet maupun live. Jadi selftest butuh client tiruan (bukan None)
+        close_position() SELALU benar-benar memanggil get_account()
+        lalu new_market_order() -- persis seperti di
+        PAPER maupun LIVE. Jadi selftest butuh client tiruan (bukan None)
         supaya bisa menguji logika exit tanpa menyentuh jaringan sama sekali.
         """
 
@@ -1549,14 +1566,14 @@ def selftest() -> None:
     assert fake_c.convert_calls == [], "BNB tidak boleh pernah dikonversi (proteksi keras)"
     print("  Simbol dengan base asset BNB -> TIDAK PERNAH dikonversi (proteksi modal) -> OK")
 
-    # Skenario D: MODE=TESTNET -> endpoint /sapi tidak ada di Spot Test
-    # Network, jadi convert_dust TIDAK boleh dipanggil sama sekali.
-    cfg_testnet = dict(cfg)
-    cfg_testnet["MODE"] = "TESTNET"
+    # Skenario D: MODE=PAPER -> konversi dust memakai /sapi/* bertanda tangan
+    # yang dilarang di PAPER, jadi convert_dust TIDAK boleh dipanggil sama sekali.
+    cfg_paper = dict(cfg)
+    cfg_paper["MODE"] = "PAPER"
     fake_d = FakeDustClient(convertible_assets=["PEPE"])
-    try_dust_sweep(fake_d, cfg_testnet, "PEPEUSDT")
-    assert fake_d.convert_calls == [], "Mode TESTNET tidak boleh memanggil convert_dust (endpoint /sapi tidak ada)"
-    print("  Mode TESTNET -> dust sweep dilewati, tidak ada panggilan /sapi -> OK")
+    try_dust_sweep(fake_d, cfg_paper, "PEPEUSDT")
+    assert fake_d.convert_calls == [], "Mode PAPER tidak boleh memanggil convert_dust (endpoint /sapi bertanda tangan)"
+    print("  Mode PAPER -> dust sweep dilewati, tidak ada panggilan /sapi -> OK")
 
     # Skenario E: endpoint convert_dust gagal (mis. kena rate limit Binance)
     # -> harus ditangani dengan aman, TIDAK boleh melempar exception ke pemanggil.
@@ -1673,7 +1690,7 @@ def selftest() -> None:
     with tempfile.TemporaryDirectory() as tmprec:
         cfg_rec["STATE_FILE"] = f"{tmprec}/state.json"
 
-        # a. Saldo 0 (mis. testnet habis di-reset) -> posisi hantu direset.
+        # a. Saldo 0 (mis. state di-reset) -> posisi hantu direset.
         st_r = dict(DEFAULT_STATE)
         st_r["current_symbol"] = "PEPEUSDT"
         st_r["qty"] = 1000.0

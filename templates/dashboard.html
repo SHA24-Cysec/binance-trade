@@ -354,7 +354,7 @@
     </div>
   </header>
 
-  <div class="banner dry" id="testnetBanner"><span>🧪</span><span>Mode <b>TESTNET</b> aktif, order benar-benar dikirim ke Binance Spot Test Network memakai dana virtual (bukan uang asli). Alur kerjanya sama persis dengan mode LIVE.</span></div>
+  <div class="banner dry" id="paperBanner"><span>🧪</span><span>Mode <b>PAPER</b> aktif: eksekusi order, fee, dan saldo <b>disimulasikan lokal</b>. Data pasar tetap asli dari Binance produksi. Tidak ada uang asli dan tidak ada order sungguhan. Hasil PAPER bukan jaminan hasil LIVE.</span></div>
   <div class="banner err" id="errBanner"><span>⚠️</span><span id="errText"></span></div>
 
   <!-- NAVIGASI TAB -->
@@ -757,7 +757,7 @@ function applyBacktestVisibility(enabled){
     }
   } else {
     // Kalau pengguna sedang berada di tab Backtest saat fitur ini mati
-    // (misalnya tab tersimpan di localStorage dari sesi TESTNET, lalu
+    // (misalnya tab tersimpan di localStorage dari sesi PAPER, lalu
     // config diganti ke LIVE), pindahkan ke Ikhtisar supaya tidak
     // terjebak di halaman kosong.
     if(btn && btn.getAttribute('aria-selected') === 'true'){
@@ -789,9 +789,9 @@ function reasonTag(r){
 function renderStatus(s){
   // mode
   const mp=document.getElementById('modePill'), md=mp.querySelector('.dot');
-  var isTestnet = (s.mode==='TESTNET') || !!s.testnet;
-  if(isTestnet){mp.className='pill dry';document.getElementById('modeText').textContent='TESTNET';md.className='dot warn';document.getElementById('testnetBanner').classList.add('show');}
-  else{mp.className='pill live';document.getElementById('modeText').textContent='LIVE';md.className='dot on';document.getElementById('testnetBanner').classList.remove('show');}
+  var isPaper = (s.mode==='PAPER') || !!s.paper;
+  if(isPaper){mp.className='pill dry';document.getElementById('modeText').textContent='PAPER';md.className='dot warn';document.getElementById('paperBanner').classList.add('show');}
+  else{mp.className='pill live';document.getElementById('modeText').textContent='LIVE';md.className='dot on';document.getElementById('paperBanner').classList.remove('show');}
   // Backtest boleh tampil atau tidak (diputuskan server). Kalau field-nya
   // tidak ada -- misalnya dashboard.py versi lama -- anggap aktif supaya
   // perilakunya tidak berubah diam-diam.
@@ -990,7 +990,7 @@ function renderTrades(trades, quote){
   if(!closed.length){tb.innerHTML='<tr><td colspan="8" class="empty">Belum ada trade yang selesai.</td></tr>';return;}
   tb.innerHTML=closed.map(t=>`
     <tr>
-      <td class="mono mut">${t.sell_time||'—'}${t.testnet?' <span class="tag dry">TESTNET</span>':''}</td>
+      <td class="mono mut">${t.sell_time||'—'}${t.paper?' <span class="tag dry">PAPER</span>':''}</td>
       <td><b>${t.symbol}</b></td>
       <td class="mono">${fmtP(t.entry||t.buy_price)}</td>
       <td class="mono">${fmtP(t.sell_price)}</td>

@@ -81,7 +81,7 @@ KLINE_PAGE = 1000
 # Utilitas
 # ======================================================================
 def _auto_file(config: dict) -> str:
-    """Nama file hasil, dipisah per mode supaya TESTNET dan LIVE tidak campur."""
+    """Nama file hasil, dipisah per mode supaya PAPER dan LIVE tidak campur."""
     import config as cfg_mod
     mode = cfg_mod.get_mode(config).lower()
     return f"watchlist_auto_{mode}.json"
