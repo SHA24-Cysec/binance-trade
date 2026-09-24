@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """
-Bot rotasi "pump scanner" untuk Binance Spot -- memantau SEMUA pair USDT,
-mencari koin yang sedang naik tajam + volume tinggi (24 jam), mengkonfirmasi
-momentum jangka pendek lewat candle 5 menit, lalu masuk dengan SATU entry
-(tanpa martingale/averaging-down). Keluar lewat Take Profit / Breakeven /
-Trailing / batas waktu hold / momentum pudar.
+Bot rotasi PULLBACK dan RETEST untuk Binance Spot. Bot memantau pair QUOTE
+yang likuid, mencari struktur breakout di atas swing high lalu pullback
+kembali ke level itu pada candle konfirmasi yang SUDAH tertutup, lalu masuk
+dengan SATU entry long (tanpa martingale dan tanpa averaging-down). Keluar
+lewat Take Profit, Breakeven, Trailing, batas waktu hold, atau invalidasi
+setup (close tertutup di bawah level breakout dikurangi ATR).
 
-INI BUKAN PREDIKSI. Bot ini bereaksi terhadap pergerakan yang SUDAH terjadi.
-Baca README.md bagian "Mode Pump Scanner" sebelum menjalankan dengan uang
-sungguhan.
+Nama file masih pump_scanner_bot.py demi kompatibilitas skrip dan layanan
+yang sudah ada, tetapi isinya BUKAN lagi pump scanner: gerbang kenaikan 24
+jam dan pengurutan top gainer sudah dihapus.
+
+INI BUKAN PREDIKSI. Bot ini bereaksi terhadap struktur yang SUDAH terbentuk.
+Baca README.md bagian strategi sebelum menjalankan dengan uang sungguhan.
 
 CARA PAKAI (sama seperti bot.py):
     pip install -r requirements.txt
@@ -42,7 +46,9 @@ import sys
 import threading
 import time
 
-from binance_client import BinanceAPIError, SymbolFilters, build_filters_cache
+from binance_client import (
+    BinanceAPIError, SymbolFilters, build_filters_cache, build_trading_symbols,
+)
 from exchange_client import ExchangeClient, create_exchange_client
 from config import (
     PUMP_CONFIG, CONFIG_LOAD_ERRORS, get_base_url, is_paper, require_valid_mode,
@@ -75,6 +81,17 @@ DEFAULT_STATE = {
     "trail_step_pct": 0.0,
     "exit_source": "",
     "atr_pct_at_entry": 0.0,
+    # Level setup yang DIKUNCI saat entry untuk exit SETUP_INVALIDATED.
+    # Sengaja tidak dihitung ulang dari data baru: alasan keluar harus sama
+    # dengan alasan masuk. 0.0 berarti tidak tersedia (posisi lama dari versi
+    # sebelumnya), dan exit invalidasi otomatis dilewati untuk posisi itu.
+    "breakout_level": 0.0,
+    "setup_invalidation_price": 0.0,
+    "atr_abs_at_entry": 0.0,
+    # close_time candle terakhir yang sudah diperiksa untuk invalidasi setup,
+    # supaya satu candle tidak diperiksa berulang dan REST tidak dipanggil
+    # lebih sering daripada satu kali per candle.
+    "last_setup_check_close_time": 0,
     "last_scan_time": 0,
     "cooldown_until": 0,
     "last_trade_time": 0,
@@ -324,6 +341,10 @@ def reset_position(state: dict) -> None:
     state["trail_step_pct"] = 0.0
     state["exit_source"] = ""
     state["atr_pct_at_entry"] = 0.0
+    state["breakout_level"] = 0.0
+    state["setup_invalidation_price"] = 0.0
+    state["atr_abs_at_entry"] = 0.0
+    state["last_setup_check_close_time"] = 0
 
 
 def try_dust_sweep(client: ExchangeClient, config: dict, symbol: "str | None") -> None:
@@ -600,6 +621,37 @@ def open_position(client: ExchangeClient, config: dict, filters_cache: dict,
     state["exit_source"] = levels["source"]
     state["atr_pct_at_entry"] = levels["atr_pct"] or 0.0
     state["sell_fail_count"] = 0
+
+    # Level setup dikunci di sini, sekali, dari hasil deteksi yang MEMICU
+    # entry ini. Kalau dihitung ulang belakangan dari candle yang lebih baru,
+    # level bisa bergeser dan posisi ditutup karena alasan yang tidak pernah
+    # menjadi dasar entry.
+    setup = getattr(candidate, "setup", None)
+    if setup is not None and setup.breakout_level and setup.invalidation_price:
+        state["breakout_level"] = float(setup.breakout_level)
+        state["setup_invalidation_price"] = float(setup.invalidation_price)
+        state["atr_abs_at_entry"] = float(setup.atr_abs or 0.0)
+        # RELASI DENGAN STOP LOSS: level invalidasi berada di bawah level
+        # breakout, sedangkan Stop Loss dihitung dari harga entry. Keduanya
+        # sengaja dibiarkan berdiri sendiri, tetapi kalau Stop Loss jauh lebih
+        # longgar daripada level invalidasi, praktis exit invalidasi yang
+        # selalu lebih dulu bekerja. Log di bawah membuat hubungan itu
+        # terlihat, bukan tersembunyi.
+        sl_price = fill_price * (1 - levels["sl_pct"] / 100.0)
+        logger.info(
+            "%s: setup dikunci -> level %.8g, batas invalidasi %.8g, harga Stop Loss %.8g "
+            "(%s yang lebih dulu tersentuh akan menutup posisi)",
+            candidate.symbol, state["breakout_level"], state["setup_invalidation_price"],
+            sl_price,
+            "invalidasi setup" if state["setup_invalidation_price"] > sl_price else "Stop Loss",
+        )
+    else:
+        state["breakout_level"] = 0.0
+        state["setup_invalidation_price"] = 0.0
+        state["atr_abs_at_entry"] = 0.0
+        logger.warning("%s: level setup tidak tersedia saat entry, exit SETUP_INVALIDATED "
+                       "dilewati untuk posisi ini.", candidate.symbol)
+    state["last_setup_check_close_time"] = 0
     # Simpan SEKARANG (temuan T-04), jangan menunggu akhir iterasi loop:
     # crash beberapa ratus milidetik setelah BUY FILLED tidak boleh
     # meninggalkan POSISI YATIM (ada di exchange, tapi state di disk masih
@@ -671,6 +723,77 @@ def check_manual_control(client: ExchangeClient, config: dict, filters_cache: di
     logger.info("Perintah 'Jual Sekarang' diterima dari dashboard untuk %s. Menutup posisi...",
                 state["current_symbol"])
     close_position(client, config, filters_cache, state, "MANUAL_CLOSE_DASHBOARD")
+
+
+def check_setup_invalidation(client: ExchangeClient, config: dict, filters_cache: dict,
+                             state: dict) -> bool:
+    """Tutup posisi bila candle konfirmasi tertutup menembus batas invalidasi setup.
+
+    Menggantikan exit MOMENTUM_FADE lama. Bedanya penting: exit lama
+    bergantung pada peringkat gainer seluruh pasar, sehingga tidak bisa
+    disimulasikan di backtest satu simbol. Exit ini hanya memakai candle
+    TERTUTUP dari simbol yang sedang dipegang, jadi backtest.py dan
+    portfolio_backtest.py dapat menirunya persis.
+
+    Level dan ATR TIDAK dihitung ulang di sini. Keduanya dikunci di state saat
+    entry oleh open_position(), memakai hasil deteksi yang memicu entry itu.
+
+    Kembalikan True kalau posisi ditutup oleh fungsi ini.
+    """
+    if not config.get("SETUP_INVALIDATION_EXIT"):
+        return False
+    symbol = state.get("current_symbol")
+    if not symbol or float(state.get("qty", 0) or 0) <= 0:
+        return False
+
+    batas = float(state.get("setup_invalidation_price") or 0.0)
+    if batas <= 0:
+        # Posisi lama dari versi sebelum fitur ini ada. Jangan menebak level
+        # dari data baru, cukup lewati.
+        return False
+
+    interval = config.get("CONFIRM_INTERVAL", "5m")
+    interval_ms = strategy.interval_to_ms(interval)
+    now_ms = state_mod.now_ms()
+    last_checked = int(state.get("last_setup_check_close_time") or 0)
+    if last_checked and now_ms < last_checked + interval_ms:
+        # Candle berikutnya belum tertutup, tidak ada yang baru untuk dicek.
+        # Ini juga yang menjaga pemakaian rate limit tetap satu panggilan
+        # klines (bobot IP 2) per candle, bukan per iterasi loop.
+        return False
+
+    try:
+        raw = client.get_klines(symbol, interval, limit=3)
+    except BinanceAPIError as exc:
+        logger.warning("Gagal mengambil candle %s untuk cek invalidasi setup: %s", symbol, exc)
+        return False
+    except (ValueError, TypeError) as exc:
+        logger.warning("Data candle %s untuk cek invalidasi setup tidak terbaca: %s", symbol, exc)
+        return False
+
+    try:
+        closed = [k for k in strategy.parse_klines(raw) if k.close_time < now_ms]
+    except ValueError as exc:
+        logger.warning("Candle %s ditolak parser saat cek invalidasi setup: %s", symbol, exc)
+        return False
+    if not closed:
+        return False
+
+    batas_waktu = max(last_checked, int(state.get("entry_time", 0) or 0))
+    state["last_setup_check_close_time"] = closed[-1].close_time
+
+    for k in closed:
+        if k.close_time <= batas_waktu:
+            continue
+        if k.close < batas:
+            logger.info(
+                "%s: candle %s tertutup di %.8g, di bawah batas invalidasi setup %.8g "
+                "(level breakout %.8g). Posisi ditutup.",
+                symbol, interval, k.close, batas, float(state.get("breakout_level") or 0.0),
+            )
+            close_position(client, config, filters_cache, state, "SETUP_INVALIDATED")
+            return True
+    return False
 
 
 def manage_exit(client: ExchangeClient, config: dict, filters_cache: dict,
@@ -778,15 +901,25 @@ def run(config: dict, lifecycle=None) -> int:
         )
     else:
         logger.warning("MODE LIVE AKTIF: order memakai UANG ASLI di Binance produksi.")
+    need_setup = strategy.required_lookback_bars(config)
+    have_bars = int(config.get("CONFIRM_LOOKBACK_BARS", 48))
+    if have_bars < need_setup:
+        logger.warning(
+            "CONFIRM_LOOKBACK_BARS=%d lebih kecil dari %d candle yang dibutuhkan ATR dan "
+            "struktur setup. Bot tetap mengambil %d candle per konfirmasi agar deteksi "
+            "tidak selalu gagal, tetapi perbaiki nilai config ini supaya backtest dan live "
+            "benar-benar memakai angka yang sama.",
+            have_bars, need_setup, strategy.confirm_window_bars(config),
+        )
     if config.get("USE_ATR_EXITS"):
         need = int(config.get("ATR_PERIOD", 14)) + 1
-        have = int(config.get("CONFIRM_LOOKBACK_BARS", 20))
+        have = strategy.confirm_window_bars(config)
         if have < need:
             logger.warning(
-                "USE_ATR_EXITS aktif tapi CONFIRM_LOOKBACK_BARS=%d, sedangkan ATR(%d) butuh "
-                "minimal %d candle. Akibatnya ATR akan selalu gagal dihitung dan bot selalu "
-                "jatuh ke SL/TP tetap. Naikkan CONFIRM_LOOKBACK_BARS jadi minimal %d.",
-                have, config.get("ATR_PERIOD", 14), need, need,
+                "USE_ATR_EXITS aktif tapi jendela konfirmasi hanya %d candle, sedangkan "
+                "ATR(%d) butuh minimal %d candle. Akibatnya ATR akan selalu gagal dihitung "
+                "dan bot selalu jatuh ke SL/TP tetap.",
+                have, config.get("ATR_PERIOD", 14), need,
             )
         else:
             logger.info("Mode exit: ATR adaptif (periode %d, SL %gx, batas %.2f%%-%.2f%%, RR %g:1)",
@@ -809,6 +942,7 @@ def run(config: dict, lifecycle=None) -> int:
     logger.info("Mengambil exchangeInfo untuk semua simbol (sekali di awal)...")
     exchange_info = client.get_exchange_info()
     filters_cache = build_filters_cache(exchange_info)
+    tradable_symbols = build_trading_symbols(exchange_info)
     filters_cache_time = time.time()
     logger.info("Filter untuk %d simbol berhasil dimuat.", len(filters_cache))
 
@@ -838,9 +972,15 @@ def run(config: dict, lifecycle=None) -> int:
         backtest memakai candle final menciptakan look-ahead/repaint mismatch.
         Karena itu satu candle ekstra diminta, candle yang close_time-nya
         belum lewat dibuang, lalu hanya window terbaru yang sudah selesai
-        dikembalikan. Cukup untuk konfirmasi momentum dan ATR entry.
+        dikembalikan. Cukup untuk deteksi setup dan ATR entry.
+
+        Jumlah candle memakai strategy.confirm_window_bars(), fungsi yang
+        sama dengan yang dipakai backtest, dashboard, dan watchlist, sehingga
+        keempat jalur melihat jendela identik. Limit endpoint klines adalah
+        1000 candle per panggilan dengan bobot IP 2 (dicek 2026-09-25 di
+        developers.binance.com/en/docs/catalog/core-trading-spot-trading/api/rest-api/market#klines).
         """
-        lookback = int(config["CONFIRM_LOOKBACK_BARS"])
+        lookback = strategy.confirm_window_bars(config)
         raw = client.get_klines(symbol, config["CONFIRM_INTERVAL"], limit=lookback + 1)
         now_ms = state_mod.now_ms()
         closed = [k for k in strategy.parse_klines(raw) if k.close_time < now_ms]
@@ -868,6 +1008,7 @@ def run(config: dict, lifecycle=None) -> int:
             if time.time() - filters_cache_time > FILTERS_REFRESH_INTERVAL_SECONDS:
                 exchange_info = client.get_exchange_info()
                 filters_cache = build_filters_cache(exchange_info)
+                tradable_symbols = build_trading_symbols(exchange_info)
                 filters_cache_time = time.time()
                 logger.info("Filter simbol disegarkan ulang (%d simbol).", len(filters_cache))
 
@@ -901,19 +1042,18 @@ def run(config: dict, lifecycle=None) -> int:
             if state["current_symbol"] and current_price is not None:
                 manage_exit(client, config, filters_cache, state, current_price)
 
+            # Exit invalidasi setup diperiksa SETELAH exit berbasis harga
+            # berjalan. Urutannya sengaja sama dengan urutan prioritas di
+            # backtest (Stop Loss lebih dulu, invalidasi setup paling akhir),
+            # supaya hasil backtest tetap mewakili perilaku bot saat dua exit
+            # bisa terpicu pada saat yang hampir bersamaan.
+            if state["current_symbol"]:
+                check_setup_invalidation(client, config, filters_cache, state)
+
             do_scan = time.time() * 1000 - state.get("last_scan_time", 0) > config["MARKET_SCAN_INTERVAL_SECONDS"] * 1000
             if do_scan:
                 state["last_scan_time"] = state_mod.now_ms()
                 tickers = client.get_ticker_24hr_all()
-
-                if state["current_symbol"] and config["MOMENTUM_FADE_EXIT"]:
-                    still_ranked = scanner.is_symbol_still_ranked(
-                        state["current_symbol"], tickers, config, config["MOMENTUM_FADE_RANK_THRESHOLD"]
-                    )
-                    if not still_ranked and current_price is not None:
-                        logger.info("%s sudah keluar dari top-%d gainer, momentum dianggap pudar.",
-                                    state["current_symbol"], config["MOMENTUM_FADE_RANK_THRESHOLD"])
-                        close_position(client, config, filters_cache, state, "MOMENTUM_FADE")
 
                 now = state_mod.now_ms()
                 can_enter = (
@@ -923,7 +1063,12 @@ def run(config: dict, lifecycle=None) -> int:
                     and now - state.get("last_trade_time", 0) >= config["MIN_SECONDS_BETWEEN_TRADES"] * 1000
                 )
                 if can_enter:
-                    best = scanner.find_best_candidate(tickers, klines_fetcher, config)
+                    # Semesta dibatasi ke simbol berstatus TRADING dari
+                    # exchangeInfo, bukan sekadar apa pun yang muncul di
+                    # ticker 24 jam. Simbol HALT atau BREAK tetap mengirim
+                    # ticker, dan order ke simbol seperti itu pasti ditolak.
+                    best = scanner.find_best_candidate(tickers, klines_fetcher, config,
+                                                       tradable_symbols)
                     if best:
                         book = client.get_book_ticker(best.symbol)
                         bid, ask = float(book["bidPrice"]), float(book["askPrice"])
@@ -931,12 +1076,13 @@ def run(config: dict, lifecycle=None) -> int:
                         spread_pct = ((ask - bid) / mid * 100.0) if mid > 0 else 999.0
                         if spread_pct <= config["MAX_SPREAD_PCT"]:
                             logger.info(
-                                "Kandidat terpilih: %s (24h=%.2f%%, vol=%.0f, spread=%.3f%%)",
-                                best.symbol, best.price_change_pct, best.quote_volume, spread_pct,
+                                "Kandidat terpilih: %s (vol24h=%.0f, 24h=%.2f%%, spread=%.3f%%) | %s",
+                                best.symbol, best.quote_volume, best.price_change_pct,
+                                spread_pct, best.confirm_reason,
                             )
                             # klines kandidat diambil ulang di sini supaya
                             # ATR dihitung dari data yang sama dengan yang
-                            # dipakai saat konfirmasi momentum.
+                            # dipakai saat deteksi setup.
                             # Filter usia listing (temuan S-08): koin yang
                             # baru listing sering pump buatan lalu kolaps.
                             # Dicek hanya untuk kandidat yang sudah lolos.
@@ -971,7 +1117,7 @@ def run(config: dict, lifecycle=None) -> int:
                             logger.info("Kandidat %s dilewati: spread %.3f%% > batas %.3f%%.",
                                         best.symbol, spread_pct, config["MAX_SPREAD_PCT"])
                     else:
-                        logger.debug("Tidak ada kandidat pump yang lolos filter+konfirmasi saat ini.")
+                        logger.info("Tidak ada setup pullback retest yang sah pada scan ini.")
 
             if time.time() - last_heartbeat >= config["HEARTBEAT_INTERVAL_SECONDS"]:
                 last_heartbeat = time.time()
@@ -1049,44 +1195,133 @@ def selftest() -> None:
     # dan bisa merusak state bot yang sedang berjalan.
     cfg["STATE_FILE"] = os.path.join(tempfile.gettempdir(), "pump_bot_selftest_state.json")
 
-    print("=== SELFTEST: filter & ranking kandidat pump ===")
+    print("=== SELFTEST: saringan semesta dan urutan volume ===")
     tickers = [
         {"symbol": "AUSDT", "priceChangePercent": "15.0", "quoteVolume": "5000000", "lastPrice": "1.0"},
         {"symbol": "BUSDT", "priceChangePercent": "25.0", "quoteVolume": "3000000", "lastPrice": "2.0"},
-        {"symbol": "CUSDT", "priceChangePercent": "3.0", "quoteVolume": "9000000", "lastPrice": "0.5"},   # gagal: %naik kurang
+        {"symbol": "CUSDT", "priceChangePercent": "-3.0", "quoteVolume": "9000000", "lastPrice": "0.5"},  # turun 24 jam, TETAP masuk semesta
         {"symbol": "DUSDT", "priceChangePercent": "40.0", "quoteVolume": "10000", "lastPrice": "0.1"},     # gagal: volume kurang
         {"symbol": "BTCUPUSDT", "priceChangePercent": "50.0", "quoteVolume": "9000000", "lastPrice": "3.0"},  # gagal: leveraged token
         {"symbol": "USDCUSDT", "priceChangePercent": "20.0", "quoteVolume": "9000000", "lastPrice": "1.0"},   # gagal: stablecoin
+        {"symbol": "HALTUSDT", "priceChangePercent": "10.0", "quoteVolume": "8000000", "lastPrice": "1.0"},   # gagal: status bukan TRADING
     ]
-    ranked = scanner.filter_and_rank_candidates(tickers, cfg)
+    tradable = {"AUSDT", "BUSDT", "CUSDT", "DUSDT", "BTCUPUSDT", "USDCUSDT"}
+    ranked = scanner.filter_and_rank_candidates(tickers, cfg, tradable)
     symbols = [c.symbol for c in ranked]
-    print("  Lolos filter & terurut:", symbols)
-    assert symbols == ["BUSDT", "AUSDT"], f"Hasil filter/ranking salah: {symbols}"
-    print("  -> OK (leveraged token, stablecoin, volume rendah, %naik rendah semua ter-exclude benar)")
+    print("  Lolos saringan, urut volume kuotasi:", symbols)
+    assert symbols == ["CUSDT", "AUSDT", "BUSDT"], f"Hasil saringan/urutan salah: {symbols}"
+    print("  -> OK (leveraged token, stablecoin, volume rendah, simbol non-TRADING ter-exclude;")
+    print("      koin yang TURUN 24 jam tetap masuk karena gerbang pump sudah dihapus)")
 
-    print("\n=== SELFTEST: konfirmasi momentum ===")
-    t = 0
+    print("\n=== SELFTEST: deteksi setup pullback dan retest ===")
+    # Data sintetis WAJIB mengisi volume dan quote_volume, karena anchored
+    # VWAP membaginya. Kline.volume default 0.0, dan VWAP dari volume nol
+    # akan mengembalikan None sehingga setup selalu ditolak.
+    from synthetic_data import skenario_pullback_retest
 
-    def bar(o, c):
-        nonlocal t
-        h = max(o, c) * 1.001
-        l = min(o, c) * 0.999
-        k = strategy.Kline(open_time=t, open=o, high=h, low=l, close=c, close_time=t + 299999)
-        t += 300000
-        return k
+    kl_ok = skenario_pullback_retest("lolos")
+    hasil = scanner.detect_pullback_retest(kl_ok, cfg)
+    print(f"  Skenario breakout, pullback, close kembali di atas level -> ok={hasil.ok} ({hasil.reason})")
+    assert hasil.ok, "Skenario retest sah harusnya lolos"
+    assert hasil.breakout_level and hasil.invalidation_price, "Level setup harus ikut dikembalikan"
 
-    # Skenario 1: momentum masih naik jelas -> harus lolos
-    klines_up = [bar(100 + i, 100 + i + 0.8) for i in range(10)]
-    ok, reason = scanner.confirm_momentum(klines_up, cfg)
-    print(f"  Skenario momentum naik konsisten -> confirmed={ok} ({reason})")
-    assert ok, "Momentum naik konsisten harusnya lolos konfirmasi"
+    kl_wick = skenario_pullback_retest("wick_saja")
+    hasil_wick = scanner.detect_pullback_retest(kl_wick, cfg)
+    print(f"  Skenario breakout hanya lewat sumbu -> ok={hasil_wick.ok} ({hasil_wick.reason})")
+    assert not hasil_wick.ok, "Sumbu yang menembus tanpa close di atas level bukan breakout"
 
-    # Skenario 2: candle terakhir reversal kuat (dibuka tinggi, ditutup dekat low) -> harus gagal
-    klines_reversal = [bar(100 + i, 100 + i + 0.8) for i in range(9)]
-    klines_reversal.append(bar(115, 108))  # candle merah besar menutup dekat low
-    ok2, reason2 = scanner.confirm_momentum(klines_reversal, cfg)
-    print(f"  Skenario candle reversal kuat di akhir -> confirmed={ok2} ({reason2})")
-    assert not ok2, "Candle reversal kuat harusnya GAGAL konfirmasi"
+    kl_jauh = skenario_pullback_retest("terlalu_jauh")
+    hasil_jauh = scanner.detect_pullback_retest(kl_jauh, cfg)
+    print(f"  Skenario harga sudah terlalu jauh di atas level -> ok={hasil_jauh.ok} ({hasil_jauh.reason})")
+    assert not hasil_jauh.ok, "Anti-kejar harus menolak entry yang sudah jauh di atas level"
+
+    kl_gagal = skenario_pullback_retest("close_di_bawah_level")
+    hasil_gagal = scanner.detect_pullback_retest(kl_gagal, cfg)
+    print(f"  Skenario retest close di bawah level -> ok={hasil_gagal.ok} ({hasil_gagal.reason})")
+    assert not hasil_gagal.ok, "Retest yang close di bawah level harus ditolak"
+
+    ok_ce, reason_ce = scanner.confirm_entry(kl_ok, cfg)
+    assert ok_ce and reason_ce == hasil.reason, "confirm_entry harus memakai detect_pullback_retest"
+    print("  -> OK (confirm_entry konsisten dengan detect_pullback_retest)")
+
+    print("\n=== SELFTEST: exit SETUP_INVALIDATED ===")
+    from decimal import Decimal as _D
+    from binance_client import SymbolFilters as _SymbolFilters
+
+    class FakeKlineClient:
+        """Client tiruan yang hanya melayani get_klines dan order jual."""
+
+        def __init__(self, closes):
+            self.closes = closes
+            self.orders = []
+
+        def get_klines(self, symbol, interval, limit=500, start_time_ms=None, end_time_ms=None):
+            now = state_mod.now_ms()
+            rows = []
+            n = len(self.closes)
+            for idx, c in enumerate(self.closes):
+                # close_time dibuat SUDAH lewat supaya candle dianggap tertutup.
+                close_time = now - (n - idx) * 300_000
+                rows.append([close_time - 299_999, str(c), str(c + 0.2), str(c - 0.2),
+                             str(c), "1000", close_time, "100000", 10, "500", "50000", "0"])
+            return rows[-limit:]
+
+        def get_account(self):
+            return {"balances": [{"asset": "TEST", "free": "1", "locked": "0"},
+                                 {"asset": "USDT", "free": "1000", "locked": "0"}]}
+
+        def new_market_order(self, symbol, side, quantity=None, quote_order_qty=None):
+            self.orders.append((symbol, side, quantity))
+            qty = float(quantity or 0.0)
+            return {"executedQty": str(qty), "cummulativeQuoteQty": str(qty * 99.0)}
+
+        def get_dust_convertible(self, account_type="SPOT"):
+            return {"details": []}
+
+        def convert_dust(self, assets, account_type="SPOT"):
+            return {"totalTransfered": "0"}
+
+    fc_inval = {"TESTUSDT": _SymbolFilters(step_size=_D("0.01"), min_qty=_D("0.01"),
+                                           min_notional=_D("5"), tick_size=_D("0.0001"))}
+    cfg_inval = dict(cfg)
+    cfg_inval["SETUP_INVALIDATION_EXIT"] = True
+
+    def _state_posisi():
+        st = dict(DEFAULT_STATE)
+        st["current_symbol"] = "TESTUSDT"
+        st["entry_price"] = 101.9
+        st["qty"] = 1.0
+        st["entry_time"] = state_mod.now_ms() - 3_600_000
+        st["breakout_level"] = 101.0
+        st["setup_invalidation_price"] = 100.1
+        st["atr_abs_at_entry"] = 0.9
+        return st
+
+    st_kena = _state_posisi()
+    client_kena = FakeKlineClient([101.5, 101.2, 99.8])
+    ditutup = check_setup_invalidation(client_kena, cfg_inval, fc_inval, st_kena)
+    print(f"  Candle tertutup di 99.8 (batas 100.1) -> ditutup={ditutup}")
+    assert ditutup and st_kena["current_symbol"] is None, "Exit invalidasi harus menutup posisi"
+    assert client_kena.orders and client_kena.orders[-1][1] == "SELL", "Harus mengirim SELL"
+
+    st_aman = _state_posisi()
+    client_aman = FakeKlineClient([101.5, 101.2, 101.4])
+    ditutup2 = check_setup_invalidation(client_aman, cfg_inval, fc_inval, st_aman)
+    print(f"  Harga bertahan di atas level -> ditutup={ditutup2}")
+    assert not ditutup2 and st_aman["current_symbol"] == "TESTUSDT", \
+        "Posisi tidak boleh ditutup saat harga bertahan di atas batas invalidasi"
+
+    st_mati = _state_posisi()
+    cfg_mati = dict(cfg_inval)
+    cfg_mati["SETUP_INVALIDATION_EXIT"] = False
+    assert not check_setup_invalidation(FakeKlineClient([99.0]), cfg_mati, fc_inval, st_mati), \
+        "Fitur yang dimatikan tidak boleh menutup posisi"
+
+    st_lama = _state_posisi()
+    st_lama["setup_invalidation_price"] = 0.0   # posisi dari versi lama tanpa level
+    assert not check_setup_invalidation(FakeKlineClient([50.0]), cfg_inval, fc_inval, st_lama), \
+        "Posisi lama tanpa level tersimpan harus dilewati, bukan ditebak"
+    print("  -> OK (terpicu, tidak terpicu, bisa dimatikan, aman untuk state lama)")
 
     print("\n=== SELFTEST: simulasi exit (TP/Breakeven/Trailing) ===")
     from decimal import Decimal as D

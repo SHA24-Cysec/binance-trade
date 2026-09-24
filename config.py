@@ -5,12 +5,13 @@ Konfigurasi Bot Pump Scanner (Binance Spot)
 Catatan: file ini dulu juga memuat blok CONFIG untuk bot grid martingale.
 Bot grid sudah dihapus, jadi kini hanya tersisa PUMP_CONFIG.
 
-Mode pump scanner TIDAK memprediksi pump sebelum terjadi -- ia mendeteksi koin
-yang harganya SUDAH naik signifikan + volume tinggi dalam 24 jam terakhir, lalu
-mengkonfirmasi lewat candle 5 menit apakah momentumnya kelihatan masih
-berlanjut sebelum ikut masuk. Ini reaktif (momentum chasing), bukan prediktif.
-Hanya satu entry per rotasi (tanpa averaging-down), dengan Stop Loss/TP/
-Breakeven/Trailing untuk keluar.
+Strategi bot ini adalah PULLBACK dan RETEST, long only, di pasar Spot. Bot
+TIDAK memprediksi arah harga: ia menunggu struktur yang sudah terjadi pada
+candle 5 menit yang SUDAH tertutup, yaitu breakout di atas swing high, lalu
+pullback kembali ke area level itu, lalu candle yang menutup kembali di atas
+level dengan konfluensi anchored VWAP. Hanya satu entry per rotasi (tanpa
+averaging-down dan tanpa martingale), dengan Stop Loss/TP/Breakeven/Trailing
+dan exit invalidasi setup untuk keluar.
 
 Kredensial diambil dari file .env, JANGAN taruh langsung di file config.py ini
 (kalau ditulis di sini, risiko ke-commit ke Git atau ke-share tanpa sengaja
@@ -190,12 +191,67 @@ PUMP_CONFIG = {
     # --- Scan & seleksi kandidat ---
     "MARKET_SCAN_INTERVAL_SECONDS": 300,     # scan seluruh pasar tiap 5 menit
     "LOOP_INTERVAL_SECONDS": 15,             # cek TP/BE/trailing tiap 15 detik
-    "MIN_PUMP_PCT_24H": 13.0,                 # minimal naik 13% dalam 24 jam utk dianggap kandidat
     "MIN_QUOTE_VOLUME_USDT_24H": 2_000_000,  # minimal volume 24 jam (hindari koin ilikuid/rawan manipulasi)
-    "TOP_N_CANDIDATES_TO_CONFIRM": 10,       # dari hasil ranking, cek candle utk N teratas
+    # Berapa simbol teratas (urut volume kuotasi 24 jam) yang candle-nya
+    # diunduh tiap siklus scan. Angka ini yang menjaga rate limit: satu
+    # panggilan klines berbobot IP 2 sedangkan plafon REQUEST_WEIGHT adalah
+    # 6000 per menit per IP (dibaca dari /api/v3/exchangeInfo, dicek
+    # 2026-09-25), ditambah 80 bobot untuk ticker 24 jam seluruh pasar.
+    "TOP_N_CANDIDATES_TO_CONFIRM": 10,
     "CONFIRM_INTERVAL": "5m",
-    "CONFIRM_LOOKBACK_BARS": 20,
-    "MIN_CLOSE_POSITION_IN_RANGE": 0.35,     # lihat market_scanner.confirm_momentum()
+    # Jendela candle tertutup untuk satu keputusan entry. Nilai minimum yang
+    # benar dihitung oleh strategy.required_lookback_bars() dari ATR_PERIOD
+    # dan parameter struktur di bawah, dan divalidasi di settings_schema.py.
+    # Dengan default saat ini minimumnya 28 candle, jadi 48 memberi ruang
+    # tambahan untuk swing yang lebih lama. Limit endpoint klines adalah 1000
+    # candle per panggilan (dicek 2026-09-25).
+    "CONFIRM_LOOKBACK_BARS": 48,
+    # Posisi close di dalam range candle retest (0 = di low, 1 = di high).
+    # Kunci lama ini dipakai ulang oleh market_scanner.detect_pullback_retest().
+    "MIN_CLOSE_POSITION_IN_RANGE": 0.35,
+
+    # ------------------------------------------------------------------
+    # PARAMETER STRATEGI PULLBACK DAN RETEST
+    # ------------------------------------------------------------------
+    # SEMUA angka di blok ini adalah TITIK AWAL yang BELUM divalidasi. Nilai
+    # ini dipilih konservatif berdasarkan struktur aturannya saja, bukan dari
+    # hasil backtest. Validasi dulu lewat backtest.py dan portfolio_backtest.py
+    # pada periode pengembangan dan periode uji yang terpisah sebelum dipakai
+    # dengan uang sungguhan.
+    #
+    # Berapa candle ke belakang yang dipindai untuk mencari swing high yang
+    # menjadi level breakout.
+    "SWING_LOOKBACK_BARS": 12,
+    # Jumlah candle di kiri dan kanan yang harus lebih rendah agar sebuah
+    # candle dianggap pivot high. Sayap kanan wajib sudah tertutup, itulah
+    # yang mencegah level breakout memakai data masa depan.
+    "SWING_PIVOT_WING_BARS": 2,
+    # Buffer di atas level agar breakout tidak dihitung dari selisih satu tick.
+    "BREAKOUT_BUFFER_ATR_MULT": 0.10,
+    # Setengah lebar zona retest di atas dan di bawah level, dalam satuan ATR.
+    "RETEST_ZONE_ATR_MULT": 0.5,
+    # Jarak maksimum anchored VWAP terhadap level agar dianggap konfluen.
+    "RETEST_VWAP_CONFLUENCE_ATR_MULT": 1.0,
+    # Minimum candle setelah anchor sebelum anchored VWAP dipercaya. Tanpa ini
+    # VWAP hanya mencerminkan satu candle, yaitu harga rata-rata candle itu.
+    "VWAP_MIN_BARS_AFTER_ANCHOR": 2,
+    # Umur maksimum setup: kalau retest tidak datang dalam sekian candle,
+    # setup dianggap gugur dan bot mencari breakout berikutnya.
+    "MAX_BARS_BREAKOUT_TO_RETEST": 12,
+    # Berapa kali harga boleh berkunjung ke zona sebelum setup dianggap lemah.
+    # Kunjungan dihitung per peristiwa, bukan per candle.
+    "MAX_RETEST_TOUCHES": 1,
+    # Jarak di bawah level yang membatalkan setup, dan juga dipakai exit
+    # SETUP_INVALIDATED. CATATAN RELASI PENTING: Stop Loss tidak boleh jauh
+    # lebih longgar dari level ini. Kalau INVALIDATION_ATR_MULT jauh lebih
+    # kecil dari ATR_MULTIPLIER_SL, exit invalidasi akan hampir selalu
+    # mendahului Stop Loss, dan Stop Loss berubah jadi pengaman yang praktis
+    # tidak pernah terpakai. Sebaliknya kalau jauh lebih besar, Stop Loss yang
+    # selalu lebih dulu kena dan exit invalidasi jadi tidak berarti.
+    "INVALIDATION_ATR_MULT": 1.0,
+    # Anti-kejar: tolak entry kalau close sudah terlalu jauh di atas level,
+    # karena stop yang masuk akal (di bawah level) jadi terlalu lebar.
+    "MAX_EXTENSION_ATR_MULT": 1.5,
 
     "EXTRA_EXCLUDE_SYMBOLS": [],             # mis. ["SOMEUSDT"] kalau mau blacklist manual
 
@@ -222,8 +278,9 @@ PUMP_CONFIG = {
     # Gunanya: saat memantau dashboard Anda tidak perlu menebak koin mana
     # yang sedang "dekat" dengan kondisi masuk bot. Panel watchlist
     # menampilkan harga, perubahan 24 jam, volume, dan status tiap koin
-    # terhadap dua gerbang pertama scanner (MIN_PUMP_PCT_24H dan
-    # MIN_QUOTE_VOLUME_USDT_24H).
+    # terhadap gerbang semesta scanner yang masih berlaku, yaitu
+    # MIN_QUOTE_VOLUME_USDT_24H dan MAX_SPREAD_PCT. Gerbang kenaikan 24 jam
+    # sudah dihapus bersama strategi lama.
     #
     # ------------------------------------------------------------------
     # DARI MANA DAFTAR INI BERASAL (metodologi, bukan tebakan)
@@ -321,17 +378,17 @@ PUMP_CONFIG = {
         {"symbol": "AVAXUSDT",    "tier": "INTI",      "score": 76.9, "note": "17 sinyal/45h, likuiditas sangat stabil"},
         {"symbol": "SUIUSDT",     "tier": "INTI",      "score": 74.5, "note": "13 sinyal/45h, volume median 25 juta"},
 
-        # --- MOMENTUM: likuiditas di atas ambang 60-90% waktu ---
+        # --- AKTIF: likuiditas di atas ambang 60-90% waktu ---
         # Aktif berkala. Sinyal cukup sering, tapi ada periode koin ini
         # tidak memenuhi filter volume sehingga bot mengabaikannya.
-        {"symbol": "CHIPUSDT",    "tier": "MOMENTUM",  "score": 76.5, "note": "32 sinyal/45h, tapi likuiditas cukup hanya 61% waktu"},
-        {"symbol": "ZAMAUSDT",    "tier": "MOMENTUM",  "score": 71.7, "note": "18 sinyal/45h, pump tertinggi 51% dalam 120 hari"},
-        {"symbol": "CRVUSDT",     "tier": "MOMENTUM",  "score": 69.2, "note": "24 sinyal/45h, ATR 0,61% agak rendah untuk SL bot"},
-        {"symbol": "TIAUSDT",     "tier": "MOMENTUM",  "score": 65.2, "note": "16 sinyal/45h, likuiditas cukup 72% waktu"},
-        {"symbol": "ETHFIUSDT",   "tier": "MOMENTUM",  "score": 64.4, "note": "16 sinyal/45h, ATR 0,65%"},
-        {"symbol": "ZROUSDT",     "tier": "MOMENTUM",  "score": 60.8, "note": "19 sinyal/45h, spread 0,133% relatif lebar"},
-        {"symbol": "POLUSDT",     "tier": "MOMENTUM",  "score": 59.6, "note": "hanya 7 sinyal/45h, tapi spread 0,010% dan likuid"},
-        {"symbol": "SEIUSDT",     "tier": "MOMENTUM",  "score": 59.5, "note": "11 sinyal/45h, likuiditas cukup 64% waktu"},
+        {"symbol": "CHIPUSDT",    "tier": "AKTIF",  "score": 76.5, "note": "32 sinyal/45h, tapi likuiditas cukup hanya 61% waktu"},
+        {"symbol": "ZAMAUSDT",    "tier": "AKTIF",  "score": 71.7, "note": "18 sinyal/45h, pump tertinggi 51% dalam 120 hari"},
+        {"symbol": "CRVUSDT",     "tier": "AKTIF",  "score": 69.2, "note": "24 sinyal/45h, ATR 0,61% agak rendah untuk SL bot"},
+        {"symbol": "TIAUSDT",     "tier": "AKTIF",  "score": 65.2, "note": "16 sinyal/45h, likuiditas cukup 72% waktu"},
+        {"symbol": "ETHFIUSDT",   "tier": "AKTIF",  "score": 64.4, "note": "16 sinyal/45h, ATR 0,65%"},
+        {"symbol": "ZROUSDT",     "tier": "AKTIF",  "score": 60.8, "note": "19 sinyal/45h, spread 0,133% relatif lebar"},
+        {"symbol": "POLUSDT",     "tier": "AKTIF",  "score": 59.6, "note": "hanya 7 sinyal/45h, tapi spread 0,010% dan likuid"},
+        {"symbol": "SEIUSDT",     "tier": "AKTIF",  "score": 59.5, "note": "11 sinyal/45h, likuiditas cukup 64% waktu"},
 
         # --- SPEKULATIF: likuiditas di atas ambang < 60% waktu ---
         # PERHATIAN: koin di tier ini paling sering memicu sinyal, tapi
@@ -352,7 +409,8 @@ PUMP_CONFIG = {
     # PERINGATAN HASIL AUDIT 2026-09-24 (temuan K-01): RISK_PERCENT=100.0
     # berarti SELURUH modal dipertaruhkan di setiap trade. Dengan SL plafon
     # ATR 4%, setiap rugi menggerus ~4% dari TOTAL akun, dan 10 rugi beruntun
-    # (biasa pada strategi momentum) menghapus lebih dari sepertiga akun.
+    # (hal biasa pada strategi jangka pendek mana pun, termasuk pullback
+    # retest) menghapus lebih dari sepertiga akun.
     # Default di bawah (25%) adalah titik awal yang lebih masuk akal untuk
     # LIVE; naikkan bertahap HANYA dari data hasil nyata, bukan karena satu
     # backtest terlihat bagus.
@@ -414,10 +472,10 @@ PUMP_CONFIG = {
     # (contohnya 3x ATR di Crude Oil berkisar dari $240 sampai $15.000+).
     # Batas min/max menahan itu tanpa membuang sifat adaptif ATR.
     #
-    # ALASAN fitur ini relevan untuk bot pump scanner: bot ini memperdagangkan
-    # BANYAK koin berbeda (semua pair USDT), dan filter MIN_PUMP_PCT_24H
-    # memastikan koin yang dipilih SEDANG dalam volatilitas tinggi. SL tetap
-    # 1.8% bisa berarti 3x ATR di satu koin tapi hanya 0.8x ATR di koin lain.
+    # ALASAN fitur ini relevan untuk bot ini: bot memperdagangkan BANYAK koin
+    # berbeda (semua pair USDT yang lolos saringan volume), dan volatilitas
+    # antar koin berbeda jauh. SL tetap 1.8% bisa berarti 3x ATR di satu koin
+    # tapi hanya 0.8x ATR di koin lain.
     # Data yang dikutip Volatility Box (595+ simbol, 2018-2025) menyebut stop
     # di bawah 1.0x ATR terpicu noise >65% dalam 3 bar pertama, sedangkan di
     # 1.5x ATR turun ke 38%.
@@ -471,8 +529,13 @@ PUMP_CONFIG = {
     "TRAILING_START_PCT": 1.5,
     "TRAILING_STEP_PCT": 0.6,
     "MAX_HOLD_MINUTES": 45,                 # paksa keluar kalau kelamaan hold (hindari nyangkut di pump mati)
-    "MOMENTUM_FADE_EXIT": True,
-    "MOMENTUM_FADE_RANK_THRESHOLD": 30,      # keluar dini kalau sudah tidak masuk top-30 gainer lagi
+    # Exit SETUP_INVALIDATED: tutup posisi kalau satu candle CONFIRM_INTERVAL
+    # tertutup dengan close di bawah breakout_level - INVALIDATION_ATR_MULT x
+    # ATR. Level dan ATR dikunci di state posisi saat entry, tidak dihitung
+    # ulang dari data baru, supaya alasan keluar sama persis dengan alasan
+    # masuk. Exit ini berbasis candle tertutup sehingga bisa disimulasikan di
+    # backtest.py maupun portfolio_backtest.py.
+    "SETUP_INVALIDATION_EXIT": True,
 
     # --- Filter & jarak antar-trade ---
     # Spread maksimum (bid-ask) yang masih boleh dimasuki. Ini biaya NYATA
@@ -851,7 +914,23 @@ PUMP_DEFAULTS["BASE_URL"] = PUMP_DEFAULTS["LIVE_BASE_URL"]
 # ---------------------------------------------------------------------
 # Helper watchlist pemantauan (READ-ONLY)
 # ---------------------------------------------------------------------
-VALID_WATCHLIST_TIERS = ("INTI", "MOMENTUM", "SPEKULATIF")
+# Tier watchlist berbasis UPTIME LIKUIDITAS, bukan strategi. "AKTIF" dulu
+# bernama "MOMENTUM", dan nama lama itu menyesatkan karena tidak ada
+# hubungannya dengan strategi entry. File watchlist atau settings override
+# lama yang masih menyimpan "MOMENTUM" otomatis dibaca sebagai "AKTIF"
+# lewat migrate_watchlist_tier() di bawah.
+VALID_WATCHLIST_TIERS = ("INTI", "AKTIF", "SPEKULATIF")
+LEGACY_WATCHLIST_TIER_MAP = {"MOMENTUM": "AKTIF"}
+
+
+def migrate_watchlist_tier(tier: str) -> str:
+    """Ubah nama tier lama menjadi nama baru.
+
+    Dipakai config.get_watchlist() dan settings_schema agar file lama tetap
+    terbaca tanpa error validasi dan tanpa kehilangan data.
+    """
+    raw = str(tier or "").strip().upper()
+    return LEGACY_WATCHLIST_TIER_MAP.get(raw, raw)
 
 
 def watchlist_enabled(config: dict = None) -> bool:
@@ -903,7 +982,7 @@ def get_watchlist(config: dict = None) -> list:
             continue
         seen.add(symbol)
 
-        tier = str(item.get("tier", "")).strip().upper()
+        tier = migrate_watchlist_tier(item.get("tier", ""))
         if tier not in VALID_WATCHLIST_TIERS:
             tier = "LAINNYA"
 

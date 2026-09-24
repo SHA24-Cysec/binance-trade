@@ -14,7 +14,7 @@ Bedanya dengan backtest.py (satu simbol):
 
 Perbedaan itu penting karena bot asli hanya memegang SATU posisi. Ketika
 satu simbol memberi sinyal, bot mungkin sedang sibuk memegang simbol lain,
-atau memilih simbol lain yang peringkat kenaikan 24 jamnya lebih tinggi.
+atau memilih simbol lain yang setupnya lebih rapat terhadap level breakout.
 Backtest satu simbol menghitung SEMUA sinyal sebagai trade, sehingga hasilnya
 hampir selalu lebih optimistis daripada yang bisa dicapai bot sungguhan.
 
@@ -23,23 +23,24 @@ CARA KERJA
 ----------
 1. Ambil daftar pair dari ticker 24 jam, saring persis seperti
    market_scanner.filter_and_rank_candidates (buang stablecoin, token
-   leveraged, simbol yang dikecualikan).
+   leveraged, simbol yang dikecualikan, dan yang volumenya di bawah ambang).
 2. Unduh candle historis untuk SEMUA simbol yang lolos saringan.
-3. Bangun "papan peringkat" per bar waktu: untuk setiap titik waktu,
-   urutkan simbol berdasarkan kenaikan 24 jam bergulir yang dihitung dari
-   candle (compute_rolling_24h_stats), persis metrik yang dipakai bot live
-   untuk me-ranking.
+3. Bangun "papan kandidat" per bar waktu: untuk setiap titik waktu, saring
+   simbol yang volume 24 jam bergulirnya lolos ambang, lalu urutkan dari
+   volume terbesar. Urutan volume ini meniru batas anggaran request bot live
+   (TOP_N_CANDIDATES_TO_CONFIRM simbol per scan), BUKAN penilaian kualitas.
 4. Maju bar demi bar melewati garis waktu gabungan:
-     - kalau TIDAK punya posisi: ambil top-N peringkat saat itu, konfirmasi
-       satu per satu dengan scanner.confirm_entry(), ambil yang PERTAMA
-       lolos. Ini meniru find_best_candidate() secara harfiah.
+     - kalau TIDAK punya posisi: evaluasi top-N kandidat dengan
+       scanner.detect_pullback_retest(), kumpulkan yang lolos, lalu pilih
+       yang setupnya paling rapat terhadap level breakout (ukuran yang sama
+       dengan scanner.setup_quality_key()). Ini meniru find_best_candidate().
      - kalau PUNYA posisi: kelola exit memakai logika yang sama dengan
-       backtest satu simbol (SL/TP/BE/Trailing/MaxHold), DITAMBAH
-       MOMENTUM_FADE yang di backtest satu simbol tidak bisa disimulasikan.
+       backtest satu simbol (SL/TP/BE/Trailing/MaxHold/SETUP_INVALIDATED).
 5. Hormati cooldown setelah setiap posisi ditutup.
 
 Yang dipakai bersama dengan bot live (BUKAN ditulis ulang):
-    market_scanner.confirm_entry()     -> aturan entry
+    market_scanner.detect_pullback_retest() -> aturan entry
+    market_scanner.setup_quality_key()      -> urutan kualitas kandidat
     market_scanner.STABLE_BASE_ASSETS  -> saringan pasar
     strategy.resolve_exit_levels()     -> level SL/TP/BE/Trailing
     backtest.compute_rolling_24h_stats -> statistik 24 jam bergulir
@@ -63,12 +64,13 @@ KETERBATASAN YANG TETAP ADA (baca sebelum percaya hasilnya)
    konservatif yang sama dengan backtest.py: STOP_LOSS diperiksa paling awal,
    sehingga hasil tidak melebih-lebihkan profit.
 
-3. RANKING DIREKONSTRUKSI, BUKAN DIREKAM. Peringkat 24 jam dihitung ulang
-   dari candle, bukan diambil dari snapshot ticker/24hr historis (Binance
-   tidak menyediakannya). Nilainya sangat dekat tetapi tidak identik dengan
-   angka yang dilihat bot pada saat itu, karena ticker/24hr adalah jendela
-   bergulir tepat 24 jam sedangkan rekonstruksi ini dibulatkan ke batas
-   candle terdekat.
+3. STATISTIK 24 JAM DIREKONSTRUKSI, BUKAN DIREKAM. Volume dan perubahan 24
+   jam dihitung ulang dari candle, bukan diambil dari snapshot ticker/24hr
+   historis (Binance tidak menyediakannya). Nilainya sangat dekat tetapi
+   tidak identik dengan angka yang dilihat bot pada saat itu, karena
+   ticker/24hr adalah jendela bergulir tepat 24 jam sedangkan rekonstruksi
+   ini dibulatkan ke batas candle terdekat. Volume itulah yang menentukan
+   simbol mana yang masuk top-N kandidat per bar.
 
 4. VOLUME 24 JAM juga direkonstruksi dari penjumlahan quote volume candle.
    Angkanya bisa sedikit berbeda dari field quoteVolume di ticker.
@@ -119,7 +121,7 @@ class PortfolioTrade:
     tp_pct: float
     atr_pct: float
     exit_source: str
-    rank_at_entry: int       # peringkat simbol saat dipilih (1 = gainer teratas)
+    rank_at_entry: int       # posisi simbol di papan kandidat (1 = volume terbesar)
     pct24h_at_entry: float
     candidates_at_entry: int  # berapa simbol lolos saringan pada bar itu
 
@@ -134,7 +136,7 @@ class SkippedSignal:
     """
     time: int
     symbol: str
-    reason: str       # "SEDANG_PEGANG_POSISI_LAIN" atau "KALAH_PERINGKAT"
+    reason: str       # "SEDANG_PEGANG_POSISI_LAIN" atau "KALAH_KUALITAS_SETUP"
     holding: str      # simbol yang sedang dipegang saat itu
 
 
@@ -163,16 +165,13 @@ def select_universe(tickers: list, config: dict, max_symbols: Optional[int] = No
     penyaringannya identik dengan bot live (stablecoin dibuang, token
     leveraged dibuang, simbol yang dikecualikan dibuang).
 
-    PENTING soal ambang: saringan scanner memakai MIN_PUMP_PCT_24H terhadap
-    kondisi pasar HARI INI, padahal kita butuh simbol yang pernah pump KAPAN
-    SAJA selama periode backtest. Karena itu ambang pump di-nolkan khusus
-    untuk pemilihan semesta -- kalau tidak, kita hanya akan mengunduh koin
-    yang kebetulan sedang naik saat backtest dijalankan, yang justru
-    menciptakan bias pemilihan baru. Ambang pump yang sebenarnya tetap
-    ditegakkan per-bar di dalam simulasi.
+    CATATAN sejak strategi pullback retest: gerbang kenaikan 24 jam sudah
+    tidak ada lagi, jadi tidak perlu lagi dinolkan khusus di sini. Semesta
+    ditentukan oleh saringan struktural dan ambang volume, sama persis dengan
+    semesta bot live. Ambang volume tetap ditegakkan lagi per-bar di dalam
+    simulasi memakai volume 24 jam bergulir dari candle.
     """
     cfg = dict(config)
-    cfg["MIN_PUMP_PCT_24H"] = -1e9   # jangan saring berdasarkan kondisi hari ini
     cfg["MIN_QUOTE_VOLUME_USDT_24H"] = float(config.get("MIN_QUOTE_VOLUME_USDT_24H", 0))
 
     ranked = scanner.filter_and_rank_candidates(tickers, cfg)
@@ -233,7 +232,7 @@ def fetch_universe_klines(
 
 
 # ======================================================================
-# Tahap 3: bangun papan peringkat per bar
+# Tahap 3: bangun papan kandidat per bar
 # ======================================================================
 
 def build_timeline(data: dict, interval: str) -> tuple[list, dict, dict]:
@@ -283,28 +282,28 @@ def run_portfolio_backtest(
     if not timeline:
         raise BacktestError("Garis waktu kosong, tidak ada candle yang bisa diproses.")
 
-    lookback = int(config["CONFIRM_LOOKBACK_BARS"])
-    min_pump = float(config["MIN_PUMP_PCT_24H"])
+    lookback = strategy.confirm_window_bars(config)
     min_vol = float(config["MIN_QUOTE_VOLUME_USDT_24H"])
     top_n = int(config.get("TOP_N_CANDIDATES_TO_CONFIRM", 10))
     cooldown_ms = int(config["COOLDOWN_MINUTES_AFTER_CLOSE"]) * MS_PER_MIN
     max_hold = float(config["MAX_HOLD_MINUTES"])
     atr_need = max(int(config.get("ATR_PERIOD", 14)) + 1, lookback)
 
-    fade_on = bool(config.get("MOMENTUM_FADE_EXIT", False))
-    fade_rank = int(config.get("MOMENTUM_FADE_RANK_THRESHOLD", 30))
+    setup_exit_on = bool(config.get("SETUP_INVALIDATION_EXIT", False))
 
-    # confirm_momentum() menolak jendela yang kurang dari 8 candle. Kalau
-    # CONFIRM_LOOKBACK_BARS diset di bawah itu, SETIAP konfirmasi entry akan
-    # gagal dan backtest menghasilkan nol trade tanpa alasan yang terlihat.
-    # Diperiksa di depan supaya penyebabnya jelas, bukan berupa hasil kosong
-    # yang membingungkan.
+    # Jumlah candle minimum untuk satu keputusan entry dihitung oleh fungsi
+    # bersama strategy.required_lookback_bars(), bukan angka hard-code seperti
+    # sebelumnya. Kalau CONFIRM_LOOKBACK_BARS diset di bawah itu, jendela
+    # tetap dinaikkan oleh confirm_window_bars() supaya backtest tidak diam-diam
+    # menghasilkan nol trade, tetapi pengguna tetap diberi peringatan.
     _pre_warnings: list = []
-    if lookback < 8:
+    _butuh = strategy.required_lookback_bars(config)
+    if int(config.get("CONFIRM_LOOKBACK_BARS", 0)) < _butuh:
         _pre_warnings.append(
-            f"CONFIRM_LOOKBACK_BARS={lookback} lebih kecil dari 8 candle minimum yang "
-            "dibutuhkan konfirmasi momentum, sehingga tidak akan pernah ada entry. "
-            "Naikkan nilainya menjadi 8 atau lebih."
+            f"CONFIRM_LOOKBACK_BARS={config.get('CONFIRM_LOOKBACK_BARS')} lebih kecil dari "
+            f"{_butuh} candle yang dibutuhkan ATR dan struktur setup. Simulasi memakai "
+            f"{lookback} candle agar deteksi tetap mungkin, tetapi perbaiki config supaya "
+            "backtest dan bot live benar-benar memakai angka yang sama."
         )
 
     try:
@@ -325,7 +324,7 @@ def run_portfolio_backtest(
     be_stop = 0.0
     trailing_active = False
     trailing_stop = 0.0
-    cur = {}          # level exit yang dikunci saat entry
+    cur = {}          # level exit dan level setup yang dikunci saat entry
     rank_at_entry = 0
     pct24h_at_entry = 0.0
     cands_at_entry = 0
@@ -340,11 +339,9 @@ def run_portfolio_backtest(
         if cancel_cb is not None and bi % 200 == 0 and cancel_cb():
             raise BacktestError("Backtest dibatalkan.")
 
-        # --- Papan peringkat pada titik waktu ini -------------------
-        # Dihitung sekali per bar lalu dipakai bersama oleh jalur entry
-        # maupun jalur momentum fade, supaya keduanya melihat pasar yang
-        # sama persis seperti bot live yang juga memakai satu snapshot
-        # ticker per rotasi.
+        # --- Papan kandidat pada titik waktu ini --------------------
+        # Dihitung sekali per bar, meniru satu snapshot ticker per rotasi
+        # pada bot live.
         board = []
         for sym, kl in data.items():
             i = index_of[sym].get(t_now)
@@ -355,7 +352,9 @@ def run_portfolio_backtest(
                 continue
             if st["vol24h"] < min_vol:
                 continue
-            board.append((st["pct24h"], sym, i))
+            board.append((st["vol24h"], sym, i, st["pct24h"]))
+        # Urut dari volume kuotasi 24 jam terbesar, sama seperti urutan
+        # pengambilan candle di bot live. Ini BUKAN penilaian kualitas setup.
         board.sort(key=lambda x: -x[0])
 
         # ============ SUDAH PUNYA POSISI: kelola exit ============
@@ -407,14 +406,12 @@ def run_portfolio_backtest(
             elif hold_minutes >= max_hold:
                 exit_reason = "MAX_HOLD_TIME"
                 exit_price = candle.close
-            elif fade_on:
-                # MOMENTUM_FADE: keluar kalau simbol tidak lagi masuk
-                # top-N gainer. Inilah yang backtest satu simbol TIDAK
-                # bisa lakukan, karena butuh peringkat seluruh pasar.
-                still = any(sym == holding for _p, sym, _i in board[:fade_rank])
-                if not still:
-                    exit_reason = "MOMENTUM_FADE"
-                    exit_price = candle.close
+            elif (setup_exit_on and cur.get("invalidation", 0.0) > 0
+                    and candle.close < cur["invalidation"]):
+                # SETUP_INVALIDATED memakai level yang DIKUNCI saat entry,
+                # sama persis dengan bot live dan backtest satu simbol.
+                exit_reason = "SETUP_INVALIDATED"
+                exit_price = candle.close
 
             is_last = (bi == total_bars - 1)
             if exit_reason is None and is_last:
@@ -449,54 +446,48 @@ def run_portfolio_backtest(
         if t_now < first_allowed_time or t_now < next_entry_allowed_at:
             continue
 
-        eligible = [(p, s, i) for (p, s, i) in board if p >= min_pump]
+        eligible = board
         if not eligible:
             continue
 
-        # Meniru find_best_candidate(): periksa top-N berurutan, ambil
-        # YANG PERTAMA lolos konfirmasi, lalu berhenti.
-        chosen = None
-        for rank, (pct, sym, i) in enumerate(eligible[:top_n], start=1):
+        # Meniru find_best_candidate(): evaluasi top-N kandidat (urut volume),
+        # kumpulkan SEMUA yang setupnya sah, lalu pilih yang paling rapat
+        # terhadap level breakout. Pemutus seri adalah volume kuotasi.
+        lolos = []
+        for rank, (vol24, sym, i, pct) in enumerate(eligible[:top_n], start=1):
             kl = data[sym]
             if i + 1 < lookback:
                 continue
             window_kl = kl[max(0, i - lookback + 1): i + 1]
             try:
-                ok, _reason = scanner.confirm_entry(window_kl, config)
+                setup = scanner.detect_pullback_retest(window_kl, config)
             except Exception:  # noqa: BLE001
-                ok = False
-            if ok:
-                chosen = (rank, pct, sym, i)
-                break
-            # Simbol ini memberi sinyal peringkat lebih tinggi tapi gagal
-            # konfirmasi; bukan "terlewat", jadi tidak dicatat.
+                continue
+            if setup.ok:
+                lolos.append((rank, pct, sym, i, vol24, setup))
 
-        if chosen is None:
+        if not lolos:
             continue
 
-        rank, pct, sym, i = chosen
+        lolos.sort(key=lambda row: (
+            row[5].extension_atr if row[5].extension_atr is not None else float("inf"),
+            -row[4],
+        ))
+        rank, pct, sym, i, _vol24, setup_terpilih = lolos[0]
 
         # Catat sinyal valid lain pada bar yang sama yang TIDAK terambil
         # karena bot hanya boleh pegang satu posisi. Ini yang membuat
         # backtest satu simbol terlihat lebih bagus dari kenyataan.
         if len(skipped) < max_skipped_records:
-            for rank2, (pct2, sym2, i2) in enumerate(eligible[:top_n], start=1):
-                if sym2 == sym or rank2 <= rank:
+            for _r2, _p2, sym2, _i2, _v2, _s2 in lolos:
+                if sym2 == sym:
                     continue
-                kl2 = data[sym2]
-                if i2 + 1 < lookback:
-                    continue
-                try:
-                    ok2, _r2 = scanner.confirm_entry(kl2[max(0, i2 - lookback + 1): i2 + 1], config)
-                except Exception:  # noqa: BLE001
-                    ok2 = False
-                if ok2:
-                    skipped.append(SkippedSignal(
-                        time=t_now, symbol=sym2,
-                        reason="KALAH_PERINGKAT", holding=sym,
-                    ))
-                    if len(skipped) >= max_skipped_records:
-                        break
+                skipped.append(SkippedSignal(
+                    time=t_now, symbol=sym2,
+                    reason="KALAH_KUALITAS_SETUP", holding=sym,
+                ))
+                if len(skipped) >= max_skipped_records:
+                    break
 
         kl = data[sym]
         candle = kl[i]
@@ -521,6 +512,10 @@ def run_portfolio_backtest(
             "be_trig": lv["be_trigger_pct"], "be_lock": lv["be_lock_pct"],
             "tr_start": lv["trail_start_pct"], "tr_step": lv["trail_step_pct"],
             "atr": lv["atr_pct"] or 0.0, "src": lv["source"],
+            # Level setup dikunci dari deteksi yang MEMICU entry ini, sama
+            # seperti open_position() di bot live.
+            "level": float(setup_terpilih.breakout_level or 0.0),
+            "invalidation": float(setup_terpilih.invalidation_price or 0.0),
         }
 
     if progress_cb:
@@ -656,7 +651,7 @@ def selftest() -> bool:
 
     # --- satu posisi saja pada satu waktu ---
     cfg = {
-        "CONFIRM_LOOKBACK_BARS": 10, "MIN_PUMP_PCT_24H": 5.0,
+        "CONFIRM_LOOKBACK_BARS": 48,
         # Nama kunci yang BENAR (perbaikan audit temuan R-03): sebelumnya
         # tertulis "CONFIRM_MIN_CLOSE_POSITION" -- kunci yang tidak pernah
         # dibaca scanner -- sehingga relaksasi gerbang ini tidak pernah
@@ -669,21 +664,24 @@ def selftest() -> bool:
         "BE_TRIGGER_PCT": 1.0, "BE_LOCK_PCT": 0.1,
         "TRAILING_START_PCT": 1.5, "TRAILING_STEP_PCT": 0.6,
         "USE_ATR_EXITS": False, "ATR_PERIOD": 14, "TAKER_FEE_PCT": 0.1,
-        "MOMENTUM_FADE_EXIT": False, "QUOTE_ASSET": "USDT",
+        "SETUP_INVALIDATION_EXIT": False, "QUOTE_ASSET": "USDT",
+        # Parameter setup dibiarkan default dari config.py lewat PUMP_CONFIG
+        # di bawah, kecuali yang sengaja dilonggarkan di atas.
     }
+    from config import PUMP_CONFIG as _PC
+    for _k in ("SWING_LOOKBACK_BARS", "SWING_PIVOT_WING_BARS", "BREAKOUT_BUFFER_ATR_MULT",
+               "RETEST_ZONE_ATR_MULT", "RETEST_VWAP_CONFLUENCE_ATR_MULT",
+               "VWAP_MIN_BARS_AFTER_ANCHOR", "MAX_BARS_BREAKOUT_TO_RETEST",
+               "MAX_RETEST_TOUCHES", "INVALIDATION_ATR_MULT", "MAX_EXTENSION_ATR_MULT"):
+        cfg[_k] = _PC[_k]
 
-    # Dua simbol naik bersamaan. Bot hanya boleh memegang satu.
-    # 288 bar = jendela 24 jam. Perlu jauh lebih banyak supaya ada
-    # cukup bar SESUDAH warmup untuk benar-benar menghasilkan trade.
-    bars = 700
-    up_a, up_b = [], []
-    price_a, price_b = 100.0, 200.0
-    for i in range(bars):
-        # naik perlahan supaya stats 24h positif dan momentum terkonfirmasi
-        price_a *= 1.002
-        price_b *= 1.0015
-        up_a.append(_mk(i, price_a, price_a * 1.003, price_a * 0.999, price_a * 1.002))
-        up_b.append(_mk(i, price_b, price_b * 1.003, price_b * 0.999, price_b * 1.002))
+    # Dua simbol membentuk setup pullback retest bersamaan. Bot hanya boleh
+    # memegang satu. 288 bar pertama = jendela 24 jam yang dibutuhkan
+    # statistik bergulir, sisanya berisi sepuluh siklus setup.
+    from synthetic_data import seri_banyak_setup
+    up_a = seri_banyak_setup(harga=100.0, siklus=10, volume=9_000_000.0)
+    up_b = seri_banyak_setup(harga=200.0, siklus=10, volume=5_000_000.0)
+    bars = len(up_a)
 
     res = run_portfolio_backtest({"AUSDT": up_a, "BUSDT": up_b}, cfg, "5m")
     overlaps = 0
@@ -717,37 +715,30 @@ def selftest() -> bool:
           f"{len(res_cd.trades)} vs {len(res.trades)}")
 
     # --- prioritas konservatif: SL menang atas TP di candle yang sama ---
-    # CATATAN: versi awal tes ini memakai rangkaian ~300 bar, padahal
-    # warmup statistik 24 jam saja sudah memakan 288 bar. Akibatnya nol
-    # trade terbentuk dan assertion "atau tidak ada trade" membuat tes
-    # LULUS TANPA MENGUJI APA PUN. Sekarang dipakai basis 700 bar naik
-    # yang sudah terbukti menghasilkan entry, lalu satu candle ekstrem
-    # disisipkan, dan tes menuntut trade benar-benar ada.
-    spike_at = 600
+    # Dipakai data setup yang sudah terbukti menghasilkan entry, lalu candle
+    # TEPAT SESUDAH entry pertama diganti dengan satu candle berayun ekstrem
+    # yang menyentuh TP (+3%) DAN SL (-2%) sekaligus. Rentangnya sengaja
+    # lebar (-12% s/d +12%) supaya kedua level pasti terlampaui berapa pun
+    # harga entry persisnya. Mesin harus memilih yang konservatif, yaitu SL.
+    entry_pertama = res.trades[0].entry_time if res.trades else 0
     seq_sl = []
-    p_sl = 100.0
-    for i in range(bars):
-        if i == spike_at:
-            # Satu candle yang menyentuh TP (+3%) DAN SL (-2%) sekaligus.
-            # Rentangnya sengaja dibuat lebar (-12% s/d +12%) supaya kedua
-            # level pasti terlampaui berapa pun harga entry persisnya.
-            # Versi sebelumnya memakai -3%/+5% dan ternyata TIDAK menyentuh
-            # SL karena entry terjadi beberapa bar lebih awal pada harga
-            # yang lebih rendah, sehingga tes menuduh mesin keliru padahal
-            # mesinnya benar.
-            seq_sl.append(_mk(i, p_sl, p_sl * 1.12, p_sl * 0.88, p_sl))
+    tandai = False
+    for k in up_a:
+        if tandai:
+            seq_sl.append(Kline(open_time=k.open_time, open=k.open,
+                                high=k.open * 1.12, low=k.open * 0.88, close=k.open,
+                                close_time=k.close_time, volume=k.volume,
+                                quote_volume=k.quote_volume))
+            tandai = False
             continue
-        p_sl *= 1.002
-        seq_sl.append(_mk(i, p_sl, p_sl * 1.003, p_sl * 0.999, p_sl * 1.002))
+        seq_sl.append(k)
+        if k.close_time == entry_pertama:
+            tandai = True
 
     res_sl = run_portfolio_backtest({"AUSDT": seq_sl}, cfg, "5m")
     check("skenario SL-vs-TP benar-benar menghasilkan trade (tes tidak vakum)",
           len(res_sl.trades) > 0, len(res_sl.trades))
-    # Trade yang MELEWATI candle ekstrem wajib keluar sebagai STOP_LOSS,
-    # bukan TAKE_PROFIT. Mengasumsikan yang terbaik dari satu candle
-    # adalah cara paling umum membuat backtest terlihat palsu bagus.
-    spanning = [t for t in res_sl.trades
-                if t.entry_time <= seq_sl[spike_at].open_time <= t.exit_time]
+    spanning = [t for t in res_sl.trades if t.entry_time == entry_pertama]
     if spanning:
         check("SL diprioritaskan saat SL & TP kena di satu candle",
               all(t.reason == "STOP_LOSS" for t in spanning),
@@ -756,36 +747,46 @@ def selftest() -> bool:
         check("SL diprioritaskan saat SL & TP kena di satu candle",
               False, "tidak ada trade yang melewati candle ekstrem")
 
-    # --- momentum fade aktif memicu exit ---
-    # CATATAN: versi awal tes ini juga vakum ("... or len(trades) == 0").
-    # Candle-nya dibuat dengan close == open sehingga tidak pernah dianggap
-    # bullish dan nol trade terbentuk, jadi tesnya selalu hijau tanpa
-    # pernah menyentuh jalur MOMENTUM_FADE sama sekali.
-    #
-    # Sekarang: SL/TP sengaja dimatikan supaya posisi tertahan cukup lama
-    # untuk bisa memudar. A memimpin di paruh pertama lalu melempem,
-    # B menyusul kencang, sehingga A wajib dilepas karena kalah peringkat.
-    cfg_fade = dict(cfg)
-    cfg_fade["MOMENTUM_FADE_EXIT"] = True
-    cfg_fade["MOMENTUM_FADE_RANK_THRESHOLD"] = 1
-    cfg_fade["USE_STOP_LOSS"] = False
-    cfg_fade["USE_TP"] = False
-    a2, b2 = [], []
-    pa, pb = 100.0, 100.0
-    for i in range(bars):
-        pa *= 1.006 if i < 400 else 1.0001   # dulu juara, lalu melempem
-        pb *= 1.001 if i < 400 else 1.008    # menyusul kencang
-        a2.append(_mk(i, pa, pa * 1.003, pa * 0.999, pa * 1.002))
-        b2.append(_mk(i, pb, pb * 1.003, pb * 0.999, pb * 1.002))
-    res_fade = run_portfolio_backtest({"AUSDT": a2, "BUSDT": b2}, cfg_fade, "5m")
-    reasons = [t.reason for t in res_fade.trades]
-    check("skenario fade benar-benar menghasilkan trade (tes tidak vakum)",
-          len(res_fade.trades) > 0, len(res_fade.trades))
-    check("MOMENTUM_FADE benar-benar terpicu", "MOMENTUM_FADE" in reasons, reasons)
-    # Setelah melepas yang memudar, modal harus berotasi ke simbol lain.
-    check("setelah fade, modal berotasi ke simbol lebih kuat",
-          len({t.symbol for t in res_fade.trades}) > 1,
-          sorted({t.symbol for t in res_fade.trades}))
+    # --- exit SETUP_INVALIDATED benar-benar terpicu ---
+    # SL/TP sengaja dimatikan supaya yang diuji murni jalur invalidasi setup:
+    # posisi ditutup saat candle tertutup jatuh di bawah level yang dikunci
+    # pada saat entry.
+    from synthetic_data import seri_dengan_setup
+    cfg_inval = dict(cfg)
+    cfg_inval["SETUP_INVALIDATION_EXIT"] = True
+    cfg_inval["USE_STOP_LOSS"] = False
+    cfg_inval["USE_TP"] = False
+    inval_kl = seri_dengan_setup(harga=100.0, ekor="invalidasi", panjang_ekor=10)
+    res_inval = run_portfolio_backtest({"AUSDT": inval_kl}, cfg_inval, "5m")
+    reasons = [t.reason for t in res_inval.trades]
+    check("skenario invalidasi benar-benar menghasilkan trade (tes tidak vakum)",
+          len(res_inval.trades) > 0, len(res_inval.trades))
+    check("SETUP_INVALIDATED benar-benar terpicu", "SETUP_INVALIDATED" in reasons, reasons)
+
+    # Kontrol negatif: harga bertahan di atas level, exit ini tidak boleh jalan.
+    tahan_kl = seri_dengan_setup(harga=100.0, ekor="bertahan", panjang_ekor=10)
+    res_tahan = run_portfolio_backtest({"AUSDT": tahan_kl}, cfg_inval, "5m")
+    reasons_tahan = [t.reason for t in res_tahan.trades]
+    check("harga bertahan -> SETUP_INVALIDATED tidak terpicu",
+          len(res_tahan.trades) > 0 and "SETUP_INVALIDATED" not in reasons_tahan,
+          reasons_tahan)
+
+    # --- paritas dengan backtest satu simbol ---
+    # Data yang sama, satu simbol saja, harus menghasilkan entry pada bar yang
+    # sama di kedua mesin. Kalau berbeda, berarti salah satu mesin memakai
+    # jendela atau urutan exit yang tidak sinkron.
+    import backtest as _bt
+    cfg_par = dict(cfg)
+    cfg_par["SETUP_INVALIDATION_EXIT"] = True
+    par_kl = seri_dengan_setup(harga=100.0, ekor="naik", panjang_ekor=20)
+    res_p1 = _bt.run_backtest(par_kl, dict(cfg_par, _symbol="AUSDT"), warmup_bars=0)
+    res_p2 = run_portfolio_backtest({"AUSDT": par_kl}, cfg_par, "5m")
+    check("paritas entry satu simbol vs portofolio",
+          [t.entry_time for t in res_p1.trades] == [t.entry_time for t in res_p2.trades],
+          f"{[t.entry_time for t in res_p1.trades]} vs {[t.entry_time for t in res_p2.trades]}")
+    check("paritas alasan exit satu simbol vs portofolio",
+          [t.reason for t in res_p1.trades] == [t.reason for t in res_p2.trades],
+          f"{[t.reason for t in res_p1.trades]} vs {[t.reason for t in res_p2.trades]}")
 
     # --- filter volume menyingkirkan simbol ilikuid ---
     cfg_vol = dict(cfg)
@@ -816,12 +817,12 @@ def selftest() -> bool:
         {"symbol": "ETHBTC", "priceChangePercent": "1.0", "quoteVolume": "9e9", "lastPrice": "0.05"},
         {"symbol": "SOLUSDT", "priceChangePercent": "-3.0", "quoteVolume": "5e8", "lastPrice": "200"},
     ]
-    uni = select_universe(tickers, {"QUOTE_ASSET": "USDT", "MIN_PUMP_PCT_24H": 8.0,
+    uni = select_universe(tickers, {"QUOTE_ASSET": "USDT",
                                     "MIN_QUOTE_VOLUME_USDT_24H": 0,
                                     "EXTRA_EXCLUDE_SYMBOLS": []})
     check("semesta buang stablecoin/leveraged/non-USDT",
           set(uni) == {"BTCUSDT", "SOLUSDT"}, uni)
-    check("semesta TIDAK tersaring oleh pump hari ini (SOL turun tetap masuk)",
+    check("semesta TIDAK tersaring oleh kenaikan hari ini (SOL turun tetap masuk)",
           "SOLUSDT" in uni)
 
     print("\nHASIL: " + ("SEMUA LULUS" if ok_all else "ADA YANG GAGAL"))

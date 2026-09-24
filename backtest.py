@@ -4,10 +4,11 @@ Modul backtest untuk Pump Scanner Bot.
 =======================================
 
 TUJUAN: menguji parameter EXIT (Stop Loss, Take Profit, Breakeven, Trailing,
-Max Hold) dan filter ENTRY (Min Pump % 24 jam) pada SATU simbol memakai data
-historis candle 5 menit dari Binance, memakai logika yang SAMA PERSIS dengan
-`market_scanner.confirm_entry()` dan `pump_scanner_bot.manage_exit()` supaya
-hasilnya konsisten dengan cara bot asli bekerja.
+Max Hold, invalidasi setup) dan parameter SETUP pullback retest pada SATU
+simbol memakai data historis candle 5 menit dari Binance, memakai logika yang
+SAMA PERSIS dengan `market_scanner.detect_pullback_retest()` dan
+`pump_scanner_bot.manage_exit()` supaya hasilnya konsisten dengan cara bot
+asli bekerja.
 
 INI BUKAN SIMULASI SEMPURNA. Baca "KETERBATASAN" di bawah sebelum
 mempercayai hasilnya untuk keputusan finansial:
@@ -30,16 +31,16 @@ mempercayai hasilnya untuk keputusan finansial:
    Urutan ini dipilih supaya hasil backtest tidak melebih-lebihkan profit --
    risiko selalu dianggap terealisasi lebih dulu kalau ambigu.
 
-3. MOMENTUM_FADE_EXIT (keluar dini kalau simbol jatuh dari top-N gainer)
-   TIDAK disimulasikan karena butuh data ranking SELURUH pasar per candle,
-   bukan cuma satu simbol. Kalau di akun asli fitur ini aktif, hasil live
-   bisa lebih baik (keluar lebih awal dari pump yang mati) dibanding
-   backtest ini.
+3. SETUP_INVALIDATED (keluar saat candle tertutup menembus batas invalidasi
+   yang dikunci saat entry) SUDAH disimulasikan di sini, karena exit itu
+   hanya butuh candle simbol yang sedang dipegang. Ini beda dari exit
+   MOMENTUM_FADE lama yang butuh peringkat seluruh pasar per candle dan
+   karenanya tidak pernah bisa diuji di backtest satu simbol.
 
-4. Filter volume (MIN_QUOTE_VOLUME_USDT_24H), spread maksimum, dan ukuran
-   posisi TIDAK bisa diubah dari form backtest (dipertahankan dari config.py
-   apa adanya) -- backtest ini fokus menguji parameter EXIT + filter pump 24h
-   + konfirmasi momentum saja.
+4. Spread maksimum dan ukuran posisi TIDAK bisa diubah dari form backtest
+   (dipertahankan dari config.py apa adanya). Slippage market order juga
+   TIDAK dimodelkan, entry dan exit dianggap terjadi tepat di harga level
+   atau harga penutupan candle. Fee taker beli dan jual SUDAH dipotong.
 
 Karena keterbatasan di atas, gunakan hasil backtest ini sebagai alat bantu
 membandingkan SATU set parameter dengan set parameter lain pada simbol yang
@@ -60,10 +61,9 @@ import market_scanner as scanner
 MS_PER_MIN = 60_000
 MS_PER_DAY = 24 * 60 * MS_PER_MIN
 
-INTERVAL_MINUTES = {
-    "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
-    "1h": 60, "2h": 120, "4h": 240,
-}
+# Satu sumber kebenaran ada di strategy.py supaya bot live, backtest satu
+# simbol, dan backtest portofolio tidak pernah memakai tabel yang berbeda.
+INTERVAL_MINUTES = strategy.INTERVAL_MINUTES
 
 
 class BacktestError(Exception):
@@ -188,7 +188,7 @@ def fetch_full_klines(
 def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
                   progress_cb: Optional[Callable[[float], None]] = None) -> BacktestResult:
     """klines: candle SUDAH termasuk periode warmup di depan (dipakai untuk
-    hitung 24h stats & konfirmasi momentum), sepanjang `warmup_bars` candle
+    hitung 24h stats & deteksi setup), sepanjang `warmup_bars` candle
     pertama tidak akan dipakai sebagai titik entry, hanya sebagai referensi.
 
     config: dict gabungan PUMP_CONFIG + override parameter dari form (lihat
@@ -197,9 +197,10 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
     window = bars_per_day(interval)
     stats = compute_rolling_24h_stats(klines, window)
 
-    lookback = config["CONFIRM_LOOKBACK_BARS"]
-    min_pump_pct = config["MIN_PUMP_PCT_24H"]
+    # Jendela konfirmasi memakai fungsi bersama, sama dengan bot live.
+    lookback = strategy.confirm_window_bars(config)
     min_vol = config["MIN_QUOTE_VOLUME_USDT_24H"]
+    setup_exit_on = bool(config.get("SETUP_INVALIDATION_EXIT", False))
     cooldown_ms = config["COOLDOWN_MINUTES_AFTER_CLOSE"] * MS_PER_MIN
 
     n = len(klines)
@@ -234,6 +235,9 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
     cur_tr_step = abs(float(config.get("TRAILING_STEP_PCT", 0.6)))
     cur_atr = 0.0
     cur_src = "FIXED"
+    # Level setup yang DIKUNCI saat entry, meniru state posisi bot live.
+    cur_invalidation = 0.0
+    cur_level = 0.0
 
     i = max(warmup_bars, window - 1, lookback, atr_need - 1)
     start_idx = i
@@ -246,15 +250,18 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
 
         if not in_position:
             st = stats[i]
-            if st is not None and st["pct24h"] >= min_pump_pct and st["vol24h"] >= min_vol \
+            # Gerbang kenaikan 24 jam sudah DIHAPUS bersama strategi lama.
+            # Yang tersisa adalah gerbang likuiditas, sama seperti semesta
+            # kandidat bot live.
+            if st is not None and st["vol24h"] >= min_vol \
                     and candle.open_time >= next_entry_allowed_at:
                 # Pada index i candle sudah dianggap selesai. Fungsi yang sama
                 # dipakai bot live setelah ia membuang candle yang masih
                 # berjalan, jadi aturan entry tidak berbeda antara live dan
                 # backtest.
                 window_klines = klines[max(0, i - lookback + 1): i + 1]
-                ok, _reason = scanner.confirm_entry(window_klines, config)
-                if ok:
+                setup = scanner.detect_pullback_retest(window_klines, config)
+                if setup.ok:
                     in_position = True
                     entry_price = candle.close
                     entry_time = candle.close_time
@@ -278,6 +285,11 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
                     cur_tr_step = lv["trail_step_pct"]
                     cur_atr = lv["atr_pct"] or 0.0
                     cur_src = lv["source"]
+                    # Level invalidasi dikunci dari setup yang MEMICU entry
+                    # ini, persis seperti open_position() di bot live. Tidak
+                    # pernah dihitung ulang dari candle setelah entry.
+                    cur_level = float(setup.breakout_level or 0.0)
+                    cur_invalidation = float(setup.invalidation_price or 0.0)
             i += 1
             continue
 
@@ -327,6 +339,13 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
             exit_price = trailing_stop
         elif hold_minutes >= config["MAX_HOLD_MINUTES"]:
             exit_reason = "MAX_HOLD_TIME"
+            exit_price = candle.close
+        elif setup_exit_on and cur_invalidation > 0 and candle.close < cur_invalidation:
+            # SETUP_INVALIDATED diperiksa PALING AKHIR, sesuai urutan di bot
+            # live (manage_exit lebih dulu, baru check_setup_invalidation).
+            # Harga keluar memakai close candle, karena keputusan ini memang
+            # baru bisa diambil setelah candle tertutup.
+            exit_reason = "SETUP_INVALIDATED"
             exit_price = candle.close
 
         is_last_bar = (i == n - 1)
@@ -476,7 +495,13 @@ def apply_overrides(base_config: dict, overrides: dict) -> dict:
         "TRAILING_START_PCT": float,
         "TRAILING_STEP_PCT": float,
         "MAX_HOLD_MINUTES": float,
-        "MIN_PUMP_PCT_24H": float,
+        # Parameter setup pullback retest yang boleh diuji dari form backtest.
+        # Menggantikan MIN_PUMP_PCT_24H yang sudah dihapus bersama strategi lama.
+        "SETUP_INVALIDATION_EXIT": _as_bool,
+        "INVALIDATION_ATR_MULT": float,
+        "MAX_EXTENSION_ATR_MULT": float,
+        "RETEST_ZONE_ATR_MULT": float,
+        "MAX_BARS_BREAKOUT_TO_RETEST": int,
     }
     cfg = copy.deepcopy(base_config)
     for key, caster in ALLOWED.items():
@@ -506,7 +531,10 @@ def validate_params(cfg: dict) -> None:
         ("TRAILING_START_PCT", 0.01, 1000),
         ("TRAILING_STEP_PCT", 0.01, 1000),
         ("MAX_HOLD_MINUTES", 1, 100000),
-        ("MIN_PUMP_PCT_24H", -100, 1000),
+        ("INVALIDATION_ATR_MULT", 0.01, 20),
+        ("MAX_EXTENSION_ATR_MULT", 0.01, 20),
+        ("RETEST_ZONE_ATR_MULT", 0.01, 10),
+        ("MAX_BARS_BREAKOUT_TO_RETEST", 1, 500),
     ]
     for key, lo, hi in checks:
         val = cfg.get(key)
@@ -518,6 +546,21 @@ def validate_params(cfg: dict) -> None:
         raise BacktestError(
             f"Batas bawah SL ATR ({cfg['ATR_SL_MIN_PCT']}%) tidak boleh lebih besar "
             f"dari batas atasnya ({cfg['ATR_SL_MAX_PCT']}%)."
+        )
+
+    if cfg.get("INVALIDATION_ATR_MULT", 0) < cfg.get("RETEST_ZONE_ATR_MULT", 0):
+        raise BacktestError(
+            f"INVALIDATION_ATR_MULT ({cfg.get('INVALIDATION_ATR_MULT')}) lebih kecil dari "
+            f"RETEST_ZONE_ATR_MULT ({cfg.get('RETEST_ZONE_ATR_MULT')}). Dasar zona retest "
+            "akan berada di bawah batas invalidasi, sehingga retest tidak akan pernah sah."
+        )
+
+    butuh = strategy.required_lookback_bars(cfg)
+    if int(cfg.get("CONFIRM_LOOKBACK_BARS", 0)) < butuh:
+        raise BacktestError(
+            f"CONFIRM_LOOKBACK_BARS={cfg.get('CONFIRM_LOOKBACK_BARS')} lebih kecil dari {butuh} "
+            "candle yang dibutuhkan ATR dan struktur setup. Naikkan nilainya supaya backtest "
+            "dan bot live memakai jendela yang sama."
         )
 
 
@@ -553,10 +596,10 @@ def selftest():
     assert 10 < last["pct24h"] < 20, f"pct24h tidak masuk akal: {last['pct24h']}"
     print("  -> OK")
 
-    print("\n=== SELFTEST backtest.py: entry + TP ===")
+    print("\n=== SELFTEST backtest.py: entry setup pullback retest + TP ===")
     from config import PUMP_CONFIG
+    from synthetic_data import seri_dengan_setup
     cfg = dict(PUMP_CONFIG)
-    cfg["MIN_PUMP_PCT_24H"] = 8.0
     cfg["MIN_QUOTE_VOLUME_USDT_24H"] = 1_000_000
     cfg["TP_PCT"] = 6.0
     cfg["USE_BREAKEVEN"] = True
@@ -568,37 +611,62 @@ def selftest():
     cfg["MAX_HOLD_MINUTES"] = 240
     cfg["_symbol"] = "TESTUSDT"
 
-    # Setelah pump (naik terus, momentum jelas naik & candle terakhir bukan
-    # reversal), lanjutkan naik tajam sampai kena TP (+6% dari entry).
-    for i in range(20):
-        price = price * 1.01
-        klines.append(_make_candle(t, price, price * 1.012, price * 0.999, price, vol=5_000_000.0))
-        t += 300_000
+    # Data khusus untuk entry: 288 candle datar (supaya statistik 24 jam
+    # terisi), lalu struktur breakout, pullback, retest, lalu harga naik
+    # sampai menyentuh Take Profit. Semua candle punya volume dan
+    # quote_volume, karena anchored VWAP membutuhkannya.
+    kl_setup = seri_dengan_setup(ekor="naik", panjang_ekor=20)
 
-    result = run_backtest(klines, cfg, warmup_bars=0)
+    result = run_backtest(kl_setup, cfg, warmup_bars=0)
     print(f"  Jumlah trade terdeteksi: {len(result.trades)}")
-    assert len(result.trades) >= 1, "Backtest harusnya mendeteksi minimal 1 entry pada skenario pump jelas ini"
+    assert len(result.trades) >= 1, \
+        "Backtest harusnya mendeteksi minimal 1 entry pada skenario retest yang sah ini"
     first = result.trades[0]
     print(f"  Trade pertama: entry={first.entry_price:.4f} exit={first.exit_price:.4f} "
           f"pnl={first.pnl_pct:+.2f}% alasan={first.reason}")
-    assert first.reason in ("STOP_LOSS", "TAKE_PROFIT", "BREAKEVEN", "TRAILING_STOP", "MAX_HOLD_TIME", "END_OF_DATA")
+    assert first.reason in ("STOP_LOSS", "TAKE_PROFIT", "BREAKEVEN", "TRAILING_STOP",
+                            "MAX_HOLD_TIME", "SETUP_INVALIDATED", "END_OF_DATA")
     summary = summarize(result)
     print(f"  Ringkasan: total_trades={summary['total_trades']} win_rate={summary['win_rate']:.1f}% "
           f"total_return={summary['total_return_pct']:+.2f}% max_dd={summary['max_drawdown_pct']:.2f}%")
     print("  -> OK")
 
-    print("\n=== SELFTEST backtest.py: tidak ada entry kalau filter tidak lolos ===")
+    print("\n=== SELFTEST backtest.py: tidak ada entry kalau gerbang likuiditas tidak lolos ===")
     cfg2 = dict(cfg)
-    cfg2["MIN_PUMP_PCT_24H"] = 500.0  # mustahil lolos
-    result2 = run_backtest(klines, cfg2, warmup_bars=0)
-    assert len(result2.trades) == 0, "Harusnya TIDAK ada entry kalau filter pump % dibuat mustahil"
+    cfg2["MIN_QUOTE_VOLUME_USDT_24H"] = 1e18  # mustahil lolos
+    result2 = run_backtest(kl_setup, cfg2, warmup_bars=0)
+    assert len(result2.trades) == 0, "Harusnya TIDAK ada entry kalau gerbang volume dibuat mustahil"
     # Kontrol positif. Tanpa ini, tes di atas tetap hijau seandainya
     # run_backtest rusak total dan SELALU mengembalikan nol trade. Data
     # yang sama dengan filter wajar harus tetap menghasilkan entry.
     assert len(result.trades) > 0, \
         ("Kontrol positif gagal: data yang sama dengan filter wajar pun tidak "
          "menghasilkan trade, jadi tes 'nol entry' di atas tidak membuktikan apa-apa")
-    print(f"  -> OK (0 entry saat filter mustahil, {len(result.trades)} entry saat wajar)")
+    print(f"  -> OK (0 entry saat gerbang mustahil, {len(result.trades)} entry saat wajar)")
+
+    print("\n=== SELFTEST backtest.py: exit SETUP_INVALIDATED ===")
+    cfg_inval = dict(cfg)
+    cfg_inval["SETUP_INVALIDATION_EXIT"] = True
+    cfg_inval["USE_STOP_LOSS"] = False       # supaya jalur invalidasi yang diuji, bukan SL
+    cfg_inval["USE_BREAKEVEN"] = False
+    cfg_inval["USE_TRAILING"] = False
+    cfg_inval["USE_TP"] = False
+    cfg_inval["MAX_HOLD_MINUTES"] = 100000
+    kl_turun = seri_dengan_setup(ekor="invalidasi", panjang_ekor=10)
+    res_inval = run_backtest(kl_turun, cfg_inval, warmup_bars=0)
+    alasan_inval = [tr.reason for tr in res_inval.trades]
+    print(f"  Harga jatuh menembus batas invalidasi -> alasan exit: {alasan_inval}")
+    assert "SETUP_INVALIDATED" in alasan_inval, \
+        "Exit SETUP_INVALIDATED harus terpicu saat candle tertutup di bawah batas invalidasi"
+
+    kl_bertahan = seri_dengan_setup(ekor="bertahan", panjang_ekor=10)
+    res_bertahan = run_backtest(kl_bertahan, cfg_inval, warmup_bars=0)
+    alasan_bertahan = [tr.reason for tr in res_bertahan.trades]
+    print(f"  Harga bertahan di atas level -> alasan exit: {alasan_bertahan}")
+    assert "SETUP_INVALIDATED" not in alasan_bertahan, \
+        "Exit SETUP_INVALIDATED tidak boleh terpicu saat harga bertahan di atas batas"
+    assert len(res_bertahan.trades) >= 1, "Kontrol positif: skenario bertahan tetap harus punya entry"
+    print("  -> OK (terpicu saat tembus, diam saat bertahan)")
 
     print("\n=== SELFTEST backtest.py: data candle rusak ditolak, bukan diam-diam dipakai ===")
     # Regresi untuk bug senyap: NaN membuat SETIAP perbandingan bernilai
@@ -628,24 +696,15 @@ def selftest():
     print(f"  -> OK ({len(_kasus_rusak)} bentuk data rusak ditolak, candle normal tetap lolos)")
 
     print("\n=== SELFTEST backtest.py: Stop Loss kena SEBELUM Breakeven/Trailing aktif ===")
-    # Bangun ulang data flat -> pump (SAMA seperti tes di atas), tapi
-    # DIPOTONG PERSIS di candle tempat entry pertama terjadi (index 315,
-    # harga 1.08265...) -- tanpa candle pump lanjutan sesudahnya -- lalu
-    # LANGSUNG disambung candle anjlok tajam beruntun. Ini mengisolasi
-    # skenario: harga turun terus sejak entry dan TIDAK PERNAH naik lagi ke
-    # BE_TRIGGER_PCT=3% profit, persis kasus yang TIDAK terlindungi oleh
-    # Breakeven/Trailing sendirian (keduanya baru aktif setelah profit).
-    sl_klines = []
-    t2 = 0
-    p2 = 1.0
-    for _ in range(288):  # hari 1: flat
-        sl_klines.append(_make_candle(t2, p2, p2 * 1.001, p2 * 0.999, p2))
-        t2 += 300_000
-    for i in range(50):  # hari 2: pump tajam +15%
-        p2 = 1.0 * (1 + 0.15 * (i / 49))
-        sl_klines.append(_make_candle(t2, p2, p2 * 1.002, p2 * 0.998, p2, vol=5_000_000.0))
-        t2 += 300_000
-    sl_klines = sl_klines[:316]  # potong TEPAT di candle tempat entry pertama terjadi (diverifikasi manual)
+    # Skenario setup yang sama seperti tes di atas, DIPOTONG persis di candle
+    # retest tempat entry terjadi, lalu LANGSUNG disambung candle anjlok
+    # beruntun. Ini mengisolasi kasus: harga turun terus sejak entry dan
+    # TIDAK PERNAH naik lagi ke BE_TRIGGER_PCT, persis situasi yang TIDAK
+    # terlindungi oleh Breakeven/Trailing sendirian (keduanya baru aktif
+    # setelah profit). Exit invalidasi setup sengaja dimatikan di sini supaya
+    # yang diuji benar-benar jalur Stop Loss.
+    sl_klines = seri_dengan_setup(ekor="bertahan", panjang_ekor=0)
+    t2 = sl_klines[-1].close_time + 1
     entry_ref_price = sl_klines[-1].close
     t2 = sl_klines[-1].close_time + 1
     p2 = entry_ref_price
@@ -661,6 +720,7 @@ def selftest():
     sl_cfg["TP_PCT"] = 999.0  # matikan TP secara efektif, isolasi pengujian SL murni
     sl_cfg["USE_STOP_LOSS"] = True
     sl_cfg["SL_PCT"] = 3.0
+    sl_cfg["SETUP_INVALIDATION_EXIT"] = False
     sl_result = run_backtest(sl_klines, sl_cfg, warmup_bars=0)
     assert len(sl_result.trades) >= 1, "Skenario Stop Loss harusnya tetap menghasilkan 1 entry"
     sl_trade = sl_result.trades[0]
@@ -699,8 +759,9 @@ def selftest():
     print("  -> OK (tanpa Stop Loss, posisi tidak dilindungi dan kerugian sama/lebih besar)")
 
     print("\n=== SELFTEST backtest.py: apply_overrides & validate_params ===")
-    merged = apply_overrides(dict(PUMP_CONFIG), {"TP_PCT": "8.5", "MIN_PUMP_PCT_24H": "10", "SL_PCT": "4.5"})
-    assert merged["TP_PCT"] == 8.5 and merged["MIN_PUMP_PCT_24H"] == 10.0 and merged["SL_PCT"] == 4.5
+    merged = apply_overrides(dict(PUMP_CONFIG), {"TP_PCT": "8.5", "INVALIDATION_ATR_MULT": "1.2",
+                                                 "SL_PCT": "4.5"})
+    assert merged["TP_PCT"] == 8.5 and merged["INVALIDATION_ATR_MULT"] == 1.2 and merged["SL_PCT"] == 4.5
     validate_params(merged)
     try:
         validate_params(apply_overrides(dict(PUMP_CONFIG), {"TP_PCT": "-5"}))
@@ -808,8 +869,8 @@ def selftest():
     _random.seed(1234)
     # Data sintetis dibuat sebagai SIKLUS PUMP berulang dengan amplitudo dan
     # volatilitas yang BERBEDA-BEDA tiap siklus. Dua alasan:
-    #   1. Random walk murni hampir tidak pernah lolos confirm_momentum, jadi
-    #      trade-nya terlalu sedikit untuk menguji apa pun.
+    #   1. Random walk murni hampir tidak pernah membentuk breakout lalu
+    #      retest, jadi trade-nya terlalu sedikit untuk menguji apa pun.
     #   2. Volatilitas yang berubah-ubah memastikan ATR menghasilkan SL yang
     #      berbeda antar trade -- kalau semua trade kebetulan punya SL sama,
     #      uji look-ahead jadi lolos secara palsu.
@@ -838,8 +899,7 @@ def selftest():
             t += 5 * MS_PER_MIN
 
     cfg_la = dict(base_atr_cfg)
-    cfg_la.update({"MIN_PUMP_PCT_24H": -100.0, "MIN_QUOTE_VOLUME_USDT_24H": 0.0,
-                    "COOLDOWN_MINUTES_AFTER_CLOSE": 0})
+    cfg_la.update({"MIN_QUOTE_VOLUME_USDT_24H": 0.0, "COOLDOWN_MINUTES_AFTER_CLOSE": 0})
     short_run = run_backtest(synth[:2500], cfg_la, warmup_bars=bars_per_day("5m"))
     long_run = run_backtest(synth, cfg_la, warmup_bars=bars_per_day("5m"))
 

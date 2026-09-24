@@ -511,6 +511,28 @@ class SymbolFilters:
         return float(rounded)
 
 
+def build_trading_symbols(exchange_info: dict) -> set:
+    """Himpunan simbol yang statusnya TRADING dan mengizinkan perdagangan SPOT.
+
+    Dipakai scanner untuk membentuk semesta kandidat. Ticker 24 jam tetap
+    mengirim baris untuk simbol berstatus HALT atau BREAK, dan order ke simbol
+    seperti itu pasti ditolak bursa, jadi lebih baik dibuang sejak awal.
+    Field status dan isSpotTradingAllowed berasal dari GET /api/v3/exchangeInfo
+    (dicek 2026-09-25 di developers.binance.com, katalog Spot REST API).
+    """
+    out = set()
+    for sym_data in exchange_info.get("symbols", []):
+        symbol = sym_data.get("symbol")
+        if not symbol:
+            continue
+        if str(sym_data.get("status", "")).upper() != "TRADING":
+            continue
+        if sym_data.get("isSpotTradingAllowed") is False:
+            continue
+        out.add(symbol)
+    return out
+
+
 def build_filters_cache(exchange_info: dict) -> dict:
     """Bangun cache {symbol: SymbolFilters} untuk SEMUA simbol dari satu
     respons exchangeInfo (dipakai mode pump scanner yang butuh filter utk

@@ -29,10 +29,36 @@ RUNTIME_FILE = ROOT / "pump_bot_runtime.json"
 RUNTIME_ERROR_FILE = ROOT / "pump_bot_runtime.error.json"
 AUDIT_FILE = ROOT / "pump_bot_settings_audit.log"
 VALID_MODES = ("PAPER", "LIVE")
-VALID_WATCHLIST_TIERS = ("INTI", "MOMENTUM", "SPEKULATIF")
+VALID_WATCHLIST_TIERS = ("INTI", "AKTIF", "SPEKULATIF")
+# Tier lama yang masih mungkin ada di file watchlist atau settings override
+# yang sudah tersimpan. Dipetakan diam-diam ke nama baru supaya file lama
+# tidak ditolak validasi dan datanya tidak hilang.
+LEGACY_WATCHLIST_TIER_MAP = {"MOMENTUM": "AKTIF"}
+
+# Kunci config yang SUDAH DIHAPUS bersama strategi lama. Kalau masih ada di
+# file override milik pengguna, kunci itu dibuang saat dimuat, bukan dianggap
+# file rusak. Tanpa daftar ini, load_mode_override() akan mengarsipkan seluruh
+# file override sebagai korup dan pengguna kehilangan semua setelannya.
+REMOVED_CONFIG_KEYS = {
+    "MIN_PUMP_PCT_24H",          # gerbang kenaikan 24 jam, dihapus bersama seleksi top gainer
+    "MOMENTUM_FADE_EXIT",        # diganti SETUP_INVALIDATION_EXIT
+    "MOMENTUM_FADE_RANK_THRESHOLD",
+}
 _WRITE_LOCK = threading.RLock()
 _SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,40}$")
 _ASSET_RE = re.compile(r"^[A-Z0-9]{2,12}$")
+
+
+def _required_lookback_bars(candidate: dict) -> int:
+    """Bungkus strategy.required_lookback_bars() dengan import lokal.
+
+    Import dilakukan di dalam fungsi supaya modul ini tetap bisa diimpor oleh
+    config.py tanpa menyeret dependensi lain saat proses import awal.
+    strategy.py sendiri tidak mengimpor modul repo mana pun, jadi tidak ada
+    risiko import melingkar.
+    """
+    from strategy import required_lookback_bars
+    return required_lookback_bars(candidate)
 
 
 def settings_file(mode: str) -> Path:
@@ -82,12 +108,24 @@ PARAMETER_SCHEMA: dict[str, dict] = {
 
     "MARKET_SCAN_INTERVAL_SECONDS": _field("Scan", "Interval scan pasar", "Jarak waktu pemindaian seluruh pasar.", "int", minimum=10, maximum=86400, unit="detik"),
     "LOOP_INTERVAL_SECONDS": _field("Scan", "Interval loop", "Jarak evaluasi posisi dan kontrol.", "int", minimum=1, maximum=300, unit="detik"),
-    "MIN_PUMP_PCT_24H": _field("Scan", "Minimum pump 24 jam", "Kenaikan minimum agar menjadi kandidat.", "float", minimum=0, maximum=10000, unit="%"),
     "MIN_QUOTE_VOLUME_USDT_24H": _field("Scan", "Minimum volume kuotasi", "Volume 24 jam minimum.", "float", minimum=0, maximum=1e15, unit="USDT"),
     "TOP_N_CANDIDATES_TO_CONFIRM": _field("Scan", "Jumlah kandidat konfirmasi", "Berapa kandidat teratas yang diperiksa.", "int", minimum=1, maximum=1000),
-    "CONFIRM_INTERVAL": _field("Scan", "Interval konfirmasi", "Interval candle konfirmasi momentum.", "str", editor="select", options=["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"]),
-    "CONFIRM_LOOKBACK_BARS": _field("Scan", "Jumlah candle konfirmasi", "Jumlah candle tertutup untuk konfirmasi dan ATR.", "int", minimum=3, maximum=1000, unit="candle"),
-    "MIN_CLOSE_POSITION_IN_RANGE": _field("Scan", "Minimum posisi close", "Posisi close candle di dalam rentang high-low.", "float", minimum=0, maximum=1),
+    "CONFIRM_INTERVAL": _field("Scan", "Interval konfirmasi", "Interval candle konfirmasi setup.", "str", editor="select", options=["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"]),
+    "CONFIRM_LOOKBACK_BARS": _field("Scan", "Jumlah candle konfirmasi", "Jumlah candle tertutup untuk deteksi setup dan ATR. Limit endpoint klines 1000 per panggilan.", "int", minimum=3, maximum=1000, unit="candle"),
+    "MIN_CLOSE_POSITION_IN_RANGE": _field("Scan", "Minimum posisi close", "Posisi close candle retest di dalam rentang high-low.", "float", minimum=0, maximum=1),
+
+    # Parameter strategi pullback dan retest. Semua default di config.py masih
+    # harus divalidasi lewat backtest repo ini.
+    "SWING_LOOKBACK_BARS": _field("Setup Pullback", "Lookback swing high", "Berapa candle ke belakang dipindai untuk mencari level breakout.", "int", minimum=3, maximum=500, unit="candle"),
+    "SWING_PIVOT_WING_BARS": _field("Setup Pullback", "Sayap pivot", "Candle di kiri dan kanan yang harus lebih rendah agar sebuah candle menjadi pivot high.", "int", minimum=1, maximum=50, unit="candle"),
+    "BREAKOUT_BUFFER_ATR_MULT": _field("Setup Pullback", "Buffer breakout", "Jarak di atas level yang wajib dilewati close agar dianggap breakout.", "float", minimum=0, maximum=10),
+    "RETEST_ZONE_ATR_MULT": _field("Setup Pullback", "Lebar zona retest", "Setengah lebar zona di atas dan di bawah level, dalam satuan ATR.", "float", minimum=0.01, maximum=10),
+    "RETEST_VWAP_CONFLUENCE_ATR_MULT": _field("Setup Pullback", "Konfluensi VWAP", "Jarak maksimum anchored VWAP terhadap level.", "float", minimum=0.01, maximum=20),
+    "VWAP_MIN_BARS_AFTER_ANCHOR": _field("Setup Pullback", "Minimum candle setelah anchor", "Candle minimum setelah breakout sebelum anchored VWAP dipercaya.", "int", minimum=1, maximum=200, unit="candle"),
+    "MAX_BARS_BREAKOUT_TO_RETEST": _field("Setup Pullback", "Umur maksimum setup", "Batas jarak candle dari breakout ke retest.", "int", minimum=1, maximum=500, unit="candle"),
+    "MAX_RETEST_TOUCHES": _field("Setup Pullback", "Maksimum kunjungan zona", "Berapa kali harga boleh kembali ke zona sebelum setup dianggap lemah.", "int", minimum=1, maximum=20),
+    "INVALIDATION_ATR_MULT": _field("Setup Pullback", "Jarak invalidasi", "Jarak di bawah level yang membatalkan setup dan memicu exit SETUP_INVALIDATED.", "float", minimum=0.01, maximum=20),
+    "MAX_EXTENSION_ATR_MULT": _field("Setup Pullback", "Batas anti-kejar", "Jarak maksimum close di atas level agar entry masih diizinkan.", "float", minimum=0.01, maximum=20),
     "EXTRA_EXCLUDE_SYMBOLS": _field("Scan", "Blacklist simbol", "Simbol tambahan yang tidak boleh dipilih.", "list", editor="symbols"),
     "MIN_LISTING_AGE_DAYS": _field("Scan", "Usia listing minimum", "Pasangan lebih muda akan ditolak.", "int", minimum=0, maximum=36500, unit="hari"),
 
@@ -131,8 +169,7 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "TRAILING_START_PCT": _field("Breakeven dan Trailing", "Mulai trailing", "Profit untuk mengaktifkan trailing tetap.", "float", minimum=0, maximum=1000, unit="%"),
     "TRAILING_STEP_PCT": _field("Breakeven dan Trailing", "Jarak trailing", "Jarak stop dari harga tertinggi.", "float", minimum=0.01, maximum=100, unit="%"),
     "MAX_HOLD_MINUTES": _field("Breakeven dan Trailing", "Maksimum waktu hold", "Paksa keluar setelah durasi ini.", "int", minimum=1, maximum=525600, unit="menit"),
-    "MOMENTUM_FADE_EXIT": _field("Breakeven dan Trailing", "Exit saat momentum pudar", "Keluar saat simbol jatuh dari ranking.", "bool"),
-    "MOMENTUM_FADE_RANK_THRESHOLD": _field("Breakeven dan Trailing", "Batas ranking momentum", "Ranking terendah sebelum momentum dianggap pudar.", "int", minimum=1, maximum=5000),
+    "SETUP_INVALIDATION_EXIT": _field("Breakeven dan Trailing", "Exit saat setup batal", "Keluar saat candle tertutup menembus batas invalidasi yang dikunci saat entry.", "bool"),
 
     "MAX_SPREAD_PCT": _field("Fee dan Filter", "Spread maksimum", "Spread bid-ask maksimum untuk entry.", "float", minimum=0, maximum=100, unit="%", dangerous=True),
     "TAKER_FEE_PCT": _field("Fee dan Filter", "Fee taker", "Asumsi fee order market.", "float", minimum=0, maximum=10, unit="%"),
@@ -215,6 +252,14 @@ def load_mode_override(mode: str) -> tuple[dict, list[str]]:
             data = json.load(handle)
         if not isinstance(data, dict):
             raise ValueError("root override harus object JSON")
+        # MIGRASI: kunci strategi lama dibuang, bukan dianggap file rusak.
+        dibuang = sorted(set(data) & REMOVED_CONFIG_KEYS)
+        for key in dibuang:
+            data.pop(key, None)
+        if dibuang:
+            errors.append(
+                f"Override {raw_mode} memuat kunci strategi lama yang sudah dihapus dan "
+                "diabaikan: " + ", ".join(dibuang))
         unknown = sorted(set(data) - set(PARAMETER_SCHEMA))
         if unknown:
             raise ValueError("kunci override tidak dikenal: " + ", ".join(unknown))
@@ -297,7 +342,9 @@ def _validate_watchlist(value: Any, quote: str) -> list[dict]:
         if not isinstance(item, dict):
             raise ValueError(f"baris watchlist {index + 1} harus object")
         symbol = str(item.get("symbol", "")).strip().upper()
-        tier = str(item.get("tier", "")).strip().upper()
+        tier = LEGACY_WATCHLIST_TIER_MAP.get(
+            str(item.get("tier", "")).strip().upper(),
+            str(item.get("tier", "")).strip().upper())
         if not _SYMBOL_RE.fullmatch(symbol) or not symbol.endswith(quote):
             raise ValueError(f"simbol watchlist tidak valid: {symbol!r}")
         if tier not in VALID_WATCHLIST_TIERS:
@@ -412,6 +459,25 @@ def validate_candidate(candidate: dict, mode: str) -> tuple[dict, dict[str, str]
             relation("CONFIRM_LOOKBACK_BARS",
                      cleaned["CONFIRM_LOOKBACK_BARS"] >= cleaned["ATR_PERIOD"] + 1,
                      "harus minimal ATR_PERIOD + 1 saat ATR aktif")
+        # Relasi jendela konfirmasi terhadap struktur setup. Dihitung lewat
+        # SATU fungsi bersama supaya angka minimum tidak pernah berbeda antara
+        # validasi, bot live, dan backtest.
+        butuh_bars = _required_lookback_bars(cleaned)
+        relation("CONFIRM_LOOKBACK_BARS",
+                 cleaned["CONFIRM_LOOKBACK_BARS"] >= butuh_bars,
+                 f"harus minimal {butuh_bars} candle untuk ATR dan struktur setup "
+                 "(SWING_LOOKBACK_BARS + 2 x SWING_PIVOT_WING_BARS + MAX_BARS_BREAKOUT_TO_RETEST)")
+        # Zona retest tidak boleh lebih dalam dari batas invalidasi. Kalau
+        # lebih dalam, candle yang baru menyentuh dasar zona sudah otomatis
+        # membatalkan setup, sehingga retest tidak akan pernah sah.
+        relation("INVALIDATION_ATR_MULT",
+                 cleaned["INVALIDATION_ATR_MULT"] >= cleaned["RETEST_ZONE_ATR_MULT"],
+                 "harus lebih besar atau sama dengan RETEST_ZONE_ATR_MULT")
+        # Batas anti-kejar harus di atas buffer breakout, kalau tidak setiap
+        # breakout yang sah langsung dianggap terlalu jauh.
+        relation("MAX_EXTENSION_ATR_MULT",
+                 cleaned["MAX_EXTENSION_ATR_MULT"] >= cleaned["BREAKOUT_BUFFER_ATR_MULT"],
+                 "harus lebih besar atau sama dengan BREAKOUT_BUFFER_ATR_MULT")
         if cleaned["USE_STOP_LOSS"]:
             relation("SL_PCT", cleaned["SL_PCT"] > 0, "harus lebih besar dari nol saat Stop Loss aktif")
         if cleaned["USE_TP"]:

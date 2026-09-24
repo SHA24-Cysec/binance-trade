@@ -42,6 +42,7 @@ from config import (
     get_watchlist, watchlist_enabled, watchlist_auto_enabled,
 )
 import state as state_mod
+import strategy
 from atomic_io import replace_with_retry, timestamp_tag
 from credential_store import (
     ENV_PATH, credential_status, read_credentials, update_env,
@@ -569,7 +570,9 @@ def build_status():
             # supaya angka di layar konsisten dengan kunci di atas.
             "trailing_start_pct": state.get("trail_start_pct") or PUMP_CONFIG.get("TRAILING_START_PCT"),
             "max_hold_minutes": PUMP_CONFIG.get("MAX_HOLD_MINUTES"),
-            "min_pump_pct_24h": PUMP_CONFIG.get("MIN_PUMP_PCT_24H"),
+            "setup_invalidation_exit": bool(PUMP_CONFIG.get("SETUP_INVALIDATION_EXIT")),
+            "setup_invalidation_price": state.get("setup_invalidation_price") or 0.0,
+            "setup_breakout_level": state.get("setup_breakout_level") or 0.0,
             "risk_percent": PUMP_CONFIG.get("RISK_PERCENT"),
             "max_position_usdt": PUMP_CONFIG.get("MAX_POSITION_USDT"),
         },
@@ -633,7 +636,9 @@ def _reject_if_backtest_disabled():
 BT_PARAM_KEYS = (
     "USE_ATR_EXITS",
     "SL_PCT", "TP_PCT", "BE_TRIGGER_PCT", "BE_LOCK_PCT", "TRAILING_START_PCT",
-    "TRAILING_STEP_PCT", "MAX_HOLD_MINUTES", "MIN_PUMP_PCT_24H",
+    "TRAILING_STEP_PCT", "MAX_HOLD_MINUTES",
+    "SETUP_INVALIDATION_EXIT", "INVALIDATION_ATR_MULT", "MAX_EXTENSION_ATR_MULT",
+    "RETEST_ZONE_ATR_MULT", "MAX_BARS_BREAKOUT_TO_RETEST",
     "ATR_PERIOD", "ATR_MULTIPLIER_SL", "ATR_SL_MIN_PCT", "ATR_SL_MAX_PCT", "ATR_TP_RR_RATIO",
     "ATR_BE_TRIGGER_MULT", "ATR_BE_LOCK_MULT", "ATR_TRAILING_START_MULT", "ATR_TRAILING_STEP_MULT",
 )
@@ -687,7 +692,7 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
         bar_ms = bt.INTERVAL_MINUTES[interval] * 60_000
         # Warmup: 24 jam penuh untuk statistik bergulir, ditambah jendela
         # konfirmasi. Tanpa ini bar-bar awal tidak punya pct24h sama sekali.
-        warmup_ms = bt.MS_PER_DAY + cfg["CONFIRM_LOOKBACK_BARS"] * bar_ms
+        warmup_ms = bt.MS_PER_DAY + strategy.confirm_window_bars(cfg) * bar_ms
 
         end_ms = int(time.time() * 1000)
         start_ms = end_ms - days * bt.MS_PER_DAY
@@ -801,13 +806,14 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "data historis untuk pair yang MASIH listing hari ini. Koin yang sudah "
                 "didelisting, sering justru yang kolaps setelah pump, tidak ada dalam data. "
                 "Hasil di sini karenanya masih cenderung lebih baik daripada kenyataan.",
-                "Peringkat 24 jam DIREKONSTRUKSI dari candle, bukan diambil dari snapshot "
+                "Statistik 24 jam DIREKONSTRUKSI dari candle, bukan diambil dari snapshot "
                 "ticker/24hr historis (Binance tidak menyediakannya). Nilainya sangat dekat "
-                "tetapi tidak identik dengan yang dilihat bot saat itu.",
+                "tetapi tidak identik dengan yang dilihat bot saat itu. Volume itulah yang "
+                "menentukan simbol mana yang masuk top-N kandidat per bar.",
                 "Exit dievaluasi per-candle " + interval + " (bukan tiap "
                 + str(PUMP_CONFIG.get("LOOP_INTERVAL_SECONDS", 15)) + " detik seperti bot asli), "
                 "dengan urutan prioritas konservatif: STOP_LOSS -> TAKE_PROFIT -> BREAKEVEN -> "
-                "TRAILING -> MAX_HOLD -> MOMENTUM_FADE. Stop Loss dianggap kena lebih dulu kalau "
+                "TRAILING -> MAX_HOLD -> SETUP_INVALIDATED. Stop Loss dianggap kena lebih dulu kalau "
                 "ambigu dalam satu candle, supaya hasil tidak melebih-lebihkan profit.",
                 "Entry dianggap terjadi tepat di harga penutupan candle sinyal. Slippage market "
                 "order dan spread belum dimodelkan. Fee taker beli+jual SUDAH dipotong.",
@@ -971,9 +977,9 @@ def api_backtest_defaults():
     out["default_max_symbols"] = 150
     out["mode"] = "portfolio"
     out["top_n_candidates"] = PUMP_CONFIG.get("TOP_N_CANDIDATES_TO_CONFIRM", 10)
-    out["momentum_fade_exit"] = PUMP_CONFIG.get("MOMENTUM_FADE_EXIT", False)
-    out["momentum_fade_rank"] = PUMP_CONFIG.get("MOMENTUM_FADE_RANK_THRESHOLD", 30)
-    out["confirm_lookback_bars"] = PUMP_CONFIG.get("CONFIRM_LOOKBACK_BARS", 20)
+    out["setup_invalidation_exit"] = bool(PUMP_CONFIG.get("SETUP_INVALIDATION_EXIT", False))
+    out["confirm_lookback_bars"] = strategy.confirm_window_bars(PUMP_CONFIG)
+    out["required_lookback_bars"] = strategy.required_lookback_bars(PUMP_CONFIG)
     out["min_quote_volume"] = PUMP_CONFIG.get("MIN_QUOTE_VOLUME_USDT_24H", 0)
     return jsonify(out)
 
@@ -987,16 +993,16 @@ def build_watchlist() -> dict:
     """Data panel watchlist: harga, perubahan 24 jam, volume, status filter.
 
     PANEL INI SEPENUHNYA READ-ONLY dan tidak memengaruhi bot sama sekali.
-    Ia hanya membandingkan kondisi pasar tiap simbol di daftar dengan DUA
-    gerbang pertama scanner (MIN_PUMP_PCT_24H dan MIN_QUOTE_VOLUME_USDT_24H),
-    supaya Anda bisa melihat koin mana yang sedang mendekati kondisi masuk.
+    Ia hanya membandingkan kondisi pasar tiap simbol di daftar dengan gerbang
+    likuiditas scanner (MIN_QUOTE_VOLUME_USDT_24H), satu-satunya gerbang
+    tingkat ticker yang tersisa setelah strategi pindah ke pullback retest.
 
     Yang TIDAK diperiksa di sini, dan sengaja tidak diklaim:
-      - konfirmasi candle 5 menit (confirm_entry): butuh unduhan candle per
-        simbol setiap refresh, yang justru memakan rate-limit yang dipakai
-        bot untuk mengirim order. Jadi status "SIAP" di panel ini berarti
-        "lolos gerbang 24 jam", BUKAN "bot pasti membeli".
-      - spread saat ini dan ranking terhadap seluruh pasar.
+      - deteksi setup pullback retest (detect_pullback_retest): butuh unduhan
+        candle per simbol setiap refresh, yang justru memakan rate-limit yang
+        dipakai bot untuk mengirim order. Jadi status "LIKUID" di panel ini
+        berarti "lolos gerbang volume", BUKAN "bot pasti membeli".
+      - spread saat ini dan urutan kualitas setup terhadap seluruh pasar.
 
     Degradasi anggun: kalau Binance tidak terjangkau, panel tetap tampil
     dengan daftar simbol dan tanda strip, bukan error yang mematikan
@@ -1061,7 +1067,6 @@ def build_watchlist() -> dict:
                 tickers = cache["data"]
                 cache["error"] = error
 
-    min_pump = float(PUMP_CONFIG.get("MIN_PUMP_PCT_24H", 0))
     min_vol = float(PUMP_CONFIG.get("MIN_QUOTE_VOLUME_USDT_24H", 0))
 
     items = []
@@ -1072,8 +1077,8 @@ def build_watchlist() -> dict:
             "symbol": sym, "tier": e["tier"], "score": e["score"], "note": e["note"],
             "price": None, "change_24h": None, "quote_volume_24h": None,
             "high_24h": None, "low_24h": None, "trades_24h": None,
-            "pass_pump": None, "pass_volume": None, "status": "TIDAK ADA DATA",
-            "pump_gap": None, "range_position": None,
+            "pass_volume": None, "status": "TIDAK ADA DATA",
+            "range_position": None,
         }
         if t:
             try:
@@ -1086,16 +1091,11 @@ def build_watchlist() -> dict:
                 price = chg = qv = hi = lo = 0.0
 
             if price > 0:
-                pass_pump = chg >= min_pump
                 pass_vol = qv >= min_vol
-                if pass_pump and pass_vol:
-                    status = "SIAP"          # lolos kedua gerbang 24 jam
-                elif pass_vol:
-                    status = "MENUNGGU"      # likuid, tapi belum cukup naik
-                elif pass_pump:
-                    status = "TIPIS"         # naik cukup, tapi volume kurang
-                else:
-                    status = "DIAM"
+                # Hanya ada satu gerbang tingkat ticker sekarang. Sisanya
+                # ditentukan oleh struktur candle, yang tidak diperiksa di
+                # panel ini demi menghemat rate limit.
+                status = "LIKUID" if pass_vol else "TIPIS"
 
                 # Posisi harga dalam rentang 24 jam: 1,0 berarti di puncak
                 # hari ini, 0,0 di dasar. Berguna untuk melihat apakah harga
@@ -1107,9 +1107,8 @@ def build_watchlist() -> dict:
                     "price": price, "change_24h": chg, "quote_volume_24h": qv,
                     "high_24h": hi, "low_24h": lo,
                     "trades_24h": int(t.get("count", 0) or 0),
-                    "pass_pump": pass_pump, "pass_volume": pass_vol,
+                    "pass_volume": pass_vol,
                     "status": status,
-                    "pump_gap": round(min_pump - chg, 2),
                     "range_position": round(rpos, 3) if rpos is not None else None,
                 })
         items.append(row)
@@ -1117,9 +1116,11 @@ def build_watchlist() -> dict:
     # Urutkan: yang paling dekat kondisi masuk tampil di atas, karena itu
     # yang benar-benar ingin dilihat saat memantau. Simbol tanpa data
     # didorong ke bawah alih-alih dibuang, supaya Anda sadar datanya hilang.
-    order = {"SIAP": 0, "TIPIS": 1, "MENUNGGU": 2, "DIAM": 3, "TIDAK ADA DATA": 4}
+    # Yang likuid tampil di atas, lalu diurutkan dari volume terbesar, sama
+    # dengan urutan kandidat yang dipakai bot saat mengambil candle.
+    order = {"LIKUID": 0, "TIPIS": 1, "TIDAK ADA DATA": 2}
     items.sort(key=lambda r: (order.get(r["status"], 9),
-                              -(r["change_24h"] if r["change_24h"] is not None else -1e9)))
+                              -(r["quote_volume_24h"] if r["quote_volume_24h"] is not None else -1.0)))
 
     counts = {}
     for r in items:
@@ -1157,7 +1158,6 @@ def _auto_status(meta: Optional[dict]) -> dict:
 def _watchlist_config() -> dict:
     """Ambang yang dipakai panel, ditampilkan supaya angkanya tidak misterius."""
     return {
-        "min_pump_pct_24h": PUMP_CONFIG.get("MIN_PUMP_PCT_24H"),
         "min_quote_volume_24h": PUMP_CONFIG.get("MIN_QUOTE_VOLUME_USDT_24H"),
         "quote_asset": PUMP_CONFIG.get("QUOTE_ASSET", "USDT"),
     }

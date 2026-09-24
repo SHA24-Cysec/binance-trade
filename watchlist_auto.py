@@ -63,6 +63,7 @@ import time
 from typing import Callable, Optional
 
 import market_scanner as scanner
+import strategy
 from strategy import Kline, atr_percent
 
 logger = logging.getLogger("watchlist_auto")
@@ -179,15 +180,14 @@ def fetch_klines_paged(client, symbol: str, interval: str, bars: int,
 def score_symbol(sym: str, kl: list, meta: dict, config: dict) -> Optional[dict]:
     """Nilai satu simbol memakai logika keputusan bot yang asli.
 
-    confirm_entry() dan atr_percent() yang dipanggil di sini adalah fungsi
-    yang sama persis dengan yang dipakai bot live, jadi angka jumlah sinyal
-    bukan perkiraan melainkan hasil menjalankan logika bot itu sendiri.
+    detect_pullback_retest() dan atr_percent() yang dipanggil di sini adalah
+    fungsi yang sama persis dengan yang dipakai bot live, jadi angka jumlah
+    sinyal bukan perkiraan melainkan hasil menjalankan logika bot itu sendiri.
     """
-    lookback = int(config.get("CONFIRM_LOOKBACK_BARS", 20))
+    lookback = strategy.confirm_window_bars(config)
     atr_period = int(config.get("ATR_PERIOD", 14))
-    min_pump = float(config.get("MIN_PUMP_PCT_24H", 13.0))
     min_vol = float(config.get("MIN_QUOTE_VOLUME_USDT_24H", 2_000_000))
-    need = max(lookback, atr_period + 1, 20)
+    need = max(lookback, atr_period + 1, strategy.required_lookback_bars(config))
 
     if len(kl) < BARS_PER_DAY_5M + need + 10:
         return None
@@ -213,16 +213,15 @@ def score_symbol(sym: str, kl: list, meta: dict, config: dict) -> Optional[dict]
     for j in range(BARS_PER_DAY_5M + need, n):
         vol24 = pre[j + 1] - pre[j + 1 - BARS_PER_DAY_5M]
         roll_vols.append(vol24)
-        prev = closes[j - BARS_PER_DAY_5M]
-        if prev <= 0:
-            continue
-        chg = (closes[j] / prev - 1.0) * 100.0
-        if chg < min_pump or vol24 < min_vol:
+        # Kenaikan 24 jam TIDAK lagi menjadi gerbang sejak strategi pindah ke
+        # pullback retest. Yang tersisa hanyalah gerbang likuiditas, sama
+        # dengan semesta kandidat bot live.
+        if vol24 < min_vol:
             continue
         gate_bars += 1
 
-        ok, _ = scanner.confirm_entry(kl[j - lookback + 1: j + 1], config)
-        if not ok or (j - last_sig) < min_gap:
+        setup = scanner.detect_pullback_retest(kl[j - lookback + 1: j + 1], config)
+        if not setup.ok or (j - last_sig) < min_gap:
             continue
         last_sig = j
         signals += 1
@@ -305,7 +304,7 @@ def _compose_score(sym, meta, config, signals, days, uptime, vol_median,
     elif signals < 1:
         dq = f"tidak ada sinyal dalam {days:.0f} hari"
 
-    tier = "INTI" if uptime >= 90 else ("MOMENTUM" if uptime >= 60 else "SPEKULATIF")
+    tier = "INTI" if uptime >= 90 else ("AKTIF" if uptime >= 60 else "SPEKULATIF")
 
     return {
         "symbol": sym, "tier": tier,
@@ -407,12 +406,12 @@ def refresh_once(client, config: dict,
         logger.warning("bookTicker gagal, spread diabaikan: %s", exc)
 
     # --- Tahap 2: pilih kandidat paling likuid ---
-    # Ambang pump di-nolkan khusus untuk pemilihan semesta, sama seperti
-    # portfolio_backtest.select_universe(): kita butuh koin yang pernah pump
-    # KAPAN SAJA dalam periode, bukan yang kebetulan naik hari ini.
-    cfg_universe = dict(config)
-    cfg_universe["MIN_PUMP_PCT_24H"] = -1e9
-    ranked = scanner.filter_and_rank_candidates(tickers, cfg_universe)
+    # Saringan semesta hanya struktural dan likuiditas, sama persis dengan
+    # bot live. Tidak ada lagi gerbang kenaikan 24 jam yang perlu dinolkan
+    # di sini, karena penilaian ini memang harus melihat koin yang pernah
+    # membentuk setup KAPAN SAJA dalam periode, bukan yang kebetulan naik
+    # hari ini.
+    ranked = scanner.filter_and_rank_candidates(tickers, dict(config))
     ranked.sort(key=lambda c: c.quote_volume, reverse=True)
     shortlist = ranked[:max_symbols]
     if not shortlist:
@@ -455,9 +454,9 @@ def refresh_once(client, config: dict,
 
     # Jaga komposisi tier supaya panel tidak didominasi satu jenis koin.
     inti = [r for r in ok_rows if r["tier"] == "INTI"][:12]
-    mom = [r for r in ok_rows if r["tier"] == "MOMENTUM"][:8]
+    aktif = [r for r in ok_rows if r["tier"] == "AKTIF"][:8]
     spek = [r for r in ok_rows if r["tier"] == "SPEKULATIF"][:6]
-    final = (inti + mom + spek)[:keep]
+    final = (inti + aktif + spek)[:keep]
 
     result = {
         "ok": bool(final),
@@ -493,15 +492,45 @@ def save_result(result: dict, config: dict) -> Optional[str]:
         return None
 
 
+def migrate_tiers(data: dict) -> dict:
+    """Ganti nama tier lama pada hasil watchlist yang dibaca dari file.
+
+    Tier "MOMENTUM" dipakai versi lama sebelum strategi pindah ke pullback
+    retest. File lama tidak dibuang, hanya namanya diterjemahkan saat dibaca,
+    memakai peta yang SAMA dengan config.migrate_watchlist_tier() supaya tidak
+    ada dua daftar nama tier yang bisa berbeda.
+
+    Dipakai load_result() dan bisa dipanggil langsung oleh tes. Objeknya
+    diubah di tempat lalu dikembalikan.
+    """
+    if not isinstance(data, dict):
+        return data
+    from config import migrate_watchlist_tier
+    for kunci in ("items", "detail"):
+        baris = data.get(kunci)
+        if not isinstance(baris, list):
+            continue
+        for row in baris:
+            if isinstance(row, dict) and row.get("tier"):
+                row["tier"] = migrate_watchlist_tier(row["tier"])
+    return data
+
+
 def load_result(config: dict) -> Optional[dict]:
-    """Baca hasil terakhir. Return None kalau belum ada atau rusak."""
+    """Baca hasil terakhir. Return None kalau belum ada atau rusak.
+
+    Nama tier lama dimigrasikan saat dibaca, bukan saat ditulis, supaya file
+    yang sudah ada di disk tetap bisa dipakai tanpa perlu penyegaran ulang.
+    """
     path = _auto_file(config)
     if not os.path.exists(path):
         return None
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return data if isinstance(data, dict) and data.get("items") else None
+        if not (isinstance(data, dict) and data.get("items")):
+            return None
+        return migrate_tiers(data)
     except (json.JSONDecodeError, OSError):
         return None
 

@@ -7,8 +7,69 @@ import settings_schema as ss
 
 
 def test_schema_covers_every_final_config_key():
-    assert len(config.PUMP_CONFIG) == 82
+    assert len(config.PUMP_CONFIG) == 90
     assert set(ss.PARAMETER_SCHEMA) == set(config.PUMP_CONFIG)
+
+
+def test_kunci_strategi_lama_benar_benar_hilang():
+    """MIN_PUMP_PCT_24H dan kawan-kawan dihapus total, bukan disembunyikan."""
+    for kunci in ("MIN_PUMP_PCT_24H", "MOMENTUM_FADE_EXIT", "MOMENTUM_FADE_RANK_THRESHOLD"):
+        assert kunci not in config.PUMP_CONFIG
+        assert kunci not in config.PUMP_DEFAULTS
+        assert kunci not in ss.PARAMETER_SCHEMA
+
+
+def test_parameter_setup_baru_ada_di_schema():
+    baru = ("SWING_LOOKBACK_BARS", "SWING_PIVOT_WING_BARS", "BREAKOUT_BUFFER_ATR_MULT",
+            "RETEST_ZONE_ATR_MULT", "RETEST_VWAP_CONFLUENCE_ATR_MULT",
+            "VWAP_MIN_BARS_AFTER_ANCHOR", "MAX_BARS_BREAKOUT_TO_RETEST",
+            "MAX_RETEST_TOUCHES", "INVALIDATION_ATR_MULT", "MAX_EXTENSION_ATR_MULT",
+            "MIN_CLOSE_POSITION_IN_RANGE", "SETUP_INVALIDATION_EXIT")
+    for kunci in baru:
+        assert kunci in ss.PARAMETER_SCHEMA, kunci
+        assert kunci in config.PUMP_CONFIG, kunci
+
+
+def test_override_lama_yang_memuat_kunci_terhapus_tidak_dianggap_rusak(tmp_path, monkeypatch):
+    settings = tmp_path / "settings-paper.json"
+    marker = tmp_path / "settings-paper.error.json"
+    monkeypatch.setattr(ss, "settings_file", lambda mode: settings)
+    monkeypatch.setattr(ss, "settings_error_file", lambda mode: marker)
+    settings.write_text(json.dumps({"MIN_PUMP_PCT_24H": 13.0,
+                                    "MOMENTUM_FADE_EXIT": True,
+                                    "RISK_PERCENT": 12.5}), encoding="utf-8")
+    data, errors = ss.load_mode_override("PAPER")
+    # Kunci lama dibuang, setelan yang masih sah dipertahankan, dan file
+    # TIDAK diarsipkan sebagai korup.
+    assert data == {"RISK_PERCENT": 12.5}
+    assert any("dihapus" in e for e in errors)
+    assert not list(tmp_path.glob("settings-paper.json.corrupt-*"))
+
+
+def test_relasi_invalidasi_tidak_boleh_lebih_dangkal_dari_zona_retest():
+    kandidat = dict(config.PUMP_CONFIG)
+    kandidat["RETEST_ZONE_ATR_MULT"] = 1.5
+    kandidat["INVALIDATION_ATR_MULT"] = 0.5
+    _cleaned, errors, _warn = ss.validate_candidate(kandidat, "PAPER")
+    assert "INVALIDATION_ATR_MULT" in errors
+
+
+def test_relasi_lookback_minimum_mengikuti_struktur_setup():
+    kandidat = dict(config.PUMP_CONFIG)
+    kandidat["CONFIRM_LOOKBACK_BARS"] = 5
+    _cleaned, errors, _warn = ss.validate_candidate(kandidat, "PAPER")
+    assert "CONFIRM_LOOKBACK_BARS" in errors
+
+
+def test_tier_watchlist_lama_dimigrasikan():
+    assert config.migrate_watchlist_tier("MOMENTUM") == "AKTIF"
+    assert config.migrate_watchlist_tier("momentum") == "AKTIF"
+    assert config.migrate_watchlist_tier("INTI") == "INTI"
+    kandidat = dict(config.PUMP_CONFIG)
+    kandidat["WATCHLIST"] = [{"symbol": "BTCUSDT", "tier": "MOMENTUM", "score": 80.0}]
+    cleaned, errors, _warn = ss.validate_candidate(kandidat, "PAPER")
+    assert not errors, errors
+    assert cleaned["WATCHLIST"][0]["tier"] == "AKTIF"
 
 
 def test_override_is_merged_per_mode(tmp_path, monkeypatch):

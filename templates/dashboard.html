@@ -142,10 +142,10 @@
   .tag.st-diam{background:rgba(148,163,184,.1);color:var(--muted);border-color:var(--border)}
   .tag.st-nodata{background:rgba(148,163,184,.08);color:var(--muted);border-color:var(--border)}
   .tag.ti-inti{background:rgba(74,222,128,.12);color:var(--green);border-color:rgba(74,222,128,.28)}
-  .tag.ti-momentum{background:rgba(56,189,248,.12);color:var(--info);border-color:rgba(56,189,248,.26)}
+  .tag.ti-aktif{background:rgba(56,189,248,.12);color:var(--info);border-color:rgba(56,189,248,.26)}
   .tag.ti-spekulatif{background:rgba(245,158,11,.12);color:var(--amber);border-color:rgba(245,158,11,.28)}
   .tag.ti-lainnya{background:rgba(148,163,184,.1);color:var(--muted);border-color:var(--border)}
-  /* bar jarak menuju ambang pump: penuh = sudah lolos */
+  /* bar jarak menuju ambang volume: penuh = sudah lolos */
   .wl-bar{position:relative;height:5px;border-radius:3px;background:rgba(148,163,184,.14);
     overflow:hidden;min-width:52px}
   .wl-bar span{position:absolute;inset:0 auto 0 0;border-radius:3px;background:var(--info);
@@ -444,7 +444,7 @@
       <table class="wl" id="wlTable">
         <thead><tr>
           <th>Simbol</th><th>Tier</th><th>Harga</th><th>24 Jam</th>
-          <th>Menuju Ambang</th><th>Volume 24J</th><th>Posisi Range</th><th>Status</th>
+          <th>Menuju Ambang Volume</th><th>Volume 24J</th><th>Posisi Range</th><th>Status</th>
         </tr></thead>
         <tbody id="wlBody"><tr><td colspan="8" class="empty">Memuat watchlist…</td></tr></tbody>
       </table>
@@ -629,8 +629,16 @@
         <input type="number" id="btMaxHold" step="1">
       </div>
       <div class="bt-field">
-        <label>Min Pump 24h %</label>
-        <input type="number" id="btMinPump" step="0.1">
+        <label>Invalidasi (x ATR)</label>
+        <input type="number" id="btInvalMult" step="0.1">
+      </div>
+      <div class="bt-field">
+        <label>Anti-kejar (x ATR)</label>
+        <input type="number" id="btExtMult" step="0.1">
+      </div>
+      <div class="bt-field">
+        <label>Exit invalidasi setup</label>
+        <input type="checkbox" id="btSetupExit">
       </div>
       <div class="bt-field bt-actions">
         <label>&nbsp;</label>
@@ -903,7 +911,10 @@ function reasonTag(r){
     if(k.includes('TAKE_PROFIT')) return '<span class="tag tp">TP</span>';
     if(k.includes('BREAKEVEN')) return '<span class="tag be">BE</span>';
     if(k.includes('TRAILING')) return '<span class="tag tr">TRAIL</span>';
-    if(k.includes('MOMENTUM')) return '<span class="tag fade">FADE</span>';
+    if(k.includes('SETUP_INVALIDATED')) return '<span class="tag fade">INVALID</span>';
+    // Riwayat lama masih bisa menyimpan MOMENTUM_FADE. Ditandai "(lama)" supaya
+    // jelas itu berasal dari strategi yang sudah tidak dipakai lagi.
+    if(k.includes('MOMENTUM')) return '<span class="tag fade">FADE (lama)</span>';
     if(k.includes('MAX_HOLD')) return '<span class="tag max">TIMEOUT</span>';
     if(k.includes('MANUAL_CLOSE')) return '<span class="tag manual">MANUAL</span>';
     return '<span class="tag dry">'+k+'</span>';
@@ -995,7 +1006,8 @@ function renderStatus(s){
     <div class="posrow"><span class="k">Trigger Breakeven</span><span class="v mono">${c.be_trigger_pct}%</span></div>
     <div class="posrow"><span class="k">Mulai Trailing</span><span class="v mono">${c.trailing_start_pct}%</span></div>
     <div class="posrow"><span class="k">Maks hold</span><span class="v mono">${c.max_hold_minutes} mnt</span></div>
-    <div class="posrow"><span class="k">Min pump 24h</span><span class="v mono">${c.min_pump_pct_24h}%</span></div>
+    <div class="posrow"><span class="k">Exit invalidasi setup</span><span class="v mono">${c.setup_invalidation_exit? 'aktif' : 'nonaktif'}</span></div>
+    ${c.setup_invalidation_price? `<div class="posrow"><span class="k">Batas invalidasi / level breakout</span><span class="v mono">${fmtP(c.setup_invalidation_price)} / ${fmtP(c.setup_breakout_level)}</span></div>` : ''}
     <div class="posrow"><span class="k">Risk per entry</span><span class="v mono">${c.risk_percent}%</span></div>
     <div class="posrow"><span class="k">Maks posisi</span><span class="v mono">${fmt(c.max_position_usdt)} ${s.quote}</span></div>`;
 }
@@ -1161,9 +1173,9 @@ function renderChart(trades){
 
 // ======================= WATCHLIST (READ-ONLY) =======================
 // Panel ini MURNI MEMANTAU. Tidak ada satu pun elemen di sini yang
-// mengirim perintah ke bot, dan status "SIAP" hanya berarti koin itu
-// lolos dua gerbang 24 jam scanner, BUKAN jaminan bot akan membeli:
-// konfirmasi candle 5 menit dan cek operasional lain tidak dihitung di sini.
+// mengirim perintah ke bot, dan status "LIKUID" hanya berarti koin itu
+// lolos gerbang volume scanner, BUKAN jaminan bot akan membeli: deteksi
+// setup pullback retest dan cek operasional lain tidak dihitung di sini.
 
 // Volume ditulis ringkas supaya kolomnya tidak melebar: 1,2 jt / 340 rb.
 function wlVol(v){
@@ -1188,11 +1200,11 @@ function renderWatchlist(w){
   document.getElementById('wlCount').textContent =
     items.length ? `${items.length} simbol dipantau` : '';
 
-  // Ringkasan status. "SIAP" ditonjolkan karena itu yang dicari saat memantau.
-  const chipOrder=[['SIAP','siap'],['TIPIS',''],['MENUNGGU',''],['DIAM',''],['TIDAK ADA DATA','']];
+  // Ringkasan status. "LIKUID" ditonjolkan karena hanya simbol likuid yang
+  // bisa masuk semesta kandidat bot.
+  const chipOrder=[['LIKUID','siap'],['TIPIS',''],['TIDAK ADA DATA','']];
   let chips=chipOrder.filter(([k])=>counts[k])
     .map(([k,c])=>`<span class="wl-chip ${c}">${k} <b>${counts[k]}</b></span>`).join('');
-  chips+=`<span class="wl-chip">ambang naik <b>${fmt(cfg.min_pump_pct_24h,1)}%</b></span>`;
   chips+=`<span class="wl-chip">ambang volume <b>${wlVol(cfg.min_quote_volume_24h)}</b></span>`;
   document.getElementById('wlChips').innerHTML=chips;
 
@@ -1240,9 +1252,9 @@ function renderWatchlist(w){
   }else{
     note.innerHTML=`${sumberTxt} dan <b>hanya untuk dipantau</b>, tidak mengubah perilaku bot. `+
       `Bot tetap memindai seluruh pair ${cfg.quote_asset||'USDT'}. `+
-      `Status <b>SIAP</b> berarti koin lolos dua gerbang 24 jam (naik ≥ ${fmt(cfg.min_pump_pct_24h,1)}% `+
-      `dan volume ≥ ${wlVol(cfg.min_quote_volume_24h)}), <b>bukan</b> berarti bot pasti membeli. `+
-      `Konfirmasi candle 5 menit tidak dihitung di panel ini.${extra}`;
+      `Status <b>LIKUID</b> berarti volume 24 jam koin ≥ ${wlVol(cfg.min_quote_volume_24h)}, `+
+      `<b>bukan</b> berarti bot pasti membeli. Deteksi setup pullback retest pada candle `+
+      `tidak dihitung di panel ini.${extra}`;
   }
 
   const tb=document.getElementById('wlBody');
@@ -1251,23 +1263,22 @@ function renderWatchlist(w){
     return;
   }
 
-  const stCls={'SIAP':'st-siap','TIPIS':'st-tipis','MENUNGGU':'st-menunggu',
-               'DIAM':'st-diam','TIDAK ADA DATA':'st-nodata'};
+  const stCls={'LIKUID':'st-siap','TIPIS':'st-tipis','TIDAK ADA DATA':'st-nodata'};
 
   tb.innerHTML=items.map(r=>{
     const tierCls='ti-'+String(r.tier||'lainnya').toLowerCase();
     const st=r.status||'TIDAK ADA DATA';
-    const rowCls=(st==='SIAP')?' class="siap"':'';
+    const rowCls=(st==='LIKUID')?' class="siap"':'';
 
-    // Bar progres menuju ambang pump. Penuh berarti syarat kenaikan
-    // sudah terpenuhi; angka di bawahnya menyebut sisa jaraknya.
+    // Bar progres menuju ambang VOLUME. Penuh berarti gerbang likuiditas
+    // sudah terlewati; angka di bawahnya menyebut sisa jaraknya.
     let bar='<span class="mut">—</span>';
-    if(r.change_24h!==null&&r.change_24h!==undefined&&cfg.min_pump_pct_24h){
-      const ratio=Math.max(0,Math.min(1,r.change_24h/cfg.min_pump_pct_24h));
-      const full=r.pass_pump?' full':'';
-      const gap=r.pass_pump
-        ? `<span class="pos">lolos +${fmt(r.change_24h-cfg.min_pump_pct_24h,1)}%</span>`
-        : `kurang ${fmt(r.pump_gap,1)}%`;
+    if(r.quote_volume_24h!==null&&r.quote_volume_24h!==undefined&&cfg.min_quote_volume_24h){
+      const ratio=Math.max(0,Math.min(1,r.quote_volume_24h/cfg.min_quote_volume_24h));
+      const full=r.pass_volume?' full':'';
+      const gap=r.pass_volume
+        ? `<span class="pos">lolos ${wlVol(r.quote_volume_24h-cfg.min_quote_volume_24h)} di atas ambang</span>`
+        : `kurang ${wlVol(cfg.min_quote_volume_24h-r.quote_volume_24h)}`;
       bar=`<div class="wl-bar${full}"><span style="width:${(ratio*100).toFixed(1)}%"></span></div>`+
           `<div class="wl-gap">${gap}</div>`;
     }
@@ -1491,7 +1502,7 @@ function renderWatchEditor(field,wrap){
   rows.forEach((item,index)=>{
     const row=document.createElement('div');row.className='wl-edit-row';
     const sym=document.createElement('input');sym.className='wsym';sym.value=item.symbol||'';sym.placeholder='ARBUSDT';
-    const tier=document.createElement('select');tier.className='wtier';['INTI','MOMENTUM','SPEKULATIF'].forEach(t=>{const o=document.createElement('option');o.value=t;o.textContent=t;o.selected=t===item.tier;tier.appendChild(o);});
+    const tier=document.createElement('select');tier.className='wtier';['INTI','AKTIF','SPEKULATIF'].forEach(t=>{const o=document.createElement('option');o.value=t;o.textContent=t;o.selected=t===item.tier;tier.appendChild(o);});
     const del=document.createElement('button');del.className='btn danger';del.textContent='Hapus';del.type='button';
     sym.oninput=tier.onchange=()=>updateWatchValue(field.key,host);
     del.onclick=()=>{_settingsValues[field.key].splice(index,1);renderSettingsFields();markSettingDirty(field.key,_settingsValues[field.key]);};
@@ -1609,7 +1620,9 @@ async function loadBacktestDefaults(){
     document.getElementById('btTrStart').value = d.TRAILING_START_PCT;
     document.getElementById('btTrStep').value = d.TRAILING_STEP_PCT;
     document.getElementById('btMaxHold').value = d.MAX_HOLD_MINUTES;
-    document.getElementById('btMinPump').value = d.MIN_PUMP_PCT_24H;
+    document.getElementById('btInvalMult').value = d.INVALIDATION_ATR_MULT;
+    document.getElementById('btExtMult').value = d.MAX_EXTENSION_ATR_MULT;
+    document.getElementById('btSetupExit').checked = !!d.SETUP_INVALIDATION_EXIT;
     document.getElementById('btUseAtr').checked = !!d.USE_ATR_EXITS;
     document.getElementById('btAtrPeriod').value = d.ATR_PERIOD;
     document.getElementById('btAtrMult').value = d.ATR_MULTIPLIER_SL;
@@ -1751,7 +1764,9 @@ async function startBacktest(){
     TRAILING_START_PCT: document.getElementById('btTrStart').value,
     TRAILING_STEP_PCT: document.getElementById('btTrStep').value,
     MAX_HOLD_MINUTES: document.getElementById('btMaxHold').value,
-    MIN_PUMP_PCT_24H: document.getElementById('btMinPump').value,
+    INVALIDATION_ATR_MULT: document.getElementById('btInvalMult').value,
+    MAX_EXTENSION_ATR_MULT: document.getElementById('btExtMult').value,
+    SETUP_INVALIDATION_EXIT: document.getElementById('btSetupExit').checked,
     USE_ATR_EXITS: document.getElementById('btUseAtr').checked,
     ATR_PERIOD: document.getElementById('btAtrPeriod').value,
     ATR_MULTIPLIER_SL: document.getElementById('btAtrMult').value,
@@ -1870,7 +1885,8 @@ function finishBacktestUI(){
 function btReasonTagClass(r){ return (r||'').toLowerCase(); }
 function btReasonLabel(r){
   const map = {STOP_LOSS:'SL', TAKE_PROFIT:'TP', BREAKEVEN:'BE', TRAILING_STOP:'TRAIL',
-               MAX_HOLD_TIME:'TIMEOUT', MOMENTUM_FADE:'FADE', END_OF_DATA:'DATA HABIS'};
+               MAX_HOLD_TIME:'TIMEOUT', SETUP_INVALIDATED:'INVALID',
+               MOMENTUM_FADE:'FADE (lama)', END_OF_DATA:'DATA HABIS'};
   return map[r] || r;
 }
 
@@ -1946,7 +1962,7 @@ function renderBacktestResult(res){
     <div class="card"><div class="accent-bar"></div>
       <div class="label">Rata-rata Peringkat Entry</div>
       <div class="value mono">#${fmt(s.avg_rank_at_entry,2)}</div>
-      <div class="sub">posisi di papan gainer saat dibeli</div></div>`;
+      <div class="sub">posisi di papan kandidat (urut volume) saat dibeli</div></div>`;
   document.getElementById('btCards').innerHTML = cardsHtml;
 
   // info box
@@ -1958,7 +1974,9 @@ function renderBacktestResult(res){
     <div class="posrow"><span class="k">Rentang data</span><span class="v mono" style="font-size:11.5px">${res.start_time||'—'} &rarr; ${res.end_time||'—'}</span></div>
     <div class="posrow"><span class="k">Titik waktu diproses</span><span class="v mono">${fmt(res.bars_total,0)} bar ${res.interval}</span></div>
     <div class="posrow"><span class="k">SL / TP / BE (trig,lock) / Trail (start,step)</span><span class="v mono" style="font-size:11.5px">${p.SL_PCT}% / ${p.TP_PCT}% / ${p.BE_TRIGGER_PCT}%,${p.BE_LOCK_PCT}% / ${p.TRAILING_START_PCT}%,${p.TRAILING_STEP_PCT}%</span></div>
-    <div class="posrow"><span class="k">Maks hold / Min pump 24h</span><span class="v mono">${p.MAX_HOLD_MINUTES} mnt / ${p.MIN_PUMP_PCT_24H}%</span></div>
+    <div class="posrow"><span class="k">Maks hold</span><span class="v mono">${p.MAX_HOLD_MINUTES} mnt</span></div>
+    <div class="posrow"><span class="k">Invalidasi / anti-kejar (x ATR)</span><span class="v mono">${p.INVALIDATION_ATR_MULT}x / ${p.MAX_EXTENSION_ATR_MULT}x</span></div>
+    <div class="posrow"><span class="k">Exit invalidasi setup</span><span class="v mono">${p.SETUP_INVALIDATION_EXIT? 'aktif':'nonaktif'}</span></div>
     <div class="posrow"><span class="k">Mode exit</span><span class="v mono">${p.USE_ATR_EXITS? 'ATR' : 'TETAP'}</span></div>
     ${p.USE_ATR_EXITS ? `
       <div class="posrow"><span class="k">ATR: periode / pengali SL / RR</span><span class="v mono">${p.ATR_PERIOD} / ${p.ATR_MULTIPLIER_SL}x / ${p.ATR_TP_RR_RATIO}x</span></div>
@@ -1976,7 +1994,7 @@ function renderBacktestResult(res){
   document.getElementById('btTradeCount').textContent = res.trades.length? '('+res.trades.length+' trade)':'';
   const tb = document.getElementById('btTradeBody');
   if(!res.trades.length){
-    tb.innerHTML = '<tr><td colspan="9" class="empty">Tidak ada trade yang lolos filter & konfirmasi pada rentang ini. Coba longgarkan Min Pump 24h, perbanyak simbol, atau perpanjang rentang hari.</td></tr>';
+    tb.innerHTML = '<tr><td colspan="9" class="empty">Tidak ada setup pullback retest yang sah pada rentang ini. Coba longgarkan parameter setup, perbanyak simbol, atau perpanjang rentang hari.</td></tr>';
   } else {
     tb.innerHTML = res.trades.map(t=>`
       <tr>

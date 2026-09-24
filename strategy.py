@@ -1,17 +1,26 @@
 """
-Struktur data candle (Kline) dan parser hasil endpoint klines Binance.
+Struktur data candle (Kline), parser klines Binance, ATR, dan anchored VWAP.
 
 Semua array di sini memakai urutan KRONOLOGIS (index 0 = candle paling lama,
 index -1 = candle paling baru), sesuai perilaku default endpoint
 GET /api/v3/klines.
 
+Referensi endpoint yang dipakai modul ini:
+  https://developers.binance.com/en/docs/catalog/core-trading-spot-trading/api/rest-api/market#klines
+  (dicek 2026-09-25). Respons klines berupa tuple 12 field dengan indeks
+  0=openTime, 1=open, 2=high, 3=low, 4=close, 5=volume, 6=closeTime,
+  7=quoteAssetVolume. Bobot request 2 per panggilan, limit maksimum 1000
+  candle per panggilan.
+
 Catatan: modul ini dulu juga berisi indikator SuperTrend + EMA + ATR untuk bot
-grid martingale lama (sudah dihapus). Modul ini kini hanya menyisakan
-struktur candle dan parser yang masih dipakai oleh pump scanner.
+grid martingale lama (sudah dihapus). Sekarang isinya struktur candle, parser,
+ATR Wilder, anchored VWAP, dan resolusi level exit yang dipakai bersama oleh
+jalur live, backtest, dan watchlist.
 """
 
 from __future__ import annotations
 
+import math
 from typing import NamedTuple
 
 
@@ -29,6 +38,22 @@ class Kline(NamedTuple):
     # berjalan tanpa perlu diubah.
     volume: float = 0.0
     quote_volume: float = 0.0
+
+
+# Panjang interval candle dalam menit. Dipakai bersama oleh bot live,
+# backtest satu simbol, dan backtest portofolio supaya tidak ada dua tabel
+# yang bisa berbeda diam-diam. Nilai enum interval mengikuti dokumentasi
+# endpoint klines Binance (dicek 2026-09-25, lihat docstring modul).
+INTERVAL_MINUTES = {
+    "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
+    "1h": 60, "2h": 120, "4h": 240, "6h": 360, "8h": 480, "12h": 720,
+    "1d": 1440,
+}
+
+
+def interval_to_ms(interval: str, default_minutes: int = 5) -> int:
+    """Panjang satu candle dalam milidetik, jatuh ke default bila tidak dikenal."""
+    return int(INTERVAL_MINUTES.get(str(interval), default_minutes)) * 60_000
 
 
 def parse_klines(raw: list) -> list[Kline]:
@@ -171,6 +196,100 @@ def atr_percent(klines: "list[Kline]", period: int = 14,
     if not price or price <= 0:
         return None
     return value / price * 100.0
+
+
+# ---------------------------------------------------------------------
+# Anchored VWAP
+# ---------------------------------------------------------------------
+def anchored_vwap(klines: "list[Kline]", anchor_index: int) -> "float | None":
+    """VWAP yang dijangkar pada satu candle tertentu (candle anchor IKUT dihitung).
+
+    Rumusnya sama dengan VWAP bergulir yang dulu ada di repo ini, hanya titik
+    mulainya berbeda:
+
+        anchored_vwap = sum(quote_volume[anchor..terakhir]) / sum(volume[anchor..terakhir])
+
+    ``quote_volume`` diambil dari indeks 7 respons klines Binance dan
+    ``volume`` dari indeks 5 (lihat docstring modul, dicek 2026-09-25), jadi
+    pembagian ini benar-benar harga rata-rata tertimbang volume, bukan
+    rata-rata harga biasa.
+
+    Kembalikan None, bukan melempar error atau memberi angka palsu, kalau:
+      - daftar candle kosong atau anchor_index di luar rentang,
+      - total volume nol (sering terjadi pada data sintetis lama yang memakai
+        nilai default Kline.volume = 0.0),
+      - total quote_volume nol atau salah satu penjumlahan menghasilkan
+        nilai tidak finite (NaN/inf).
+
+    Pemanggil WAJIB memperlakukan None sebagai "setup ditolak", bukan sebagai
+    nol. VWAP nol akan membuat setiap perbandingan harga lolos secara diam-diam.
+    """
+    if not klines:
+        return None
+    n = len(klines)
+    if anchor_index < 0 or anchor_index >= n:
+        return None
+
+    vol_sum = 0.0
+    quote_sum = 0.0
+    for k in klines[anchor_index:]:
+        vol_sum += float(k.volume)
+        quote_sum += float(k.quote_volume)
+
+    if not math.isfinite(vol_sum) or not math.isfinite(quote_sum):
+        return None
+    if vol_sum <= 0 or quote_sum <= 0:
+        return None
+    value = quote_sum / vol_sum
+    if not math.isfinite(value) or value <= 0:
+        return None
+    return value
+
+
+# ---------------------------------------------------------------------
+# Kebutuhan jumlah candle untuk satu keputusan entry
+# ---------------------------------------------------------------------
+def required_lookback_bars(config: dict) -> int:
+    """Jumlah candle MINIMUM yang dibutuhkan satu evaluasi setup pullback retest.
+
+    Dihitung di SATU tempat lalu dipakai bersama oleh bot live, backtest satu
+    simbol, backtest portofolio, penilaian watchlist, dan validasi
+    settings_schema. Sebelumnya angka minimum ini tersebar (ada yang
+    hard-code 8 di portfolio_backtest.py), dan itu jenis duplikasi yang
+    membuat satu jalur diam-diam berbeda dari jalur lain.
+
+    Dua kebutuhan yang digabung:
+      1. ATR Wilder butuh ATR_PERIOD + 1 candle (TR candle pertama dibuang).
+      2. Struktur setup butuh ruang untuk swing lookback, sayap pivot kiri dan
+         kanan, lalu jarak dari breakout sampai retest:
+         SWING_LOOKBACK_BARS + 2 x SWING_PIVOT_WING_BARS + MAX_BARS_BREAKOUT_TO_RETEST.
+
+    Nilai default parameter di config.py adalah TITIK AWAL yang masih harus
+    divalidasi lewat backtest repo ini, bukan angka yang sudah terbukti.
+    """
+    atr_period = int(config.get("ATR_PERIOD", 14) or 14)
+    swing_lookback = int(config.get("SWING_LOOKBACK_BARS", 12) or 12)
+    wing = int(config.get("SWING_PIVOT_WING_BARS", 2) or 2)
+    max_bars_to_retest = int(config.get("MAX_BARS_BREAKOUT_TO_RETEST", 12) or 12)
+
+    need_atr = max(2, atr_period + 1)
+    need_struktur = max(3, swing_lookback + 2 * wing + max_bars_to_retest)
+    return max(need_atr, need_struktur)
+
+
+def confirm_window_bars(config: dict) -> int:
+    """Jumlah candle tertutup yang harus diambil untuk satu keputusan entry.
+
+    Sama dengan CONFIRM_LOOKBACK_BARS, tetapi tidak pernah lebih kecil dari
+    required_lookback_bars(). Ini yang dipakai pengambil klines di bot live,
+    dashboard, dan watchlist supaya ketiganya melihat jendela yang identik
+    walaupun config diisi terlalu kecil oleh pengguna.
+
+    Batas atas 1000 mengikuti limit maksimum endpoint GET /api/v3/klines
+    (dicek 2026-09-25, lihat docstring modul).
+    """
+    lookback = int(config.get("CONFIRM_LOOKBACK_BARS", 48) or 48)
+    return max(1, min(1000, max(lookback, required_lookback_bars(config))))
 
 
 def resolve_exit_levels(config: dict, klines: "list[Kline] | None" = None,
