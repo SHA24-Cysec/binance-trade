@@ -496,10 +496,6 @@
         <label>Min Pump 24h %</label>
         <input type="number" id="btMinPump" step="0.1">
       </div>
-      <div class="bt-field">
-        <label>Maks Ekstensi VWAP %</label>
-        <input type="number" id="btVwapExt" step="0.1">
-      </div>
       <div class="bt-field bt-actions">
         <label>&nbsp;</label>
         <div style="display:flex;gap:8px">
@@ -509,36 +505,6 @@
       </div>
     </div>
     <div id="btEstimate" class="mut" style="font-size:11.5px;margin-top:10px;line-height:1.6"></div>
-
-    <div class="bt-sub">
-      <h3>🎯 Entry retest VWAP + volume relatif</h3>
-      <p>
-        Model <b>VWAP_RETEST_RVOL</b> tidak membeli saat pump langsung. Ia menunggu low candle
-        sebelumnya menyentuh area VWAP, lalu candle sinyal bullish reclaim VWAP dengan quote
-        volume relatif tinggi. Ini <b>hipotesis uji</b>, bukan parameter terbukti atau siap live.
-      </p>
-      <div class="bt-form">
-        <div class="bt-field"><label>Model entry</label>
-          <select id="btEntryModel">
-            <option value="VWAP_RETEST_RVOL">VWAP retest + RVOL</option>
-            <option value="LEGACY_MOMENTUM">Legacy momentum</option>
-          </select></div>
-        <div class="bt-field"><label>Lookback retest (bar)</label>
-          <input type="number" id="btRetestBars" step="1" min="1"></div>
-        <div class="bt-field"><label>Toleransi sentuh di atas VWAP %</label>
-          <input type="number" id="btRetestTouch" step="0.05" min="0"></div>
-        <div class="bt-field"><label>Breakdown maksimum di bawah VWAP %</label>
-          <input type="number" id="btRetestBreakdown" step="0.05" min="0"></div>
-        <div class="bt-field"><label>Reclaim minimum di atas VWAP %</label>
-          <input type="number" id="btRetestReclaim" step="0.05" min="0"></div>
-        <div class="bt-field"><label>Posisi close sinyal (0..1)</label>
-          <input type="number" id="btRetestClosePos" step="0.05" min="0" max="1"></div>
-        <div class="bt-field"><label>Lookback RVOL (bar)</label>
-          <input type="number" id="btRvolBars" step="1" min="1"></div>
-        <div class="bt-field"><label>RVOL minimum (x)</label>
-          <input type="number" id="btMinRvol" step="0.1" min="0.01"></div>
-      </div>
-    </div>
 
     <div class="bt-sub">
       <h3>⚡ Exit berbasis ATR</h3>
@@ -871,9 +837,6 @@ function renderStatus(s){
     <div class="posrow"><span class="k">Mulai Trailing</span><span class="v mono">${c.trailing_start_pct}%</span></div>
     <div class="posrow"><span class="k">Maks hold</span><span class="v mono">${c.max_hold_minutes} mnt</span></div>
     <div class="posrow"><span class="k">Min pump 24h</span><span class="v mono">${c.min_pump_pct_24h}%</span></div>
-    <div class="posrow"><span class="k">Model entry</span><span class="v mono">${c.entry_model||'LEGACY_MOMENTUM'}</span></div>
-    <div class="posrow"><span class="k">RVOL minimum</span><span class="v mono">${c.min_relative_quote_volume!=null? c.min_relative_quote_volume+'x':'—'}</span></div>
-    <div class="posrow"><span class="k">Maks ekstensi VWAP</span><span class="v mono">${c.vwap_max_extension_pct!=null? c.vwap_max_extension_pct+'%' : 'nonaktif'}</span></div>
     <div class="posrow"><span class="k">Risk per entry</span><span class="v mono">${c.risk_percent}%</span></div>
     <div class="posrow"><span class="k">Maks posisi</span><span class="v mono">${fmt(c.max_position_usdt)} ${s.quote}</span></div>`;
 }
@@ -1041,7 +1004,7 @@ function renderChart(trades){
 // Panel ini MURNI MEMANTAU. Tidak ada satu pun elemen di sini yang
 // mengirim perintah ke bot, dan status "SIAP" hanya berarti koin itu
 // lolos dua gerbang 24 jam scanner, BUKAN jaminan bot akan membeli:
-// konfirmasi candle 5 menit (retest VWAP + RVOL) tidak dihitung di sini.
+// konfirmasi candle 5 menit dan cek operasional lain tidak dihitung di sini.
 
 // Volume ditulis ringkas supaya kolomnya tidak melebar: 1,2 jt / 340 rb.
 function wlVol(v){
@@ -1227,15 +1190,6 @@ async function loadBacktestDefaults(){
     document.getElementById('btTrStep').value = d.TRAILING_STEP_PCT;
     document.getElementById('btMaxHold').value = d.MAX_HOLD_MINUTES;
     document.getElementById('btMinPump').value = d.MIN_PUMP_PCT_24H;
-    document.getElementById('btVwapExt').value = d.VWAP_MAX_EXTENSION_PCT;
-    document.getElementById('btEntryModel').value = d.ENTRY_MODEL || 'VWAP_RETEST_RVOL';
-    document.getElementById('btRetestBars').value = d.VWAP_RETEST_LOOKBACK_BARS;
-    document.getElementById('btRetestTouch').value = d.VWAP_RETEST_TOUCH_TOLERANCE_PCT;
-    document.getElementById('btRetestBreakdown').value = d.VWAP_RETEST_MAX_BREAKDOWN_PCT;
-    document.getElementById('btRetestReclaim').value = d.VWAP_RETEST_MIN_RECLAIM_PCT;
-    document.getElementById('btRetestClosePos').value = d.VWAP_RETEST_SIGNAL_MIN_CLOSE_POSITION;
-    document.getElementById('btRvolBars').value = d.RVOL_LOOKBACK_BARS;
-    document.getElementById('btMinRvol').value = d.MIN_RELATIVE_QUOTE_VOLUME;
     document.getElementById('btUseAtr').checked = !!d.USE_ATR_EXITS;
     document.getElementById('btAtrPeriod').value = d.ATR_PERIOD;
     document.getElementById('btAtrMult').value = d.ATR_MULTIPLIER_SL;
@@ -1378,15 +1332,6 @@ async function startBacktest(){
     TRAILING_STEP_PCT: document.getElementById('btTrStep').value,
     MAX_HOLD_MINUTES: document.getElementById('btMaxHold').value,
     MIN_PUMP_PCT_24H: document.getElementById('btMinPump').value,
-    VWAP_MAX_EXTENSION_PCT: document.getElementById('btVwapExt').value,
-    ENTRY_MODEL: document.getElementById('btEntryModel').value,
-    VWAP_RETEST_LOOKBACK_BARS: document.getElementById('btRetestBars').value,
-    VWAP_RETEST_TOUCH_TOLERANCE_PCT: document.getElementById('btRetestTouch').value,
-    VWAP_RETEST_MAX_BREAKDOWN_PCT: document.getElementById('btRetestBreakdown').value,
-    VWAP_RETEST_MIN_RECLAIM_PCT: document.getElementById('btRetestReclaim').value,
-    VWAP_RETEST_SIGNAL_MIN_CLOSE_POSITION: document.getElementById('btRetestClosePos').value,
-    RVOL_LOOKBACK_BARS: document.getElementById('btRvolBars').value,
-    MIN_RELATIVE_QUOTE_VOLUME: document.getElementById('btMinRvol').value,
     USE_ATR_EXITS: document.getElementById('btUseAtr').checked,
     ATR_PERIOD: document.getElementById('btAtrPeriod').value,
     ATR_MULTIPLIER_SL: document.getElementById('btAtrMult').value,
@@ -1594,11 +1539,6 @@ function renderBacktestResult(res){
     <div class="posrow"><span class="k">Titik waktu diproses</span><span class="v mono">${fmt(res.bars_total,0)} bar ${res.interval}</span></div>
     <div class="posrow"><span class="k">SL / TP / BE (trig,lock) / Trail (start,step)</span><span class="v mono" style="font-size:11.5px">${p.SL_PCT}% / ${p.TP_PCT}% / ${p.BE_TRIGGER_PCT}%,${p.BE_LOCK_PCT}% / ${p.TRAILING_START_PCT}%,${p.TRAILING_STEP_PCT}%</span></div>
     <div class="posrow"><span class="k">Maks hold / Min pump 24h</span><span class="v mono">${p.MAX_HOLD_MINUTES} mnt / ${p.MIN_PUMP_PCT_24H}%</span></div>
-    <div class="posrow"><span class="k">Maks ekstensi VWAP</span><span class="v mono">${p.VWAP_MAX_EXTENSION_PCT}%</span></div>
-    <div class="posrow"><span class="k">Model entry</span><span class="v mono">${p.ENTRY_MODEL}</span></div>
-    ${p.ENTRY_MODEL==='VWAP_RETEST_RVOL' ? `
-      <div class="posrow"><span class="k">Retest VWAP: bar / sentuh / breakdown / reclaim</span><span class="v mono" style="font-size:11.5px">${p.VWAP_RETEST_LOOKBACK_BARS} / ${p.VWAP_RETEST_TOUCH_TOLERANCE_PCT}% / ${p.VWAP_RETEST_MAX_BREAKDOWN_PCT}% / ${p.VWAP_RETEST_MIN_RECLAIM_PCT}%</span></div>
-      <div class="posrow"><span class="k">Sinyal: posisi close / RVOL</span><span class="v mono">${p.VWAP_RETEST_SIGNAL_MIN_CLOSE_POSITION} / ${p.MIN_RELATIVE_QUOTE_VOLUME}x (${p.RVOL_LOOKBACK_BARS} bar)</span></div>` : ''}
     <div class="posrow"><span class="k">Mode exit</span><span class="v mono">${p.USE_ATR_EXITS? 'ATR' : 'TETAP'}</span></div>
     ${p.USE_ATR_EXITS ? `
       <div class="posrow"><span class="k">ATR: periode / pengali SL / RR</span><span class="v mono">${p.ATR_PERIOD} / ${p.ATR_MULTIPLIER_SL}x / ${p.ATR_TP_RR_RATIO}x</span></div>

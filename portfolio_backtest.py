@@ -669,8 +669,7 @@ def selftest() -> bool:
         "BE_TRIGGER_PCT": 1.0, "BE_LOCK_PCT": 0.1,
         "TRAILING_START_PCT": 1.5, "TRAILING_STEP_PCT": 0.6,
         "USE_ATR_EXITS": False, "ATR_PERIOD": 14, "TAKER_FEE_PCT": 0.1,
-        "MOMENTUM_FADE_EXIT": False, "ENTRY_MODEL": "LEGACY_MOMENTUM",
-        "USE_VWAP_FILTER": False, "QUOTE_ASSET": "USDT",
+        "MOMENTUM_FADE_EXIT": False, "QUOTE_ASSET": "USDT",
     }
 
     # Dua simbol naik bersamaan. Bot hanya boleh memegang satu.

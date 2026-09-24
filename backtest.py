@@ -4,11 +4,10 @@ Modul backtest untuk Pump Scanner Bot.
 =======================================
 
 TUJUAN: menguji parameter EXIT (Stop Loss, Take Profit, Breakeven, Trailing,
-Max Hold) dan filter ENTRY (Min Pump % 24 jam, filter VWAP) pada SATU simbol
-memakai data historis candle 5 menit dari Binance, memakai logika yang SAMA
-PERSIS dengan `market_scanner.confirm_momentum()`,
-`market_scanner.check_vwap_extension()`, dan `pump_scanner_bot.manage_exit()`
-supaya hasilnya konsisten dengan cara bot asli bekerja.
+Max Hold) dan filter ENTRY (Min Pump % 24 jam) pada SATU simbol memakai data
+historis candle 5 menit dari Binance, memakai logika yang SAMA PERSIS dengan
+`market_scanner.confirm_entry()` dan `pump_scanner_bot.manage_exit()` supaya
+hasilnya konsisten dengan cara bot asli bekerja.
 
 INI BUKAN SIMULASI SEMPURNA. Baca "KETERBATASAN" di bawah sebelum
 mempercayai hasilnya untuk keputusan finansial:
@@ -40,14 +39,7 @@ mempercayai hasilnya untuk keputusan finansial:
 4. Filter volume (MIN_QUOTE_VOLUME_USDT_24H), spread maksimum, dan ukuran
    posisi TIDAK bisa diubah dari form backtest (dipertahankan dari config.py
    apa adanya) -- backtest ini fokus menguji parameter EXIT + filter pump 24h
-   + filter VWAP saja, sesuai permintaan.
-
-5. FILTER VWAP (USE_VWAP_FILTER) memakai VWAP BERGULIR jangka pendek, window
-   sama dengan CONFIRM_LOOKBACK_BARS (candle konfirmasi momentum yang sama),
-   BUKAN VWAP sesi/harian seperti di bursa saham. Binance Spot tidak punya
-   jam buka/tutup sesi, jadi VWAP bergulir jangka pendek dipakai supaya
-   mengukur leg pump yang SEDANG terjadi, bukan tercampur histori sebelum
-   pump seperti kalau memakai VWAP 24 jam.
+   + konfirmasi momentum saja.
 
 Karena keterbatasan di atas, gunakan hasil backtest ini sebagai alat bantu
 membandingkan SATU set parameter dengan set parameter lain pada simbol yang
@@ -485,15 +477,6 @@ def apply_overrides(base_config: dict, overrides: dict) -> dict:
         "TRAILING_STEP_PCT": float,
         "MAX_HOLD_MINUTES": float,
         "MIN_PUMP_PCT_24H": float,
-        "VWAP_MAX_EXTENSION_PCT": float,
-        "ENTRY_MODEL": lambda v: str(v).strip().upper(),
-        "VWAP_RETEST_LOOKBACK_BARS": int,
-        "VWAP_RETEST_TOUCH_TOLERANCE_PCT": float,
-        "VWAP_RETEST_MAX_BREAKDOWN_PCT": float,
-        "VWAP_RETEST_MIN_RECLAIM_PCT": float,
-        "VWAP_RETEST_SIGNAL_MIN_CLOSE_POSITION": float,
-        "RVOL_LOOKBACK_BARS": int,
-        "MIN_RELATIVE_QUOTE_VOLUME": float,
     }
     cfg = copy.deepcopy(base_config)
     for key, caster in ALLOWED.items():
@@ -524,37 +507,12 @@ def validate_params(cfg: dict) -> None:
         ("TRAILING_STEP_PCT", 0.01, 1000),
         ("MAX_HOLD_MINUTES", 1, 100000),
         ("MIN_PUMP_PCT_24H", -100, 1000),
-        ("VWAP_MAX_EXTENSION_PCT", 0.01, 1000),
-        ("VWAP_RETEST_LOOKBACK_BARS", 1, 100),
-        ("VWAP_RETEST_TOUCH_TOLERANCE_PCT", 0, 100),
-        ("VWAP_RETEST_MAX_BREAKDOWN_PCT", 0, 100),
-        ("VWAP_RETEST_MIN_RECLAIM_PCT", 0, 100),
-        ("VWAP_RETEST_SIGNAL_MIN_CLOSE_POSITION", 0, 1),
-        ("RVOL_LOOKBACK_BARS", 1, 500),
-        ("MIN_RELATIVE_QUOTE_VOLUME", 0.01, 100),
     ]
     for key, lo, hi in checks:
         val = cfg.get(key)
         if val is None or not (lo <= val <= hi):
             raise BacktestError(f"Parameter '{key}'={val} di luar rentang wajar ({lo}..{hi}).")
 
-    entry_model = str(cfg.get("ENTRY_MODEL", scanner.ENTRY_MODEL_LEGACY)).strip().upper()
-    if entry_model not in scanner.VALID_ENTRY_MODELS:
-        raise BacktestError(
-            f"ENTRY_MODEL '{entry_model}' tidak dikenal. Pilih salah satu: "
-            f"{', '.join(scanner.VALID_ENTRY_MODELS)}."
-        )
-    if entry_model == scanner.ENTRY_MODEL_VWAP_RETEST_RVOL:
-        if not cfg.get("USE_VWAP_FILTER", False):
-            raise BacktestError("VWAP_RETEST_RVOL membutuhkan USE_VWAP_FILTER=True.")
-        required = max(8, int(cfg["VWAP_RETEST_LOOKBACK_BARS"]) + 1,
-                       int(cfg["RVOL_LOOKBACK_BARS"]) + 1)
-        available = int(cfg.get("CONFIRM_LOOKBACK_BARS", 0))
-        if available < required:
-            raise BacktestError(
-                f"CONFIRM_LOOKBACK_BARS={available} terlalu pendek untuk VWAP_RETEST_RVOL; "
-                f"butuh minimal {required} candle."
-            )
 
     if cfg.get("ATR_SL_MIN_PCT") > cfg.get("ATR_SL_MAX_PCT"):
         raise BacktestError(
@@ -598,9 +556,6 @@ def selftest():
     print("\n=== SELFTEST backtest.py: entry + TP ===")
     from config import PUMP_CONFIG
     cfg = dict(PUMP_CONFIG)
-    # Selftest exit lama memakai pola momentum langsung agar perubahan model
-    # entry tidak mengaburkan pengujian TP/SL/ATR di bawah.
-    cfg["ENTRY_MODEL"] = scanner.ENTRY_MODEL_LEGACY
     cfg["MIN_PUMP_PCT_24H"] = 8.0
     cfg["MIN_QUOTE_VOLUME_USDT_24H"] = 1_000_000
     cfg["TP_PCT"] = 6.0
@@ -671,75 +626,6 @@ def selftest():
     _ok = strategy.parse_klines([[0, "1", "2", "0.5", "1.5", 10, 300_000, 1000]])
     assert len(_ok) == 1 and _ok[0].close == 1.5, "Candle normal malah ditolak"
     print(f"  -> OK ({len(_kasus_rusak)} bentuk data rusak ditolak, candle normal tetap lolos)")
-
-    print("\n=== SELFTEST backtest.py: filter VWAP menolak pump yang terlalu curam/ekstrem ===")
-    # Pump SANGAT curam (+3%/candle, candle close dekat high supaya lolos cek
-    # reversal confirm_momentum) -> extension dari VWAP window pendek akan
-    # jauh melebihi VWAP_MAX_EXTENSION_PCT (5%) begitu momentum lolos.
-    klines_curam = []
-    t3 = 0
-    price3 = 1.0
-    for _ in range(288):
-        klines_curam.append(_make_candle(t3, price3, price3 * 1.001, price3 * 0.999, price3))
-        t3 += 300_000
-    for _ in range(60):
-        price3 = price3 * 1.03
-        klines_curam.append(_make_candle(
-            t3, price3 * 0.99, price3 * 1.001, price3 * 0.985, price3, vol=5_000_000.0))
-        t3 += 300_000
-
-    cfg_vwap_on = dict(cfg)
-    cfg_vwap_on["MIN_PUMP_PCT_24H"] = 8.0
-    cfg_vwap_on["MIN_QUOTE_VOLUME_USDT_24H"] = 1_000_000
-    cfg_vwap_on["USE_VWAP_FILTER"] = True
-    cfg_vwap_on["VWAP_MAX_EXTENSION_PCT"] = 5.0
-    result_on = run_backtest(klines_curam, cfg_vwap_on, warmup_bars=0)
-    print(f"  Filter VWAP ON, pump curam +3%/candle -> jumlah trade: {len(result_on.trades)}")
-    assert len(result_on.trades) == 0, "Pump yang terlalu curam harusnya DITOLAK filter VWAP (0 trade)"
-
-    cfg_vwap_off = dict(cfg_vwap_on)
-    cfg_vwap_off["USE_VWAP_FILTER"] = False
-    result_off = run_backtest(klines_curam, cfg_vwap_off, warmup_bars=0)
-    print(f"  Filter VWAP OFF, data sama persis -> jumlah trade: {len(result_off.trades)}")
-    assert len(result_off.trades) > 0, "Tanpa filter VWAP, pump curam yang sama harusnya tetap bisa entry"
-    print("  -> OK (filter VWAP terbukti menolak entry pada pump yang kepanasan/ekstrem)")
-
-    print("\n=== SELFTEST backtest.py: entry retest VWAP + RVOL memakai mesin backtest ===")
-    # Tes integrasi ini memastikan run_backtest() memanggil confirm_entry(),
-    # bukan kembali diam-diam ke confirm_momentum() lama. Sebagian besar data
-    # datar agar tidak ada entry sebelum pola retest valid terbentuk.
-    retest_bt = []
-    trt = 0
-    for _ in range(304):
-        retest_bt.append(_make_candle(trt, 100.0, 100.1, 99.9, 100.0, vol=1000.0))
-        trt += 300_000
-    retest_bt += [
-        _make_candle(trt, 100.2, 100.55, 100.0, 100.5, vol=1000.0),
-        _make_candle(trt + 300_000, 100.5, 100.65, 100.4, 100.6, vol=1000.0),
-        _make_candle(trt + 600_000, 100.6, 100.70, 100.5, 100.65, vol=1000.0),
-        _make_candle(trt + 900_000, 100.75, 101.05, 100.7, 101.0, vol=2000.0),
-        # Candle sesudah entry: cukup tinggi untuk TP tetap 0,5%.
-        _make_candle(trt + 1_200_000, 101.0, 101.7, 100.9, 101.5, vol=1000.0),
-    ]
-    retest_cfg = dict(cfg)
-    retest_cfg.update({
-        "ENTRY_MODEL": scanner.ENTRY_MODEL_VWAP_RETEST_RVOL,
-        "MIN_PUMP_PCT_24H": -100.0, "MIN_QUOTE_VOLUME_USDT_24H": 0.0,
-        "USE_VWAP_FILTER": True, "VWAP_MAX_EXTENSION_PCT": 3.5,
-        "VWAP_RETEST_LOOKBACK_BARS": 3, "VWAP_RETEST_TOUCH_TOLERANCE_PCT": 0.20,
-        "VWAP_RETEST_MAX_BREAKDOWN_PCT": 0.75, "VWAP_RETEST_MIN_RECLAIM_PCT": 0.10,
-        "VWAP_RETEST_SIGNAL_MIN_CLOSE_POSITION": 0.60,
-        "RVOL_LOOKBACK_BARS": 5, "MIN_RELATIVE_QUOTE_VOLUME": 1.50,
-        "USE_ATR_EXITS": False, "TP_PCT": 0.5, "SL_PCT": 10.0,
-        "USE_BREAKEVEN": False, "USE_TRAILING": False,
-        "COOLDOWN_MINUTES_AFTER_CLOSE": 999,
-    })
-    retest_result = run_backtest(retest_bt, retest_cfg, warmup_bars=288)
-    assert len(retest_result.trades) == 1, (
-        f"Pola retest+RVOL harus menghasilkan tepat 1 trade, dapat {len(retest_result.trades)}")
-    assert abs(retest_result.trades[0].entry_price - 101.0) < 1e-9, retest_result.trades[0]
-    assert retest_result.trades[0].reason == "TAKE_PROFIT", retest_result.trades[0]
-    print("  Retest valid masuk pada candle reclaim, lalu TP -> OK")
 
     print("\n=== SELFTEST backtest.py: Stop Loss kena SEBELUM Breakeven/Trailing aktif ===")
     # Bangun ulang data flat -> pump (SAMA seperti tes di atas), tapi
@@ -952,9 +838,8 @@ def selftest():
             t += 5 * MS_PER_MIN
 
     cfg_la = dict(base_atr_cfg)
-    cfg_la.update({"ENTRY_MODEL": scanner.ENTRY_MODEL_LEGACY,
-                    "MIN_PUMP_PCT_24H": -100.0, "MIN_QUOTE_VOLUME_USDT_24H": 0.0,
-                    "USE_VWAP_FILTER": False, "COOLDOWN_MINUTES_AFTER_CLOSE": 0})
+    cfg_la.update({"MIN_PUMP_PCT_24H": -100.0, "MIN_QUOTE_VOLUME_USDT_24H": 0.0,
+                    "COOLDOWN_MINUTES_AFTER_CLOSE": 0})
     short_run = run_backtest(synth[:2500], cfg_la, warmup_bars=bars_per_day("5m"))
     long_run = run_backtest(synth, cfg_la, warmup_bars=bars_per_day("5m"))
 
@@ -1118,22 +1003,6 @@ def main():
     parser.add_argument("--symbol", default="BTCUSDT", help="Simbol, mis. SOLUSDT")
     parser.add_argument("--days", type=int, default=30, help="Jumlah hari data historis")
     parser.add_argument("--interval", default=None, help="Interval candle (default dari config)")
-    parser.add_argument("--entry-model", choices=scanner.VALID_ENTRY_MODELS, default=None,
-                        help="Model entry: LEGACY_MOMENTUM atau VWAP_RETEST_RVOL")
-    parser.add_argument("--retest-bars", type=int, default=None,
-                        help="Jumlah candle sebelum sinyal untuk mencari retest VWAP")
-    parser.add_argument("--retest-touch-tolerance", type=float, default=None,
-                        help="Toleransi low retest di atas VWAP (%%)")
-    parser.add_argument("--retest-max-breakdown", type=float, default=None,
-                        help="Breakdown low retest maksimum di bawah VWAP (%%)")
-    parser.add_argument("--retest-min-reclaim", type=float, default=None,
-                        help="Close candle sinyal minimum di atas VWAP (%%)")
-    parser.add_argument("--retest-min-close-position", type=float, default=None,
-                        help="Posisi close minimum candle sinyal di range 0..1")
-    parser.add_argument("--rvol-bars", type=int, default=None,
-                        help="Jumlah candle pembanding quote volume")
-    parser.add_argument("--min-rvol", type=float, default=None,
-                        help="Quote volume sinyal minimum dalam kelipatan rata-rata sebelumnya")
     parser.add_argument("--atr-multiplier", type=float, default=None)
     parser.add_argument("--atr-period", type=int, default=None)
     parser.add_argument("--atr-min", type=float, default=None, help="Batas bawah SL (%%)")
@@ -1161,15 +1030,7 @@ def main():
     cfg["_symbol"] = args.symbol
     if args.interval:
         cfg["CONFIRM_INTERVAL"] = args.interval
-    for key, val in (("ENTRY_MODEL", args.entry_model),
-                     ("VWAP_RETEST_LOOKBACK_BARS", args.retest_bars),
-                     ("VWAP_RETEST_TOUCH_TOLERANCE_PCT", args.retest_touch_tolerance),
-                     ("VWAP_RETEST_MAX_BREAKDOWN_PCT", args.retest_max_breakdown),
-                     ("VWAP_RETEST_MIN_RECLAIM_PCT", args.retest_min_reclaim),
-                     ("VWAP_RETEST_SIGNAL_MIN_CLOSE_POSITION", args.retest_min_close_position),
-                     ("RVOL_LOOKBACK_BARS", args.rvol_bars),
-                     ("MIN_RELATIVE_QUOTE_VOLUME", args.min_rvol),
-                     ("ATR_MULTIPLIER_SL", args.atr_multiplier), ("ATR_PERIOD", args.atr_period),
+    for key, val in (("ATR_MULTIPLIER_SL", args.atr_multiplier), ("ATR_PERIOD", args.atr_period),
                       ("ATR_SL_MIN_PCT", args.atr_min), ("ATR_SL_MAX_PCT", args.atr_max),
                       ("ATR_TP_RR_RATIO", args.atr_rr),
                       ("ATR_BE_TRIGGER_MULT", args.atr_be_trigger),

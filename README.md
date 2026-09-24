@@ -380,7 +380,7 @@ Dua cara menekannya:
 |---|---|
 | `config.py` | Semua parameter strategi, risiko, dan kredensial (`PUMP_CONFIG`) |
 | `binance_client.py` | Klien REST Binance Spot (dibuat manual, signature sudah diverifikasi cocok dengan contoh resmi Binance) |
-| `market_scanner.py` | Filter & ranking koin "pump" + konfirmasi momentum + filter VWAP |
+| `market_scanner.py` | Filter & ranking koin "pump" + konfirmasi momentum |
 | `pump_scanner_bot.py` | Program utama: scan pasar, rotasi 1 koin (`--selftest` tersedia juga) |
 | `strategy.py` | Struktur candle (`Kline`) + parser klines |
 | `state.py` | Penyimpanan state posisi ke file JSON (tahan restart) |
@@ -400,10 +400,8 @@ Dua cara menekannya:
    (xxxUP/DOWN/BULL/BEAR), bukan pair stablecoin-ke-stablecoin.
 3. Dari hasil yang lolos, diambil top-N (`TOP_N_CANDIDATES_TO_CONFIRM`)
    untuk dicek candle 5 menit terakhirnya: apakah momentum jangka pendek
-   masih naik dan candle terakhir bukan reversal/topping, DAN (kalau
-   `USE_VWAP_FILTER` aktif) apakah harga saat ini masih wajar dibanding
-   VWAP bergulir jangka pendek -- lihat bagian "Filter VWAP" di bawah.
-   Kandidat pertama yang lolos SEMUA konfirmasi ini yang dibeli.
+   masih naik dan candle terakhir bukan reversal/topping. Kandidat pertama
+   yang lolos SEMUA konfirmasi ini yang dibeli.
 4. Bot hanya memegang **1 koin dalam satu waktu**. Tidak ada
    averaging-down/martingale -- satu kali entry per rotasi, karena
    averaging-down pada koin yang sedang "gagal pump" (dan berpotensi dump
@@ -414,33 +412,6 @@ Dua cara menekannya:
    batas waktu hold maksimum (`MAX_HOLD_MINUTES` -- mencegah "nyangkut" di
    pump yang sudah mati), atau momentum pudar (koin sudah tidak masuk
    top-N gainer lagi saat scan berikutnya).
-
-## Filter VWAP (`USE_VWAP_FILTER`, `VWAP_MAX_EXTENSION_PCT`)
-
-Filter tambahan pada tahap konfirmasi entry (langkah 3 di atas), aktif
-secara default (`USE_VWAP_FILTER: True`).
-
-- **VWAP yang dipakai adalah VWAP BERGULIR jangka pendek**, bukan VWAP
-  sesi/harian seperti di bursa saham. Binance Spot buka 24/7 tanpa jam
-  reset sesi, jadi VWAP dihitung dari window candle konfirmasi yang sama
-  dipakai `confirm_momentum()` (`CONFIRM_LOOKBACK_BARS`, default 20 candle
-  5 menit = 100 menit terakhir). Ini sengaja BUKAN VWAP 24 jam bergulir
-  karena filter pump 24 jam (`MIN_PUMP_PCT_24H`) sudah membuat semua
-  kandidat otomatis jauh di atas VWAP 24 jam-nya -- window pendek jauh
-  lebih diskriminatif karena mengukur leg pump yang SEDANG terjadi, bukan
-  tercampur histori sebelum pump dimulai.
-- Rumus: `VWAP = total(quote_volume) / total(volume)` pada window candle
-  tersebut (rata-rata harga tertimbang volume transaksi riil).
-- Kandidat **DITOLAK** kalau harga saat ini masih di BAWAH VWAP jangka
-  pendek (indikasi tekanan beli di leg ini belum benar-benar dominan).
-- Kandidat **DITOLAK** kalau harga saat ini sudah lebih dari
-  `VWAP_MAX_EXTENSION_PCT` (default 5%) DI ATAS VWAP jangka pendek
-  (indikasi harga sudah terlalu "kepanasan"/ekstrem, risiko besar membeli
-  di puncak lokal yang segera terkoreksi).
-- Kandidat **LOLOS** hanya kalau harga berada di rentang
-  `[VWAP, VWAP × (1 + VWAP_MAX_EXTENSION_PCT/100)]`.
-- Bisa dimatikan (`USE_VWAP_FILTER: False`) kalau ingin kembali ke perilaku
-  sebelum fitur ini ada (hanya mengandalkan `confirm_momentum()`).
 
 ## PERINGATAN (harap dibaca)
 
@@ -620,12 +591,11 @@ Arti kolom Status:
 | **TIDAK ADA DATA** | Simbol tidak ditemukan di ticker Binance (salah ketik, atau pair sudah delisting) |
 
 **Status SIAP bukan berarti bot pasti membeli.** Panel ini hanya memeriksa dua
-gerbang 24 jam. Bot masih menjalankan konfirmasi candle 5 menit (retest VWAP +
-RVOL pada `ENTRY_MODEL` aktif), cek spread, cooldown, dan hanya mengambil SATU
-kandidat terbaik dari seluruh pasar. Konfirmasi candle sengaja tidak dihitung
-di panel ini, karena itu berarti mengunduh candle per simbol setiap refresh dan
-memakan jatah rate-limit IP yang sama dengan yang dipakai bot untuk mengirim
-order.
+gerbang 24 jam. Bot masih menjalankan konfirmasi candle 5 menit, cek spread,
+cooldown, dan hanya mengambil SATU kandidat terbaik dari seluruh pasar.
+Konfirmasi candle sengaja tidak dihitung di panel ini, karena itu berarti
+mengunduh candle per simbol setiap refresh dan memakan jatah rate-limit IP
+yang sama dengan yang dipakai bot untuk mengirim order.
 
 Beban jaringannya kecil: panel memakai SATU panggilan `ticker/24hr` untuk
 seluruh pasar (bukan satu per simbol) dengan cache 20 detik, jadi paling
@@ -797,15 +767,13 @@ dimatikan lewat config):**
 Di bagian bawah dashboard ada panel **"Backtest Parameter"**. Isi satu simbol
 (mis. `SOLUSDT`), rentang hari (bebas, tidak dibatasi -- lihat catatan di
 bawah), dan parameter yang mau diuji (Stop Loss, TP%, Breakeven, Trailing,
-Maks Hold, Min Pump 24h, Maks Ekstensi VWAP), lalu klik **Jalankan
-Backtest**. Prosesnya:
+Maks Hold, Min Pump 24h), lalu klik **Jalankan Backtest**. Prosesnya:
 
 1. Dashboard mengambil candle 5 menit historis simbol tsb langsung dari
    Binance (butuh koneksi internet keluar dari server dashboard).
 2. Untuk tiap candle, dihitung ulang persentase kenaikan & volume 24 jam
-   bergulir, lalu diuji dengan filter `MIN_PUMP_PCT_24H`, fungsi konfirmasi
-   momentum, dan filter VWAP (`check_vwap_extension()`) **yang sama persis**
-   dengan `market_scanner.py`.
+   bergulir, lalu diuji dengan filter `MIN_PUMP_PCT_24H` dan fungsi
+   konfirmasi momentum **yang sama persis** dengan `market_scanner.py`.
 3. Kalau lolos, posisi "dibuka", lalu dievaluasi tiap candil berikutnya
    dengan logika exit **yang sama persis** dengan `manage_exit()` di
    `pump_scanner_bot.py` (Stop Loss / Take Profit / Breakeven / Trailing /
@@ -838,9 +806,6 @@ diunduh dengan paging dari Binance).
   profit saat kondisinya ambigu.
 - **`MOMENTUM_FADE_EXIT` tidak disimulasikan** (butuh data ranking seluruh
   pasar per candle, bukan cuma satu simbol).
-- **Filter VWAP** memakai VWAP BERGULIR jangka pendek (window
-  `CONFIRM_LOOKBACK_BARS`, sama dengan candle konfirmasi momentum), BUKAN
-  VWAP sesi/harian -- lihat bagian "Filter VWAP" di atas untuk detail.
 - Filter volume, spread maksimum, dan ukuran posisi TIDAK bisa diubah dari
   form ini (dipertahankan dari `config.py`).
 - Return total dihitung **compounding** (reinvest 100% tiap trade, sesuai
@@ -933,8 +898,6 @@ Di `config.py` (nilai default sudah aman untuk PAPER):
 2. Set `"MODE": "LIVE"` di `config.py`.
 3. Periksa kontrol risiko: `RISK_PERCENT`, `MAX_POSITION_USDT`,
    `USE_EQUITY_STOP`, `MAX_DAILY_LOSS_PERCENT`, `CLOSE_ALL_AT_LIMIT`.
-4. Periksa `ALLOW_EXPERIMENTAL_ENTRY_LIVE` sesuai kebijakan Anda
-   (default `False` memblokir entry model eksperimen di LIVE).
-5. Mulai dari **modal kecil**, pantau beberapa rotasi trade pertama.
-6. Sadari: **hasil PAPER bukan jaminan hasil LIVE** (slippage, antrean order
+4. Mulai dari **modal kecil**, pantau beberapa rotasi trade pertama.
+5. Sadari: **hasil PAPER bukan jaminan hasil LIVE** (slippage, antrean order
    book, dan likuiditas nyata bisa berbeda).

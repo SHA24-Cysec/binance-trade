@@ -403,11 +403,8 @@ def build_status():
             "trailing_start_pct": state.get("trail_start_pct") or PUMP_CONFIG.get("TRAILING_START_PCT"),
             "max_hold_minutes": PUMP_CONFIG.get("MAX_HOLD_MINUTES"),
             "min_pump_pct_24h": PUMP_CONFIG.get("MIN_PUMP_PCT_24H"),
-            "entry_model": PUMP_CONFIG.get("ENTRY_MODEL", "LEGACY_MOMENTUM"),
-            "min_relative_quote_volume": PUMP_CONFIG.get("MIN_RELATIVE_QUOTE_VOLUME"),
             "risk_percent": PUMP_CONFIG.get("RISK_PERCENT"),
             "max_position_usdt": PUMP_CONFIG.get("MAX_POSITION_USDT"),
-            "vwap_max_extension_pct": PUMP_CONFIG.get("VWAP_MAX_EXTENSION_PCT") if PUMP_CONFIG.get("USE_VWAP_FILTER") else None,
         },
     }
 
@@ -469,10 +466,7 @@ def _reject_if_backtest_disabled():
 BT_PARAM_KEYS = (
     "USE_ATR_EXITS",
     "SL_PCT", "TP_PCT", "BE_TRIGGER_PCT", "BE_LOCK_PCT", "TRAILING_START_PCT",
-    "TRAILING_STEP_PCT", "MAX_HOLD_MINUTES", "MIN_PUMP_PCT_24H", "VWAP_MAX_EXTENSION_PCT",
-    "ENTRY_MODEL", "VWAP_RETEST_LOOKBACK_BARS", "VWAP_RETEST_TOUCH_TOLERANCE_PCT",
-    "VWAP_RETEST_MAX_BREAKDOWN_PCT", "VWAP_RETEST_MIN_RECLAIM_PCT",
-    "VWAP_RETEST_SIGNAL_MIN_CLOSE_POSITION", "RVOL_LOOKBACK_BARS", "MIN_RELATIVE_QUOTE_VOLUME",
+    "TRAILING_STEP_PCT", "MAX_HOLD_MINUTES", "MIN_PUMP_PCT_24H",
     "ATR_PERIOD", "ATR_MULTIPLIER_SL", "ATR_SL_MIN_PCT", "ATR_SL_MAX_PCT", "ATR_TP_RR_RATIO",
     "ATR_BE_TRIGGER_MULT", "ATR_BE_LOCK_MULT", "ATR_TRAILING_START_MULT", "ATR_TRAILING_STEP_MULT",
 )
@@ -937,8 +931,8 @@ def build_watchlist() -> dict:
                     status = "DIAM"
 
                 # Posisi harga dalam rentang 24 jam: 1,0 berarti di puncak
-                # hari ini, 0,0 di dasar. Berguna karena bot menolak harga
-                # yang sudah terlalu jauh di atas VWAP.
+                # hari ini, 0,0 di dasar. Berguna untuk melihat apakah harga
+                # sudah dekat puncak harian.
                 rng = hi - lo
                 rpos = ((price - lo) / rng) if rng > 0 else None
 

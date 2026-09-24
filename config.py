@@ -8,10 +8,9 @@ Bot grid sudah dihapus, jadi kini hanya tersisa PUMP_CONFIG.
 Mode pump scanner TIDAK memprediksi pump sebelum terjadi -- ia mendeteksi koin
 yang harganya SUDAH naik signifikan + volume tinggi dalam 24 jam terakhir, lalu
 mengkonfirmasi lewat candle 5 menit apakah momentumnya kelihatan masih
-berlanjut, DAN apakah harga saat ini masih wajar dibanding VWAP bergulir
-jangka pendek (tidak kepanasan/ekstrem), sebelum ikut masuk. Ini reaktif
-(momentum chasing), bukan prediktif. Hanya satu entry per rotasi (tanpa
-averaging-down), dengan Stop Loss/TP/Breakeven/Trailing untuk keluar.
+berlanjut sebelum ikut masuk. Ini reaktif (momentum chasing), bukan prediktif.
+Hanya satu entry per rotasi (tanpa averaging-down), dengan Stop Loss/TP/
+Breakeven/Trailing untuk keluar.
 
 Kredensial diambil dari file .env, JANGAN taruh langsung di file config.py ini
 (kalau ditulis di sini, risiko ke-commit ke Git atau ke-share tanpa sengaja
@@ -191,35 +190,6 @@ PUMP_CONFIG = {
     "CONFIRM_INTERVAL": "5m",
     "CONFIRM_LOOKBACK_BARS": 20,
     "MIN_CLOSE_POSITION_IN_RANGE": 0.35,     # lihat market_scanner.confirm_momentum()
-    "USE_VWAP_FILTER": True,                 # tolak kandidat yang terlalu jauh dari VWAP bergulir jangka pendek
-    "VWAP_MAX_EXTENSION_PCT": 3.5,            # tolak kalau harga > batas ini di atas VWAP; harga di BAWAH VWAP juga ditolak
-
-    # --- Model entry (EKSPERIMENTAL: wajib backtest out-of-sample dulu) ---
-    #
-    # LEGACY_MOMENTUM: perilaku lama, membeli saat momentum pendek naik dan
-    #                  harga masih berada di area VWAP yang diizinkan.
-    # VWAP_RETEST_RVOL: setelah pump 24 jam lolos, TUNGGU pullback/retest VWAP,
-    #                  lalu beli hanya jika candle 5m berikutnya bullish,
-    #                  reclaim VWAP, dan quote volume relatifnya menguat.
-    #
-    # Hasil 730 hari sebelumnya menunjukkan entry momentum langsung tidak
-    # punya edge kotor. Karena itu mode retest ini adalah DESAIN HIPOTESIS,
-    # bukan set parameter terbukti dan bukan izin untuk live trading.
-    "ENTRY_MODEL": "VWAP_RETEST_RVOL",
-    "VWAP_RETEST_LOOKBACK_BARS": 3,           # retest harus terjadi dalam 3 candle SEBELUM candle sinyal
-    "VWAP_RETEST_TOUCH_TOLERANCE_PCT": 0.20,  # low retest boleh sampai 0,20% di atas VWAP
-    "VWAP_RETEST_MAX_BREAKDOWN_PCT": 0.75,    # low retest tidak boleh breakdown >0,75% di bawah VWAP
-    "VWAP_RETEST_MIN_RECLAIM_PCT": 0.10,      # close sinyal minimal 0,10% di atas VWAP
-    "VWAP_RETEST_SIGNAL_MIN_CLOSE_POSITION": 0.60,  # close sinyal minimal di 60% range candle
-    "RVOL_LOOKBACK_BARS": 10,                 # pembanding volume = 10 candle sebelum candle sinyal
-    "MIN_RELATIVE_QUOTE_VOLUME": 1.50,        # quote volume sinyal minimal 1,5x rata-rata pembanding
-    # Proteksi keras: mode entry baru tidak boleh mengirim order LIVE sebelum
-    # lulus validasi out-of-sample yang disepakati. PAPER dan backtest tetap
-    # diizinkan. Jangan ubah ke True hanya karena satu hasil backtest bagus.
-    # DEFAULT False (hasil audit 2026-09-24): dengan ENTRY_MODEL saat ini masih
-    # berstatus hipotesis, pagar ini HARUS aktif. Ubah ke True hanya setelah
-    # Anda sadar penuh sudah memvalidasi model entry di data produksi.
-    "ALLOW_EXPERIMENTAL_ENTRY_LIVE": False,
 
     "EXTRA_EXCLUDE_SYMBOLS": [],             # mis. ["SOMEUSDT"] kalau mau blacklist manual
 
@@ -264,8 +234,8 @@ PUMP_CONFIG = {
     #   - 110 pair shortlist ditarik candle 5 menit selama 45 hari
     #     (= CONFIRM_INTERVAL bot, 12.960 candle per simbol).
     #   - Pada tiap candle 5 menit itu dijalankan confirm_entry() ASLI dari
-    #     market_scanner.py dengan ENTRY_MODEL yang sedang aktif, plus
-    #     atr_percent() asli dari strategy.py. Jadi angka "berapa kali koin
+    #     market_scanner.py, plus atr_percent() asli dari strategy.py.
+    #     Jadi angka "berapa kali koin
     #     ini memicu sinyal" adalah hasil menjalankan logika keputusan bot
     #     itu sendiri, bukan perkiraan.
     #
