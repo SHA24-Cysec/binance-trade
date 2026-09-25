@@ -114,7 +114,7 @@
   .tag.tp,.tag.take_profit{background:rgba(74,222,128,.13);color:var(--green);border-color:rgba(74,222,128,.3)}
   .tag.be,.tag.breakeven{background:rgba(56,189,248,.13);color:var(--info);border-color:rgba(56,189,248,.28)}
   .tag.tr,.tag.trailing_stop{background:rgba(45,212,191,.13);color:#2dd4bf;border-color:rgba(45,212,191,.28)}
-  .tag.fade,.tag.max,.tag.max_hold_time{background:rgba(245,158,11,.13);color:var(--amber);border-color:rgba(245,158,11,.28)}
+  .tag.fade{background:rgba(245,158,11,.13);color:var(--amber);border-color:rgba(245,158,11,.28)}
   .tag.dry,.tag.timeout,.tag.end_of_data{background:rgba(148,163,184,.12);color:var(--muted);border-color:var(--border)}
   .tag.manual{background:rgba(167,139,250,.13);color:#a78bfa;border-color:rgba(167,139,250,.3)}
   .tag.stop_loss{background:rgba(244,63,94,.13);color:var(--red);border-color:rgba(244,63,94,.3)}
@@ -625,10 +625,6 @@
         <input type="number" id="btTrStep" step="0.1">
       </div>
       <div class="bt-field">
-        <label>Maks Hold (menit)</label>
-        <input type="number" id="btMaxHold" step="1">
-      </div>
-      <div class="bt-field">
         <label>Invalidasi (x ATR)</label>
         <input type="number" id="btInvalMult" step="0.1">
       </div>
@@ -915,7 +911,6 @@ function reasonTag(r){
     // Riwayat lama masih bisa menyimpan MOMENTUM_FADE. Ditandai "(lama)" supaya
     // jelas itu berasal dari strategi yang sudah tidak dipakai lagi.
     if(k.includes('MOMENTUM')) return '<span class="tag fade">FADE (lama)</span>';
-    if(k.includes('MAX_HOLD')) return '<span class="tag max">TIMEOUT</span>';
     if(k.includes('MANUAL_CLOSE')) return '<span class="tag manual">MANUAL</span>';
     return '<span class="tag dry">'+k+'</span>';
   });
@@ -1005,7 +1000,6 @@ function renderStatus(s){
     <div class="posrow"><span class="k">Take Profit</span><span class="v mono">${c.tp_pct}%</span></div>
     <div class="posrow"><span class="k">Trigger Breakeven</span><span class="v mono">${c.be_trigger_pct}%</span></div>
     <div class="posrow"><span class="k">Mulai Trailing</span><span class="v mono">${c.trailing_start_pct}%</span></div>
-    <div class="posrow"><span class="k">Maks hold</span><span class="v mono">${c.max_hold_minutes} mnt</span></div>
     <div class="posrow"><span class="k">Exit invalidasi setup</span><span class="v mono">${c.setup_invalidation_exit? 'aktif' : 'nonaktif'}</span></div>
     ${c.setup_invalidation_price? `<div class="posrow"><span class="k">Batas invalidasi / level breakout</span><span class="v mono">${fmtP(c.setup_invalidation_price)} / ${fmtP(c.setup_breakout_level)}</span></div>` : ''}
     <div class="posrow"><span class="k">Risk per entry</span><span class="v mono">${c.risk_percent}%</span></div>
@@ -1619,7 +1613,6 @@ async function loadBacktestDefaults(){
     document.getElementById('btBeLock').value = d.BE_LOCK_PCT;
     document.getElementById('btTrStart').value = d.TRAILING_START_PCT;
     document.getElementById('btTrStep').value = d.TRAILING_STEP_PCT;
-    document.getElementById('btMaxHold').value = d.MAX_HOLD_MINUTES;
     document.getElementById('btInvalMult').value = d.INVALIDATION_ATR_MULT;
     document.getElementById('btExtMult').value = d.MAX_EXTENSION_ATR_MULT;
     document.getElementById('btSetupExit').checked = !!d.SETUP_INVALIDATION_EXIT;
@@ -1763,7 +1756,6 @@ async function startBacktest(){
     BE_LOCK_PCT: document.getElementById('btBeLock').value,
     TRAILING_START_PCT: document.getElementById('btTrStart').value,
     TRAILING_STEP_PCT: document.getElementById('btTrStep').value,
-    MAX_HOLD_MINUTES: document.getElementById('btMaxHold').value,
     INVALIDATION_ATR_MULT: document.getElementById('btInvalMult').value,
     MAX_EXTENSION_ATR_MULT: document.getElementById('btExtMult').value,
     SETUP_INVALIDATION_EXIT: document.getElementById('btSetupExit').checked,
@@ -1885,7 +1877,7 @@ function finishBacktestUI(){
 function btReasonTagClass(r){ return (r||'').toLowerCase(); }
 function btReasonLabel(r){
   const map = {STOP_LOSS:'SL', TAKE_PROFIT:'TP', BREAKEVEN:'BE', TRAILING_STOP:'TRAIL',
-               MAX_HOLD_TIME:'TIMEOUT', SETUP_INVALIDATED:'INVALID',
+               SETUP_INVALIDATED:'INVALID',
                MOMENTUM_FADE:'FADE (lama)', END_OF_DATA:'DATA HABIS'};
   return map[r] || r;
 }
@@ -1974,7 +1966,6 @@ function renderBacktestResult(res){
     <div class="posrow"><span class="k">Rentang data</span><span class="v mono" style="font-size:11.5px">${res.start_time||'—'} &rarr; ${res.end_time||'—'}</span></div>
     <div class="posrow"><span class="k">Titik waktu diproses</span><span class="v mono">${fmt(res.bars_total,0)} bar ${res.interval}</span></div>
     <div class="posrow"><span class="k">SL / TP / BE (trig,lock) / Trail (start,step)</span><span class="v mono" style="font-size:11.5px">${p.SL_PCT}% / ${p.TP_PCT}% / ${p.BE_TRIGGER_PCT}%,${p.BE_LOCK_PCT}% / ${p.TRAILING_START_PCT}%,${p.TRAILING_STEP_PCT}%</span></div>
-    <div class="posrow"><span class="k">Maks hold</span><span class="v mono">${p.MAX_HOLD_MINUTES} mnt</span></div>
     <div class="posrow"><span class="k">Invalidasi / anti-kejar (x ATR)</span><span class="v mono">${p.INVALIDATION_ATR_MULT}x / ${p.MAX_EXTENSION_ATR_MULT}x</span></div>
     <div class="posrow"><span class="k">Exit invalidasi setup</span><span class="v mono">${p.SETUP_INVALIDATION_EXIT? 'aktif':'nonaktif'}</span></div>
     <div class="posrow"><span class="k">Mode exit</span><span class="v mono">${p.USE_ATR_EXITS? 'ATR' : 'TETAP'}</span></div>

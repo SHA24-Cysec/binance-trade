@@ -40,9 +40,17 @@ LEGACY_WATCHLIST_TIER_MAP = {"MOMENTUM": "AKTIF"}
 # file rusak. Tanpa daftar ini, load_mode_override() akan mengarsipkan seluruh
 # file override sebagai korup dan pengguna kehilangan semua setelannya.
 REMOVED_CONFIG_KEYS = {
-    "MIN_PUMP_PCT_24H",          # gerbang kenaikan 24 jam, dihapus bersama seleksi top gainer
+    # Gerbang kenaikan 24 jam versi lama. Fungsinya kini digantikan
+    # PUMP_MIN_24H_CHANGE_PCT (bersama PUMP_VOLUME_SURGE_MULT), tetapi nama
+    # kunci lamanya tetap dibuang dari file override supaya nilainya tidak
+    # diam-diam dianggap masih berlaku.
+    "MIN_PUMP_PCT_24H",
     "MOMENTUM_FADE_EXIT",        # diganti SETUP_INVALIDATION_EXIT
     "MOMENTUM_FADE_RANK_THRESHOLD",
+    # Batas waktu hold. Dihapus total karena memaksa exit berdasarkan jam
+    # dinding, bukan harga atau struktur. Tidak ada penggantinya: posisi kini
+    # hanya ditutup oleh SL/TP/Breakeven/Trailing/SETUP_INVALIDATED.
+    "MAX_HOLD_MINUTES",
 }
 _WRITE_LOCK = threading.RLock()
 _SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,40}$")
@@ -126,6 +134,11 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "MAX_RETEST_TOUCHES": _field("Setup Pullback", "Maksimum kunjungan zona", "Berapa kali harga boleh kembali ke zona sebelum setup dianggap lemah.", "int", minimum=1, maximum=20),
     "INVALIDATION_ATR_MULT": _field("Setup Pullback", "Jarak invalidasi", "Jarak di bawah level yang membatalkan setup dan memicu exit SETUP_INVALIDATED.", "float", minimum=0.01, maximum=20),
     "MAX_EXTENSION_ATR_MULT": _field("Setup Pullback", "Batas anti-kejar", "Jarak maksimum close di atas level agar entry masih diizinkan.", "float", minimum=0.01, maximum=20),
+    # Gerbang pump: saringan semesta WAJIB yang dijalankan sebelum deteksi
+    # setup. Didaftarkan di grup yang sama dengan parameter pullback retest
+    # supaya muncul berdampingan di tab Setelan dashboard.
+    "PUMP_MIN_24H_CHANGE_PCT": _field("Setup Pullback", "Minimum kenaikan 24 jam", "Kenaikan harga 24 jam minimum (priceChangePercent) agar sebuah simbol boleh menjadi kandidat.", "float", minimum=0, maximum=1000, unit="%"),
+    "PUMP_VOLUME_SURGE_MULT": _field("Setup Pullback", "Pengali lonjakan volume", "Volume kuotasi 24 jam berjalan minimal sekian kali rata-rata volume kuotasi 7 hari penuh sebelumnya.", "float", minimum=1, maximum=100, unit="x"),
     "EXTRA_EXCLUDE_SYMBOLS": _field("Scan", "Blacklist simbol", "Simbol tambahan yang tidak boleh dipilih.", "list", editor="symbols"),
     "MIN_LISTING_AGE_DAYS": _field("Scan", "Usia listing minimum", "Pasangan lebih muda akan ditolak.", "int", minimum=0, maximum=36500, unit="hari"),
 
@@ -169,7 +182,6 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "USE_TRAILING": _field("Breakeven dan Trailing", "Aktifkan trailing", "Mengikuti kenaikan harga dengan stop dinamis.", "bool"),
     "TRAILING_START_PCT": _field("Breakeven dan Trailing", "Mulai trailing", "Profit untuk mengaktifkan trailing tetap.", "float", minimum=0, maximum=1000, unit="%"),
     "TRAILING_STEP_PCT": _field("Breakeven dan Trailing", "Jarak trailing", "Jarak stop dari harga tertinggi.", "float", minimum=0.01, maximum=100, unit="%"),
-    "MAX_HOLD_MINUTES": _field("Breakeven dan Trailing", "Maksimum waktu hold", "Paksa keluar setelah durasi ini.", "int", minimum=1, maximum=525600, unit="menit"),
     "SETUP_INVALIDATION_EXIT": _field("Breakeven dan Trailing", "Exit saat setup batal", "Keluar saat candle tertutup menembus batas invalidasi yang dikunci saat entry.", "bool"),
 
     "MAX_SPREAD_PCT": _field("Fee dan Filter", "Spread maksimum", "Spread bid-ask maksimum untuk entry.", "float", minimum=0, maximum=100, unit="%", dangerous=True),
@@ -479,6 +491,21 @@ def validate_candidate(candidate: dict, mode: str) -> tuple[dict, dict[str, str]
         relation("MAX_EXTENSION_ATR_MULT",
                  cleaned["MAX_EXTENSION_ATR_MULT"] >= cleaned["BREAKOUT_BUFFER_ATR_MULT"],
                  "harus lebih besar atau sama dengan BREAKOUT_BUFFER_ATR_MULT")
+        # Gerbang pump. Ambang yang terlalu longgar membuat gerbang ini tidak
+        # menyaring apa pun, ambang yang terlalu ketat membuat bot praktis
+        # tidak pernah punya kandidat. Keduanya tetap diizinkan, tapi diberi
+        # peringatan supaya perubahan itu disadari.
+        relation("PUMP_VOLUME_SURGE_MULT", cleaned["PUMP_VOLUME_SURGE_MULT"] >= 1.0,
+                 "harus minimal 1 kali rata-rata 7 hari, di bawah itu berarti volume justru turun")
+        if cleaned["PUMP_MIN_24H_CHANGE_PCT"] <= 0:
+            warnings.append("PUMP_MIN_24H_CHANGE_PCT nol atau kurang: gerbang kenaikan 24 jam "
+                            "praktis mati dan koin yang turun ikut menjadi kandidat.")
+        if cleaned["PUMP_MIN_24H_CHANGE_PCT"] >= 50:
+            warnings.append("PUMP_MIN_24H_CHANGE_PCT sangat tinggi, kandidat bisa nol "
+                            "untuk waktu yang lama.")
+        if cleaned["PUMP_VOLUME_SURGE_MULT"] >= 5:
+            warnings.append("PUMP_VOLUME_SURGE_MULT sangat tinggi, kandidat bisa nol "
+                            "untuk waktu yang lama.")
         if cleaned["USE_STOP_LOSS"]:
             relation("SL_PCT", cleaned["SL_PCT"] > 0, "harus lebih besar dari nol saat Stop Loss aktif")
         if cleaned["USE_TP"]:

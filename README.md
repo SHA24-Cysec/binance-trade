@@ -4,7 +4,7 @@ Bot ini **memindai SEMUA pair USDT** di Binance Spot untuk mencari setup
 **pullback dan retest**: harga menembus sebuah swing high, lalu kembali
 menguji level yang baru ditembus itu dan ditolak naik lagi. Bot masuk dengan
 **satu entry** (long only, spot) dan keluar lewat Stop Loss / Take Profit /
-Breakeven / Trailing / batas waktu hold / pembatalan setup.
+Breakeven / Trailing / pembatalan setup.
 **Tidak ada averaging-down/martingale.**
 
 Strategi lama (mengejar top gainer 24 jam dengan konfirmasi momentum, plus
@@ -184,7 +184,9 @@ hanya SL/TP:
 | Trailing start | `1.0x ATR` | 2,00% |
 | Trailing step | `1.5x ATR` | 3,00% |
 
-`MAX_HOLD_MINUTES` tetap berbasis waktu, tidak ikut ATR.
+Tidak ada lagi batas waktu hold: parameter `MAX_HOLD_MINUTES` sudah **dihapus
+total** dari repo ini. Posisi hanya ditutup oleh harga dan struktur, bukan
+oleh jam dinding.
 
 **Kenapa BE/Trailing wajib ikut.** Kalau hanya SL/TP yang adaptif sementara
 BE/Trailing memakai angka tetap, hasilnya pincang. Pada koin ATR 3%:
@@ -265,8 +267,8 @@ bisa berarti 3x ATR di satu koin tapi hanya 0,8x ATR di koin lain.
 Namun ada dua hal yang melawan:
 
 1. **Timeframe.** ATR jauh lebih baik di timeframe harian; PF jatuh dari 1,72
-   ke 0,96 di timeframe per jam karena noise. Bot ini pakai 5 menit dengan
-   `MAX_HOLD_MINUTES = 45`, jadi ada di ujung yang kurang menguntungkan ATR.
+   ke 0,96 di timeframe per jam karena noise. Bot ini pakai candle 5 menit,
+   jadi ada di ujung yang kurang menguntungkan ATR.
 2. **`RISK_PERCENT = 95.0`.** Prinsip inti ATR adalah stop melebar harus
    dibarengi posisi mengecil supaya risiko rupiah konstan. Fitur ini **belum**
    menyentuh position sizing, jadi logika itu masih belum lengkap.
@@ -412,9 +414,31 @@ Dua cara menekannya:
    koin ilikuid), status simbol TRADING di `exchangeInfo`, bukan token
    leverage (xxxUP/DOWN/BULL/BEAR), bukan pair stablecoin-ke-stablecoin,
    bukan simbol di `EXTRA_EXCLUDE_SYMBOLS`, dan umur listing minimal
-   `MIN_LISTING_AGE_DAYS`. **Tidak ada lagi gerbang kenaikan 24 jam**, jadi
-   koin yang sedang turun 24 jam tetap boleh menjadi kandidat.
-3. Dari hasil yang lolos, diambil top-N paling likuid
+   `MIN_LISTING_AGE_DAYS`.
+3. **Gerbang pump (WAJIB).** Simbol hanya lanjut ke tahap berikutnya kalau
+   KEDUA syarat ini terpenuhi:
+   - kenaikan harga 24 jam (`priceChangePercent` dari ticker yang sudah
+     diambil di langkah 1, tanpa request tambahan) **>= `PUMP_MIN_24H_CHANGE_PCT`**
+     (default 10%); dan
+   - volume sedang naik, yaitu `quoteVolume` 24 jam berjalan
+     **>= `PUMP_VOLUME_SURGE_MULT` x rata-rata volume kuotasi 7 hari penuh
+     sebelumnya** (default 1,5x). Rata-rata dihitung dari candle `1d` yang
+     sudah tertutup, dan candle harian itu **hanya diminta untuk simbol yang
+     sudah lolos syarat kenaikan**, jadi beban rate limit tetap kecil
+     (bobot IP 2 per simbol).
+
+   Koin yang sedang turun 24 jam, volumenya tidak naik, belum punya 7 candle
+   harian penuh (baru listing), atau candle hariannya gagal diambil,
+   **ditolak** (fail closed). Kalau tidak ada satu pun yang lolos, log menulis
+   baris eksplisit "0 kandidat lolos gerbang pump" tiap siklus scan, jadi
+   kondisi sepi terlihat jelas di `pump_bot_paper.log` / `pump_bot_live.log`.
+   Gerbang ini dipakai jalur live, backtest satu simbol, backtest portofolio,
+   dan penyegar watchlist lewat satu fungsi bersama
+   (`market_scanner.is_pumping_today()` / `evaluate_pump_gate()`). Di jalur
+   backtest, rata-rata 7 hari selalu dihitung dari candle harian yang sudah
+   tertutup **pada titik waktu yang sedang diuji**, bukan data hari ini, jadi
+   tidak ada look-ahead.
+4. Dari hasil yang lolos, diambil top-N paling likuid
    (`TOP_N_CANDIDATES_TO_CONFIRM`, batas ini murni demi rate limit) untuk
    dicek candle 5 menitnya dengan `detect_pullback_retest()`:
    swing high pivot -> breakout close di atas level plus
@@ -427,17 +451,24 @@ Dua cara menekannya:
    Dari semua kandidat yang setupnya sah, yang dibeli adalah yang **paling
    rapat** terhadap level breakout relatif ATR, dengan volume kuotasi sebagai
    pemutus seri.
-4. Bot hanya memegang **1 koin dalam satu waktu**. Tidak ada
+5. Bot hanya memegang **1 koin dalam satu waktu**. Tidak ada
    averaging-down/martingale -- satu kali entry per rotasi, karena
    averaging-down pada koin yang sedang "gagal pump" (dan berpotensi dump
    tajam, terutama altcoin kecil) sangat berisiko.
-5. Keluar dari posisi lewat salah satu dari: **Stop Loss** (`SL_PCT`,
+6. Keluar dari posisi lewat salah satu dari: **Stop Loss** (`SL_PCT`,
    default 3% -- batas kerugian maksimum dari harga entry, dicek PALING
    AWAL sebelum kondisi lain), Take Profit, Breakeven, Trailing Stop,
-   batas waktu hold maksimum (`MAX_HOLD_MINUTES` -- mencegah "nyangkut" di
-   posisi yang tidak bergerak), atau **setup batal** (`SETUP_INVALIDATION_EXIT`:
+   atau **setup batal** (`SETUP_INVALIDATION_EXIT`:
    candle tertutup jatuh di bawah batas invalidasi yang dikunci saat entry,
    yaitu level breakout dikurangi `INVALIDATION_ATR_MULT` x ATR).
+
+   **Tidak ada exit berbasis batas waktu.** `MAX_HOLD_MINUTES` beserta alasan
+   keluar `MAX_HOLD_TIME` sudah dihapus total dari config, tab Setelan, panel
+   backtest, bot live, dan kedua mesin backtest. Posisi yang setupnya masih
+   utuh tidak akan ditutup hanya karena sudah lama dipegang. Konsekuensinya
+   perlu disadari: satu posisi bisa dipegang tanpa batas waktu sampai Stop
+   Loss, Take Profit, Breakeven, Trailing Stop, atau batas invalidasi setup
+   tersentuh, jadi pastikan salah satu dari exit itu memang aktif.
 
 ### Parameter setup pullback retest
 
@@ -460,6 +491,8 @@ backtest portofolio, dan penyegar watchlist.
 | `MAX_EXTENSION_ATR_MULT` | 1.5 | Anti-kejar: jarak maksimum close di atas level agar entry masih diizinkan |
 | `SETUP_INVALIDATION_EXIT` | True | Aktifkan exit saat candle tertutup menembus batas invalidasi |
 | `CONFIRM_LOOKBACK_BARS` | 48 | Panjang jendela candle untuk satu keputusan entry |
+| `PUMP_MIN_24H_CHANGE_PCT` | 10.0 | Gerbang pump syarat 1: kenaikan harga 24 jam minimum (persen) agar sebuah simbol boleh menjadi kandidat. Koin yang turun 24 jam gugur di sini |
+| `PUMP_VOLUME_SURGE_MULT` | 1.5 | Gerbang pump syarat 2: volume kuotasi 24 jam berjalan minimal sekian kali rata-rata volume kuotasi 7 hari penuh sebelumnya (candle `1d` yang sudah tertutup) |
 
 Nilai default di atas adalah **titik awal yang belum tervalidasi**, bukan
 rekomendasi. Jalankan backtest sendiri sebelum memakainya.
@@ -821,17 +854,19 @@ dimatikan lewat config):**
 Di bagian bawah dashboard ada panel **"Backtest Parameter"**. Isi satu simbol
 (mis. `SOLUSDT`), rentang hari (bebas, tidak dibatasi -- lihat catatan di
 bawah), dan parameter yang mau diuji (Stop Loss, TP%, Breakeven, Trailing,
-Maks Hold, jarak invalidasi, batas anti-kejar), lalu klik **Jalankan Backtest**. Prosesnya:
+jarak invalidasi, batas anti-kejar), lalu klik **Jalankan Backtest**. Prosesnya:
 
 1. Dashboard mengambil candle 5 menit historis simbol tsb langsung dari
    Binance (butuh koneksi internet keluar dari server dashboard).
-2. Untuk tiap candle, dihitung ulang volume 24 jam bergulir sebagai gerbang
-   likuiditas, lalu jendela candle diuji dengan `detect_pullback_retest()`
+2. Untuk tiap candle, dihitung ulang kenaikan dan volume 24 jam bergulir
+   sebagai gerbang likuiditas dan **gerbang pump** (`PUMP_MIN_24H_CHANGE_PCT`
+   dan `PUMP_VOLUME_SURGE_MULT`, rata-rata 7 hari diambil dari candle `1d`
+   yang sudah tertutup pada bar tersebut), lalu jendela candle diuji dengan `detect_pullback_retest()`
    **yang sama persis** dengan `market_scanner.py`.
 3. Kalau lolos, posisi "dibuka", lalu dievaluasi tiap candil berikutnya
    dengan logika exit **yang sama persis** dengan `manage_exit()` di
    `pump_scanner_bot.py` (Stop Loss / Take Profit / Breakeven / Trailing /
-   Maks Hold).
+   pembatalan setup).
 
 Selama proses berjalan, dashboard menampilkan **panel loading**: spinner,
 progress bar (dengan efek shimmer, bukan cuma diam), tahap yang sedang

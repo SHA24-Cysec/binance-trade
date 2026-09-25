@@ -217,9 +217,13 @@ def score_symbol(sym: str, kl: list, meta: dict, config: dict) -> Optional[dict]
     atrs: list = []
     roll_vols: list = []
     last_sig = -10 ** 9
-    # Bot hanya memegang satu posisi. Konversi durasi hold ke jumlah bar dari
-    # interval aktif, bukan asumsi 5 menit.
-    min_gap = max(1, int(float(config.get("MAX_HOLD_MINUTES", 45)) * 60_000 / interval_ms))
+    # Bot hanya memegang satu posisi dan tidak boleh langsung masuk lagi
+    # setelah keluar, jadi dua setup yang terlalu berdekatan tidak mungkin
+    # keduanya dieksekusi. Jaraknya memakai COOLDOWN_MINUTES_AFTER_CLOSE
+    # (sebelumnya MAX_HOLD_MINUTES, yang sudah dihapus total dari repo ini).
+    # Konversi ke jumlah bar memakai interval aktif, bukan asumsi 5 menit.
+    min_gap = max(1, int(float(config.get("COOLDOWN_MINUTES_AFTER_CLOSE", 15))
+                         * 60_000 / interval_ms))
 
     for j in range(bars_per_day + need, n):
         vol24 = pre[j + 1] - pre[j + 1 - bars_per_day]
@@ -419,16 +423,34 @@ def refresh_once(client, config: dict,
         logger.warning("bookTicker gagal, spread diabaikan: %s", exc)
 
     # --- Tahap 2: pilih kandidat paling likuid ---
-    # Saringan semesta hanya struktural dan likuiditas, sama persis dengan
-    # bot live. Tidak ada lagi gerbang kenaikan 24 jam yang perlu dinolkan
-    # di sini, karena penilaian ini memang harus melihat koin yang pernah
-    # membentuk setup KAPAN SAJA dalam periode, bukan yang kebetulan naik
-    # hari ini.
-    ranked = scanner.filter_and_rank_candidates(tickers, dict(config))
+    # Saringan semesta memakai fungsi yang SAMA dengan bot live, termasuk
+    # gerbang pump yang wajib itu. Watchlist harus mencerminkan semesta yang
+    # benar-benar bisa dimasuki bot: kalau di sini gerbangnya dilewati,
+    # watchlist akan penuh simbol yang tidak akan pernah lolos saat scan live.
+    #
+    # Candle harian hanya diminta untuk simbol yang sudah lolos syarat
+    # kenaikan 24 jam, dan biayanya (bobot IP 2 per simbol) dibebankan ke
+    # anggaran yang sama dengan pengambilan candle lain.
+    _daily_cache: dict = {}
+    _daily_raw = scanner.make_daily_klines_fetcher(client, cache=_daily_cache)
+
+    def _daily_fetcher(symbol: str):
+        if symbol in _daily_cache:
+            return _daily_cache[symbol]
+        if not budget.can_spend(WEIGHT_KLINES):
+            raise RuntimeError(budget.stopped_reason or "anggaran request habis")
+        hasil = _daily_raw(symbol)
+        budget.spend(WEIGHT_KLINES)
+        return hasil
+
+    ranked = scanner.filter_and_rank_candidates(
+        tickers, dict(config), get_daily_klines_fn=_daily_fetcher)
     ranked.sort(key=lambda c: c.quote_volume, reverse=True)
     shortlist = ranked[:max_symbols]
     if not shortlist:
-        return {"ok": False, "error": "tidak ada simbol lolos filter struktural"}
+        return {"ok": False,
+                "error": "tidak ada simbol lolos filter struktural dan gerbang pump "
+                         "(naik 24 jam dan volume naik)"}
 
     # --- Tahap 3: unduh candle & nilai ---
     interval = str(config.get("CONFIRM_INTERVAL", "5m"))

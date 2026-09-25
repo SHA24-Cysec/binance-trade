@@ -13,10 +13,18 @@ import market_scanner as scanner
 import strategy
 from strategy import Kline
 from synthetic_data import (
-    lanjutan_setelah_entry, make_candle, seri_dengan_setup, skenario_pullback_retest,
+    cfg_gerbang_pump_nonaktif, lanjutan_setelah_entry, make_candle, riwayat_harian,
+    seri_dengan_setup, skenario_pullback_retest,
 )
 
 CFG = dict(cfg_mod.PUMP_CONFIG)
+
+# Berkas ini menguji deteksi setup dan jalur exit, BUKAN gerbang pump.
+# Gerbang pump tetap berjalan di run_backtest (tidak ada jalan belakang di
+# kode produksi), jadi setiap pemanggilan backtest di sini memakai ambang yang
+# dilonggarkan lewat cfg_gerbang_pump_nonaktif() dan menyediakan riwayat
+# harian sintetis lewat riwayat_harian(). Gerbang pump diuji sungguhan di
+# tests/test_pump_gate.py.
 
 
 # ======================================================================
@@ -172,9 +180,10 @@ def test_paritas_deteksi_live_dan_backtest():
         kl[max(0, entry_bar - window + 1): entry_bar + 1], CFG)
     assert langsung.ok, langsung.reason
 
-    cfg_bt = dict(CFG)
+    cfg_bt = cfg_gerbang_pump_nonaktif(CFG)
     cfg_bt["MIN_QUOTE_VOLUME_USDT_24H"] = 1_000_000
-    hasil = backtest.run_backtest(kl, cfg_bt, warmup_bars=0)
+    hasil = backtest.run_backtest(kl, cfg_bt, warmup_bars=0,
+                                   daily_klines=riwayat_harian(kl))
     assert len(hasil.trades) == 1
     trade = hasil.trades[0]
     assert trade.entry_time == kl[entry_bar].close_time
@@ -183,34 +192,34 @@ def test_paritas_deteksi_live_dan_backtest():
 
 def test_backtest_mengunci_level_invalidasi_saat_entry():
     kl = seri_dengan_setup(ekor="invalidasi", panjang_ekor=10)
-    cfg_bt = dict(CFG)
+    cfg_bt = cfg_gerbang_pump_nonaktif(CFG)
     cfg_bt.update({"MIN_QUOTE_VOLUME_USDT_24H": 1_000_000,
                    "SETUP_INVALIDATION_EXIT": True, "USE_STOP_LOSS": False,
-                   "USE_TP": False, "USE_BREAKEVEN": False, "USE_TRAILING": False,
-                   "MAX_HOLD_MINUTES": 100000})
-    hasil = backtest.run_backtest(kl, cfg_bt, warmup_bars=0)
+                   "USE_TP": False, "USE_BREAKEVEN": False, "USE_TRAILING": False})
+    hasil = backtest.run_backtest(kl, cfg_bt, warmup_bars=0,
+                                   daily_klines=riwayat_harian(kl))
     assert [t.reason for t in hasil.trades] == ["SETUP_INVALIDATED"]
 
 
 def test_exit_invalidasi_tidak_terpicu_saat_harga_bertahan():
     kl = seri_dengan_setup(ekor="bertahan", panjang_ekor=10)
-    cfg_bt = dict(CFG)
+    cfg_bt = cfg_gerbang_pump_nonaktif(CFG)
     cfg_bt.update({"MIN_QUOTE_VOLUME_USDT_24H": 1_000_000,
                    "SETUP_INVALIDATION_EXIT": True, "USE_STOP_LOSS": False,
-                   "USE_TP": False, "USE_BREAKEVEN": False, "USE_TRAILING": False,
-                   "MAX_HOLD_MINUTES": 100000})
-    hasil = backtest.run_backtest(kl, cfg_bt, warmup_bars=0)
+                   "USE_TP": False, "USE_BREAKEVEN": False, "USE_TRAILING": False})
+    hasil = backtest.run_backtest(kl, cfg_bt, warmup_bars=0,
+                                   daily_klines=riwayat_harian(kl))
     assert [t.reason for t in hasil.trades] == ["END_OF_DATA"]
 
 
 def test_flag_setup_invalidation_exit_dihormati():
     kl = seri_dengan_setup(ekor="invalidasi", panjang_ekor=10)
-    cfg_bt = dict(CFG)
+    cfg_bt = cfg_gerbang_pump_nonaktif(CFG)
     cfg_bt.update({"MIN_QUOTE_VOLUME_USDT_24H": 1_000_000,
                    "SETUP_INVALIDATION_EXIT": False, "USE_STOP_LOSS": False,
-                   "USE_TP": False, "USE_BREAKEVEN": False, "USE_TRAILING": False,
-                   "MAX_HOLD_MINUTES": 100000})
-    hasil = backtest.run_backtest(kl, cfg_bt, warmup_bars=0)
+                   "USE_TP": False, "USE_BREAKEVEN": False, "USE_TRAILING": False})
+    hasil = backtest.run_backtest(kl, cfg_bt, warmup_bars=0,
+                                   daily_klines=riwayat_harian(kl))
     assert "SETUP_INVALIDATED" not in [t.reason for t in hasil.trades]
 
 
@@ -312,3 +321,37 @@ def test_exit_invalidasi_live_satu_panggilan_klines_per_candle(monkeypatch):
     bot.check_setup_invalidation(client, cfg, {}, state)
     bot.check_setup_invalidation(client, cfg, {}, state)
     assert client.panggilan == 1, "candle yang sama tidak boleh diunduh berulang kali"
+
+
+# ======================================================================
+# MAX_HOLD dihapus total
+# ======================================================================
+
+def test_posisi_tidak_pernah_ditutup_karena_batas_waktu():
+    """Hold jauh lebih lama dari batas 45 menit lama tidak memicu exit apa pun.
+
+    Dulu posisi dipaksa keluar dengan alasan MAX_HOLD_TIME setelah
+    MAX_HOLD_MINUTES. Parameter itu sudah dihapus total, jadi posisi hanya
+    boleh berakhir karena harga, struktur, atau data habis.
+    """
+    kl = seri_dengan_setup(ekor="bertahan", panjang_ekor=60)   # 60 bar 5m = 5 jam
+    cfg_bt = cfg_gerbang_pump_nonaktif(CFG)
+    cfg_bt.update({"MIN_QUOTE_VOLUME_USDT_24H": 1_000_000,
+                   "SETUP_INVALIDATION_EXIT": False, "USE_STOP_LOSS": False,
+                   "USE_TP": False, "USE_BREAKEVEN": False, "USE_TRAILING": False})
+    hasil = backtest.run_backtest(kl, cfg_bt, warmup_bars=0,
+                                  daily_klines=riwayat_harian(kl))
+    assert [t.reason for t in hasil.trades] == ["END_OF_DATA"]
+    assert hasil.trades[0].hold_minutes > 45
+
+
+def test_alasan_exit_max_hold_time_tidak_ada_lagi_di_kode():
+    import inspect
+
+    import portfolio_backtest
+    import pump_scanner_bot
+
+    for mod in (backtest, portfolio_backtest, pump_scanner_bot, scanner):
+        src = inspect.getsource(mod)
+        assert "MAX_HOLD_TIME" not in src, mod.__name__
+        assert "MAX_HOLD_MINUTES" not in src, mod.__name__

@@ -8,8 +8,11 @@ lewat Take Profit, Breakeven, Trailing, batas waktu hold, atau invalidasi
 setup (close tertutup di bawah level breakout dikurangi ATR).
 
 Nama file masih pump_scanner_bot.py demi kompatibilitas skrip dan layanan
-yang sudah ada, tetapi isinya BUKAN lagi pump scanner: gerbang kenaikan 24
-jam dan pengurutan top gainer sudah dihapus.
+yang sudah ada. Pengurutan top gainer memang sudah dihapus (kandidat diurut
+berdasarkan kualitas setup), tetapi seleksi semesta kembali memakai GERBANG
+PUMP yang wajib: naik >= PUMP_MIN_24H_CHANGE_PCT dalam 24 jam DAN volume
+kuotasi 24 jam >= PUMP_VOLUME_SURGE_MULT x rata-rata 7 hari penuh sebelumnya.
+Lihat market_scanner.is_pumping_today().
 
 INI BUKAN PREDIKSI. Bot ini bereaksi terhadap struktur yang SUDAH terbentuk.
 Baca README.md bagian strategi sebelum menjalankan dengan uang sungguhan.
@@ -1086,9 +1089,6 @@ def manage_exit(client: ExchangeClient, config: dict, filters_cache: dict,
         reasons.append("BREAKEVEN")
     if state["trailing_active"] and current_price <= state["trailing_stop_price"]:
         reasons.append("TRAILING_STOP")
-    if hold_minutes >= config["MAX_HOLD_MINUTES"]:
-        reasons.append("MAX_HOLD_TIME")
-
     if reasons:
         close_position(client, config, filters_cache, state, "+".join(reasons))
 
@@ -1318,8 +1318,17 @@ def run(config: dict, lifecycle=None) -> int:
                     # exchangeInfo, bukan sekadar apa pun yang muncul di
                     # ticker 24 jam. Simbol HALT atau BREAK tetap mengirim
                     # ticker, dan order ke simbol seperti itu pasti ditolak.
+                    # Gerbang pump butuh candle harian, tetapi HANYA untuk
+                    # simbol yang sudah lolos syarat kenaikan 24 jam. Cache
+                    # dibuat baru tiap siklus scan supaya candle harian tidak
+                    # pernah dipakai ulang dari siklus sebelumnya (bisa basi),
+                    # namun satu simbol tidak diminta dua kali dalam satu
+                    # siklus yang sama.
+                    daily_fetcher = scanner.make_daily_klines_fetcher(client, cache={})
                     best = scanner.find_best_candidate(tickers, klines_fetcher, config,
-                                                       tradable_symbols)
+                                                       tradable_symbols,
+                                                       daily_klines_fetcher=daily_fetcher,
+                                                       reference_ms=state_mod.now_ms())
                     if best:
                         book = client.get_book_ticker(best.symbol)
                         bid, ask = float(book["bidPrice"]), float(book["askPrice"])
@@ -1445,23 +1454,66 @@ def selftest() -> None:
     # dan bisa merusak state bot yang sedang berjalan.
     cfg["STATE_FILE"] = os.path.join(tempfile.gettempdir(), "pump_bot_selftest_state.json")
 
-    print("=== SELFTEST: saringan semesta dan urutan volume ===")
+    print("=== SELFTEST: saringan semesta, gerbang pump, dan urutan volume ===")
+    # Gerbang pump WAJIB: naik >= PUMP_MIN_24H_CHANGE_PCT dalam 24 jam DAN
+    # volume kuotasi 24 jam >= PUMP_VOLUME_SURGE_MULT x rata-rata 7 hari.
+    HARI_MS = 86_400_000
+
+    def _harian(quote_volume_harian: float):
+        """Tujuh candle harian PENUH dengan volume kuotasi tertentu."""
+        return [strategy.Kline(open_time=i * HARI_MS, open=1.0, high=1.0, low=1.0,
+                               close=1.0, close_time=(i + 1) * HARI_MS - 1,
+                               volume=quote_volume_harian, quote_volume=quote_volume_harian)
+                for i in range(7)]
+
+    # Rata-rata harian per simbol dibuat supaya rasio volumenya jelas:
+    #   AUSDT  5.000.000 / 2.000.000 = 2,50x  -> lolos
+    #   BUSDT  3.000.000 / 1.000.000 = 3,00x  -> lolos
+    #   EUSDT  4.000.000 / 4.000.000 = 1,00x  -> GAGAL syarat volume
+    #   FUSDT  belum punya 7 candle harian     -> GAGAL (koin baru listing)
+    RATA_HARIAN = {
+        "AUSDT": 2_000_000.0, "BUSDT": 1_000_000.0, "CUSDT": 1_000_000.0,
+        "DUSDT": 1_000.0, "EUSDT": 4_000_000.0, "BTCUPUSDT": 1_000.0,
+        "USDCUSDT": 1_000.0, "HALTUSDT": 1_000.0,
+    }
+
+    def daily_fetcher(symbol: str):
+        if symbol == "FUSDT":          # baru listing: hanya 3 candle harian
+            return _harian(1_000.0)[:3]
+        if symbol == "GUSDT":          # simbol bermasalah: request gagal
+            raise RuntimeError("timeout simulasi")
+        return _harian(RATA_HARIAN.get(symbol, 1_000.0))
+
+    ref_ms = 7 * HARI_MS + 1           # semua candle harian di atas sudah tertutup
+
     tickers = [
         {"symbol": "AUSDT", "priceChangePercent": "15.0", "quoteVolume": "5000000", "lastPrice": "1.0"},
         {"symbol": "BUSDT", "priceChangePercent": "25.0", "quoteVolume": "3000000", "lastPrice": "2.0"},
-        {"symbol": "CUSDT", "priceChangePercent": "-3.0", "quoteVolume": "9000000", "lastPrice": "0.5"},  # turun 24 jam, TETAP masuk semesta
+        {"symbol": "CUSDT", "priceChangePercent": "-3.0", "quoteVolume": "9000000", "lastPrice": "0.5"},   # gagal: turun 24 jam
         {"symbol": "DUSDT", "priceChangePercent": "40.0", "quoteVolume": "10000", "lastPrice": "0.1"},     # gagal: volume kurang
+        {"symbol": "EUSDT", "priceChangePercent": "20.0", "quoteVolume": "4000000", "lastPrice": "1.0"},   # gagal: volume tidak naik
+        {"symbol": "FUSDT", "priceChangePercent": "30.0", "quoteVolume": "8000000", "lastPrice": "1.0"},   # gagal: riwayat harian < 7
+        {"symbol": "GUSDT", "priceChangePercent": "30.0", "quoteVolume": "8000000", "lastPrice": "1.0"},   # gagal: klines harian error
         {"symbol": "BTCUPUSDT", "priceChangePercent": "50.0", "quoteVolume": "9000000", "lastPrice": "3.0"},  # gagal: leveraged token
         {"symbol": "USDCUSDT", "priceChangePercent": "20.0", "quoteVolume": "9000000", "lastPrice": "1.0"},   # gagal: stablecoin
         {"symbol": "HALTUSDT", "priceChangePercent": "10.0", "quoteVolume": "8000000", "lastPrice": "1.0"},   # gagal: status bukan TRADING
     ]
-    tradable = {"AUSDT", "BUSDT", "CUSDT", "DUSDT", "BTCUPUSDT", "USDCUSDT"}
-    ranked = scanner.filter_and_rank_candidates(tickers, cfg, tradable)
+    tradable = {"AUSDT", "BUSDT", "CUSDT", "DUSDT", "EUSDT", "FUSDT", "GUSDT",
+                "BTCUPUSDT", "USDCUSDT"}
+    ranked = scanner.filter_and_rank_candidates(
+        tickers, cfg, tradable, get_daily_klines_fn=daily_fetcher, reference_ms=ref_ms)
     symbols = [c.symbol for c in ranked]
-    print("  Lolos saringan, urut volume kuotasi:", symbols)
-    assert symbols == ["CUSDT", "AUSDT", "BUSDT"], f"Hasil saringan/urutan salah: {symbols}"
-    print("  -> OK (leveraged token, stablecoin, volume rendah, simbol non-TRADING ter-exclude;")
-    print("      koin yang TURUN 24 jam tetap masuk karena gerbang pump sudah dihapus)")
+    print("  Lolos saringan + gerbang pump, urut volume kuotasi:", symbols)
+    assert symbols == ["AUSDT", "BUSDT"], f"Hasil saringan/urutan salah: {symbols}"
+    print("  -> OK (leveraged token, stablecoin, volume rendah, simbol non-TRADING,")
+    print("      koin yang TURUN 24 jam, volume yang tidak naik, koin baru listing,")
+    print("      dan simbol yang gagal diambil candle hariannya semuanya ter-exclude)")
+
+    # Gerbang ini WAJIB: tanpa sumber candle harian, semua simbol ditolak.
+    tanpa_sumber = scanner.filter_and_rank_candidates(tickers, cfg, tradable)
+    assert tanpa_sumber == [], \
+        "Tanpa sumber candle harian, gerbang pump harus menolak semua simbol (fail closed)"
+    print("  -> OK (tanpa sumber candle harian, gerbang pump fail closed)")
 
     print("\n=== SELFTEST: deteksi setup pullback dan retest ===")
     # Data sintetis WAJIB mengisi volume dan quote_volume, karena anchored
@@ -1621,7 +1673,6 @@ def selftest() -> None:
         "USE_STOP_LOSS": True, "SL_PCT": 3.0,
         "USE_BREAKEVEN": True, "BE_TRIGGER_PCT": 3.0, "BE_LOCK_PCT": 0.15,
         "USE_TRAILING": True, "TRAILING_START_PCT": 4.0, "TRAILING_STEP_PCT": 1.0,
-        "MAX_HOLD_MINUTES": 600,
     })
 
     state = dict(DEFAULT_STATE)

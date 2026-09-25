@@ -22,6 +22,26 @@ import config as cfg_mod
 import market_scanner as scanner
 from strategy import Kline
 
+
+def _harian_pump(_symbol: str, quote_volume: float = 1_000_000.0) -> list:
+    """Tujuh candle harian penuh bervolume kecil.
+
+    Dipakai tes yang menguji saringan STRUKTURAL (stablecoin, leveraged
+    token, watchlist). Gerbang pump tetap berjalan pada tes-tes itu, jadi
+    sumber candle harian wajib ada; volumenya dibuat kecil supaya simbol yang
+    memang seharusnya lolos tidak tersandung syarat volume.
+    """
+    hari = 86_400_000
+    return [Kline(open_time=i * hari, open=1.0, high=1.0, low=1.0, close=1.0,
+                  close_time=(i + 1) * hari - 1, volume=quote_volume,
+                  quote_volume=quote_volume)
+            for i in range(7)]
+
+
+def _ref_ms() -> int:
+    """Waktu acuan sesudah candle harian _harian_pump() tertutup."""
+    return 7 * 86_400_000 + 1
+
 # Pengujian dashboard butuh Flask. Kalau dependensi belum dipasang, lebih
 # baik pengujian itu DILEWATI dengan pesan yang jelas daripada memuntahkan
 # belasan traceback ModuleNotFoundError yang menyesatkan -- kesalahannya ada
@@ -134,8 +154,10 @@ class TestTidakMenyentuhTrading(unittest.TestCase):
         dengan["WATCHLIST"] = [{"symbol": "AAAUSDT", "tier": "INTI", "score": 99.0}]
         dengan["WATCHLIST_ENABLED"] = True
 
-        r1 = [c.symbol for c in scanner.filter_and_rank_candidates(tickers, tanpa)]
-        r2 = [c.symbol for c in scanner.filter_and_rank_candidates(tickers, dengan)]
+        r1 = [c.symbol for c in scanner.filter_and_rank_candidates(
+            tickers, tanpa, get_daily_klines_fn=_harian_pump, reference_ms=_ref_ms())]
+        r2 = [c.symbol for c in scanner.filter_and_rank_candidates(
+            tickers, dengan, get_daily_klines_fn=_harian_pump, reference_ms=_ref_ms())]
         self.assertEqual(r1, r2, "watchlist mengubah ranking kandidat")
         # Urutan semesta kini murni berdasarkan volume kuotasi 24 jam, bukan
         # kenaikan harga. BBB naik paling tinggi tetapi volumenya lebih kecil
@@ -146,7 +168,9 @@ class TestTidakMenyentuhTrading(unittest.TestCase):
         """Ini yang membedakan mode pantau dari whitelist keras."""
         tickers = [{"symbol": "TIDAKADADIDAFTARUSDT", "priceChangePercent": "30.0",
                     "quoteVolume": "9000000", "lastPrice": "1.0"}]
-        ranked = scanner.filter_and_rank_candidates(tickers, cfg_mod.PUMP_CONFIG)
+        ranked = scanner.filter_and_rank_candidates(
+            tickers, cfg_mod.PUMP_CONFIG,
+            get_daily_klines_fn=_harian_pump, reference_ms=_ref_ms())
         self.assertEqual(len(ranked), 1,
                          "koin di luar watchlist seharusnya TETAP jadi kandidat")
 
@@ -159,13 +183,17 @@ class TestStablecoinBaru(unittest.TestCase):
             {"symbol": "RLUSDUSDT", "priceChangePercent": "0.00",
              "quoteVolume": "88200000", "lastPrice": "1.0"},
         ]
-        self.assertEqual(scanner.filter_and_rank_candidates(tickers, cfg_mod.PUMP_CONFIG), [])
+        self.assertEqual(scanner.filter_and_rank_candidates(
+            tickers, cfg_mod.PUMP_CONFIG,
+            get_daily_klines_fn=_harian_pump, reference_ms=_ref_ms()), [])
 
     def test_stablecoin_lama_masih_dibuang(self):
         for base in ("USDC", "FDUSD", "TUSD", "DAI"):
             t = [{"symbol": f"{base}USDT", "priceChangePercent": "20.0",
                   "quoteVolume": "9000000", "lastPrice": "1.0"}]
-            self.assertEqual(scanner.filter_and_rank_candidates(t, cfg_mod.PUMP_CONFIG), [],
+            self.assertEqual(scanner.filter_and_rank_candidates(
+                t, cfg_mod.PUMP_CONFIG,
+                get_daily_klines_fn=_harian_pump, reference_ms=_ref_ms()), [],
                              f"{base} lolos padahal stablecoin")
 
 
@@ -203,15 +231,20 @@ class TestBuildWatchlist(unittest.TestCase):
         r = w["items"][0]
         self.assertEqual(r["status"], "LIKUID")
         self.assertTrue(r["pass_volume"])
-        # Gerbang kenaikan 24 jam sudah dihapus bersama strategi lama, jadi
-        # kuncinya pun tidak boleh muncul lagi di payload panel.
+        # Panel watchlist hanya menilai likuiditas dan struktur; gerbang pump
+        # ditegakkan di market_scanner saat scan, bukan di payload panel ini,
+        # jadi kunci lama pass_pump/pump_gap tidak boleh muncul lagi.
         self.assertNotIn("pass_pump", r)
         self.assertNotIn("pump_gap", r)
         # posisi range: (10-8)/(11-8) = 0,667
         self.assertAlmostEqual(r["range_position"], 0.667, places=2)
 
     def test_koin_turun_tetap_likuid_asal_volumenya_cukup(self):
-        """Strategi baru tidak peduli koin naik atau turun 24 jam."""
+        """Status LIKUID pada panel watchlist hanya soal volume.
+
+        Penilaian naik atau turun 24 jam dilakukan gerbang pump di
+        market_scanner saat scan, bukan oleh label likuiditas panel ini.
+        """
         t = [{"symbol": "AAAUSDT", "lastPrice": "10", "priceChangePercent": "-25",
               "quoteVolume": "5000000", "highPrice": "13", "lowPrice": "9", "count": 100}]
         with self._patch(t):

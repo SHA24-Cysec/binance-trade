@@ -8,14 +8,17 @@ import settings_schema as ss
 
 def test_schema_covers_every_final_config_key():
     # BACKTEST_INITIAL_EQUITY_USDT ditambahkan agar sizing backtest dapat
-    # direproduksi tanpa membaca saldo LIVE.
-    assert len(config.PUMP_CONFIG) == 91
+    # direproduksi tanpa membaca saldo LIVE. PUMP_MIN_24H_CHANGE_PCT dan
+    # PUMP_VOLUME_SURGE_MULT ditambahkan bersama gerbang pump, sedangkan
+    # MAX_HOLD_MINUTES dihapus total.
+    assert len(config.PUMP_CONFIG) == 92
     assert set(ss.PARAMETER_SCHEMA) == set(config.PUMP_CONFIG)
 
 
 def test_kunci_strategi_lama_benar_benar_hilang():
     """MIN_PUMP_PCT_24H dan kawan-kawan dihapus total, bukan disembunyikan."""
-    for kunci in ("MIN_PUMP_PCT_24H", "MOMENTUM_FADE_EXIT", "MOMENTUM_FADE_RANK_THRESHOLD"):
+    for kunci in ("MIN_PUMP_PCT_24H", "MOMENTUM_FADE_EXIT", "MOMENTUM_FADE_RANK_THRESHOLD",
+                  "MAX_HOLD_MINUTES"):
         assert kunci not in config.PUMP_CONFIG
         assert kunci not in config.PUMP_DEFAULTS
         assert kunci not in ss.PARAMETER_SCHEMA
@@ -26,7 +29,8 @@ def test_parameter_setup_baru_ada_di_schema():
             "RETEST_ZONE_ATR_MULT", "RETEST_VWAP_CONFLUENCE_ATR_MULT",
             "VWAP_MIN_BARS_AFTER_ANCHOR", "MAX_BARS_BREAKOUT_TO_RETEST",
             "MAX_RETEST_TOUCHES", "INVALIDATION_ATR_MULT", "MAX_EXTENSION_ATR_MULT",
-            "MIN_CLOSE_POSITION_IN_RANGE", "SETUP_INVALIDATION_EXIT")
+            "MIN_CLOSE_POSITION_IN_RANGE", "SETUP_INVALIDATION_EXIT",
+            "PUMP_MIN_24H_CHANGE_PCT", "PUMP_VOLUME_SURGE_MULT")
     for kunci in baru:
         assert kunci in ss.PARAMETER_SCHEMA, kunci
         assert kunci in config.PUMP_CONFIG, kunci

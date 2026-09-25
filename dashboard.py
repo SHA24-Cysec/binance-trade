@@ -569,7 +569,6 @@ def build_status():
             # Alias lama yang dipakai template. Ikut mengambil nilai posisi
             # supaya angka di layar konsisten dengan kunci di atas.
             "trailing_start_pct": state.get("trail_start_pct") or PUMP_CONFIG.get("TRAILING_START_PCT"),
-            "max_hold_minutes": PUMP_CONFIG.get("MAX_HOLD_MINUTES"),
             "setup_invalidation_exit": bool(PUMP_CONFIG.get("SETUP_INVALIDATION_EXIT")),
             "setup_invalidation_price": state.get("setup_invalidation_price") or 0.0,
             "setup_breakout_level": state.get("setup_breakout_level") or 0.0,
@@ -636,7 +635,7 @@ def _reject_if_backtest_disabled():
 BT_PARAM_KEYS = (
     "USE_ATR_EXITS",
     "SL_PCT", "TP_PCT", "BE_TRIGGER_PCT", "BE_LOCK_PCT", "TRAILING_START_PCT",
-    "TRAILING_STEP_PCT", "MAX_HOLD_MINUTES",
+    "TRAILING_STEP_PCT",
     "SETUP_INVALIDATION_EXIT", "INVALIDATION_ATR_MULT", "MAX_EXTENSION_ATR_MULT",
     "RETEST_ZONE_ATR_MULT", "MAX_BARS_BREAKOUT_TO_RETEST",
     "ATR_PERIOD", "ATR_MULTIPLIER_SL", "ATR_SL_MIN_PCT", "ATR_SL_MAX_PCT", "ATR_TP_RR_RATIO",
@@ -768,10 +767,24 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "Periksa koneksi ke Binance."
             )
 
+        # --- Tahap 2b: candle harian untuk gerbang pump ---------------
+        # Gerbang pump membandingkan volume 24 jam berjalan dengan rata-rata
+        # 7 hari penuh sebelumnya. Candle 1d diunduh terpisah (bobot IP 2 per
+        # simbol) supaya angka rata-ratanya sama dengan yang dibaca bot live,
+        # dan dimundurkan 8 hari agar bar paling awal pun punya riwayat penuh.
+        set_progress(0.80, "mengunduh volume harian untuk gerbang pump...")
+        daily_data = pbt.fetch_universe_daily_klines(
+            client, list(data.keys()),
+            fetch_start_ms - 8 * bt.MS_PER_DAY, end_ms,
+            progress_cb=lambda frac, sym: set_progress(
+                0.80 + frac * 0.02, f"volume harian {sym}"),
+            cancel_cb=cancelled,
+        )
+
         # --- Tahap 3: simulasi ----------------------------------------
         set_progress(0.82, "menjalankan simulasi portofolio...")
         result = pbt.run_portfolio_backtest(
-            data, cfg, interval, warmup_ms=warmup_ms,
+            data, cfg, interval, warmup_ms=warmup_ms, daily_klines=daily_data,
             progress_cb=lambda f: set_progress(0.82 + f * 0.17,
                                                "menjalankan simulasi portofolio..."),
             cancel_cb=cancelled,
@@ -831,7 +844,7 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "Exit dievaluasi per-candle " + interval + " (bukan tiap "
                 + str(PUMP_CONFIG.get("LOOP_INTERVAL_SECONDS", 15)) + " detik seperti bot asli), "
                 "dengan urutan prioritas konservatif: STOP_LOSS -> TAKE_PROFIT -> BREAKEVEN -> "
-                "TRAILING -> MAX_HOLD -> SETUP_INVALIDATED. Stop Loss dianggap kena lebih dulu kalau "
+                "TRAILING -> SETUP_INVALIDATED. Stop Loss dianggap kena lebih dulu kalau "
                 "ambigu dalam satu candle, supaya hasil tidak melebih-lebihkan profit.",
                 "Entry dianggap terjadi tepat di harga penutupan candle sinyal. Slippage market "
                 "order dan spread belum dimodelkan. Fee taker beli+jual SUDAH dipotong.",

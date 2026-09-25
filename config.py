@@ -253,6 +253,35 @@ PUMP_CONFIG = {
     # karena stop yang masuk akal (di bawah level) jadi terlalu lebar.
     "MAX_EXTENSION_ATR_MULT": 1.5,
 
+    # ------------------------------------------------------------------
+    # GERBANG PUMP (saringan semesta, WAJIB, bukan sekadar prioritas urutan)
+    # ------------------------------------------------------------------
+    # Sebuah simbol hanya boleh masuk semesta kandidat kalau KEDUA syarat di
+    # bawah terpenuhi. Pemeriksaan terjadi SEBELUM deteksi pullback retest,
+    # jadi struktur setup hanya dicari pada koin yang memang sedang bergerak.
+    #
+    # Kenapa gerbang ini dihidupkan kembali: tanpa syarat kenaikan, semesta
+    # kandidat didominasi pair besar yang sedang sideways atau turun. Setup
+    # pullback retest pada koin yang tren harian dan volumenya tidak mendukung
+    # lebih sering berakhir sebagai retest yang gagal.
+    #
+    # Sumber data syarat 1 dan 2 (bagian volume 24 jam berjalan) adalah
+    # respons GET /api/v3/ticker/24hr yang SUDAH diambil sekali untuk seluruh
+    # pasar tiap siklus scan, jadi keduanya tidak menambah request.
+    #
+    # Minimal kenaikan harga 24 jam, dalam persen, dari field
+    # priceChangePercent. Koin yang turun 24 jam otomatis gugur.
+    "PUMP_MIN_24H_CHANGE_PCT": 10.0,
+    # Volume dianggap "sedang naik" bila quoteVolume 24 jam berjalan minimal
+    # sekian kali rata-rata volume kuotasi 7 hari PENUH sebelumnya (candle 1d
+    # yang sudah tertutup). Candle harian diminta HANYA untuk simbol yang
+    # sudah lolos syarat kenaikan, yaitu subset kecil, sehingga bobot IP
+    # tambahannya kecil (2 per simbol). Perbandingan terhadap rata-rata 7 hari
+    # dipilih daripada menyimpan riwayat volume di file JSON baru, supaya
+    # tidak ada masalah cold start dan supaya angka yang sama bisa dihitung
+    # ulang untuk titik waktu historis mana pun di backtest.
+    "PUMP_VOLUME_SURGE_MULT": 1.5,
+
     "EXTRA_EXCLUDE_SYMBOLS": [],             # mis. ["SOMEUSDT"] kalau mau blacklist manual
 
     # --- Filter usia listing (proteksi koin baru) ---
@@ -532,7 +561,12 @@ PUMP_CONFIG = {
     "USE_TRAILING": True,
     "TRAILING_START_PCT": 1.5,
     "TRAILING_STEP_PCT": 0.6,
-    "MAX_HOLD_MINUTES": 45,                 # paksa keluar kalau kelamaan hold (hindari nyangkut di pump mati)
+    # CATATAN: MAX_HOLD_MINUTES (paksa keluar setelah sekian menit) sudah
+    # DIHAPUS TOTAL, bukan dinonaktifkan. Alasannya: batas waktu memaksa exit
+    # pada harga pasar apa pun tanpa melihat struktur, sehingga posisi yang
+    # masih valid secara setup bisa ditutup hanya karena jam dinding. Keluar
+    # sekarang sepenuhnya ditentukan harga dan struktur: Stop Loss, Take
+    # Profit, Breakeven, Trailing Stop, dan SETUP_INVALIDATION_EXIT di bawah.
     # Exit SETUP_INVALIDATED: tutup posisi kalau satu candle CONFIRM_INTERVAL
     # tertutup dengan close di bawah breakout_level - INVALIDATION_ATR_MULT x
     # ATR. Level dan ATR dikunci di state posisi saat entry, tidak dihitung

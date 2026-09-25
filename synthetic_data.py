@@ -270,3 +270,52 @@ def seri_banyak_setup(harga: float = 100.0, siklus: int = 10, bar_datar: int = 2
             out.append(make_candle(i, harga / 0.995, harga * 1.001, harga * 0.997, harga, volume))
             i += 1
     return out
+
+
+# ======================================================================
+# Data pendukung GERBANG PUMP (naik 24 jam + volume naik)
+# ======================================================================
+
+def riwayat_harian(klines: list[Kline], hari: int = 7,
+                   quote_volume_harian: float = 1_000_000.0,
+                   harga: float = 1.0) -> list[Kline]:
+    """Candle 1d PENUH yang seluruhnya tertutup SEBELUM deret ``klines``.
+
+    Dipakai tes dan selftest yang memanggil backtest: gerbang pump menolak
+    simbol yang belum punya tujuh candle harian penuh (fail closed), jadi
+    skenario yang ingin menguji hal LAIN (exit, sizing, invalidasi) tetap
+    harus menyediakan riwayat harian yang masuk akal.
+
+    Candle dibuat mundur dari candle pertama ``klines``, satu hari per candle.
+    Timestamp boleh negatif karena data sintetis memakai open_time mulai dari
+    nol; yang dipakai gerbang hanya urutan waktu dan quote_volume.
+    """
+    ms_per_day = 86_400_000
+    mulai = int(klines[0].open_time) if klines else 0
+    out: list[Kline] = []
+    for n in range(hari, 0, -1):
+        open_time = mulai - n * ms_per_day
+        out.append(Kline(
+            open_time=open_time,
+            open=harga, high=harga, low=harga, close=harga,
+            close_time=open_time + ms_per_day - 1,
+            volume=quote_volume_harian / max(harga, 1e-9),
+            quote_volume=float(quote_volume_harian),
+        ))
+    return out
+
+
+def cfg_gerbang_pump_nonaktif(config: dict) -> dict:
+    """Salinan config dengan ambang gerbang pump dilonggarkan total.
+
+    HANYA untuk pengujian yang menguji bagian lain dari pipeline (exit,
+    sizing, paritas live vs backtest). Gerbang pump sendiri diuji terpisah di
+    tests/test_pump_gate.py dengan ambang sungguhan. Melonggarkan ambang di
+    sini membuat tes tersebut tidak ikut merah setiap kali default gerbang
+    diubah, tanpa perlu mematikan gerbangnya lewat jalan belakang di kode
+    produksi.
+    """
+    out = dict(config)
+    out["PUMP_MIN_24H_CHANGE_PCT"] = -1000.0
+    out["PUMP_VOLUME_SURGE_MULT"] = 0.0
+    return out
