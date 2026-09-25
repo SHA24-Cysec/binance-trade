@@ -292,6 +292,53 @@ def confirm_window_bars(config: dict) -> int:
     return max(1, min(1000, max(lookback, required_lookback_bars(config))))
 
 
+def resolve_position_notional(config: dict, quote_free: float) -> dict:
+    """Tentukan nominal entry dari saldo quote dengan policy yang dipakai live.
+
+    Ini adalah sumber kebenaran tunggal untuk sizing. Bot live memakainya
+    sebelum BUY, sedangkan kedua backtest memakainya untuk membangun equity
+    curve. Urutannya sengaja eksplisit:
+
+    1. mode persen memakai saldo free setelah BALANCE_BUFFER_PCT,
+    2. mode fixed memakai POSITION_SIZE_USDT apa adanya,
+    3. MAX_POSITION_USDT, bila positif, membatasi KEDUA mode.
+
+    Return memuat rincian supaya caller tidak perlu menebak apakah plafon
+    sedang menimpa parameter sizing yang dipilih user.
+    """
+    free = max(0.0, float(quote_free or 0.0))
+    use_percent = bool(config.get("USE_RISK_PERCENT"))
+    buffer_pct = max(0.0, float(config.get("BALANCE_BUFFER_PCT", 0.5) or 0.0))
+    buffer_pct = min(buffer_pct, 100.0)
+
+    if use_percent:
+        spendable = free * (1.0 - buffer_pct / 100.0)
+        requested = spendable * float(config.get("RISK_PERCENT", 25.0) or 0.0) / 100.0
+        mode = "PERCENT"
+    else:
+        spendable = free
+        requested = float(config.get("POSITION_SIZE_USDT", 5.0) or 0.0)
+        mode = "FIXED"
+
+    requested = max(0.0, requested)
+    cap = float(config.get("MAX_POSITION_USDT", 0.0) or 0.0)
+    cap_active = cap > 0.0 and requested > cap
+    notional = min(requested, cap) if cap > 0.0 else requested
+    effective_pct = (notional / free * 100.0) if free > 0 else 0.0
+
+    return {
+        "notional": notional,
+        "requested_notional": requested,
+        "mode": mode,
+        "quote_free": free,
+        "spendable_quote": spendable,
+        "buffer_pct": buffer_pct if use_percent else 0.0,
+        "cap": cap if cap > 0.0 else None,
+        "cap_active": cap_active,
+        "effective_pct_of_free": effective_pct,
+    }
+
+
 def resolve_exit_levels(config: dict, klines: "list[Kline] | None" = None,
                          entry_price: "float | None" = None) -> dict:
     """Tentukan SL% dan TP% untuk SATU posisi, mode tetap maupun ATR.
@@ -326,18 +373,29 @@ def resolve_exit_levels(config: dict, klines: "list[Kline] | None" = None,
     """
     fixed_sl = abs(float(config.get("SL_PCT", 1.8)))
     fixed_tp = abs(float(config.get("TP_PCT", 4.0)))
+    fixed_be_trigger = abs(float(config.get("BE_TRIGGER_PCT", 1.0)))
+    fixed_be_lock = abs(float(config.get("BE_LOCK_PCT", 0.15)))
+    fixed_trail_start = abs(float(config.get("TRAILING_START_PCT", 1.5)))
+    fixed_trail_step = abs(float(config.get("TRAILING_STEP_PCT", 0.6)))
+
+    # Invariant ini berlaku untuk mode fixed MAUPUN ATR. Tanpanya BE dapat
+    # mengunci harga yang belum pernah disentuh (lock > trigger), sedangkan
+    # backtest candle bisa mencatat fill profit yang mustahil.
+    fixed_trail_step = min(fixed_trail_step, fixed_sl)
+    fixed_be_trigger = min(fixed_be_trigger, fixed_trail_start)
+    fixed_be_lock = min(fixed_be_lock, fixed_be_trigger)
     fixed_levels = {
         "sl_pct": fixed_sl,
         "tp_pct": fixed_tp,
-        "be_trigger_pct": abs(float(config.get("BE_TRIGGER_PCT", 1.0))),
-        "be_lock_pct": abs(float(config.get("BE_LOCK_PCT", 0.15))),
-        "trail_start_pct": abs(float(config.get("TRAILING_START_PCT", 1.5))),
-        "trail_step_pct": abs(float(config.get("TRAILING_STEP_PCT", 0.6))),
+        "be_trigger_pct": fixed_be_trigger,
+        "be_lock_pct": fixed_be_lock,
+        "trail_start_pct": fixed_trail_start,
+        "trail_step_pct": fixed_trail_step,
     }
 
     if not config.get("USE_ATR_EXITS", False):
         return {**fixed_levels, "atr_pct": None,
-                "source": "FIXED", "note": "SL/TP/BE/Trailing tetap dari config"}
+                "source": "FIXED", "note": "SL/TP/BE/Trailing tetap dari config (invariant BE/trailing diterapkan)"}
 
     period = int(config.get("ATR_PERIOD", 14))
     a_pct = atr_percent(klines or [], period, reference_price=entry_price)

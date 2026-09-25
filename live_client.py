@@ -76,11 +76,10 @@ class LiveClient(ExchangeClient):
                          quantity: Optional[float] = None,
                          quote_order_qty: Optional[float] = None,
                          new_client_order_id: Optional[str] = None) -> dict:
-        # new_client_order_id diteruskan bila diberikan (BinanceSpotClient versi
-        # ini memakai signature ringkas; parameter opsional diabaikan bila tak
-        # didukung -- perilaku order tetap benar).
-        return self.signed.new_market_order(symbol, side, quantity=quantity,
-                                            quote_order_qty=quote_order_qty)
+        return self.signed.new_market_order(
+            symbol, side, quantity=quantity, quote_order_qty=quote_order_qty,
+            new_client_order_id=new_client_order_id,
+        )
 
     def new_order(self, symbol: str, side: str, order_type: str,
                   quantity: Optional[float] = None,

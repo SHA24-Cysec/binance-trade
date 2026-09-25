@@ -417,6 +417,10 @@ PUMP_CONFIG = {
     "USE_RISK_PERCENT": True,               # True = ukuran posisi % dari saldo USDT free
     "RISK_PERCENT": 25.0,                      # dipakai jika USE_RISK_PERCENT = True
     "POSITION_SIZE_USDT": 5.0,              # dipakai jika USE_RISK_PERCENT = False
+    # Modal awal simulasi backtest. Ini BUKAN saldo LIVE yang dibaca otomatis;
+    # ubah sesuai akun yang ingin dimodelkan. Backtest memakai policy sizing
+    # yang sama dengan live terhadap angka ini.
+    "BACKTEST_INITIAL_EQUITY_USDT": 10_000.0,
 
     # --- Plafon nominal per posisi ---
     #

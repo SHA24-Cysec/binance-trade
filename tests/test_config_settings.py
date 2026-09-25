@@ -7,7 +7,9 @@ import settings_schema as ss
 
 
 def test_schema_covers_every_final_config_key():
-    assert len(config.PUMP_CONFIG) == 90
+    # BACKTEST_INITIAL_EQUITY_USDT ditambahkan agar sizing backtest dapat
+    # direproduksi tanpa membaca saldo LIVE.
+    assert len(config.PUMP_CONFIG) == 91
     assert set(ss.PARAMETER_SCHEMA) == set(config.PUMP_CONFIG)
 
 

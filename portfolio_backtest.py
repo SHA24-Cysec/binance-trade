@@ -101,6 +101,7 @@ from backtest import (
     bars_per_day,
     compute_rolling_24h_stats,
     fetch_full_klines,
+    initial_backtest_equity,
 )
 
 
@@ -124,6 +125,10 @@ class PortfolioTrade:
     rank_at_entry: int       # posisi simbol di papan kandidat (1 = volume terbesar)
     pct24h_at_entry: float
     candidates_at_entry: int  # berapa simbol lolos saringan pada bar itu
+    position_notional: float = 0.0
+    equity_before: float = 0.0
+    equity_after: float = 0.0
+    pnl_quote: float = 0.0
 
 
 @dataclass
@@ -152,13 +157,16 @@ class PortfolioResult:
     skipped: list = field(default_factory=list)
     warnings: list = field(default_factory=list)
     symbols_failed: list = field(default_factory=list)
+    initial_equity: float = 0.0
+    final_equity: float = 0.0
 
 
 # ======================================================================
 # Tahap 1: pilih semesta simbol
 # ======================================================================
 
-def select_universe(tickers: list, config: dict, max_symbols: Optional[int] = None) -> list[str]:
+def select_universe(tickers: list, config: dict, max_symbols: Optional[int] = None,
+                    tradable_symbols: Optional[set] = None) -> list[str]:
     """Tentukan simbol mana yang ikut disimulasikan.
 
     Memakai filter_and_rank_candidates() milik scanner supaya aturan
@@ -174,7 +182,7 @@ def select_universe(tickers: list, config: dict, max_symbols: Optional[int] = No
     cfg = dict(config)
     cfg["MIN_QUOTE_VOLUME_USDT_24H"] = float(config.get("MIN_QUOTE_VOLUME_USDT_24H", 0))
 
-    ranked = scanner.filter_and_rank_candidates(tickers, cfg)
+    ranked = scanner.filter_and_rank_candidates(tickers, cfg, tradable_symbols)
     # Urutkan berdasarkan likuiditas, bukan kenaikan hari ini. Kalau daftar
     # harus dipotong, yang dipertahankan adalah pair paling likuid, yang juga
     # paling mungkin lolos filter volume bot pada periode mana pun.
@@ -278,6 +286,15 @@ def run_portfolio_backtest(
     if not data:
         raise BacktestError("Tidak ada data candle untuk disimulasikan.")
 
+    # Jalur direct API juga wajib melewati structural policy yang sama dengan
+    # scanner, bukan hanya jalur select_universe dashboard.
+    tradable_meta = config.get("_historical_tradable_symbols")
+    original_count = len(data)
+    data = {sym: kl for sym, kl in data.items()
+            if scanner.is_structurally_allowed_symbol(sym, config, tradable_meta)}
+    if not data:
+        raise BacktestError("Tidak ada data yang lolos policy semesta bersama.")
+
     timeline, index_of, stats_of = build_timeline(data, interval)
     if not timeline:
         raise BacktestError("Garis waktu kosong, tidak ada candle yang bisa diproses.")
@@ -297,6 +314,10 @@ def run_portfolio_backtest(
     # tetap dinaikkan oleh confirm_window_bars() supaya backtest tidak diam-diam
     # menghasilkan nol trade, tetapi pengguna tetap diberi peringatan.
     _pre_warnings: list = []
+    if len(data) != original_count:
+        _pre_warnings.append("Sebagian data dibuang oleh policy semesta bersama (stablecoin, leveraged token, blacklist, quote, atau status metadata).")
+    if tradable_meta is None or config.get("_tradable_status_is_current_snapshot"):
+        _pre_warnings.append("Status TRADING historis tidak tersedia dari candle Binance. Policy status hanya dapat diverifikasi dari metadata saat ini bila caller menyediakannya.")
     _butuh = strategy.required_lookback_bars(config)
     if int(config.get("CONFIRM_LOOKBACK_BARS", 0)) < _butuh:
         _pre_warnings.append(
@@ -315,11 +336,15 @@ def run_portfolio_backtest(
     trades: list = []
     skipped: list = []
     warnings: list = list(_pre_warnings)
+    initial_equity = initial_backtest_equity(config)
+    equity = initial_equity
 
     # Status posisi
     holding: Optional[str] = None
     entry_price = 0.0
     entry_time = 0
+    position_notional = 0.0
+    equity_before_entry = 0.0
     be_active = False
     be_stop = 0.0
     trailing_active = False
@@ -424,18 +449,24 @@ def run_portfolio_backtest(
 
             if exit_reason:
                 gross = (exit_price / entry_price - 1.0) * 100.0
+                pnl_pct = gross - fee_round_trip
+                pnl_quote = position_notional * pnl_pct / 100.0
+                equity_after = max(0.0, equity + pnl_quote)
                 trades.append(PortfolioTrade(
                     symbol=holding,
                     entry_time=entry_time, entry_price=entry_price,
                     exit_time=candle.close_time, exit_price=exit_price,
                     reason=exit_reason, hold_minutes=hold_minutes,
-                    pnl_pct=gross - fee_round_trip, gross_pnl_pct=gross,
-                    fee_pct=fee_round_trip,
+                    pnl_pct=pnl_pct, gross_pnl_pct=gross, fee_pct=fee_round_trip,
                     sl_pct=cur["sl"], tp_pct=cur["tp"],
                     atr_pct=cur["atr"], exit_source=cur["src"],
                     rank_at_entry=rank_at_entry, pct24h_at_entry=pct24h_at_entry,
                     candidates_at_entry=cands_at_entry,
+                    position_notional=position_notional, equity_before=equity_before_entry,
+                    equity_after=equity_after, pnl_quote=pnl_quote,
                 ))
+                equity = equity_after
+                position_notional = 0.0
                 holding = None
                 be_active = False
                 trailing_active = False
@@ -474,6 +505,11 @@ def run_portfolio_backtest(
             -row[4],
         ))
         rank, pct, sym, i, _vol24, setup_terpilih = lolos[0]
+        sizing = strategy.resolve_position_notional(config, equity)
+        if sizing["notional"] <= 0 or sizing["notional"] > equity:
+            # Live juga tidak boleh membeli nominal fixed yang melebihi saldo.
+            # Tidak dipaksa masuk dengan full-equity compounding.
+            continue
 
         # Catat sinyal valid lain pada bar yang sama yang TIDAK terambil
         # karena bot hanya boleh pegang satu posisi. Ini yang membuat
@@ -492,6 +528,8 @@ def run_portfolio_backtest(
         kl = data[sym]
         candle = kl[i]
         holding = sym
+        position_notional = sizing["notional"]
+        equity_before_entry = equity
         entry_price = candle.close
         entry_time = candle.close_time
         be_active = False
@@ -531,6 +569,8 @@ def run_portfolio_backtest(
         trades=trades,
         skipped=skipped,
         warnings=list(dict.fromkeys(warnings)),   # buang duplikat, jaga urutan
+        initial_equity=initial_equity,
+        final_equity=equity,
     )
 
 
@@ -539,33 +579,33 @@ def run_portfolio_backtest(
 # ======================================================================
 
 def summarize_portfolio(result: PortfolioResult) -> dict:
-    """Statistik hasil simulasi portofolio.
-
-    Return dibuat mirip backtest.summarize() supaya dashboard bisa memakai
-    komponen tampilan yang sama, ditambah beberapa metrik khas portofolio.
-    """
+    """Statistik simulasi portofolio dengan equity/notional nyata."""
     trades = result.trades
     total = len(trades)
     wins = [t for t in trades if t.pnl_pct > 0]
     losses = [t for t in trades if t.pnl_pct <= 0]
 
+    initial = result.initial_equity
+    equity = initial
+    gross_equity = initial
     equity_curve = [0.0]
-    mult = 1.0
-    gross_mult = 1.0
     for t in trades:
-        mult *= (1 + t.pnl_pct / 100.0)
-        gross_mult *= (1 + t.gross_pnl_pct / 100.0)
-        equity_curve.append((mult - 1.0) * 100.0)
+        notional = t.position_notional if t.position_notional > 0 else equity
+        if t.equity_after > 0 or t.pnl_quote != 0:
+            equity = t.equity_after
+        else:
+            equity = max(0.0, equity + notional * t.pnl_pct / 100.0)
+        gross_equity = max(0.0, gross_equity + notional * t.gross_pnl_pct / 100.0)
+        equity_curve.append((equity / initial - 1.0) * 100.0 if initial > 0 else 0.0)
 
-    peak = -1e18
+    final_equity = equity if trades else (result.final_equity or initial)
+    total_return = ((final_equity / initial) - 1.0) * 100.0 if initial > 0 else 0.0
+    gross_return = ((gross_equity / initial) - 1.0) * 100.0 if initial > 0 else 0.0
+    peak = initial
     max_dd = 0.0
-    for v in equity_curve:
-        level = 1 + v / 100.0
-        if level > peak:
-            peak = level
-        dd = (peak - level) / peak * 100.0 if peak > 0 else 0.0
-        if dd > max_dd:
-            max_dd = dd
+    for value in [initial] + [initial * (1.0 + v / 100.0) for v in equity_curve[1:]]:
+        peak = max(peak, value)
+        max_dd = max(max_dd, ((peak - value) / peak * 100.0) if peak > 0 else 0.0)
 
     gross_win = sum(t.pnl_pct for t in wins)
     gross_loss = abs(sum(t.pnl_pct for t in losses))
@@ -580,7 +620,7 @@ def summarize_portfolio(result: PortfolioResult) -> dict:
     symbol_pnl: dict = {}
     for t in trades:
         symbol_counts[t.symbol] = symbol_counts.get(t.symbol, 0) + 1
-        symbol_pnl[t.symbol] = symbol_pnl.get(t.symbol, 0.0) + t.pnl_pct
+        symbol_pnl[t.symbol] = symbol_pnl.get(t.symbol, 0.0) + t.pnl_quote
     top_symbols = sorted(symbol_pnl.items(), key=lambda kv: kv[1], reverse=True)
 
     span_ms = max(1, result.end_time - result.start_time)
@@ -589,32 +629,33 @@ def summarize_portfolio(result: PortfolioResult) -> dict:
     exposure = (total_hold / (span_days * 24 * 60) * 100.0) if span_days > 0 else 0.0
 
     return {
-        "total_trades": total,
-        "wins": len(wins),
-        "losses": len(losses),
+        "total_trades": total, "wins": len(wins), "losses": len(losses),
         "win_rate": (len(wins) / total * 100.0) if total else 0.0,
-        "total_return_pct": (mult - 1.0) * 100.0,
-        "gross_return_pct": (gross_mult - 1.0) * 100.0,
-        "fee_drag_pct": (gross_mult - mult) * 100.0,
+        "total_return_pct": total_return, "gross_return_pct": gross_return,
+        "fee_drag_pct": gross_return - total_return,
         "total_fee_pct": sum(t.fee_pct for t in trades),
         "max_drawdown_pct": max_dd,
         "avg_win_pct": (sum(t.pnl_pct for t in wins) / len(wins)) if wins else 0.0,
         "avg_loss_pct": (sum(t.pnl_pct for t in losses) / len(losses)) if losses else 0.0,
         "profit_factor": profit_factor,
         "avg_hold_minutes": (total_hold / total) if total else 0.0,
-        "reason_counts": reason_counts,
-        "equity_curve": equity_curve,
-        # --- khas portofolio ---
-        "unique_symbols": len(symbol_counts),
-        "symbols_in_universe": result.symbols_with_data,
-        "top_symbols": [{"symbol": s, "pnl_pct": p, "trades": symbol_counts[s]}
+        "reason_counts": reason_counts, "equity_curve": equity_curve,
+        "initial_equity": initial, "final_equity": final_equity,
+        "total_pnl_quote": final_equity - initial,
+        "unique_symbols": len(symbol_counts), "symbols_in_universe": result.symbols_with_data,
+        # pnl_pct di sini adalah kontribusi terhadap modal awal, bukan
+        # penjumlahan persentase trade. pnl_quote disertakan untuk pelaporan.
+        "top_symbols": [{"symbol": s, "pnl_quote": p,
+                         "pnl_pct": (p / initial * 100.0) if initial > 0 else 0.0,
+                         "trades": symbol_counts[s]}
                         for s, p in top_symbols[:10]],
-        "worst_symbols": [{"symbol": s, "pnl_pct": p, "trades": symbol_counts[s]}
+        "worst_symbols": [{"symbol": s, "pnl_quote": p,
+                            "pnl_pct": (p / initial * 100.0) if initial > 0 else 0.0,
+                            "trades": symbol_counts[s]}
                           for s, p in top_symbols[-5:][::-1] if p < 0],
         "skipped_signals": len(result.skipped),
         "avg_rank_at_entry": (sum(t.rank_at_entry for t in trades) / total) if total else 0.0,
-        "exposure_pct": exposure,
-        "span_days": span_days,
+        "exposure_pct": exposure, "span_days": span_days,
         "trades_per_day": (total / span_days) if span_days > 0 else 0.0,
     }
 

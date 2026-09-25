@@ -85,6 +85,10 @@ class BacktestTrade:
     exit_source: str = "FIXED"
     gross_pnl_pct: float = 0.0
     fee_pct: float = 0.0
+    position_notional: float = 0.0
+    equity_before: float = 0.0
+    equity_after: float = 0.0
+    pnl_quote: float = 0.0
 
 
 @dataclass
@@ -98,6 +102,8 @@ class BacktestResult:
     trades: list = field(default_factory=list)
     params: dict = field(default_factory=dict)
     warnings: list = field(default_factory=list)
+    initial_equity: float = 0.0
+    final_equity: float = 0.0
 
 
 def bars_per_day(interval: str) -> int:
@@ -105,6 +111,18 @@ def bars_per_day(interval: str) -> int:
     if not minutes:
         raise BacktestError(f"Interval '{interval}' tidak didukung untuk perhitungan 24 jam.")
     return (24 * 60) // minutes
+
+
+def initial_backtest_equity(config: dict) -> float:
+    """Equity quote awal untuk simulasi sizing sequential.
+
+    Nilai eksplisit BACKTEST_INITIAL_EQUITY_USDT diutamakan. Fallback menjaga
+    kompatibilitas config lama dengan saldo PAPER awal, lalu 10.000 USDT.
+    """
+    fallback = (config.get("PAPER_INITIAL_BALANCES", {}) or {}).get(
+        config.get("QUOTE_ASSET", "USDT"), 10_000.0)
+    value = float(config.get("BACKTEST_INITIAL_EQUITY_USDT", fallback) or 0.0)
+    return max(0.0, value)
 
 
 def compute_rolling_24h_stats(klines: list[Kline], window: int) -> list[Optional[dict]]:
@@ -207,9 +225,22 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
     trades: list[BacktestTrade] = []
     warnings: list[str] = []
 
+    initial_equity = initial_backtest_equity(config)
+    symbol = str(config.get("_symbol", "") or "")
+    historical_tradable = config.get("_historical_tradable_symbols")
+    if symbol and not scanner.is_structurally_allowed_symbol(symbol, config, historical_tradable):
+        warnings.append("Simbol ditolak oleh policy semesta bersama (quote, stablecoin, leveraged token, blacklist, atau status historis).")
+        return BacktestResult(symbol=symbol, interval=interval, bars_total=n, bars_usable=0,
+                              start_time=klines[0].open_time if klines else 0,
+                              end_time=klines[-1].close_time if klines else 0,
+                              trades=[], params=config, warnings=warnings,
+                              initial_equity=initial_equity, final_equity=initial_equity)
+    equity = initial_equity
     in_position = False
     entry_price = 0.0
     entry_time = 0
+    position_notional = 0.0
+    equity_before_entry = 0.0
     be_active = False
     be_stop = 0.0
     trailing_active = False
@@ -262,7 +293,15 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
                 window_klines = klines[max(0, i - lookback + 1): i + 1]
                 setup = scanner.detect_pullback_retest(window_klines, config)
                 if setup.ok:
+                    sizing = strategy.resolve_position_notional(config, equity)
+                    # Sama seperti live: posisi fixed yang lebih besar dari
+                    # saldo tidak boleh "terisi" secara ajaib di backtest.
+                    if sizing["notional"] <= 0 or sizing["notional"] > equity:
+                        i += 1
+                        continue
                     in_position = True
+                    position_notional = sizing["notional"]
+                    equity_before_entry = equity
                     entry_price = candle.close
                     entry_time = candle.close_time
                     be_active = False
@@ -366,14 +405,20 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
             # hasil. Backtest yang mengabaikannya akan terlihat jauh lebih
             # bagus daripada kenyataan.
             pnl_pct = gross_pct - fee_round_trip_pct
+            pnl_quote = position_notional * pnl_pct / 100.0
+            equity_after = max(0.0, equity + pnl_quote)
             trades.append(BacktestTrade(
                 entry_time=entry_time, entry_price=entry_price,
                 exit_time=candle.close_time, exit_price=exit_price,
                 reason=exit_reason, hold_minutes=hold_minutes, pnl_pct=pnl_pct,
                 sl_pct=cur_sl, tp_pct=cur_tp, atr_pct=cur_atr, exit_source=cur_src,
                 gross_pnl_pct=gross_pct, fee_pct=fee_round_trip_pct,
+                position_notional=position_notional, equity_before=equity_before_entry,
+                equity_after=equity_after, pnl_quote=pnl_quote,
             ))
+            equity = equity_after
             in_position = False
+            position_notional = 0.0
             next_entry_allowed_at = candle.close_time + cooldown_ms
 
         i += 1
@@ -388,6 +433,8 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
         trades=trades,
         params=config,
         warnings=warnings,
+        initial_equity=initial_equity,
+        final_equity=equity,
     )
     return result
 
@@ -400,28 +447,33 @@ def summarize(result: BacktestResult) -> dict:
     losses = [t for t in trades if t.pnl_pct <= 0]
     win_rate = (len(wins) / total * 100.0) if total else 0.0
 
-    # Return kumulatif dihitung sebagai COMPOUNDING sederhana (reinvest 100%
-    # tiap trade) supaya menggambarkan efek RISK_PERCENT tinggi -- BUKAN
-    # penjumlahan biasa, karena bot memang memakai persentase saldo per entry.
-    equity_curve = [0.0]  # dalam persen, basis 0% = modal awal
-    equity_mult = 1.0
-    gross_mult = 1.0      # skenario tandingan: hasil yang sama TANPA fee
+    # Equity curve memakai hasil nominal yang benar-benar disimulasikan oleh
+    # run_backtest, bukan mengompound pnl% seolah setiap entry memakai 100%
+    # akun. Untuk objek lama/manual tanpa nominal, fallback menjaga fungsi
+    # tetap dapat dipakai dengan modal konfigurasi saat ini.
+    initial = result.initial_equity or initial_backtest_equity(result.params)
+    equity = initial
+    gross_equity = initial
+    equity_curve = [0.0]
     for t in trades:
-        equity_mult *= (1 + t.pnl_pct / 100.0)
-        gross_mult *= (1 + t.gross_pnl_pct / 100.0)
-        equity_curve.append((equity_mult - 1.0) * 100.0)
+        notional = t.position_notional if t.position_notional > 0 else equity
+        if t.equity_after > 0 or t.pnl_quote != 0:
+            equity = t.equity_after
+        else:
+            equity = max(0.0, equity + notional * t.pnl_pct / 100.0)
+        gross_equity = max(0.0, gross_equity + notional * t.gross_pnl_pct / 100.0)
+        equity_curve.append((equity / initial - 1.0) * 100.0 if initial > 0 else 0.0)
 
-    total_return_pct = (equity_mult - 1.0) * 100.0
+    final_equity = equity if trades else (result.final_equity or initial)
+    total_return_pct = ((final_equity / initial) - 1.0) * 100.0 if initial > 0 else 0.0
+    gross_return_pct = ((gross_equity / initial) - 1.0) * 100.0 if initial > 0 else 0.0
 
-    peak = -1e18
+    peak = initial
     max_dd = 0.0
-    for v in equity_curve:
-        level = 1 + v / 100.0
-        if level > peak:
-            peak = level
-        dd = (peak - level) / peak * 100.0 if peak > 0 else 0.0
-        if dd > max_dd:
-            max_dd = dd
+    for value in [initial] + [initial * (1.0 + v / 100.0) for v in equity_curve[1:]]:
+        peak = max(peak, value)
+        dd = (peak - value) / peak * 100.0 if peak > 0 else 0.0
+        max_dd = max(max_dd, dd)
 
     avg_win = (sum(t.pnl_pct for t in wins) / len(wins)) if wins else 0.0
     avg_loss = (sum(t.pnl_pct for t in losses) / len(losses)) if losses else 0.0
@@ -448,14 +500,11 @@ def summarize(result: BacktestResult) -> dict:
         "avg_hold_minutes": avg_hold,
         "reason_counts": reason_counts,
         "equity_curve": equity_curve,
-        # Dampak biaya. PENTING: return kotor di bawah juga dihitung
-        # COMPOUNDING, sama seperti total_return_pct. Kalau yang satu
-        # dijumlah biasa dan yang lain di-compound, keduanya tidak sebanding
-        # dan bisa menghasilkan hal mustahil seperti "bersih > kotor".
-        "gross_return_pct": (gross_mult - 1.0) * 100.0,
-        # Selisih compounding antara tanpa-fee dan dengan-fee. Inilah biaya
-        # sesungguhnya terhadap hasil akhir, bukan sekadar penjumlahan fee.
-        "fee_drag_pct": (gross_mult - equity_mult) * 100.0,
+        "initial_equity": initial,
+        "final_equity": final_equity,
+        "total_pnl_quote": final_equity - initial,
+        "gross_return_pct": gross_return_pct,
+        "fee_drag_pct": gross_return_pct - total_return_pct,
         "total_fee_pct": sum(t.fee_pct for t in trades),
     }
 

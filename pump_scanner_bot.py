@@ -45,6 +45,7 @@ import signal
 import sys
 import threading
 import time
+import uuid
 
 from binance_client import (
     BinanceAPIError, SymbolFilters, build_filters_cache, build_trading_symbols,
@@ -108,6 +109,15 @@ DEFAULT_STATE = {
     # Penghitung kegagalan SELL berturut-turut untuk eskalasi alarm (lihat
     # close_position). Direset ke 0 saat entry baru atau SELL berhasil.
     "sell_fail_count": 0,
+    # Intent order disimpan SEBELUM request dikirim. Jika proses mati atau
+    # respons jaringan hilang setelah exchange menerima order, startup dapat
+    # menanyakannya kembali lewat clientOrderId dan tidak menganggap posisi
+    # nyata sebagai state kosong.
+    "pending_order": None,
+    # Posisi/aset yang tidak dapat dipetakan aman ke state bot memblokir entry
+    # baru sampai operator melakukan rekonsiliasi, bukan diabaikan diam-diam.
+    "reconciliation_required": False,
+    "reconciliation_assets": [],
 }
 
 
@@ -145,9 +155,22 @@ def load_pump_state(path: str) -> dict:
 
 
 def get_balance(account: dict, asset: str) -> float:
+    """Saldo free aset, dipertahankan untuk caller yang akan mengirim MARKET."""
     for b in account.get("balances", []):
         if b.get("asset") == asset:
             return float(b.get("free", 0.0))
+    return 0.0
+
+
+def get_total_balance(account: dict, asset: str) -> float:
+    """Saldo free + locked untuk rekonsiliasi kepemilikan aset.
+
+    Aset locked tetap milik akun. Menganggapnya nol akan membuat limit SELL
+    manual terlihat seperti posisi hilang lalu state bot dihapus salah.
+    """
+    for b in account.get("balances", []):
+        if b.get("asset") == asset:
+            return float(b.get("free", 0.0)) + float(b.get("locked", 0.0))
     return 0.0
 
 
@@ -248,58 +271,159 @@ def maybe_force_close_at_risk_limit(client: ExchangeClient, config: dict,
         state["_limit_close_done"] = False
 
 
-def reconcile_state_with_exchange(client: ExchangeClient, config: dict, state: dict) -> None:
-    """Selaraskan state posisi dengan saldo asli di exchange, dipanggil SEKALI
-    saat startup sebelum loop utama (perbaikan audit 2026-09-24, temuan S-02).
-
-    Kasus yang ditangani:
-      a. State mengira ada posisi, tapi saldo base asset di exchange 0
-         (riwayat/posisi bisa berubah di luar bot -- ini wajar,
-         atau posisi dijual manual lewat aplikasi): posisi "hantu" direset
-         supaya bot tidak mengelola SL/TP untuk koin yang sudah tidak ada.
-      b. Qty di state lebih besar dari saldo nyata (fee memotong aset dasar,
-         sebagian terjual manual): qty disesuaikan ke saldo nyata.
-      c. Saldo nyata >= qty state: tidak diubah (aset ekstra di akun bukan
-         urusan bot).
-
-    Kalau API gagal, rekonsiliasi DILEWATI (bukan gagal keras): bot tetap
-    jalan memakai state lama, dan close_position sudah punya penyesuaian qty
-    sendiri terhadap saldo sebelum menjual.
-    """
-    symbol = state.get("current_symbol")
-    qty_state = float(state.get("qty") or 0.0)
-    if not symbol or qty_state <= 0:
-        return  # tidak ada posisi -> nol panggilan API
+def _restore_pending_buy(config: dict, state: dict, pending: dict, order: dict,
+                         account: dict) -> bool:
+    """Pulihkan state minimal dari BUY yang terisi tetapi responsnya hilang."""
+    executed = float(order.get("executedQty", 0.0) or 0.0)
+    quoted = float(order.get("cummulativeQuoteQty", 0.0) or 0.0)
+    symbol = str(pending.get("symbol") or order.get("symbol") or "")
+    if not symbol or executed <= 0 or quoted <= 0:
+        return False
     quote = config["QUOTE_ASSET"]
     if not symbol.endswith(quote):
-        return
-    base_asset = symbol[: -len(quote)]
+        return False
+    base = symbol[: -len(quote)]
+    # PAPER dapat memotong fee dari base. Untuk pengelolaan posisi, jangan
+    # pernah menyimpan qty lebih besar dari saldo free yang benar-benar bisa
+    # dijual sekarang.
+    qty = min(executed, get_balance(account, base))
+    if qty <= 0:
+        return False
+    levels = pending.get("levels") if isinstance(pending.get("levels"), dict) else {}
+    setup = pending.get("setup") if isinstance(pending.get("setup"), dict) else {}
+    state["current_symbol"] = symbol
+    state["entry_price"] = quoted / executed
+    state["qty"] = qty
+    state["entry_time"] = int(order.get("transactTime") or state_mod.now_ms())
+    state["be_active"] = False
+    state["be_stop_price"] = 0.0
+    state["trailing_active"] = False
+    state["trailing_stop_price"] = 0.0
+    for key in ("sl_pct", "tp_pct", "be_trigger_pct", "be_lock_pct",
+                "trail_start_pct", "trail_step_pct", "exit_source", "atr_pct_at_entry"):
+        if key in levels:
+            state[key] = levels[key]
+    state["breakout_level"] = float(setup.get("breakout_level") or 0.0)
+    state["setup_invalidation_price"] = float(setup.get("invalidation_price") or 0.0)
+    state["atr_abs_at_entry"] = float(setup.get("atr_abs") or 0.0)
+    state["last_setup_check_close_time"] = 0
+    state["last_trade_time"] = state_mod.now_ms()
+    state["sell_fail_count"] = 0
+    return True
+
+
+def reconcile_state_with_exchange(client: ExchangeClient, config: dict, state: dict) -> None:
+    """Selaraskan intent/state posisi dengan saldo exchange saat startup.
+
+    Rekonsiliasi tidak hanya menangani state yang terlalu besar. Ia juga
+    memulihkan BUY ber-intent yang responsnya hilang, menghitung saldo locked
+    sebagai kepemilikan, dan memblokir entry bila ada aset base yang tidak dapat
+    dipetakan aman ke posisi bot.
+    """
+    quote = config["QUOTE_ASSET"]
     try:
         account = client.get_account()
     except BinanceAPIError as exc:
         logger.warning(
             "Rekonsiliasi startup dilewati (gagal ambil saldo: %s). "
-            "State lama dipakai apa adanya; close_position tetap menyesuaikan qty saat menjual.",
+            "State lama dipakai apa adanya; entry baru tidak akan berjalan bila ada intent order.",
             exc,
         )
         return
-    free_base = get_balance(account, base_asset)
-    if free_base <= 0:
-        logger.warning(
-            "REKONSILIASI: state bilang pegang %s qty=%.8f, tapi saldo %s di exchange = 0. "
-            "Posisi hantu direset (kemungkinan penjualan manual atau reset state).",
-            symbol, qty_state, base_asset,
-        )
-        reset_position(state)
-        state_mod.save_state(config["STATE_FILE"], state)
-        return
-    if free_base < qty_state:
-        logger.warning(
-            "REKONSILIASI: qty state %s (%.8f) lebih besar dari saldo nyata (%.8f). "
-            "Qty disesuaikan ke saldo nyata.",
-            symbol, qty_state, free_base,
-        )
-        state["qty"] = free_base
+
+    changed = False
+    pending = state.get("pending_order")
+    if isinstance(pending, dict) and pending.get("client_order_id"):
+        symbol = str(pending.get("symbol") or "")
+        try:
+            order = client.get_order(symbol,
+                                     orig_client_order_id=pending["client_order_id"])
+        except BinanceAPIError as exc:
+            # -2013 berarti order tidak pernah tercatat di exchange. Error lain
+            # tidak boleh menghapus intent karena statusnya masih tidak pasti.
+            if getattr(exc, "code", None) == -2013:
+                logger.warning("Intent %s untuk %s tidak ditemukan di exchange; dibersihkan.",
+                               pending.get("side"), symbol)
+                state["pending_order"] = None
+                changed = True
+            else:
+                state["reconciliation_required"] = True
+                state["reconciliation_assets"] = [symbol] if symbol else []
+                changed = True
+                logger.critical("Intent order %s belum dapat diverifikasi (%s). Entry baru diblokir.",
+                                symbol, exc)
+        else:
+            side = str(pending.get("side") or order.get("side") or "").upper()
+            status = str(order.get("status") or "").upper()
+            if side == "BUY" and float(order.get("executedQty", 0.0) or 0.0) > 0:
+                if _restore_pending_buy(config, state, pending, order, account):
+                    logger.critical("BUY %s dipulihkan dari intent/order setelah respons hilang.", symbol)
+                    state["reconciliation_required"] = False
+                    state["reconciliation_assets"] = []
+                else:
+                    state["reconciliation_required"] = True
+                    state["reconciliation_assets"] = [symbol] if symbol else []
+                state["pending_order"] = None
+                changed = True
+            elif status in ("FILLED", "CANCELED", "REJECTED", "EXPIRED"):
+                # SELL finalized akan diselaraskan dengan saldo di bawah.
+                state["pending_order"] = None
+                changed = True
+            else:
+                state["reconciliation_required"] = True
+                state["reconciliation_assets"] = [symbol] if symbol else []
+                changed = True
+
+    symbol = state.get("current_symbol")
+    qty_state = float(state.get("qty") or 0.0)
+    if symbol and qty_state > 0 and symbol.endswith(quote):
+        base_asset = symbol[: -len(quote)]
+        total_base = get_total_balance(account, base_asset)
+        free_base = get_balance(account, base_asset)
+        if total_base <= 0:
+            logger.warning(
+                "REKONSILIASI: state bilang pegang %s qty=%.8f, tapi saldo total %s = 0. "
+                "Posisi hantu direset.", symbol, qty_state, base_asset,
+            )
+            reset_position(state)
+            changed = True
+        elif total_base < qty_state:
+            logger.warning(
+                "REKONSILIASI: qty state %s (%.8f) lebih besar dari saldo total nyata %.8f. "
+                "Qty disesuaikan.", symbol, qty_state, total_base,
+            )
+            state["qty"] = total_base
+            changed = True
+        if free_base <= 0 and total_base > 0:
+            # Ada order manual/open order. Jangan reset posisi dan jangan
+            # berpura-pura MARKET SELL dapat mengelolanya.
+            state["reconciliation_required"] = True
+            state["reconciliation_assets"] = [base_asset]
+            changed = True
+            logger.critical("%s seluruhnya locked. Entry baru diblokir sampai order manual direkonsiliasi.",
+                            base_asset)
+    elif not state.get("current_symbol") and not state.get("pending_order"):
+        # State kosong tidak cukup untuk menyimpulkan akun kosong. Base asset
+        # yang tersisa bisa berasal dari BUY yang respons/state-nya hilang.
+        foreign = []
+        for bal in account.get("balances", []):
+            asset = str(bal.get("asset") or "")
+            if not asset or asset in (quote, "BNB"):
+                continue
+            try:
+                amount = float(bal.get("free", 0.0)) + float(bal.get("locked", 0.0))
+            except (TypeError, ValueError):
+                continue
+            if amount > 0:
+                foreign.append(asset)
+        if foreign:
+            state["reconciliation_required"] = True
+            state["reconciliation_assets"] = sorted(set(foreign))
+            changed = True
+            logger.critical("State kosong tetapi akun masih punya aset base %s. Entry baru diblokir sampai rekonsiliasi manual.",
+                            ", ".join(state["reconciliation_assets"]))
+
+    if changed:
         state_mod.save_state(config["STATE_FILE"], state)
 
 
@@ -345,6 +469,7 @@ def reset_position(state: dict) -> None:
     state["setup_invalidation_price"] = 0.0
     state["atr_abs_at_entry"] = 0.0
     state["last_setup_check_close_time"] = 0
+    state["pending_order"] = None
 
 
 def try_dust_sweep(client: ExchangeClient, config: dict, symbol: "str | None") -> None:
@@ -429,17 +554,46 @@ def try_dust_sweep(client: ExchangeClient, config: dict, symbol: "str | None") -
                 base_asset, transferred)
 
 
+def _new_client_order_id(prefix: str) -> str:
+    """ID singkat, unik, dan dapat dipakai untuk recovery order Binance."""
+    return f"pump-{prefix}-{uuid.uuid4().hex[:24]}"
+
+
+def _submit_market_order(client: ExchangeClient, symbol: str, side: str, quantity: float,
+                         client_order_id: str) -> dict:
+    """Kirim market order dengan idempotency key.
+
+    Fallback TypeError hanya untuk fake client lama di selftest. Implementasi
+    ExchangeClient nyata mendukung argumen ini.
+    """
+    try:
+        return client.new_market_order(symbol, side, quantity=quantity,
+                                       new_client_order_id=client_order_id)
+    except TypeError:
+        return client.new_market_order(symbol, side, quantity=quantity)
+
+
 def close_position(client: ExchangeClient, config: dict, filters_cache: dict,
-                    state: dict, reason: str) -> None:
+                   state: dict, reason: str) -> None:
     symbol = state["current_symbol"]
     if not symbol:
         return
+
+    pending = state.get("pending_order")
+    if isinstance(pending, dict):
+        logger.critical("SELL %s (%s) belum dapat dikonfirmasi (intent %s). Tidak mengirim SELL duplikat.",
+                        symbol, reason, pending.get("client_order_id"))
+        state["reconciliation_required"] = True
+        state["reconciliation_assets"] = [symbol]
+        state_mod.save_state(config["STATE_FILE"], state)
+        return
+
     filters = filters_cache.get(symbol)
-    qty_to_sell = state["qty"]
+    qty_to_sell = float(state["qty"])
+    base_asset = symbol[: -len(config["QUOTE_ASSET"])]
 
     try:
         account = client.get_account()
-        base_asset = symbol[: -len(config["QUOTE_ASSET"])]
         free_base = get_balance(account, base_asset)
         qty_to_sell = min(qty_to_sell, free_base)
     except BinanceAPIError as exc:
@@ -448,76 +602,93 @@ def close_position(client: ExchangeClient, config: dict, filters_cache: dict,
     if filters:
         qty_to_sell = filters.round_qty(qty_to_sell)
         if qty_to_sell < float(filters.min_qty):
-            # Ini justru kasus dust paling umum: sisa qty setelah pembulatan
-            # LOT_SIZE terlalu kecil untuk dijual lewat order biasa. Coba
-            # sapu sisa itu ke BNB lewat jalur dust convert Binance sebelum
-            # dianggap selesai.
-            logger.warning("Qty jual %s (%.8f) di bawah minQty bursa. Posisi direset manual di state.",
-                            symbol, qty_to_sell)
+            logger.warning("Qty jual %s (%.8f) di bawah minQty bursa. Posisi direset sebagai dust.",
+                           symbol, qty_to_sell)
             reset_position(state)
             state["sell_fail_count"] = 0
             state["cooldown_until"] = state_mod.now_ms() + config["COOLDOWN_MINUTES_AFTER_CLOSE"] * 60 * 1000
-            # Simpan SEKARANG (temuan T-04): crash setelah titik ini tidak
-            # boleh membuat bot mengira masih pegang posisi ini saat restart.
             state_mod.save_state(config["STATE_FILE"], state)
             try_dust_sweep(client, config, symbol)
             return
 
+    if qty_to_sell <= 0:
+        logger.critical("SELL %s (%s) tidak dikirim karena qty yang bisa dijual nol. Rekonsiliasi manual diperlukan.",
+                        symbol, reason)
+        state["reconciliation_required"] = True
+        state["reconciliation_assets"] = [base_asset]
+        state_mod.save_state(config["STATE_FILE"], state)
+        return
+
     entry_price = state["entry_price"]
+    client_order_id = _new_client_order_id("sell")
+    state["pending_order"] = {
+        "side": "SELL", "symbol": symbol, "qty": qty_to_sell,
+        "client_order_id": client_order_id, "reason": reason,
+        "created_at": state_mod.now_ms(),
+    }
+    state_mod.save_state(config["STATE_FILE"], state)
 
     try:
-        resp = client.new_market_order(symbol, "SELL", quantity=qty_to_sell)
+        resp = _submit_market_order(client, symbol, "SELL", qty_to_sell, client_order_id)
     except BinanceAPIError as exc:
-        # Eskalasi kegagalan SELL (temuan S-03): error yang sama berulang
-        # tanpa batas (mis. -1013 filter berubah, -2011 simbol bermasalah)
-        # dulu cuma dicatat tiap 15 detik tanpa pembeda dan tanpa alarm.
+        # Respons gagal dapat berarti exchange sudah menerima order. Intent
+        # sengaja dipertahankan dan entry baru diblokir sampai get_order()
+        # merekonsiliasinya, bukan mencoba SELL kedua secara buta.
         state["sell_fail_count"] = int(state.get("sell_fail_count", 0)) + 1
+        state["reconciliation_required"] = True
+        state["reconciliation_assets"] = [base_asset]
         n = state["sell_fail_count"]
-        if n in (5, 20, 100):
-            logger.critical(
-                "SELL %s (%s) GAGAL %d kali berturut-turut (%s). Kemungkinan penyebab permanen: "
-                "filter simbol berubah atau simbol bermasalah. PERIKSA MANUAL SEGERA -- posisi ini "
-                "tidak terlindungi otomatis sampai SELL berhasil.",
-                symbol, reason, n, exc,
-            )
-        else:
-            logger.error("Order SELL %s (%s) gagal (%d): %s. Posisi TIDAK direset, akan dicoba lagi.",
-                         symbol, reason, n, exc)
-        # Penyebab paling umum kegagalan SELL permanen adalah filter filter
-        # bursa yang berubah (LOTSIZE/minQty). Segarkan cache filter simbol
-        # ini pada kegagalan beruntun ke-5 -- percobaan berikutnya memakai
-        # filter baru.
+        logger.critical("SELL %s (%s) status tidak pasti (%d): %s. Intent disimpan; jangan kirim order duplikat.",
+                        symbol, reason, n, exc)
+        state_mod.save_state(config["STATE_FILE"], state)
         if n == 5:
             try:
                 info = client.get_exchange_info(symbol)
                 syms = info.get("symbols", []) if isinstance(info, dict) else []
                 if syms:
                     filters_cache[symbol] = SymbolFilters.from_symbol_data(syms[0])
-                    logger.info("Filter %s disegarkan ulang setelah kegagalan SELL beruntun.", symbol)
             except BinanceAPIError as refresh_exc:
                 logger.warning("Penyegaran filter %s juga gagal: %s", symbol, refresh_exc)
         return
 
-    executed_qty = float(resp.get("executedQty", 0.0))
-    cumm_quote = float(resp.get("cummulativeQuoteQty", 0.0))
+    # Respons diterima, sehingga intent tidak lagi ambigu walau fill parsial.
+    state["pending_order"] = None
+    executed_qty = max(0.0, float(resp.get("executedQty", 0.0) or 0.0))
+    cumm_quote = max(0.0, float(resp.get("cummulativeQuoteQty", 0.0) or 0.0))
+    status = str(resp.get("status") or "").upper()
     sell_price = (cumm_quote / executed_qty) if executed_qty > 0 else 0.0
     pnl = (sell_price - entry_price) * executed_qty if entry_price > 0 else 0.0
-    logger.info(
-        "SELL FILLED %s (%s): qty=%.8f @ avg %.6f | entry=%.6f | estimasi PnL=%.2f %s",
-        symbol, reason, executed_qty, sell_price, entry_price, pnl, config["QUOTE_ASSET"],
-    )
-    reset_position(state)
+
+    remaining = max(0.0, float(state["qty"]) - executed_qty)
+    try:
+        post_account = client.get_account()
+        remaining = min(remaining, get_balance(post_account, base_asset))
+    except BinanceAPIError:
+        # Pengurangan dari qty state tetap lebih aman daripada reset penuh.
+        pass
+
+    min_qty = float(filters.min_qty) if filters else 0.0
+    fully_closed = executed_qty >= qty_to_sell - 1e-12 and (remaining <= 0 or remaining < min_qty)
+    if fully_closed:
+        logger.info("SELL FILLED %s (%s): qty=%.8f @ avg %.6f | entry=%.6f | estimasi PnL=%.2f %s",
+                    symbol, reason, executed_qty, sell_price, entry_price, pnl, config["QUOTE_ASSET"])
+        reset_position(state)
+        state["sell_fail_count"] = 0
+        state["cooldown_until"] = state_mod.now_ms() + config["COOLDOWN_MINUTES_AFTER_CLOSE"] * 60 * 1000
+        state["last_trade_time"] = state_mod.now_ms()
+        state_mod.save_state(config["STATE_FILE"], state)
+        try_dust_sweep(client, config, symbol)
+        return
+
+    # Market order dapat EXPIRED dengan partial fill. Posisi harus tetap ada
+    # agar SL/TP/recovery berikutnya tahu aset yang belum terjual.
+    state["qty"] = remaining
     state["sell_fail_count"] = 0
-    state["cooldown_until"] = state_mod.now_ms() + config["COOLDOWN_MINUTES_AFTER_CLOSE"] * 60 * 1000
-    state["last_trade_time"] = state_mod.now_ms()
-    # Simpan SEKARANG (temuan T-04), jangan menunggu akhir iterasi loop:
-    # crash tepat setelah SELL FILLED tidak boleh membuat bot restart dengan
-    # state basi lalu menjual posisi yang sama DUA KALI.
+    state["reconciliation_required"] = False
+    state["reconciliation_assets"] = []
     state_mod.save_state(config["STATE_FILE"], state)
-    # Setelah SELL FILLED sungguhan, sisa qty yang tidak terjual (kalau ada,
-    # mis. executed_qty < qty_to_sell karena pembulatan bursa) mungkin
-    # menyisakan dust kecil -- coba sapu ke BNB.
-    try_dust_sweep(client, config, symbol)
+    logger.critical("SELL PARTIAL %s (%s): status=%s filled=%.8f dari %.8f, sisa state=%.8f. Posisi TIDAK direset.",
+                    symbol, reason, status or "UNKNOWN", executed_qty, qty_to_sell, remaining)
 
 
 def open_position(client: ExchangeClient, config: dict, filters_cache: dict,
@@ -536,37 +707,31 @@ def open_position(client: ExchangeClient, config: dict, filters_cache: dict,
     # qty/MIN_NOTIONAL masih valid di harga eksekusi riil.
     price_ref = reference_price if (reference_price and reference_price > 0) else candidate.last_price
 
-    usdt_free = None
-    if config.get("USE_RISK_PERCENT"):
-        try:
-            account = client.get_account()
-        except BinanceAPIError as exc:
-            logger.error("Gagal ambil saldo sebelum BUY %s: %s. Entry dilewati.", candidate.symbol, exc)
-            return
-        usdt_free = get_balance(account, config["QUOTE_ASSET"])
-
-        # Bantalan teknis: order MARKET diisi pada harga yang bergerak dan fee
-        # taker dipotong dari saldo yang sama, jadi membelanjakan 100% saldo
-        # persis sering ditolak bursa (-2010 insufficient balance).
-        buffer_pct = max(0.0, float(config.get("BALANCE_BUFFER_PCT", 0.5)))
-        spendable = usdt_free * (1 - buffer_pct / 100.0)
-        usdt_amount = spendable * float(config["RISK_PERCENT"]) / 100.0
-    else:
-        usdt_amount = float(config["POSITION_SIZE_USDT"])
-
-    # Plafon nominal OPSIONAL. 0 atau negatif = tanpa plafon, sehingga
-    # RISK_PERCENT benar-benar terpakai berapa pun besar saldo.
-    max_pos = float(config.get("MAX_POSITION_USDT", 0) or 0)
-    if max_pos > 0 and usdt_amount > max_pos:
+    # Kedua mode sizing perlu saldo aktual: mode persen menghitung proporsi,
+    # mode fixed perlu ditolak sebelum order bila nominal melebihi saldo.
+    try:
+        account = client.get_account()
+    except BinanceAPIError as exc:
+        logger.error("Gagal ambil saldo sebelum BUY %s: %s. Entry dilewati.", candidate.symbol, exc)
+        return
+    usdt_free = get_balance(account, config["QUOTE_ASSET"])
+    sizing = strategy.resolve_position_notional(config, usdt_free)
+    usdt_amount = sizing["notional"]
+    if sizing["cap_active"]:
+        asal = (f"RISK_PERCENT={float(config.get('RISK_PERCENT', 0) or 0):.2f}%"
+                if sizing["mode"] == "PERCENT"
+                else f"POSITION_SIZE_USDT={float(config.get('POSITION_SIZE_USDT', 0) or 0):.2f}")
         logger.warning(
             "Ukuran posisi %s dipotong plafon MAX_POSITION_USDT: %.2f -> %.2f %s. "
-            "Itu berarti hanya %.2f%% dari saldo free (%.2f), BUKAN RISK_PERCENT=%.1f%% "
-            "yang Anda set. Set MAX_POSITION_USDT=0 kalau memang ingin mengikuti persentase.",
-            candidate.symbol, usdt_amount, max_pos, config["QUOTE_ASSET"],
-            (max_pos / usdt_free * 100.0) if usdt_free else 0.0,
-            usdt_free or 0.0, float(config.get("RISK_PERCENT", 0)),
+            "Sumber nominal=%s; eksposur efektif %.2f%% dari saldo free %.2f.",
+            candidate.symbol, sizing["requested_notional"], usdt_amount,
+            config["QUOTE_ASSET"], asal, sizing["effective_pct_of_free"], usdt_free,
         )
-        usdt_amount = max_pos
+    if usdt_amount > usdt_free:
+        logger.warning("Entry %s dilewati: nominal %.2f %s melebihi saldo free %.2f %s.",
+                       candidate.symbol, usdt_amount, config["QUOTE_ASSET"],
+                       usdt_free, config["QUOTE_ASSET"])
+        return
 
     qty = filters.round_qty(usdt_amount / price_ref)
     notional = qty * price_ref
@@ -581,16 +746,51 @@ def open_position(client: ExchangeClient, config: dict, filters_cache: dict,
         )
         return
 
+    # Simpan intent dan preview level SEBELUM request. Bila respons hilang
+    # setelah exchange mengisi BUY, startup dapat memulihkan posisi dengan
+    # clientOrderId tanpa menganggap akun kosong.
+    setup = getattr(candidate, "setup", None)
+    preview = strategy.resolve_exit_levels(config, klines, price_ref)
+    client_order_id = _new_client_order_id("buy")
+    state["pending_order"] = {
+        "side": "BUY", "symbol": candidate.symbol, "qty": qty,
+        "client_order_id": client_order_id, "created_at": state_mod.now_ms(),
+        "levels": {
+            "sl_pct": preview["sl_pct"], "tp_pct": preview["tp_pct"],
+            "be_trigger_pct": preview["be_trigger_pct"], "be_lock_pct": preview["be_lock_pct"],
+            "trail_start_pct": preview["trail_start_pct"], "trail_step_pct": preview["trail_step_pct"],
+            "exit_source": preview["source"], "atr_pct_at_entry": preview["atr_pct"] or 0.0,
+        },
+        "setup": {
+            "breakout_level": float(getattr(setup, "breakout_level", 0.0) or 0.0),
+            "invalidation_price": float(getattr(setup, "invalidation_price", 0.0) or 0.0),
+            "atr_abs": float(getattr(setup, "atr_abs", 0.0) or 0.0),
+        },
+    }
+    pending_intent = dict(state["pending_order"])
+    state_mod.save_state(config["STATE_FILE"], state)
     try:
-        resp = client.new_market_order(candidate.symbol, "BUY", quantity=qty)
+        resp = _submit_market_order(client, candidate.symbol, "BUY", qty, client_order_id)
     except BinanceAPIError as exc:
-        logger.error("Order BUY %s gagal: %s", candidate.symbol, exc)
+        state["reconciliation_required"] = True
+        state["reconciliation_assets"] = [candidate.symbol]
+        state_mod.save_state(config["STATE_FILE"], state)
+        logger.critical("Order BUY %s status tidak pasti: %s. Intent disimpan dan entry baru diblokir sampai rekonsiliasi.",
+                        candidate.symbol, exc)
         return
 
+    state["pending_order"] = None
     executed_qty = float(resp.get("executedQty", 0.0))
     cumm_quote = float(resp.get("cummulativeQuoteQty", 0.0))
-    if executed_qty <= 0:
-        logger.error("Order BUY %s terkirim tapi executedQty=0. Respons: %s", candidate.symbol, resp)
+    if executed_qty <= 0 or cumm_quote <= 0:
+        # Respons diterima tetapi belum cukup untuk membangun posisi. Simpan
+        # intent agar startup dapat memeriksa get_order(), bukan scan lagi.
+        state["pending_order"] = pending_intent
+        state["reconciliation_required"] = True
+        state["reconciliation_assets"] = [candidate.symbol]
+        state_mod.save_state(config["STATE_FILE"], state)
+        logger.critical("Order BUY %s tidak memberi fill lengkap. Intent dipertahankan untuk rekonsiliasi: %s",
+                        candidate.symbol, resp)
         return
     fill_price = cumm_quote / executed_qty
 
@@ -599,11 +799,35 @@ def open_position(client: ExchangeClient, config: dict, filters_cache: dict,
         candidate.symbol, executed_qty, fill_price, candidate.price_change_pct,
         candidate.quote_volume, candidate.confirm_reason,
     )
+    # Fee BUY dapat dipotong dari base asset. Selaraskan qty state dengan
+    # saldo yang benar-benar bisa dijual agar equity dan close tidak memakai
+    # executedQty gross secara keliru, terutama di PAPER.
+    base_asset = candidate.symbol[: -len(config["QUOTE_ASSET"])]
+    managed_qty = executed_qty
+    try:
+        managed_qty = min(executed_qty, get_balance(client.get_account(), base_asset))
+    except BinanceAPIError:
+        pass
+    if managed_qty <= 0:
+        state["pending_order"] = pending_intent
+        state["reconciliation_required"] = True
+        state["reconciliation_assets"] = [candidate.symbol]
+        state_mod.save_state(config["STATE_FILE"], state)
+        logger.critical("BUY %s terisi tetapi saldo base tidak dapat dikonfirmasi. Entry diblokir sampai rekonsiliasi.",
+                        candidate.symbol)
+        return
+
     state["current_symbol"] = candidate.symbol
     state["entry_price"] = fill_price
-    state["qty"] = executed_qty
+    state["qty"] = managed_qty
     state["entry_time"] = state_mod.now_ms()
     state["last_trade_time"] = state_mod.now_ms()
+    state["be_active"] = False
+    state["be_stop_price"] = 0.0
+    state["trailing_active"] = False
+    state["trailing_stop_price"] = 0.0
+    state["reconciliation_required"] = False
+    state["reconciliation_assets"] = []
 
     # Level exit dihitung SEKALI di sini lalu DIKUNCI di state, memakai harga
     # fill sungguhan sebagai acuan. Sengaja tidak dihitung ulang tiap iterasi:
@@ -727,18 +951,11 @@ def check_manual_control(client: ExchangeClient, config: dict, filters_cache: di
 
 def check_setup_invalidation(client: ExchangeClient, config: dict, filters_cache: dict,
                              state: dict) -> bool:
-    """Tutup posisi bila candle konfirmasi tertutup menembus batas invalidasi setup.
+    """Tutup posisi bila candle tertutup menembus batas invalidasi setup.
 
-    Menggantikan exit MOMENTUM_FADE lama. Bedanya penting: exit lama
-    bergantung pada peringkat gainer seluruh pasar, sehingga tidak bisa
-    disimulasikan di backtest satu simbol. Exit ini hanya memakai candle
-    TERTUTUP dari simbol yang sedang dipegang, jadi backtest.py dan
-    portfolio_backtest.py dapat menirunya persis.
-
-    Level dan ATR TIDAK dihitung ulang di sini. Keduanya dikunci di state saat
-    entry oleh open_position(), memakai hasil deteksi yang memicu entry itu.
-
-    Kembalikan True kalau posisi ditutup oleh fungsi ini.
+    Semua candle sejak cursor state diambil kronologis. Jangan memakai limit
+    kecil tetap: downtime lebih dari beberapa candle tidak boleh menghapus
+    bukti invalidasi hanya karena harga kemudian rebound.
     """
     if not config.get("SETUP_INVALIDATION_EXIT"):
         return False
@@ -748,8 +965,6 @@ def check_setup_invalidation(client: ExchangeClient, config: dict, filters_cache
 
     batas = float(state.get("setup_invalidation_price") or 0.0)
     if batas <= 0:
-        # Posisi lama dari versi sebelum fitur ini ada. Jangan menebak level
-        # dari data baru, cukup lewati.
         return False
 
     interval = config.get("CONFIRM_INTERVAL", "5m")
@@ -757,13 +972,35 @@ def check_setup_invalidation(client: ExchangeClient, config: dict, filters_cache
     now_ms = state_mod.now_ms()
     last_checked = int(state.get("last_setup_check_close_time") or 0)
     if last_checked and now_ms < last_checked + interval_ms:
-        # Candle berikutnya belum tertutup, tidak ada yang baru untuk dicek.
-        # Ini juga yang menjaga pemakaian rate limit tetap satu panggilan
-        # klines (bobot IP 2) per candle, bukan per iterasi loop.
         return False
 
+    # Mulai satu interval sebelum close cursor. Filter close_time di bawah
+    # menghilangkan duplikat, sementara offset ini tetap aman untuk API yang
+    # memaknai startTime sebagai open_time.
+    entry_time = int(state.get("entry_time", 0) or 0)
+    after_time = max(last_checked, entry_time)
+    start_time = max(0, after_time - interval_ms + 1) if after_time else None
+    raw_all: list = []
+    cursor = start_time
+    max_pages = 20  # 20.000 candle, pagar terhadap respons API aneh.
     try:
-        raw = client.get_klines(symbol, interval, limit=3)
+        for _ in range(max_pages):
+            raw = client.get_klines(symbol, interval, limit=1000,
+                                    start_time_ms=cursor, end_time_ms=now_ms)
+            if not raw:
+                break
+            raw_all.extend(raw)
+            try:
+                next_cursor = int(raw[-1][0]) + interval_ms
+            except (IndexError, TypeError, ValueError):
+                raise ValueError("open_time candle invalid saat cek invalidasi")
+            if cursor is not None and next_cursor <= cursor:
+                raise ValueError("cursor candle tidak maju saat cek invalidasi")
+            cursor = next_cursor
+            if len(raw) < 1000:
+                break
+        else:
+            raise ValueError("terlalu banyak halaman candle untuk cek invalidasi")
     except BinanceAPIError as exc:
         logger.warning("Gagal mengambil candle %s untuk cek invalidasi setup: %s", symbol, exc)
         return False
@@ -772,19 +1009,17 @@ def check_setup_invalidation(client: ExchangeClient, config: dict, filters_cache
         return False
 
     try:
-        closed = [k for k in strategy.parse_klines(raw) if k.close_time < now_ms]
+        parsed = strategy.parse_klines(raw_all)
     except ValueError as exc:
         logger.warning("Candle %s ditolak parser saat cek invalidasi setup: %s", symbol, exc)
         return False
+    # Hilangkan duplikat antar halaman, urutkan, dan proses hanya candle baru.
+    by_close = {k.close_time: k for k in parsed if k.close_time < now_ms and k.close_time > after_time}
+    closed = [by_close[t] for t in sorted(by_close)]
     if not closed:
         return False
 
-    batas_waktu = max(last_checked, int(state.get("entry_time", 0) or 0))
-    state["last_setup_check_close_time"] = closed[-1].close_time
-
     for k in closed:
-        if k.close_time <= batas_waktu:
-            continue
         if k.close < batas:
             logger.info(
                 "%s: candle %s tertutup di %.8g, di bawah batas invalidasi setup %.8g "
@@ -793,6 +1028,11 @@ def check_setup_invalidation(client: ExchangeClient, config: dict, filters_cache
             )
             close_position(client, config, filters_cache, state, "SETUP_INVALIDATED")
             return True
+
+    # Cursor baru hanya disimpan setelah seluruh batch tervalidasi dan tidak
+    # ada kegagalan fetch/parser, sehingga candle tidak hilang saat error.
+    state["last_setup_check_close_time"] = closed[-1].close_time
+    state_mod.save_state(config["STATE_FILE"], state)
     return False
 
 
@@ -1012,6 +1252,15 @@ def run(config: dict, lifecycle=None) -> int:
                 filters_cache_time = time.time()
                 logger.info("Filter simbol disegarkan ulang (%d simbol).", len(filters_cache))
 
+            # MARKET order normalnya selesai segera. Namun timeout jaringan
+            # dapat terjadi setelah Binance menerima order. Intent pending
+            # direkonsiliasi aktif pada loop berikutnya (bukan hanya saat
+            # restart), dan semua entry tetap diblokir sampai status pasti.
+            if state.get("pending_order"):
+                logger.warning("Merekonsiliasi intent order pending %s sebelum melanjutkan loop.",
+                               state["pending_order"].get("client_order_id"))
+                reconcile_state_with_exchange(client, config, state)
+
             # Perintah manual dari dashboard (mis. "Jual Sekarang") dicek
             # PALING AWAL setiap iterasi, sebelum logika exit otomatis --
             # kalau user memintanya, itu harus didahulukan.
@@ -1058,6 +1307,8 @@ def run(config: dict, lifecycle=None) -> int:
                 now = state_mod.now_ms()
                 can_enter = (
                     not state["current_symbol"]
+                    and not state.get("pending_order")
+                    and not state.get("reconciliation_required")
                     and now >= state.get("cooldown_until", 0)
                     and not entries_paused
                     and now - state.get("last_trade_time", 0) >= config["MIN_SECONDS_BETWEEN_TRADES"] * 1000
@@ -1072,8 +1323,7 @@ def run(config: dict, lifecycle=None) -> int:
                     if best:
                         book = client.get_book_ticker(best.symbol)
                         bid, ask = float(book["bidPrice"]), float(book["askPrice"])
-                        mid = (bid + ask) / 2.0
-                        spread_pct = ((ask - bid) / mid * 100.0) if mid > 0 else 999.0
+                        spread_pct = scanner.spread_pct_from_book(bid, ask)
                         if spread_pct <= config["MAX_SPREAD_PCT"]:
                             logger.info(
                                 "Kandidat terpilih: %s (vol24h=%.0f, 24h=%.2f%%, spread=%.3f%%) | %s",
@@ -1422,8 +1672,14 @@ def selftest() -> None:
         def get_account(self):
             return {"balances": [
                 {"asset": "USDT", "free": str(self.usdt_free), "locked": "0"},
-                {"asset": "TESTB", "free": "0", "locked": "0"},
+                {"asset": "TESTB", "free": str(self.free), "locked": "0"},
             ]}
+
+        def new_market_order(self, symbol, side, quantity=None, quote_order_qty=None):
+            resp = super().new_market_order(symbol, side, quantity, quote_order_qty)
+            if side == "BUY":
+                self.free += float(quantity or 0.0)
+            return resp
 
     from decimal import Decimal as D2
     from binance_client import SymbolFilters as SF2
@@ -1865,17 +2121,20 @@ def selftest() -> None:
             "Qty harus disesuaikan ke saldo nyata"
         print("  Qty state > saldo nyata -> qty disesuaikan -> OK")
 
-        # c. Tanpa posisi -> nol panggilan API.
+        # c. State kosong tetap perlu satu kali cek saldo untuk mendeteksi
+        # orphan asset hasil BUY yang responsnya hilang.
         cl_idle = ReconClient({})
-        reconcile_state_with_exchange(cl_idle, cfg_rec, dict(DEFAULT_STATE))
-        assert cl_idle.calls == 0, "Tanpa posisi tidak boleh ada panggilan API"
+        st_idle = dict(DEFAULT_STATE)
+        reconcile_state_with_exchange(cl_idle, cfg_rec, st_idle)
+        assert cl_idle.calls == 1 and not st_idle["reconciliation_required"], \
+            "State kosong harus cek saldo sekali tetapi tidak boleh memblokir akun benar-benar kosong"
         # d. API gagal -> tidak crash, state dibiarkan.
         st_r4 = dict(DEFAULT_STATE)
         st_r4["current_symbol"] = "PEPEUSDT"
         st_r4["qty"] = 10.0
         reconcile_state_with_exchange(ReconClient({}, fail=True), cfg_rec, st_r4)
         assert st_r4["current_symbol"] == "PEPEUSDT", "API gagal -> state lama dipertahankan"
-        print("  Tanpa posisi -> 0 panggilan API; API gagal -> aman tanpa crash -> OK")
+        print("  State kosong -> cek saldo sekali; API gagal -> aman tanpa crash -> OK")
 
     print("\n=== SELFTEST: filter usia listing (S-08) ===")
     _listing_age_cache.clear()

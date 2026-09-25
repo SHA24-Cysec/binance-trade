@@ -88,14 +88,23 @@ def _auto_file(config: dict) -> str:
     return f"watchlist_auto_{mode}.json"
 
 
-def to_klines(raw: list) -> list:
+def to_klines(raw: list, now_ms: Optional[int] = None) -> list:
+    """Parse hanya candle yang sudah tertutup, seperti scanner live.
+
+    Candle berjalan berubah setiap detik. Memasukkannya ke statistik 24 jam
+    atau deteksi retest membuat watchlist tidak stabil dan berbeda dari bot.
+    """
+    now_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
     out = []
     for k in raw:
         try:
+            close_time = int(k[6])
+            if close_time >= now_ms:
+                continue
             out.append(Kline(
                 open_time=int(k[0]), open=float(k[1]), high=float(k[2]),
                 low=float(k[3]), close=float(k[4]), volume=float(k[5]),
-                close_time=int(k[6]), quote_volume=float(k[7]),
+                close_time=close_time, quote_volume=float(k[7]),
             ))
         except (TypeError, ValueError, IndexError):
             continue
@@ -187,9 +196,12 @@ def score_symbol(sym: str, kl: list, meta: dict, config: dict) -> Optional[dict]
     lookback = strategy.confirm_window_bars(config)
     atr_period = int(config.get("ATR_PERIOD", 14))
     min_vol = float(config.get("MIN_QUOTE_VOLUME_USDT_24H", 2_000_000))
+    interval = str(config.get("CONFIRM_INTERVAL", "5m"))
+    interval_ms = strategy.interval_to_ms(interval)
+    bars_per_day = max(1, round(24 * 60 * 60 * 1000 / interval_ms))
     need = max(lookback, atr_period + 1, strategy.required_lookback_bars(config))
 
-    if len(kl) < BARS_PER_DAY_5M + need + 10:
+    if len(kl) < bars_per_day + need + 10:
         return None
 
     closes = [k.close for k in kl]
@@ -205,13 +217,12 @@ def score_symbol(sym: str, kl: list, meta: dict, config: dict) -> Optional[dict]
     atrs: list = []
     roll_vols: list = []
     last_sig = -10 ** 9
-    # Bot hanya memegang satu posisi dan MAX_HOLD_MINUTES default 45 menit
-    # (9 bar 5 menit). Sinyal yang terlalu berdekatan tidak mungkin jadi
-    # trade terpisah, jadi digabung supaya jumlahnya tidak dilebih-lebihkan.
-    min_gap = max(1, int(config.get("MAX_HOLD_MINUTES", 45)) // 5)
+    # Bot hanya memegang satu posisi. Konversi durasi hold ke jumlah bar dari
+    # interval aktif, bukan asumsi 5 menit.
+    min_gap = max(1, int(float(config.get("MAX_HOLD_MINUTES", 45)) * 60_000 / interval_ms))
 
-    for j in range(BARS_PER_DAY_5M + need, n):
-        vol24 = pre[j + 1] - pre[j + 1 - BARS_PER_DAY_5M]
+    for j in range(bars_per_day + need, n):
+        vol24 = pre[j + 1] - pre[j + 1 - bars_per_day]
         roll_vols.append(vol24)
         # Kenaikan 24 jam TIDAK lagi menjadi gerbang sejak strategi pindah ke
         # pullback retest. Yang tersisa hanyalah gerbang likuiditas, sama
@@ -225,14 +236,14 @@ def score_symbol(sym: str, kl: list, meta: dict, config: dict) -> Optional[dict]
             continue
         last_sig = j
         signals += 1
-        a = atr_percent(kl[max(0, j - (atr_period + 5)): j + 1], period=atr_period)
+        a = atr_percent(kl[max(0, j - (atr_period + 1)): j + 1], period=atr_period)
         if a:
             atrs.append(a)
 
     if not roll_vols:
         return None
 
-    days = n * 5 / 60 / 24
+    days = n * interval_ms / 86_400_000
     uptime = sum(1 for v in roll_vols if v >= min_vol) / len(roll_vols) * 100.0
     vol_median = statistics.median(roll_vols)
     atr_med = statistics.median(atrs) if atrs else None
@@ -296,7 +307,8 @@ def _compose_score(sym, meta, config, signals, days, uptime, vol_median,
 
     # Diskualifikasi struktural
     dq = None
-    base = sym[:-4] if sym.endswith("USDT") else sym
+    quote = str(config.get("QUOTE_ASSET", "USDT"))
+    base = sym[:-len(quote)] if quote and sym.endswith(quote) else sym
     if base.endswith("B") and weekend_pct is not None and weekend_pct < 16.0:
         dq = "saham tokenisasi (bStocks), tidak berjalan 24/7"
     elif spread is not None and spread > max_spread:
@@ -399,7 +411,8 @@ def refresh_once(client, config: dict,
                 try:
                     bid, ask = float(b["bidPrice"]), float(b["askPrice"])
                     if bid > 0 and ask > 0:
-                        spreads[b["symbol"]] = (ask - bid) / ask * 100.0
+                        # Canonical formula mid-price, sama dengan live.
+                        spreads[b["symbol"]] = scanner.spread_pct_from_book(bid, ask)
                 except (KeyError, TypeError, ValueError):
                     continue
     except Exception as exc:  # noqa: BLE001
@@ -418,8 +431,14 @@ def refresh_once(client, config: dict,
         return {"ok": False, "error": "tidak ada simbol lolos filter struktural"}
 
     # --- Tahap 3: unduh candle & nilai ---
-    bars = days * BARS_PER_DAY_5M
     interval = str(config.get("CONFIRM_INTERVAL", "5m"))
+    if interval not in strategy.INTERVAL_MINUTES:
+        return {"ok": False, "error": f"interval watchlist tidak didukung: {interval}"}
+    interval_ms = strategy.interval_to_ms(interval)
+    bars_per_day = max(1, round(86_400_000 / interval_ms))
+    # Tambah sedikit ruang agar filter 24 jam dan indikator tidak kehilangan
+    # satu candle tertutup yang sedang berjalan saat respons diterima.
+    bars = days * bars_per_day + strategy.required_lookback_bars(config) + 2
     scored: list = []
     failed = 0
 

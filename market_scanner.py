@@ -114,6 +114,32 @@ def _looks_leveraged(base_asset: str) -> bool:
     return False
 
 
+def is_structurally_allowed_symbol(symbol: str, config: dict,
+                                   tradable_symbols: "set | None" = None) -> bool:
+    """Gerbang statis semesta yang dapat dipakai ulang oleh semua jalur.
+
+    Tidak memerlukan ticker historis, sehingga backtest satu simbol dapat
+    menolak stablecoin, leveraged token, blacklist, quote salah, dan simbol
+    non-TRADING dengan policy yang sama seperti scanner live.
+    """
+    quote_asset = str(config.get("QUOTE_ASSET", ""))
+    if not quote_asset or not symbol.endswith(quote_asset):
+        return False
+    if symbol in set(config.get("EXTRA_EXCLUDE_SYMBOLS", [])):
+        return False
+    if tradable_symbols is not None and symbol not in tradable_symbols:
+        return False
+    base_asset = symbol[: -len(quote_asset)]
+    return bool(base_asset and base_asset not in STABLE_BASE_ASSETS
+                and not _looks_leveraged(base_asset))
+
+
+def spread_pct_from_book(bid: float, ask: float) -> float:
+    """Spread persen canonical terhadap mid-price untuk seluruh pemakai."""
+    mid = (float(bid) + float(ask)) / 2.0
+    return ((float(ask) - float(bid)) / mid * 100.0) if mid > 0 else float("inf")
+
+
 def filter_and_rank_candidates(tickers: list, config: dict,
                                tradable_symbols: "set | None" = None) -> list[Candidate]:
     """Saring semesta pair lalu urutkan dari volume kuotasi 24 jam tertinggi.
@@ -136,24 +162,15 @@ def filter_and_rank_candidates(tickers: list, config: dict,
     dari data historis dan tidak punya snapshot exchangeInfo saat itu).
     """
     quote_asset = config["QUOTE_ASSET"]
-    exclude_symbols = set(config.get("EXTRA_EXCLUDE_SYMBOLS", []))
     min_vol = float(config.get("MIN_QUOTE_VOLUME_USDT_24H", 0) or 0)
 
     out = []
     for t in tickers:
         symbol = t.get("symbol", "")
-        if not symbol.endswith(quote_asset):
-            continue
-        if symbol in exclude_symbols:
-            continue
-        if tradable_symbols is not None and symbol not in tradable_symbols:
+        if not is_structurally_allowed_symbol(symbol, config, tradable_symbols):
             continue
 
         base_asset = symbol[: -len(quote_asset)]
-        if not base_asset or base_asset in STABLE_BASE_ASSETS:
-            continue
-        if _looks_leveraged(base_asset):
-            continue
 
         try:
             price_change_pct = float(t["priceChangePercent"])

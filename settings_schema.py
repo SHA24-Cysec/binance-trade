@@ -144,6 +144,7 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "USE_RISK_PERCENT": _field("Ukuran Posisi", "Gunakan persen risiko", "Ukuran posisi dihitung dari saldo bebas.", "bool", dangerous=True),
     "RISK_PERCENT": _field("Ukuran Posisi", "Persen saldo per entry", "Persentase saldo bebas yang digunakan.", "float", minimum=0.01, maximum=100, unit="%", dangerous=True),
     "POSITION_SIZE_USDT": _field("Ukuran Posisi", "Ukuran posisi tetap", "Nominal saat mode persen dimatikan.", "float", minimum=0.01, maximum=1e9, unit="USDT", dangerous=True),
+    "BACKTEST_INITIAL_EQUITY_USDT": _field("Ukuran Posisi", "Modal awal backtest", "Saldo USDT awal yang dipakai model sizing pada backtest.", "float", minimum=0.01, maximum=1e12, unit="USDT"),
     "MAX_POSITION_USDT": _field("Ukuran Posisi", "Plafon posisi", "Nol berarti tanpa plafon di PAPER, tetapi dilarang di LIVE.", "float", minimum=0, maximum=1e9, unit="USDT", dangerous=True),
     "BALANCE_BUFFER_PCT": _field("Ukuran Posisi", "Bantalan saldo", "Saldo yang tidak dibelanjakan untuk fee dan pergerakan harga.", "float", minimum=0, maximum=50, unit="%"),
 

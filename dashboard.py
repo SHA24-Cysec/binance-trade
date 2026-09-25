@@ -721,7 +721,25 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 f"Gagal mengambil daftar pasar dari Binance: {exc}"
             ) from exc
 
-        universe = pbt.select_universe(tickers, cfg, max_symbols=max_symbols)
+        # Metadata exchange saat ini memberi parity status TRADING dengan
+        # scanner live. Binance tidak menyediakan snapshot status historis,
+        # sehingga run_portfolio_backtest tetap menandainya sebagai batasan.
+        tradable_now = None
+        try:
+            exchange_info = client.get_exchange_info()
+            tradable_now = {
+                s.get("symbol") for s in exchange_info.get("symbols", [])
+                if s.get("symbol") and s.get("status") == "TRADING"
+                and s.get("isSpotTradingAllowed", True)
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Metadata status pair tidak tersedia untuk portfolio backtest: %s", exc)
+        if tradable_now is not None:
+            cfg["_historical_tradable_symbols"] = tradable_now
+            cfg["_tradable_status_is_current_snapshot"] = True
+
+        universe = pbt.select_universe(tickers, cfg, max_symbols=max_symbols,
+                                       tradable_symbols=tradable_now)
         if not universe:
             raise bt.BacktestError(
                 "Tidak ada simbol yang lolos saringan pasar. Periksa QUOTE_ASSET "

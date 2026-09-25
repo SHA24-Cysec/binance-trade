@@ -389,7 +389,8 @@ class BinanceSpotClient:
         return self._request("GET", "/api/v3/account", signed=True)
 
     def new_market_order(self, symbol: str, side: str, quantity: Optional[float] = None,
-                          quote_order_qty: Optional[float] = None) -> dict:
+                          quote_order_qty: Optional[float] = None,
+                          new_client_order_id: Optional[str] = None) -> dict:
         params = {"symbol": symbol, "side": side, "type": "MARKET"}
         # _fmt_num WAJIB di sini: str(float) berubah jadi notasi ilmiah untuk
         # nilai < 1e-4 (mis. '8.33e-05') dan Binance menolak quantity dalam
@@ -399,6 +400,8 @@ class BinanceSpotClient:
             params["quantity"] = _fmt_num(quantity)
         if quote_order_qty is not None:
             params["quoteOrderQty"] = _fmt_num(quote_order_qty)
+        if new_client_order_id:
+            params["newClientOrderId"] = str(new_client_order_id)
         return self._request("POST", "/api/v3/order", params, signed=True)
 
     def get_dust_convertible(self, account_type: str = "SPOT") -> dict:
