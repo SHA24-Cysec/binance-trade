@@ -842,19 +842,21 @@ class TestMigrasiTier(unittest.TestCase):
 class TestEntryTetapUtuh(unittest.TestCase):
     """Pastikan tidak ada logika entry yang ikut berubah saat mengedit file."""
 
+    def _momentum(self):
+        from strategy import Kline
+        vals = [100.0] * 30 + [100.2,100.4,99.4,98.4,97.4,97.6,98.6,98.1,98.3,97.8,98.8,99.8,98.8,99.8,99.3,99.5,98.5,99.5,98.5,100.0]
+        return [Kline(i*300000,v,v+1,v-1,v,i*300000+299999,1000,v*1000) for i,v in enumerate(vals)]
+
     def test_deteksi_setup_masih_bekerja(self):
-        from synthetic_data import skenario_pullback_retest
-        hasil = scanner.detect_pullback_retest(
-            skenario_pullback_retest("lolos"), _synthetic_strategy_config())
+        hasil = scanner.detect_pullback_retest(self._momentum(), _synthetic_strategy_config())
         self.assertTrue(hasil.ok, hasil.reason)
         self.assertGreater(hasil.breakout_level, 0)
 
     def test_setup_gagal_menyebut_alasan(self):
-        from synthetic_data import skenario_pullback_retest
-        hasil = scanner.detect_pullback_retest(
-            skenario_pullback_retest("wick_saja"), _synthetic_strategy_config())
+        hasil = scanner.detect_pullback_retest([K(100, 100, 100, 100, 100)] * 50,
+                                               _synthetic_strategy_config())
         self.assertFalse(hasil.ok)
-        self.assertIn("breakout", hasil.reason)
+        self.assertIn("konfirmasi", hasil.reason)
 
     def test_data_kurang_ditolak(self):
         hasil = scanner.detect_pullback_retest([K(1, 1, 1, 1)] * 3, cfg_mod.PUMP_CONFIG)
@@ -862,10 +864,8 @@ class TestEntryTetapUtuh(unittest.TestCase):
         self.assertIn("minimum", hasil.reason)
 
     def test_confirm_entry_tetap_mengembalikan_pasangan_bool_dan_alasan(self):
-        """Kontrak lama confirm_entry() tidak boleh berubah."""
-        from synthetic_data import skenario_pullback_retest
-        ok, alasan = scanner.confirm_entry(
-            skenario_pullback_retest("lolos"), _synthetic_strategy_config())
+        """Kontrak confirm_entry() tetap (bool, str)."""
+        ok, alasan = scanner.confirm_entry(self._momentum(), _synthetic_strategy_config())
         self.assertIsInstance(ok, bool)
         self.assertIsInstance(alasan, str)
         self.assertTrue(ok, alasan)

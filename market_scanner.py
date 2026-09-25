@@ -109,6 +109,7 @@ class SetupResult:
     anchor_index: Optional[int] = None
     anchored_vwap: Optional[float] = None
     retest_touches: int = 0
+    atr_value: Optional[float] = None
 
 
 def _looks_leveraged(base_asset: str) -> bool:
@@ -240,7 +241,7 @@ def average_prior_daily_quote_volume(
 
 def evaluate_pump_gate(price_change_pct, quote_volume,
                        avg_daily_quote_volume: Optional[float],
-                       config: dict) -> tuple[bool, str]:
+                       config: dict, btc_drop_pct: float | None = None) -> tuple[bool, str]:
     """Inti gerbang pump, MURNI dan tanpa jaringan.
 
     Dipakai bersama oleh jalur live dan seluruh jalur backtest supaya tidak
@@ -255,6 +256,14 @@ def evaluate_pump_gate(price_change_pct, quote_volume,
     """
     min_change = float(config.get("PUMP_MIN_24H_CHANGE_PCT", 10.0) or 0.0)
     surge_mult = float(config.get("PUMP_VOLUME_SURGE_MULT", 1.5) or 0.0)
+
+    if btc_drop_pct is None:
+        btc_drop_pct = config.get("_btc_drop_pct")
+    if config.get("BTC_FILTER_ENABLED", False) and btc_drop_pct is not None:
+        max_drop = abs(float(config.get("BTC_MAX_DROP_PCT", 5.0) or 0.0))
+        if float(btc_drop_pct) <= -max_drop:
+            return False, (f"BTC turun {float(btc_drop_pct):.2f}% dalam "
+                           f"{int(config.get("BTC_LOOKBACK_BARS", 3) or 3)} candle")
 
     if not _angka_wajar(quote_volume):
         return False, f"quote_volume 24 jam tidak wajar ({quote_volume!r})"
@@ -529,143 +538,59 @@ def _breakout_level_for(klines: list[Kline], pivots: list[int], b: int,
     return max(kandidat)
 
 
+def _pivot_low_indexes(klines: list[Kline], wing: int) -> list[int]:
+    """Cari pivot low dengan sayap kanan yang sudah tertutup."""
+    if wing < 1 or len(klines) < 2 * wing + 1:
+        return []
+    return [p for p in range(wing, len(klines) - wing)
+            if all(klines[p].low < klines[j].low for j in range(p-wing, p))
+            and all(klines[p].low < klines[j].low for j in range(p+1, p+wing+1))]
+
+
+def _higher_low_confirmed(klines: list[Kline], wing: int) -> bool:
+    """True bila pivot low terakhir lebih tinggi dari pivot low sebelumnya."""
+    pivots = _pivot_low_indexes(klines, wing)
+    return len(pivots) >= 2 and klines[pivots[-1]].low > klines[pivots[-2]].low
+
+
 def detect_pullback_retest(klines: list[Kline], config: dict) -> SetupResult:
-    """Deteksi setup pullback dan retest pada jendela candle tertutup.
+    """Deteksi momentum pump dengan minimal tiga dari empat konfirmasi.
 
-    Urutan kejadian yang dicari:
-      1. Breakout: close menembus swing high valid.
-      2. Anchor: candle breakout menjadi jangkar anchored VWAP.
-      3. Pullback: harga kembali menyentuh level breakout.
-      4. Retest terkonfirmasi: candle terakhir menyentuh level, close kembali
-         di atas level, close berada di bagian atas range candle, dan close di
-         atas anchored VWAP.
-      5. Batas umur setup dan jumlah kunjungan ke level tetap dijaga agar
-         setup lama atau terlalu sering dites tidak dipakai.
-
-    Fungsi ini murni dan tanpa state. Semua candle yang diterima harus sudah
-    tertutup dan berurutan kronologis.
+    Semua indikator hanya membaca candle dalam ``klines`` yang diasumsikan
+    sudah close dan kronologis. Konfirmasi terdiri dari EMA cross, RSI sehat,
+    MACD histogram menguat, dan higher low setelah pump awal. Tidak ada candle
+    yang belum close atau data masa depan yang digunakan.
     """
-    swing_lookback = int(config.get("SWING_LOOKBACK_BARS", 12) or 12)
-    wing = int(config.get("SWING_PIVOT_WING_BARS", 2) or 2)
-    vwap_min_bars = int(config.get("VWAP_MIN_BARS_AFTER_ANCHOR", 2) or 0)
-    max_bars = int(config.get("MAX_BARS_BREAKOUT_TO_RETEST", 12) or 1)
-    max_touches = int(config.get("MAX_RETEST_TOUCHES", 1) or 1)
-    min_close_pos = float(config.get("MIN_CLOSE_POSITION_IN_RANGE", 0.35) or 0.0)
-
-    butuh = strategy.required_lookback_bars(config)
     n = len(klines)
-    if n < butuh:
-        return SetupResult(False, f"data candle kurang: {n} dari minimum {butuh}")
-
-    last = klines[-1]
-    if last.close <= 0:
-        return SetupResult(False, "harga close terakhir tidak valid")
-
-    pivots = _pivot_high_indexes(klines, wing)
-    if not pivots:
-        return SetupResult(False, "tidak ada swing high (pivot) di dalam jendela")
-
-    anchor: Optional[int] = None
-    level: Optional[float] = None
-    touches = 0
-    sedang_di_level = False
-    alasan_gugur = ""
-
-    for b in range(n):
-        candle = klines[b]
-
-        if anchor is not None and level is not None:
-            if b - anchor > max_bars:
-                alasan_gugur = (f"setup gugur: lebih dari {max_bars} candle sejak breakout "
-                                "tanpa retest terkonfirmasi")
-                anchor = None
-                level = None
-                touches = 0
-                sedang_di_level = False
-            else:
-                if b > anchor:
-                    di_level = candle.low <= level <= candle.high
-                    if di_level and not sedang_di_level:
-                        touches += 1
-                    sedang_di_level = di_level
-                continue
-
-        lvl = _breakout_level_for(klines, pivots, b, swing_lookback, wing)
-        if lvl is None:
-            continue
-        if candle.close > lvl:
-            anchor = b
-            level = lvl
-            touches = 0
-            sedang_di_level = False
-
-    if anchor is None or level is None:
-        alasan = alasan_gugur or "tidak ada breakout dalam jendela"
-        return SetupResult(False, alasan)
-
-    zone_low = level
-    zone_high = level
-    idx_terakhir = n - 1
-
-    dasar = dict(breakout_level=level, zone_low=zone_low, zone_high=zone_high,
-                 anchor_index=anchor, retest_touches=touches)
-
-    if idx_terakhir == anchor:
-        return SetupResult(False, "belum retest: breakout baru terjadi pada candle terakhir", **dasar)
-
-    bars_setelah_anchor = idx_terakhir - anchor
-    if bars_setelah_anchor < vwap_min_bars:
-        return SetupResult(
-            False,
-            f"anchored VWAP belum layak: baru {bars_setelah_anchor} candle setelah anchor, "
-            f"minimum {vwap_min_bars}",
-            **dasar)
-
-    vwap = strategy.anchored_vwap(klines, anchor)
-    dasar["anchored_vwap"] = vwap
-    if vwap is None:
-        return SetupResult(False, "anchored VWAP tidak bisa dihitung (volume nol atau tidak tersedia)",
-                           **dasar)
-
-    if touches > max_touches:
-        return SetupResult(
-            False,
-            f"sentuhan level sudah {touches} kali, batas MAX_RETEST_TOUCHES {max_touches}",
-            **dasar)
-
-    if not (last.low <= level <= last.high):
-        return SetupResult(
-            False,
-            f"belum retest: candle terakhir belum menyentuh level {level:.8g}",
-            **dasar)
-
-    if last.close <= level:
-        return SetupResult(
-            False,
-            f"retest gagal: close {last.close:.8g} tidak kembali di atas level {level:.8g}",
-            **dasar)
-
-    candle_range = last.high - last.low
-    if candle_range <= 0:
-        return SetupResult(False, "candle terakhir tidak punya range (high sama dengan low)", **dasar)
-    close_pos = (last.close - last.low) / candle_range
-    if close_pos < min_close_pos:
-        return SetupResult(
-            False,
-            f"close candle retest hanya di posisi {close_pos:.2f} dari range, "
-            f"minimum {min_close_pos:.2f}",
-            **dasar)
-
-    if last.close <= vwap:
-        return SetupResult(
-            False,
-            f"close {last.close:.8g} masih di bawah anchored VWAP {vwap:.8g}",
-            **dasar)
-
-    return SetupResult(
-        True,
-        f"retest sah: level {level:.8g}, anchored VWAP {vwap:.8g}",
-        **dasar)
+    period = 14
+    wing = max(1, int(config.get("SWING_PIVOT_WING_BARS", 2) or 2))
+    minimum = max(30, strategy.required_lookback_bars(config))
+    if n < minimum:
+        return SetupResult(False, f"data candle kurang: {n} dari minimum {minimum}")
+    closes = [float(k.close) for k in klines]
+    if any(x <= 0 or not math.isfinite(x) for x in closes):
+        return SetupResult(False, "close candle tidak valid")
+    ema9, ema21 = strategy.ema(closes, 9), strategy.ema(closes, 21)
+    if len(ema9) < 2:
+        return SetupResult(False, "data EMA kurang")
+    ema_cross = ema9[-2] <= ema21[-2] and ema9[-1] > ema21[-1]
+    rsi_values = strategy.rsi(closes, period)
+    rsi_ok = 50.0 <= rsi_values[-1] <= 75.0
+    _macd, _signal, histogram = strategy.macd(closes)
+    macd_ok = len(histogram) >= 2 and (histogram[-1] > histogram[-2] or
+                                       (histogram[-2] <= 0 < histogram[-1]))
+    higher_low = _higher_low_confirmed(klines, wing)
+    confirmations = sum((ema_cross, rsi_ok, macd_ok, higher_low))
+    details = (f"EMA={'ya' if ema_cross else 'tidak'}, RSI={rsi_values[-1]:.2f}, "
+               f"MACD={'naik' if macd_ok else 'tidak'}, HL={'ya' if higher_low else 'tidak'} "
+               f"({confirmations}/4)")
+    if confirmations < 3:
+        return SetupResult(False, f"konfirmasi entry kurang dari 3/4: {details}")
+    return SetupResult(True, f"momentum pump sah: {details}",
+                       breakout_level=klines[-1].close,
+                       zone_low=klines[-1].low, zone_high=klines[-1].high,
+                       anchor_index=max(0, n - 1), retest_touches=0,
+                       atr_value=strategy.atr(klines, int(config.get("ATR_PERIOD", 14) or 14)))
 
 def confirm_entry(klines: list[Kline], config: dict) -> tuple[bool, str]:
     """Konfirmasi entry dengan alasan yang dapat dicatat ke log.

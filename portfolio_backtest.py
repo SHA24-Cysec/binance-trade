@@ -455,18 +455,18 @@ def run_portfolio_backtest(
             pnl_low = (candle.low / entry_price - 1.0) * 100.0
             hold_minutes = (candle.close_time - entry_time) / 60000.0
 
-            sl_price = entry_price * (1 - cur["sl"] / 100.0) if config["USE_STOP_LOSS"] else None
-
-            if config["USE_BREAKEVEN"] and not be_active and pnl_high >= cur["be_trig"]:
+            atr_mode = cur.get("src") == "ATR"
+            sl_price = (entry_price - cur["sl"]) if atr_mode else entry_price * (1 - cur["sl"] / 100.0)
+            pnl_high_unit = candle.high - entry_price if atr_mode else pnl_high
+            if config["USE_BREAKEVEN"] and not be_active and pnl_high_unit >= cur["be_trig"]:
                 be_active = True
-                be_stop = entry_price * (1 + cur["be_lock"] / 100.0)
-
+                be_stop = entry_price + cur["be_lock"] if atr_mode else entry_price * (1 + cur["be_lock"] / 100.0)
             if config["USE_TRAILING"]:
-                if not trailing_active and pnl_high >= cur["tr_start"]:
+                if not trailing_active and pnl_high_unit >= cur["tr_start"]:
                     trailing_active = True
-                    trailing_stop = candle.high * (1 - cur["tr_step"] / 100.0)
+                    trailing_stop = candle.high - cur["tr_step"] if atr_mode else candle.high * (1 - cur["tr_step"] / 100.0)
                 elif trailing_active:
-                    cand_stop = candle.high * (1 - cur["tr_step"] / 100.0)
+                    cand_stop = candle.high - cur["tr_step"] if atr_mode else candle.high * (1 - cur["tr_step"] / 100.0)
                     if cand_stop > trailing_stop:
                         trailing_stop = cand_stop
 
@@ -479,12 +479,13 @@ def run_portfolio_backtest(
             # Fill gap-aware (perbaikan audit B-06): candle yang DIBUKA sudah
             # menembus level diisi pada harga pembukaan, sama seperti
             # paper_engine mengisi stop pada harga book pasca-gap.
-            if config["USE_STOP_LOSS"] and pnl_low <= -cur["sl"]:
+            sl_triggered = (candle.low <= sl_price if atr_mode else pnl_low <= -cur["sl"])
+            if config["USE_STOP_LOSS"] and sl_triggered:
                 exit_reason = "STOP_LOSS"
                 exit_price = min(sl_price, candle.open)
-            elif config["USE_TP"] and pnl_high >= cur["tp"]:
+            elif config["USE_TP"] and (candle.high >= entry_price + cur["tp"] if atr_mode else pnl_high >= cur["tp"]):
                 exit_reason = "TAKE_PROFIT"
-                exit_price = max(entry_price * (1 + cur["tp"] / 100.0), candle.open)
+                exit_price = max(entry_price + cur["tp"] if atr_mode else entry_price * (1 + cur["tp"] / 100.0), candle.open)
             elif be_active and candle.low <= be_stop:
                 exit_reason = "BREAKEVEN"
                 exit_price = min(be_stop, candle.open)
@@ -594,7 +595,9 @@ def run_portfolio_backtest(
         cands_at_entry = len(eligible)
 
         # Level exit dikunci memakai fungsi yang sama dengan bot live.
-        lv = strategy.resolve_exit_levels(config)
+        level_cfg = dict(config)
+        level_cfg["_atr_value"] = strategy.atr(data[sym][:i + 1], int(config.get("ATR_PERIOD", 14) or 14))
+        lv = strategy.resolve_exit_levels(level_cfg)
         cur = {
             "sl": lv["sl_pct"], "tp": lv["tp_pct"],
             "be_trig": lv["be_trigger_pct"], "be_lock": lv["be_lock_pct"],

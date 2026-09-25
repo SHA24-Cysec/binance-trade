@@ -133,6 +133,17 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     # supaya muncul berdampingan di tab Setelan dashboard.
     "PUMP_MIN_24H_CHANGE_PCT": _field("Setup Pullback", "Minimum kenaikan 24 jam", "Kenaikan harga 24 jam minimum (priceChangePercent) agar sebuah simbol boleh menjadi kandidat.", "float", minimum=0, maximum=1000, unit="%"),
     "PUMP_VOLUME_SURGE_MULT": _field("Setup Pullback", "Pengali lonjakan volume", "Volume kuotasi 24 jam berjalan minimal sekian kali rata-rata volume kuotasi 7 hari penuh sebelumnya.", "float", minimum=1, maximum=100, unit="x"),
+    "BTC_FILTER_ENABLED": _field("Setup Pullback", "Filter korelasi BTC", "Tolak entry altcoin bila BTC turun tajam pada jendela candle tertutup.", "bool"),
+    "BTC_MAX_DROP_PCT": _field("Setup Pullback", "Penurunan BTC maksimum", "Batas penurunan BTC sebelum entry ditolak.", "float", minimum=0.1, maximum=50, unit="%"),
+    "BTC_LOOKBACK_BARS": _field("Setup Pullback", "Lookback BTC", "Jumlah candle tertutup untuk mengukur penurunan BTC.", "int", minimum=1, maximum=1000, unit="candle"),
+    "USE_ATR_EXIT": _field("SL dan TP", "Gunakan exit ATR", "Gunakan jarak exit adaptif berdasarkan ATR; jika mati, gunakan persen lama.", "bool", dangerous=True),
+    "ATR_PERIOD": _field("SL dan TP", "Periode ATR", "Periode ATR Wilder.", "int", minimum=2, maximum=200, unit="candle"),
+    "ATR_MULT_SL": _field("SL dan TP", "Pengali ATR Stop Loss", "Jarak Stop Loss dalam ATR.", "float", minimum=0.1, maximum=20, unit="x", dangerous=True),
+    "ATR_MULT_TP": _field("SL dan TP", "Pengali ATR Take Profit", "Jarak Take Profit dalam ATR.", "float", minimum=0.1, maximum=50, unit="x"),
+    "ATR_MULT_TRAIL": _field("SL dan TP", "Pengali ATR trailing", "Jarak trailing dalam ATR.", "float", minimum=0.1, maximum=20, unit="x"),
+    "ATR_MULT_BE_TRIGGER": _field("Breakeven dan Trailing", "Pengali ATR trigger BE", "Profit ATR untuk mengaktifkan breakeven.", "float", minimum=0, maximum=20, unit="x"),
+    "ATR_MULT_BE_LOCK": _field("Breakeven dan Trailing", "Pengali ATR lock BE", "Profit ATR yang dikunci.", "float", minimum=0, maximum=20, unit="x"),
+    "ATR_MULT_TRAIL_START": _field("Breakeven dan Trailing", "Pengali ATR mulai trailing", "Profit ATR untuk mengaktifkan trailing.", "float", minimum=0, maximum=50, unit="x"),
     "EXTRA_EXCLUDE_SYMBOLS": _field("Scan", "Blacklist simbol", "Simbol tambahan yang tidak boleh dipilih.", "list", editor="symbols"),
     "MIN_LISTING_AGE_DAYS": _field("Scan", "Usia listing minimum", "Pasangan lebih muda akan ditolak.", "int", minimum=0, maximum=36500, unit="hari"),
 
@@ -463,6 +474,12 @@ def validate_candidate(candidate: dict, mode: str) -> tuple[dict, dict[str, str]
         # peringatan supaya perubahan itu disadari.
         relation("PUMP_VOLUME_SURGE_MULT", cleaned["PUMP_VOLUME_SURGE_MULT"] >= 1.0,
                  "harus minimal 1 kali rata-rata 7 hari, di bawah itu berarti volume justru turun")
+        relation("ATR_MULT_TRAIL", cleaned["ATR_MULT_TRAIL"] <= cleaned["ATR_MULT_SL"],
+                 "tidak boleh melebihi ATR_MULT_SL agar invariant trailing <= SL terjaga")
+        relation("ATR_MULT_BE_TRIGGER", cleaned["ATR_MULT_BE_TRIGGER"] <= cleaned["ATR_MULT_TRAIL_START"],
+                 "tidak boleh melebihi trigger trailing")
+        relation("ATR_MULT_BE_LOCK", cleaned["ATR_MULT_BE_LOCK"] <= cleaned["ATR_MULT_BE_TRIGGER"],
+                 "tidak boleh melebihi trigger breakeven")
         if cleaned["PUMP_MIN_24H_CHANGE_PCT"] <= 0:
             warnings.append("PUMP_MIN_24H_CHANGE_PCT nol atau kurang: gerbang kenaikan 24 jam "
                             "praktis mati dan koin yang turun ikut menjadi kandidat.")

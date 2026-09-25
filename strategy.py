@@ -197,39 +197,124 @@ def resolve_position_notional(config: dict, quote_free: float) -> dict:
     }
 
 
-def resolve_exit_levels(config: dict) -> dict:
-    """Tentukan level exit tetap untuk satu posisi.
+def ema(closes: list[float], period: int) -> list[float]:
+    """Hitung EMA kronologis dan mengembalikan seluruh deret EMA.
 
-    Return dict:
-        sl_pct           : float, jarak Stop Loss dalam persen
-        tp_pct           : float, jarak Take Profit dalam persen
-        be_trigger_pct   : float, profit yang memicu Breakeven
-        be_lock_pct      : float, profit yang dikunci saat Breakeven aktif
-        trail_start_pct  : float, profit yang mengaktifkan Trailing
-        trail_step_pct   : float, jarak Trailing di bawah harga tertinggi
-        source           : selalu "FIXED"
-        note             : penjelasan singkat untuk log
+    Candle pada indeks 0 adalah candle paling lama. Nilai awal memakai close
+    pertama, sehingga tidak ada data masa depan yang masuk ke perhitungan.
     """
+    period = int(period)
+    values = [float(x) for x in closes]
+    if period <= 0:
+        raise ValueError("period EMA harus lebih besar dari nol")
+    if not values:
+        return []
+    alpha = 2.0 / (period + 1.0)
+    out = [values[0]]
+    for value in values[1:]:
+        out.append(alpha * value + (1.0 - alpha) * out[-1])
+    return out
+
+
+def rsi(closes: list[float], period: int = 14) -> list[float]:
+    """Hitung RSI Wilder kronologis; nilai yang belum matang bernilai 50.0."""
+    period = int(period)
+    values = [float(x) for x in closes]
+    if period <= 0:
+        raise ValueError("period RSI harus lebih besar dari nol")
+    if not values:
+        return []
+    out = [50.0] * len(values)
+    if len(values) <= period:
+        return out
+    gains = [max(0.0, values[i] - values[i - 1]) for i in range(1, len(values))]
+    losses = [max(0.0, values[i - 1] - values[i]) for i in range(1, len(values))]
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    def value():
+        if avg_loss == 0:
+            return 100.0 if avg_gain > 0 else 50.0
+        return 100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
+    out[period] = value()
+    for i in range(period + 1, len(values)):
+        avg_gain = (avg_gain * (period - 1) + gains[i - 1]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i - 1]) / period
+        out[i] = value()
+    return out
+
+
+def macd(closes: list[float], fast: int = 12, slow: int = 26,
+         signal: int = 9) -> tuple[list[float], list[float], list[float]]:
+    """Hitung MACD line, signal line, dan histogram secara kronologis."""
+    fast_line = ema(closes, fast)
+    slow_line = ema(closes, slow)
+    line = [a - b for a, b in zip(fast_line, slow_line)]
+    signal_line = ema(line, signal)
+    histogram = [a - b for a, b in zip(line, signal_line)]
+    return line, signal_line, histogram
+
+
+def atr(klines: list[Kline], period: int = 14) -> float | None:
+    """Kembalikan ATR Wilder terakhir dari candle yang sudah tertutup."""
+    period = int(period)
+    if period <= 0 or not klines:
+        return None
+    trs: list[float] = []
+    for i, candle in enumerate(klines):
+        prev_close = klines[i - 1].close if i else candle.close
+        trs.append(max(candle.high - candle.low,
+                       abs(candle.high - prev_close),
+                       abs(candle.low - prev_close)))
+    if len(trs) < period:
+        return None
+    result = sum(trs[:period]) / period
+    for tr in trs[period:]:
+        result = (result * (period - 1) + tr) / period
+    return result if math.isfinite(result) and result > 0 else None
+
+
+def resolve_exit_levels(config: dict) -> dict:
+    """Tentukan level exit ATR atau fallback persen lama.
+
+    Pada mode ATR, nilai jarak dikembalikan sebagai jarak harga absolut.
+    Nama field lama dipertahankan agar state, backtest, dan dashboard tidak
+    perlu mengubah kontrak penyimpanan. ``atr_value`` dan ``entry_price``
+    opsional: tanpa keduanya fungsi mengembalikan multiplier ATR sebagai
+    jarak unit, yang kemudian dikalikan ATR saat entry.
+    """
+    use_atr = bool(config.get("USE_ATR_EXIT", False))
+    if use_atr:
+        period = max(1, int(config.get("ATR_PERIOD", 14) or 14))
+        sl = abs(float(config.get("ATR_MULT_SL", 1.5) or 0.0))
+        tp = abs(float(config.get("ATR_MULT_TP", 3.0) or 0.0))
+        trail = abs(float(config.get("ATR_MULT_TRAIL", 1.0) or 0.0))
+        be_trigger = abs(float(config.get("ATR_MULT_BE_TRIGGER", 1.0) or 0.0))
+        be_lock = abs(float(config.get("ATR_MULT_BE_LOCK", 0.1) or 0.0))
+        trail_start = abs(float(config.get("ATR_MULT_TRAIL_START", 1.5) or 0.0))
+        trail = min(trail, sl)
+        be_trigger = min(be_trigger, trail_start)
+        be_lock = min(be_lock, be_trigger)
+        atr_value = config.get("_atr_value")
+        if atr_value is not None:
+            atr_value = abs(float(atr_value))
+        scale = atr_value if atr_value is not None else 1.0
+        return {"sl_pct": sl * scale, "tp_pct": tp * scale,
+                "be_trigger_pct": be_trigger * scale, "be_lock_pct": be_lock * scale,
+                "trail_start_pct": trail_start * scale, "trail_step_pct": trail * scale,
+                "atr_period": period, "atr_value": atr_value,
+                "atr_mult_sl": sl, "atr_mult_tp": tp, "atr_mult_trail": trail,
+                "source": "ATR", "note": "Level exit berbasis ATR; invariant diterapkan"}
+
     fixed_sl = abs(float(config.get("SL_PCT", 1.8)))
     fixed_tp = abs(float(config.get("TP_PCT", 4.0)))
     fixed_be_trigger = abs(float(config.get("BE_TRIGGER_PCT", 1.0)))
     fixed_be_lock = abs(float(config.get("BE_LOCK_PCT", 0.15)))
     fixed_trail_start = abs(float(config.get("TRAILING_START_PCT", 1.5)))
     fixed_trail_step = abs(float(config.get("TRAILING_STEP_PCT", 0.6)))
-
-    # Invariant level exit. Tanpanya BE dapat mengunci harga yang belum pernah
-    # disentuh, sedangkan backtest candle bisa mencatat fill profit mustahil.
     fixed_trail_step = min(fixed_trail_step, fixed_sl)
     fixed_be_trigger = min(fixed_be_trigger, fixed_trail_start)
     fixed_be_lock = min(fixed_be_lock, fixed_be_trigger)
-
-    return {
-        "sl_pct": fixed_sl,
-        "tp_pct": fixed_tp,
-        "be_trigger_pct": fixed_be_trigger,
-        "be_lock_pct": fixed_be_lock,
-        "trail_start_pct": fixed_trail_start,
-        "trail_step_pct": fixed_trail_step,
-        "source": "FIXED",
-        "note": "Level exit tetap dari config; invariant BE/trailing diterapkan",
-    }
+    return {"sl_pct": fixed_sl, "tp_pct": fixed_tp,
+            "be_trigger_pct": fixed_be_trigger, "be_lock_pct": fixed_be_lock,
+            "trail_start_pct": fixed_trail_start, "trail_step_pct": fixed_trail_step,
+            "source": "FIXED", "note": "Level exit tetap dari config; invariant diterapkan"}

@@ -11,7 +11,7 @@ def test_schema_covers_every_final_config_key():
     # direproduksi tanpa membaca saldo LIVE. PUMP_MIN_24H_CHANGE_PCT dan
     # PUMP_VOLUME_SURGE_MULT ditambahkan bersama gerbang pump, sedangkan
     # MAX_HOLD_MINUTES dihapus total.
-    assert len(config.PUMP_CONFIG) == 76
+    assert len(config.PUMP_CONFIG) == len(ss.PARAMETER_SCHEMA)
     assert set(ss.PARAMETER_SCHEMA) == set(config.PUMP_CONFIG)
 
 

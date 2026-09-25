@@ -946,8 +946,9 @@ function renderStatus(s){
   // config
   const c=s.config;
   document.getElementById('configBox').innerHTML=`
-    <div class="posrow"><span class="k">Stop Loss</span><span class="v mono">${c.sl_pct!=null? c.sl_pct+'%' : 'nonaktif'}</span></div>
-    <div class="posrow"><span class="k">Take Profit</span><span class="v mono">${c.tp_pct}%</span></div>
+    <div class="posrow"><span class="k">Mode exit</span><span class="v mono">${c.exit_source==='ATR'?'ATR':'PERSEN LAMA'}</span></div>
+    <div class="posrow"><span class="k">Stop Loss</span><span class="v mono">${c.sl_pct!=null? c.sl_pct+(c.exit_source==='ATR'?' harga':'%') : 'nonaktif'}</span></div>
+    <div class="posrow"><span class="k">Take Profit</span><span class="v mono">${c.tp_pct}${c.exit_source==='ATR'?' harga':'%'}</span></div>
     <div class="posrow"><span class="k">Trigger Breakeven</span><span class="v mono">${c.be_trigger_pct}%</span></div>
     <div class="posrow"><span class="k">Mulai Trailing</span><span class="v mono">${c.trailing_start_pct}%</span></div>
     <div class="posrow"><span class="k">Risk per entry</span><span class="v mono">${c.risk_percent}%</span></div>

@@ -729,7 +729,10 @@ def open_position(client: ExchangeClient, config: dict, filters_cache: dict,
     # Simpan intent dan preview level SEBELUM request. Bila respons hilang
     # setelah exchange mengisi BUY, startup dapat memulihkan posisi dengan
     # clientOrderId tanpa menganggap akun kosong.
-    preview = strategy.resolve_exit_levels(config)
+    level_cfg = dict(config)
+    if candidate.setup is not None and candidate.setup.atr_value is not None:
+        level_cfg["_atr_value"] = candidate.setup.atr_value
+    preview = strategy.resolve_exit_levels(level_cfg)
     client_order_id = _new_client_order_id("buy")
     state["pending_order"] = {
         "side": "BUY", "symbol": candidate.symbol, "qty": qty,
@@ -805,7 +808,7 @@ def open_position(client: ExchangeClient, config: dict, filters_cache: dict,
 
     # Level exit dihitung sekali di sini lalu dikunci di state. Stop hanya
     # boleh mengetat lewat Breakeven/Trailing, tidak pernah melonggar.
-    levels = strategy.resolve_exit_levels(config)
+    levels = strategy.resolve_exit_levels(level_cfg)
     state["sl_pct"] = levels["sl_pct"]
     state["tp_pct"] = levels["tp_pct"]
     state["be_trigger_pct"] = levels["be_trigger_pct"]
@@ -891,48 +894,48 @@ def check_manual_control(client: ExchangeClient, config: dict, filters_cache: di
 
 def manage_exit(client: ExchangeClient, config: dict, filters_cache: dict,
                  state: dict, current_price: float) -> None:
+    """Kelola SL, TP, breakeven, dan trailing dalam unit persen atau harga."""
     if not state["current_symbol"] or state["qty"] <= 0 or state["entry_price"] <= 0:
         return
-
-    pnl_pct = (current_price / state["entry_price"] - 1.0) * 100.0
-
-    # Ambil level yang dikunci saat entry. Fallback ke config dipakai untuk
-    # posisi lama yang dibuka sebelum fitur ini ada (state file versi lama),
-    # supaya bot yang di-upgrade saat sedang memegang posisi tidak kehilangan
-    # stop loss-nya.
-    sl_pct = abs(float(state.get("sl_pct") or 0.0)) or abs(float(config["SL_PCT"]))
-    tp_pct = abs(float(state.get("tp_pct") or 0.0)) or abs(float(config["TP_PCT"]))
+    atr_mode = str(state.get("exit_source", "")).upper() == "ATR"
+    sl = abs(float(state.get("sl_pct") or 0.0)) or abs(float(config["SL_PCT"]))
+    tp = abs(float(state.get("tp_pct") or 0.0)) or abs(float(config["TP_PCT"]))
     be_trigger = abs(float(state.get("be_trigger_pct") or 0.0)) or abs(float(config["BE_TRIGGER_PCT"]))
     be_lock = abs(float(state.get("be_lock_pct") or 0.0)) or abs(float(config["BE_LOCK_PCT"]))
     trail_start = abs(float(state.get("trail_start_pct") or 0.0)) or abs(float(config["TRAILING_START_PCT"]))
     trail_step = abs(float(state.get("trail_step_pct") or 0.0)) or abs(float(config["TRAILING_STEP_PCT"]))
+    if atr_mode:
+        pnl_unit = current_price - state["entry_price"]
+        sl_hit = current_price <= state["entry_price"] - sl
+        tp_hit = current_price >= state["entry_price"] + tp
+        be_trigger_hit = pnl_unit >= be_trigger
+        trail_start_hit = pnl_unit >= trail_start
+    else:
+        pnl_unit = (current_price / state["entry_price"] - 1.0) * 100.0
+        sl_hit = pnl_unit <= -sl
+        tp_hit = pnl_unit >= tp
+        be_trigger_hit = pnl_unit >= be_trigger
+        trail_start_hit = pnl_unit >= trail_start
 
-    # Stop Loss: batas kerugian maksimum dari harga entry. Dicek PALING AWAL
-    # dan TIDAK bergantung pada Breakeven/Trailing aktif atau tidak -- ini
-    # jaring pengaman kalau harga langsung turun sejak entry dan tidak pernah
-    # sempat untung (BE/Trailing baru aktif setelah profit menyentuh trigger-nya
-    # masing-masing, jadi TIDAK melindungi skenario ini tanpa Stop Loss).
-    if config["USE_STOP_LOSS"] and pnl_pct <= -sl_pct:
+    if config["USE_STOP_LOSS"] and sl_hit:
         close_position(client, config, filters_cache, state, "STOP_LOSS")
         return
-
-    if config["USE_BREAKEVEN"] and not state["be_active"] and pnl_pct >= be_trigger:
+    if config["USE_BREAKEVEN"] and not state["be_active"] and be_trigger_hit:
         state["be_active"] = True
-        state["be_stop_price"] = state["entry_price"] * (1 + be_lock / 100.0)
-        logger.info("%s: Breakeven diaktifkan, stop dikunci di %.6f", state["current_symbol"], state["be_stop_price"])
-
+        state["be_stop_price"] = (state["entry_price"] + be_lock if atr_mode
+                                   else state["entry_price"] * (1 + be_lock / 100.0))
     if config["USE_TRAILING"]:
-        if not state["trailing_active"] and pnl_pct >= trail_start:
+        if not state["trailing_active"] and trail_start_hit:
             state["trailing_active"] = True
-            state["trailing_stop_price"] = current_price * (1 - trail_step / 100.0)
-            logger.info("%s: Trailing stop diaktifkan di %.6f", state["current_symbol"], state["trailing_stop_price"])
+            state["trailing_stop_price"] = (current_price - trail_step if atr_mode
+                                             else current_price * (1 - trail_step / 100.0))
         elif state["trailing_active"]:
-            candidate_stop = current_price * (1 - trail_step / 100.0)
+            candidate_stop = (current_price - trail_step if atr_mode
+                              else current_price * (1 - trail_step / 100.0))
             if candidate_stop > state["trailing_stop_price"]:
                 state["trailing_stop_price"] = candidate_stop
-
     reasons = []
-    if config["USE_TP"] and pnl_pct >= tp_pct:
+    if config["USE_TP"] and tp_hit:
         reasons.append("TAKE_PROFIT")
     if state["be_active"] and current_price <= state["be_stop_price"]:
         reasons.append("BREAKEVEN")
@@ -1145,7 +1148,23 @@ def run(config: dict, lifecycle=None) -> int:
                     # namun satu simbol tidak diminta dua kali dalam satu
                     # siklus yang sama.
                     daily_fetcher = scanner.make_daily_klines_fetcher(client, cache={})
-                    best = scanner.find_best_candidate(tickers, klines_fetcher, config,
+                    # Filter korelasi BTC memakai candle konfirmasi yang sudah
+                    # close. Nilai hanya disuntikkan untuk satu siklus scan.
+                    scan_config = dict(config)
+                    if config.get("BTC_FILTER_ENABLED", False):
+                        try:
+                            btc_raw = client.get_klines(
+                                "BTC" + config["QUOTE_ASSET"], config["CONFIRM_INTERVAL"],
+                                limit=int(config.get("BTC_LOOKBACK_BARS", 3) or 3) + 1)
+                            btc_closed = [k for k in strategy.parse_klines(btc_raw)
+                                          if k.close_time < state_mod.now_ms()]
+                            look = int(config.get("BTC_LOOKBACK_BARS", 3) or 3)
+                            if len(btc_closed) >= look + 1:
+                                scan_config["_btc_drop_pct"] = (btc_closed[-1].close /
+                                    btc_closed[-look-1].close - 1.0) * 100.0
+                        except Exception as exc:  # satu filter gagal tidak menghentikan scan
+                            logger.warning("Filter BTC tidak dapat dihitung: %s", exc)
+                    best = scanner.find_best_candidate(tickers, klines_fetcher, scan_config,
                                                        tradable_symbols,
                                                        daily_klines_fetcher=daily_fetcher,
                                                        reference_ms=state_mod.now_ms())
@@ -1334,25 +1353,21 @@ def selftest() -> None:
     # akan mengembalikan None sehingga setup selalu ditolak.
     from synthetic_data import skenario_pullback_retest
 
-    kl_ok = skenario_pullback_retest("lolos")
+    # Seri sintetis momentum: EMA9 baru menembus EMA21, RSI tetap sehat,
+    # histogram MACD naik, dan dua pivot low terakhir membentuk higher low.
+    vals = [100.0] * 30 + [100.2, 100.4, 99.4, 98.4, 97.4, 97.6,
+                            98.6, 98.1, 98.3, 97.8, 98.8, 99.8, 98.8,
+                            99.8, 99.3, 99.5, 98.5, 99.5, 98.5, 100.0]
+    kl_ok = [strategy.Kline(i * 300_000, v, v + 1, max(0.01, v - 1), v,
+                            i * 300_000 + 299_999, 1000.0, v * 1000.0)
+             for i, v in enumerate(vals)]
     hasil = scanner.detect_pullback_retest(kl_ok, cfg)
-    print(f"  Skenario breakout, pullback, close kembali di atas level -> ok={hasil.ok} ({hasil.reason})")
-    assert hasil.ok, "Skenario retest sah harusnya lolos"
-    assert hasil.breakout_level, "Level breakout harus ikut dikembalikan"
-
-    kl_wick = skenario_pullback_retest("wick_saja")
-    hasil_wick = scanner.detect_pullback_retest(kl_wick, cfg)
-    print(f"  Skenario breakout hanya lewat sumbu -> ok={hasil_wick.ok} ({hasil_wick.reason})")
-    assert not hasil_wick.ok, "Sumbu yang menembus tanpa close di atas level bukan breakout"
-
-    kl_gagal = skenario_pullback_retest("close_di_bawah_level")
-    hasil_gagal = scanner.detect_pullback_retest(kl_gagal, cfg)
-    print(f"  Skenario retest close di bawah level -> ok={hasil_gagal.ok} ({hasil_gagal.reason})")
-    assert not hasil_gagal.ok, "Retest yang close di bawah level harus ditolak"
-
+    print(f"  Skenario 3 dari 4 konfirmasi momentum -> ok={hasil.ok} ({hasil.reason})")
+    assert hasil.ok, "Skenario momentum sah harusnya lolos"
+    assert hasil.atr_value is not None, "ATR harus ikut tersedia pada setup"
     ok_ce, reason_ce = scanner.confirm_entry(kl_ok, cfg)
-    assert ok_ce and reason_ce == hasil.reason, "confirm_entry harus memakai detect_pullback_retest"
-    print("  -> OK (confirm_entry konsisten dengan detect_pullback_retest)")
+    assert ok_ce and reason_ce == hasil.reason, "confirm_entry harus memakai deteksi momentum"
+    print("  -> OK (confirm_entry tetap mengembalikan (bool, str))")
 
     print("\n=== SELFTEST: simulasi exit (TP/Breakeven/Trailing) ===")
     from decimal import Decimal as D

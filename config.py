@@ -296,6 +296,22 @@ PUMP_CONFIG = {
     # dengan volume yang sedang naik nyata (2x rata-rata 7 hari) tanpa menuntut
     # lonjakan ekstrem yang jarang. Tetap >1 (syarat validasi).
     "PUMP_VOLUME_SURGE_MULT": 2.0,
+    # Filter korelasi BTC. Nilai drop dihitung dari candle tertutup pada
+    # jendela BTC_LOOKBACK_BARS oleh pemanggil data pasar.
+    "BTC_FILTER_ENABLED": True,
+    "BTC_MAX_DROP_PCT": 3.0,
+    "BTC_LOOKBACK_BARS": 3,
+
+    # Exit adaptif untuk volatilitas scalping. False mempertahankan perilaku
+    # persen lama agar state dan konfigurasi lama tetap kompatibel.
+    "USE_ATR_EXIT": True,
+    "ATR_PERIOD": 14,
+    "ATR_MULT_SL": 1.5,
+    "ATR_MULT_TP": 3.0,
+    "ATR_MULT_TRAIL": 1.0,
+    "ATR_MULT_BE_TRIGGER": 1.0,
+    "ATR_MULT_BE_LOCK": 0.1,
+    "ATR_MULT_TRAIL_START": 1.5,
 
     "EXTRA_EXCLUDE_SYMBOLS": [],             # mis. ["SOMEUSDT"] kalau mau blacklist manual
 

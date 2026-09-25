@@ -312,7 +312,9 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
                     trailing_stop = 0.0
                     # Level exit dikunci saat entry memakai fungsi yang sama
                     # dengan bot live supaya hasil backtest mewakili perilaku bot.
-                    lv = strategy.resolve_exit_levels(config)
+                    level_cfg = dict(config)
+                    level_cfg["_atr_value"] = strategy.atr(klines[:i + 1], int(config.get("ATR_PERIOD", 14) or 14))
+                    lv = strategy.resolve_exit_levels(level_cfg)
                     cur_sl = lv["sl_pct"]
                     cur_tp = lv["tp_pct"]
                     cur_be_trig = lv["be_trigger_pct"]
@@ -328,18 +330,18 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
         pnl_low = (candle.low / entry_price - 1.0) * 100.0
         hold_minutes = (candle.close_time - entry_time) / 60000.0
 
-        sl_price = entry_price * (1 - cur_sl / 100.0) if config["USE_STOP_LOSS"] else None
-
-        if config["USE_BREAKEVEN"] and not be_active and pnl_high >= cur_be_trig:
+        atr_mode = cur_src == "ATR"
+        sl_price = (entry_price - cur_sl) if atr_mode else entry_price * (1 - cur_sl / 100.0)
+        pnl_high_unit = candle.high - entry_price if atr_mode else pnl_high
+        if config["USE_BREAKEVEN"] and not be_active and pnl_high_unit >= cur_be_trig:
             be_active = True
-            be_stop = entry_price * (1 + cur_be_lock / 100.0)
-
+            be_stop = entry_price + cur_be_lock if atr_mode else entry_price * (1 + cur_be_lock / 100.0)
         if config["USE_TRAILING"]:
-            if not trailing_active and pnl_high >= cur_tr_start:
+            if not trailing_active and pnl_high_unit >= cur_tr_start:
                 trailing_active = True
-                trailing_stop = candle.high * (1 - cur_tr_step / 100.0)
+                trailing_stop = candle.high - cur_tr_step if atr_mode else candle.high * (1 - cur_tr_step / 100.0)
             elif trailing_active:
-                cand_stop = candle.high * (1 - cur_tr_step / 100.0)
+                cand_stop = candle.high - cur_tr_step if atr_mode else candle.high * (1 - cur_tr_step / 100.0)
                 if cand_stop > trailing_stop:
                     trailing_stop = cand_stop
 
@@ -360,12 +362,13 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
         # bukan level stopnya -- konsisten dengan paper_engine yang mengisi
         # stop pada harga book pasca-gap. Tanpa ini backtest terlalu optimis
         # pada pair yang sering gap.
-        if config["USE_STOP_LOSS"] and pnl_low <= -cur_sl:
+        sl_triggered = (candle.low <= sl_price if atr_mode else pnl_low <= -cur_sl)
+        if config["USE_STOP_LOSS"] and sl_triggered:
             exit_reason = "STOP_LOSS"
             exit_price = min(sl_price, candle.open)
-        elif config["USE_TP"] and pnl_high >= cur_tp:
+        elif config["USE_TP"] and (candle.high >= entry_price + cur_tp if atr_mode else pnl_high >= cur_tp):
             exit_reason = "TAKE_PROFIT"
-            exit_price = max(entry_price * (1 + cur_tp / 100.0), candle.open)
+            exit_price = max(entry_price + cur_tp if atr_mode else entry_price * (1 + cur_tp / 100.0), candle.open)
         elif be_active and candle.low <= be_stop:
             exit_reason = "BREAKEVEN"
             exit_price = min(be_stop, candle.open)
@@ -601,7 +604,11 @@ def selftest():
     cfg["TRAILING_STEP_PCT"] = 1.5
     cfg["_symbol"] = "TESTUSDT"
 
-    kl_setup = seri_dengan_setup(ekor="naik", panjang_ekor=20)
+    vals = [100.0] * 288 + [100.2, 100.4, 99.4, 98.4, 97.4, 97.6,
+                            98.6, 98.1, 98.3, 97.8, 98.8, 99.8, 98.8,
+                            99.8, 99.3, 99.5, 98.5, 99.5, 98.5, 100.0]
+    kl_setup = [_make_candle(i * 300_000, v, v + 1, max(0.01, v - 1), v,
+                             vol=5_000_000.0) for i, v in enumerate(vals)]
     result = run_backtest(kl_setup, cfg, warmup_bars=0, daily_klines=riwayat_harian(kl_setup))
     assert len(result.trades) >= 1, "Backtest harus mendeteksi minimal 1 entry pada skenario sah"
     first = result.trades[0]
@@ -638,7 +645,7 @@ def selftest():
     print("  -> OK")
 
     print("\n=== SELFTEST backtest.py: Stop Loss kena sebelum proteksi profit aktif ===")
-    sl_klines = seri_dengan_setup(ekor="bertahan", panjang_ekor=0)
+    sl_klines = list(kl_setup)
     entry_ref_price = sl_klines[-1].close
     t2 = sl_klines[-1].close_time + 1
     p2 = entry_ref_price
@@ -671,7 +678,7 @@ def selftest():
         raise AssertionError("Harusnya menolak TP_PCT negatif")
     except BacktestError:
         pass
-    levels = strategy.resolve_exit_levels(dict(PUMP_CONFIG, SL_PCT=3.0, TP_PCT=6.0))
+    levels = strategy.resolve_exit_levels(dict(PUMP_CONFIG, USE_ATR_EXIT=False, SL_PCT=3.0, TP_PCT=6.0))
     assert levels["source"] == "FIXED" and levels["sl_pct"] == 3.0 and levels["tp_pct"] == 6.0
     print("  -> OK")
 
