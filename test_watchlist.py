@@ -845,7 +845,10 @@ class TestEntryTetapUtuh(unittest.TestCase):
     def _momentum(self):
         from strategy import Kline
         vals = [100.0] * 30 + [100.2,100.4,99.4,98.4,97.4,97.6,98.6,98.1,98.3,97.8,98.8,99.8,98.8,99.8,99.3,99.5,98.5,99.5,98.5,100.0]
-        return [Kline(i*300000,v,v+1,v-1,v,i*300000+299999,1000,v*1000) for i,v in enumerate(vals)]
+        return [Kline(i*300000, v, v+1, v-1, v, i*300000+299999,
+                      3000 if i == len(vals)-1 else 1000,
+                      v * (3000 if i == len(vals)-1 else 1000))
+                for i, v in enumerate(vals)]
 
     def test_deteksi_setup_masih_bekerja(self):
         hasil = scanner.detect_pullback_retest(self._momentum(), _synthetic_strategy_config())
@@ -856,7 +859,7 @@ class TestEntryTetapUtuh(unittest.TestCase):
         hasil = scanner.detect_pullback_retest([K(100, 100, 100, 100, 100)] * 50,
                                                _synthetic_strategy_config())
         self.assertFalse(hasil.ok)
-        self.assertIn("konfirmasi", hasil.reason)
+        self.assertTrue("konfirmasi" in hasil.reason or "rolling volume" in hasil.reason)
 
     def test_data_kurang_ditolak(self):
         hasil = scanner.detect_pullback_retest([K(1, 1, 1, 1)] * 3, cfg_mod.PUMP_CONFIG)

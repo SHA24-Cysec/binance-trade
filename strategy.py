@@ -1,6 +1,6 @@
 """
-Struktur data candle (Kline), parser klines Binance, anchored VWAP, ukuran
-jendela bersama, sizing posisi, dan resolusi level exit tetap.
+Struktur data candle (Kline), parser klines Binance, indikator momentum,
+ukuran jendela bersama, sizing posisi, dan resolusi level exit ATR.
 
 Semua array di sini memakai urutan KRONOLOGIS (index 0 = candle paling lama,
 index -1 = candle paling baru), sesuai perilaku default endpoint
@@ -100,55 +100,18 @@ def parse_klines(raw: list) -> list[Kline]:
 
 
 # ---------------------------------------------------------------------
-# Anchored VWAP
-# ---------------------------------------------------------------------
-def anchored_vwap(klines: "list[Kline]", anchor_index: int) -> "float | None":
-    """VWAP yang dijangkar pada satu candle tertentu.
-
-    Rumusnya:
-        anchored_vwap = sum(quote_volume[anchor..terakhir]) / sum(volume[anchor..terakhir])
-
-    ``quote_volume`` diambil dari indeks 7 respons klines Binance dan
-    ``volume`` dari indeks 5. Pemanggil wajib memperlakukan None sebagai
-    setup ditolak, bukan sebagai nol.
-    """
-    if not klines:
-        return None
-    n = len(klines)
-    if anchor_index < 0 or anchor_index >= n:
-        return None
-
-    vol_sum = 0.0
-    quote_sum = 0.0
-    for k in klines[anchor_index:]:
-        vol_sum += float(k.volume)
-        quote_sum += float(k.quote_volume)
-
-    if not math.isfinite(vol_sum) or not math.isfinite(quote_sum):
-        return None
-    if vol_sum <= 0 or quote_sum <= 0:
-        return None
-    value = quote_sum / vol_sum
-    if not math.isfinite(value) or value <= 0:
-        return None
-    return value
-
-
-# ---------------------------------------------------------------------
 # Kebutuhan jumlah candle untuk satu keputusan entry
 # ---------------------------------------------------------------------
 def required_lookback_bars(config: dict) -> int:
-    """Jumlah candle minimum yang dibutuhkan satu evaluasi pullback retest.
+    """Jumlah candle minimum untuk indikator momentum dan volume rolling.
 
-    Struktur setup butuh ruang untuk swing lookback, sayap pivot kiri dan
-    kanan, lalu jarak dari breakout sampai retest:
-    SWING_LOOKBACK_BARS + 2 x SWING_PIVOT_WING_BARS + MAX_BARS_BREAKOUT_TO_RETEST.
+    EMA, RSI, MACD, ATR, pivot low, serta rata-rata volume rolling hanya
+    boleh memakai candle yang sudah close. Angka ini dipakai bersama oleh
+    bot live, backtest, dan watchlist agar jendelanya konsisten.
     """
-    swing_lookback = int(config.get("SWING_LOOKBACK_BARS", 12) or 12)
-    wing = int(config.get("SWING_PIVOT_WING_BARS", 2) or 2)
-    max_bars_to_retest = int(config.get("MAX_BARS_BREAKOUT_TO_RETEST", 12) or 12)
-
-    return max(3, swing_lookback + 2 * wing + max_bars_to_retest)
+    rolling_lookback = int(config.get("ROLLING_VOLUME_LOOKBACK_BARS", 20) or 20)
+    confirmation_bars = int(config.get("ROLLING_VOLUME_CONFIRMATION_BARS", 1) or 1)
+    return max(30, rolling_lookback + max(1, confirmation_bars))
 
 
 def confirm_window_bars(config: dict) -> int:

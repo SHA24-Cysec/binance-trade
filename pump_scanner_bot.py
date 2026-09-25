@@ -1003,8 +1003,17 @@ def run(config: dict, lifecycle=None) -> int:
             "benar-benar memakai angka yang sama.",
             have_bars, need_setup, strategy.confirm_window_bars(config),
         )
-    logger.info("Mode exit: SL/TP tetap (SL %.2f%%, TP %.2f%%)",
-                config.get("SL_PCT", 0), config.get("TP_PCT", 0))
+    if config.get("USE_ATR_EXIT", False):
+        logger.info(
+            "Mode exit: ATR (periode %d, SL %.2fx, TP %.2fx, trailing %.2fx)",
+            int(config.get("ATR_PERIOD", 14) or 14),
+            float(config.get("ATR_MULT_SL", 0) or 0),
+            float(config.get("ATR_MULT_TP", 0) or 0),
+            float(config.get("ATR_MULT_TRAIL", 0) or 0),
+        )
+    else:
+        logger.info("Mode exit: SL/TP tetap (SL %.2f%%, TP %.2f%%)",
+                    config.get("SL_PCT", 0), config.get("TP_PCT", 0))
     logger.info("=" * 70)
 
     client = create_exchange_client(config)
@@ -1348,18 +1357,20 @@ def selftest() -> None:
     print("  -> OK (tanpa sumber candle harian, gerbang pump fail closed)")
 
     print("\n=== SELFTEST: deteksi setup pullback dan retest ===")
-    # Data sintetis WAJIB mengisi volume dan quote_volume, karena anchored
-    # VWAP membaginya. Kline.volume default 0.0, dan VWAP dari volume nol
-    # akan mengembalikan None sehingga setup selalu ditolak.
+    # Data sintetis mengisi volume dan quote_volume agar gerbang rolling
+    # volume dapat diuji tanpa jaringan. Dua candle terakhir dibuat melonjak
+    # sehingga candle keputusan memiliki volume minimal 2x rata-rata.
     from synthetic_data import skenario_pullback_retest
 
     # Seri sintetis momentum: EMA9 baru menembus EMA21, RSI tetap sehat,
     # histogram MACD naik, dan dua pivot low terakhir membentuk higher low.
     vals = [100.0] * 30 + [100.2, 100.4, 99.4, 98.4, 97.4, 97.6,
                             98.6, 98.1, 98.3, 97.8, 98.8, 99.8, 98.8,
-                            99.8, 99.3, 99.5, 98.5, 99.5, 98.5, 100.0]
+                            99.8, 99.3, 99.5, 98.5, 99.5, 98.5, 100.0, 100.5]
     kl_ok = [strategy.Kline(i * 300_000, v, v + 1, max(0.01, v - 1), v,
-                            i * 300_000 + 299_999, 1000.0, v * 1000.0)
+                            i * 300_000 + 299_999,
+                            3000.0 if i >= len(vals) - 2 else 1000.0,
+                            v * (3000.0 if i >= len(vals) - 2 else 1000.0))
              for i, v in enumerate(vals)]
     hasil = scanner.detect_pullback_retest(kl_ok, cfg)
     print(f"  Skenario 3 dari 4 konfirmasi momentum -> ok={hasil.ok} ({hasil.reason})")

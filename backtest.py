@@ -606,9 +606,10 @@ def selftest():
 
     vals = [100.0] * 288 + [100.2, 100.4, 99.4, 98.4, 97.4, 97.6,
                             98.6, 98.1, 98.3, 97.8, 98.8, 99.8, 98.8,
-                            99.8, 99.3, 99.5, 98.5, 99.5, 98.5, 100.0]
+                            99.8, 99.3, 99.5, 98.5, 99.5, 98.5, 100.0, 100.5]
     kl_setup = [_make_candle(i * 300_000, v, v + 1, max(0.01, v - 1), v,
-                             vol=5_000_000.0) for i, v in enumerate(vals)]
+                             vol=(10_000_000.0 if i >= len(vals) - 2 else 5_000_000.0))
+                for i, v in enumerate(vals)]
     result = run_backtest(kl_setup, cfg, warmup_bars=0, daily_klines=riwayat_harian(kl_setup))
     assert len(result.trades) >= 1, "Backtest harus mendeteksi minimal 1 entry pada skenario sah"
     first = result.trades[0]

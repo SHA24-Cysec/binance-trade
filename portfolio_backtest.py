@@ -760,6 +760,9 @@ def selftest() -> bool:
         # hanya ambangnya yang dilonggarkan. Gerbang pump diuji sungguhan di
         # tests/test_pump_gate.py.
         "PUMP_MIN_24H_CHANGE_PCT": -1000.0, "PUMP_VOLUME_SURGE_MULT": 0.0,
+        # Fokus selftest ini adalah orkestrasi portofolio dan exit. Sinyal
+        # rolling volume diuji terpisah pada test sinyal momentum.
+        "ROLLING_VOLUME_FILTER_ENABLED": False,
         # Parameter setup dibiarkan default dari config.py lewat PUMP_CONFIG
         # di bawah, kecuali yang sengaja dilonggarkan di atas.
     }

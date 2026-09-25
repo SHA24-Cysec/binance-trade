@@ -28,7 +28,7 @@ def make_candle(index: int, open_: float, high: float, low: float, close: float,
 
     quote_volume = volume x rata-rata (high, low, close). Ini mendekati cara
     bursa menghitung quote asset volume (jumlah harga x kuantitas per trade),
-    cukup untuk membuat anchored VWAP bergerak masuk akal pada data uji.
+    cukup untuk membuat simulasi setup lama tetap terbaca pada data uji.
     """
     harga_rata = (high + low + close) / 3.0
     return Kline(
@@ -81,8 +81,8 @@ def skenario_pullback_retest(nama: str = "lolos") -> list[Kline]:
       close_lemah            close retest di bagian bawah range candle
       kedaluwarsa            retest datang setelah MAX_BARS_BREAKOUT_TO_RETEST
       terlalu_jauh           close retest sudah jauh di atas level (anti-kejar)
-      di_bawah_vwap          close retest di atas level tetapi di bawah anchored VWAP
-      vwap_jauh              anchored VWAP jauh dari level (tanpa konfluensi)
+      di_bawah_vwap          skenario setup legacy dengan close lemah
+      vwap_jauh              skenario setup legacy tanpa konfluensi
       invalidasi             ada candle yang close di bawah batas invalidasi
       datar                  seluruh candle identik
       volume_nol             sama dengan "lolos" tetapi volume nol

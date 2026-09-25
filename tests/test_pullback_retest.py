@@ -8,9 +8,12 @@ from config import PUMP_CONFIG
 
 
 def candles(values):
-    return [strategy.Kline(i * 300000, v, v + 1, max(.01, v - 1), v,
-                           i * 300000 + 299999, 1000.0, v * 1000.0)
-            for i, v in enumerate(values)]
+    out = []
+    for i, v in enumerate(values):
+        volume = 3000.0 if i == len(values) - 1 else 1000.0
+        out.append(strategy.Kline(i * 300000, v, v + 1, max(.01, v - 1), v,
+                                  i * 300000 + 299999, volume, volume * v))
+    return out
 
 
 def momentum_data():
@@ -57,6 +60,25 @@ def test_tidak_lookahead():
     result = scanner.detect_pullback_retest(base, cfg())
     future = base + candles([90, 120])
     assert scanner.detect_pullback_retest(future[:len(base)], cfg()) == result
+
+
+def test_volume_rolling_wajib_dan_tidak_lookahead():
+    data = candles([100.0] * 50)
+    ok, reason = scanner._rolling_volume_confirmation(data, cfg())
+    assert ok, reason
+
+    data[-1] = data[-1]._replace(volume=1000.0, quote_volume=100000.0)
+    ok, reason = scanner._rolling_volume_confirmation(data, cfg())
+    assert not ok and "rolling volume" in reason
+
+
+def test_volume_rolling_bisa_dimatikan():
+    data = candles([100.0] * 50)
+    data[-1] = data[-1]._replace(volume=1000.0, quote_volume=100000.0)
+    c = cfg()
+    c["ROLLING_VOLUME_FILTER_ENABLED"] = False
+    ok, reason = scanner._rolling_volume_confirmation(data, c)
+    assert ok and "nonaktif" in reason
 
 
 def test_atr_exit_menerapkan_invariant_dan_fallback():

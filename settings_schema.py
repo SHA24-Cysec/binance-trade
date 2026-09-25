@@ -125,7 +125,7 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     # harus divalidasi lewat backtest repo ini.
     "SWING_LOOKBACK_BARS": _field("Setup Pullback", "Lookback swing high", "Berapa candle ke belakang dipindai untuk mencari level breakout.", "int", minimum=3, maximum=500, unit="candle"),
     "SWING_PIVOT_WING_BARS": _field("Setup Pullback", "Sayap pivot", "Candle di kiri dan kanan yang harus lebih rendah agar sebuah candle menjadi pivot high.", "int", minimum=1, maximum=50, unit="candle"),
-    "VWAP_MIN_BARS_AFTER_ANCHOR": _field("Setup Pullback", "Minimum candle setelah anchor", "Candle minimum setelah breakout sebelum anchored VWAP dipercaya.", "int", minimum=1, maximum=200, unit="candle"),
+    "VWAP_MIN_BARS_AFTER_ANCHOR": _field("Legacy", "Parameter setup lama", "Disimpan untuk membaca konfigurasi lama. Tidak dipakai oleh strategi momentum baru.", "int", minimum=1, maximum=200, unit="candle", read_only=True),
     "MAX_BARS_BREAKOUT_TO_RETEST": _field("Setup Pullback", "Umur maksimum setup", "Batas jarak candle dari breakout ke retest.", "int", minimum=1, maximum=500, unit="candle"),
     "MAX_RETEST_TOUCHES": _field("Setup Pullback", "Maksimum kunjungan zona", "Berapa kali harga boleh kembali ke zona sebelum setup dianggap lemah.", "int", minimum=1, maximum=20),
     # Gerbang pump: saringan semesta WAJIB yang dijalankan sebelum deteksi
@@ -136,6 +136,10 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "BTC_FILTER_ENABLED": _field("Setup Pullback", "Filter korelasi BTC", "Tolak entry altcoin bila BTC turun tajam pada jendela candle tertutup.", "bool"),
     "BTC_MAX_DROP_PCT": _field("Setup Pullback", "Penurunan BTC maksimum", "Batas penurunan BTC sebelum entry ditolak.", "float", minimum=0.1, maximum=50, unit="%"),
     "BTC_LOOKBACK_BARS": _field("Setup Pullback", "Lookback BTC", "Jumlah candle tertutup untuk mengukur penurunan BTC.", "int", minimum=1, maximum=1000, unit="candle"),
+    "ROLLING_VOLUME_FILTER_ENABLED": _field("Setup Momentum", "Filter volume rolling", "Wajibkan volume candle konfirmasi melampaui rata-rata candle sebelumnya.", "bool"),
+    "ROLLING_VOLUME_LOOKBACK_BARS": _field("Setup Momentum", "Lookback volume rolling", "Jumlah candle sebelumnya untuk menghitung rata-rata volume.", "int", minimum=2, maximum=500, unit="candle"),
+    "ROLLING_VOLUME_SURGE_MULT": _field("Setup Momentum", "Pengali volume rolling", "Volume candle konfirmasi minimal sekian kali rata-rata sebelumnya.", "float", minimum=0.1, maximum=100, unit="x"),
+    "ROLLING_VOLUME_CONFIRMATION_BARS": _field("Setup Momentum", "Candle volume konfirmasi", "Jumlah candle terakhir yang wajib memenuhi lonjakan volume.", "int", minimum=1, maximum=20, unit="candle"),
     "USE_ATR_EXIT": _field("SL dan TP", "Gunakan exit ATR", "Gunakan jarak exit adaptif berdasarkan ATR; jika mati, gunakan persen lama.", "bool", dangerous=True),
     "ATR_PERIOD": _field("SL dan TP", "Periode ATR", "Periode ATR Wilder.", "int", minimum=2, maximum=200, unit="candle"),
     "ATR_MULT_SL": _field("SL dan TP", "Pengali ATR Stop Loss", "Jarak Stop Loss dalam ATR.", "float", minimum=0.1, maximum=20, unit="x", dangerous=True),
@@ -474,6 +478,11 @@ def validate_candidate(candidate: dict, mode: str) -> tuple[dict, dict[str, str]
         # peringatan supaya perubahan itu disadari.
         relation("PUMP_VOLUME_SURGE_MULT", cleaned["PUMP_VOLUME_SURGE_MULT"] >= 1.0,
                  "harus minimal 1 kali rata-rata 7 hari, di bawah itu berarti volume justru turun")
+        relation("ROLLING_VOLUME_SURGE_MULT", cleaned["ROLLING_VOLUME_SURGE_MULT"] > 0,
+                 "harus lebih besar dari nol")
+        relation("ROLLING_VOLUME_CONFIRMATION_BARS",
+                 cleaned["ROLLING_VOLUME_CONFIRMATION_BARS"] <= cleaned["ROLLING_VOLUME_LOOKBACK_BARS"],
+                 "tidak boleh melebihi lookback volume rolling")
         relation("ATR_MULT_TRAIL", cleaned["ATR_MULT_TRAIL"] <= cleaned["ATR_MULT_SL"],
                  "tidak boleh melebihi ATR_MULT_SL agar invariant trailing <= SL terjaga")
         relation("ATR_MULT_BE_TRIGGER", cleaned["ATR_MULT_BE_TRIGGER"] <= cleaned["ATR_MULT_TRAIL_START"],

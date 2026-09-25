@@ -107,7 +107,6 @@ class SetupResult:
     zone_low: Optional[float] = None
     zone_high: Optional[float] = None
     anchor_index: Optional[int] = None
-    anchored_vwap: Optional[float] = None
     retest_touches: int = 0
     atr_value: Optional[float] = None
 
@@ -494,7 +493,7 @@ def filter_and_rank_candidates(tickers: list, config: dict,
 
 
 # ======================================================================
-# Deteksi setup: breakout, anchored VWAP, pullback, retest
+# Deteksi setup: momentum pump dan konfirmasi volume rolling
 # ======================================================================
 
 def _pivot_high_indexes(klines: list[Kline], wing: int) -> list[int]:
@@ -553,6 +552,56 @@ def _higher_low_confirmed(klines: list[Kline], wing: int) -> bool:
     return len(pivots) >= 2 and klines[pivots[-1]].low > klines[pivots[-2]].low
 
 
+def _rolling_volume_confirmation(klines: list[Kline], config: dict) -> tuple[bool, str]:
+    """Validasi lonjakan volume pada candle konfirmasi yang sudah close.
+
+    Candle keputusan terakhir tidak pernah masuk ke rata-rata pembandingnya.
+    Dengan begitu, sinyal tidak dapat meloloskan diri hanya karena volume
+    candle yang sedang diuji ikut menaikkan rata-rata. Quote volume dipakai
+    bila tersedia karena satuannya langsung mengikuti asset kuotasi; volume
+    dasar menjadi fallback untuk fixture lama yang belum memilikinya.
+    """
+    if not bool(config.get("ROLLING_VOLUME_FILTER_ENABLED", True)):
+        return True, "rolling volume nonaktif"
+
+    lookback = max(1, int(config.get("ROLLING_VOLUME_LOOKBACK_BARS", 20) or 20))
+    confirmations = max(1, int(config.get("ROLLING_VOLUME_CONFIRMATION_BARS", 1) or 1))
+    multiplier = float(config.get("ROLLING_VOLUME_SURGE_MULT", 2.0) or 0.0)
+    required = lookback + confirmations
+    if len(klines) < required:
+        return False, f"data volume rolling kurang: {len(klines)} dari minimum {required}"
+    if not math.isfinite(multiplier) or multiplier <= 0:
+        return False, "ROLLING_VOLUME_SURGE_MULT tidak valid"
+
+    values = []
+    for k in klines:
+        quote = float(getattr(k, "quote_volume", 0.0) or 0.0)
+        base = float(getattr(k, "volume", 0.0) or 0.0)
+        value = quote if quote > 0 else base
+        if not math.isfinite(value) or value < 0:
+            return False, "volume candle tidak valid"
+        values.append(value)
+
+    passed = 0
+    ratios = []
+    for offset in range(confirmations):
+        idx = len(values) - confirmations + offset
+        prior = values[idx - lookback:idx]
+        average = sum(prior) / lookback
+        current = values[idx]
+        if average <= 0:
+            return False, "rata-rata volume rolling nol"
+        ratio = current / average
+        ratios.append(ratio)
+        if ratio >= multiplier:
+            passed += 1
+
+    ok = passed == confirmations
+    detail = (f"rolling volume {min(ratios):.2f}x, minimum {multiplier:g}x, "
+              f"{passed}/{confirmations} candle konfirmasi")
+    return ok, detail
+
+
 def detect_pullback_retest(klines: list[Kline], config: dict) -> SetupResult:
     """Deteksi momentum pump dengan minimal tiga dari empat konfirmasi.
 
@@ -570,6 +619,9 @@ def detect_pullback_retest(klines: list[Kline], config: dict) -> SetupResult:
     closes = [float(k.close) for k in klines]
     if any(x <= 0 or not math.isfinite(x) for x in closes):
         return SetupResult(False, "close candle tidak valid")
+    volume_ok, volume_detail = _rolling_volume_confirmation(klines, config)
+    if not volume_ok:
+        return SetupResult(False, f"rolling volume ditolak: {volume_detail}")
     ema9, ema21 = strategy.ema(closes, 9), strategy.ema(closes, 21)
     if len(ema9) < 2:
         return SetupResult(False, "data EMA kurang")
@@ -583,7 +635,7 @@ def detect_pullback_retest(klines: list[Kline], config: dict) -> SetupResult:
     confirmations = sum((ema_cross, rsi_ok, macd_ok, higher_low))
     details = (f"EMA={'ya' if ema_cross else 'tidak'}, RSI={rsi_values[-1]:.2f}, "
                f"MACD={'naik' if macd_ok else 'tidak'}, HL={'ya' if higher_low else 'tidak'} "
-               f"({confirmations}/4)")
+               f"({confirmations}/4), {volume_detail}")
     if confirmations < 3:
         return SetupResult(False, f"konfirmasi entry kurang dari 3/4: {details}")
     return SetupResult(True, f"momentum pump sah: {details}",

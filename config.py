@@ -5,13 +5,12 @@ Konfigurasi Bot Pump Scanner (Binance Spot)
 Catatan: file ini dulu juga memuat blok CONFIG untuk bot grid martingale.
 Bot grid sudah dihapus, jadi kini hanya tersisa PUMP_CONFIG.
 
-Strategi bot ini adalah PULLBACK dan RETEST, long only, di pasar Spot. Bot
-TIDAK memprediksi arah harga: ia menunggu struktur yang sudah terjadi pada
-candle 5 menit yang SUDAH tertutup, yaitu breakout di atas swing high, lalu
-pullback kembali ke area level itu, lalu candle yang menutup kembali di atas
-level dengan konfluensi anchored VWAP. Hanya satu entry per rotasi (tanpa
-averaging-down dan tanpa martingale), dengan Stop Loss/TP/Breakeven/Trailing
-dan exit invalidasi setup untuk keluar.
+Strategi bot ini adalah PUMP MOMENTUM, long only, di pasar Spot. Bot
+hanya memakai candle yang SUDAH tertutup dan kronologis. Entry membutuhkan
+minimal 3 dari 4 konfirmasi: EMA9 cross EMA21, RSI sehat, MACD histogram
+menguat, dan higher low. Volume harian serta volume rolling menjadi gerbang
+pump berlapis. Hanya satu entry per rotasi (tanpa averaging-down dan tanpa
+martingale), dengan Stop Loss/TP/Breakeven/Trailing berbasis ATR.
 
 Kredensial diambil dari file .env, JANGAN taruh langsung di file config.py ini
 (kalau ditulis di sini, risiko ke-commit ke Git atau ke-share tanpa sengaja
@@ -208,7 +207,7 @@ PUMP_CONFIG = {
     # adalah 1000 candle per panggilan (dicek 2026-09-25).
     # OPTIMASI MANUAL: 53 -> 60. Wajib >= SWING_LOOKBACK_BARS(20) +
     # 2*SWING_PIVOT_WING_BARS(3) + MAX_BARS_BREAKOUT_TO_RETEST(24) = 50.
-    # Diberi margin ke 60 supaya anchored VWAP punya lebih banyak riwayat.
+    # Diberi margin ke 60 agar indikator momentum dan volume rolling memiliki data cukup.
     "CONFIRM_LOOKBACK_BARS": 60,
     # Posisi close di dalam range candle retest (0 = di low, 1 = di high).
     # Kunci lama ini dipakai ulang oleh market_scanner.detect_pullback_retest().
@@ -246,8 +245,8 @@ PUMP_CONFIG = {
     # pivot high valid = lebih banyak kandidat breakout. Tetap >=3 agar pivot
     # tidak jadi noise satu-dua candle.
     "SWING_PIVOT_WING_BARS": 3,
-    # Minimum candle setelah anchor sebelum anchored VWAP dipercaya. Tanpa ini
-    # VWAP hanya mencerminkan satu candle, yaitu harga rata-rata candle itu.
+    # Kunci legacy untuk kompatibilitas konfigurasi lama. Tidak dipakai oleh
+    # strategi momentum baru.
     "VWAP_MIN_BARS_AFTER_ANCHOR": 4,
     # Umur maksimum setup: kalau retest tidak datang dalam sekian candle,
     # setup dianggap gugur dan bot mencari breakout berikutnya.
@@ -301,6 +300,13 @@ PUMP_CONFIG = {
     "BTC_FILTER_ENABLED": True,
     "BTC_MAX_DROP_PCT": 3.0,
     "BTC_LOOKBACK_BARS": 3,
+
+    # Konfirmasi momentum volume pada candle timeframe entry. Volume candle
+    # terakhir yang sudah close harus melebihi rata-rata candle sebelumnya.
+    "ROLLING_VOLUME_FILTER_ENABLED": True,
+    "ROLLING_VOLUME_LOOKBACK_BARS": 20,
+    "ROLLING_VOLUME_SURGE_MULT": 2.0,
+    "ROLLING_VOLUME_CONFIRMATION_BARS": 1,
 
     # Exit adaptif untuk volatilitas scalping. False mempertahankan perilaku
     # persen lama agar state dan konfigurasi lama tetap kompatibel.

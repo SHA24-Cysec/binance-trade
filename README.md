@@ -1,12 +1,13 @@
 # binance-trade
 
-Bot rotasi Binance Spot untuk mode PAPER dan LIVE. Bot memindai pair dengan quote asset yang sama, menyaring kandidat likuid yang sedang bergerak, lalu mencari setup pullback retest pada candle yang sudah tertutup.
+Bot rotasi Binance Spot untuk mode PAPER dan LIVE. Bot memindai pair dengan quote asset yang sama, menyaring kandidat pump yang likuid, lalu mencari momentum scalping pada candle yang sudah tertutup.
 
 ## Status utama
 
 - Satu entry long per rotasi, tanpa martingale dan tanpa averaging down.
-- Entry memakai struktur pullback retest: breakout di atas swing high, pullback menyentuh level, lalu close kembali di atas level dan anchored VWAP.
-- Exit memakai angka tetap dari config: Stop Loss, Take Profit, Breakeven, dan Trailing.
+- Entry membutuhkan minimal 3 dari 4 konfirmasi: EMA9 cross EMA21, RSI sehat, MACD histogram menguat, dan higher low.
+- Volume harian dan rolling volume candle menjadi gerbang pump berlapis.
+- Exit default memakai ATR untuk menyesuaikan volatilitas, dengan fallback ke persentase lama.
 - Ukuran posisi memakai mode persen saldo atau nominal tetap, dengan plafon nominal opsional.
 - Dashboard menyediakan kontrol mode, kredensial, setelan, backtest portofolio, watchlist, riwayat, dan reset akun PAPER.
 
@@ -26,8 +27,8 @@ Mode default adalah PAPER. Mode LIVE wajib memakai API key dan secret produksi y
 | --- | --- |
 | `config.py` | Default config dan helper mode runtime |
 | `settings_schema.py` | Schema dan validasi setelan dashboard |
-| `strategy.py` | Struktur candle, parser klines, anchored VWAP, sizing, dan level exit tetap |
-| `market_scanner.py` | Filter pasar, gerbang pump, dan deteksi setup pullback retest |
+| `strategy.py` | Struktur candle, parser klines, indikator momentum, sizing, dan level exit ATR |
+| `market_scanner.py` | Filter pasar, gerbang pump, rolling volume, dan deteksi sinyal momentum |
 | `pump_scanner_bot.py` | Loop bot live atau paper |
 | `backtest.py` | Backtest satu simbol dan selftest lokal |
 | `portfolio_backtest.py` | Backtest portofolio lintas simbol |
@@ -35,30 +36,33 @@ Mode default adalah PAPER. Mode LIVE wajib memakai API key dan secret produksi y
 | `templates/dashboard.html` | Tampilan dashboard |
 | `watchlist_auto.py` | Penyegar watchlist read-only |
 
-## Setup pullback retest
+## Sinyal momentum pump
 
-Urutan yang dicari oleh scanner:
+Sinyal entry hanya dievaluasi dari candle yang sudah close dan kronologis. Bot membutuhkan minimal 3 dari 4 konfirmasi berikut:
 
-1. Candle close menembus swing high valid.
-2. Candle breakout menjadi anchor untuk anchored VWAP.
-3. Harga kembali menyentuh level breakout.
-4. Candle terakhir close kembali di atas level.
-5. Close berada cukup tinggi dalam range candle sesuai `MIN_CLOSE_POSITION_IN_RANGE`.
-6. Close berada di atas anchored VWAP.
-7. Umur setup dibatasi oleh `MAX_BARS_BREAKOUT_TO_RETEST` dan jumlah sentuhan oleh `MAX_RETEST_TOUCHES`.
+1. EMA9 baru cross ke atas EMA21.
+2. RSI(14) berada pada zona 50 sampai 75.
+3. MACD histogram naik atau baru cross ke area positif.
+4. Higher low terbentuk setelah momentum awal.
 
-Parameter utama setup:
+Sebelum konfirmasi indikator, volume candle konfirmasi harus memenuhi gerbang rolling:
+
+- `ROLLING_VOLUME_LOOKBACK_BARS` candle sebelumnya menjadi rata-rata pembanding.
+- Volume candle konfirmasi minimal `ROLLING_VOLUME_SURGE_MULT` kali rata-rata tersebut.
+- Jumlah candle yang wajib memenuhi syarat diatur oleh `ROLLING_VOLUME_CONFIRMATION_BARS`.
+- Candle yang sedang berjalan tidak boleh masuk ke perhitungan.
+
+Parameter utama:
 
 | Key | Makna |
 | --- | --- |
 | `CONFIRM_INTERVAL` | Interval candle konfirmasi |
-| `CONFIRM_LOOKBACK_BARS` | Jumlah candle tertutup yang diambil untuk evaluasi |
-| `SWING_LOOKBACK_BARS` | Lookback untuk mencari swing high |
-| `SWING_PIVOT_WING_BARS` | Sayap kiri dan kanan pivot |
-| `VWAP_MIN_BARS_AFTER_ANCHOR` | Minimum candle setelah breakout sebelum VWAP dipakai |
-| `MAX_BARS_BREAKOUT_TO_RETEST` | Umur maksimum setup |
-| `MAX_RETEST_TOUCHES` | Jumlah kunjungan ke level yang masih diterima |
-| `MIN_CLOSE_POSITION_IN_RANGE` | Posisi minimum close di dalam range candle retest |
+| `CONFIRM_LOOKBACK_BARS` | Jumlah candle tertutup yang diambil |
+| `SWING_PIVOT_WING_BARS` | Sayap kiri dan kanan untuk pivot low |
+| `ROLLING_VOLUME_FILTER_ENABLED` | Mengaktifkan filter volume rolling |
+| `ROLLING_VOLUME_LOOKBACK_BARS` | Jumlah candle pembanding volume |
+| `ROLLING_VOLUME_SURGE_MULT` | Pengali minimum volume konfirmasi |
+| `ROLLING_VOLUME_CONFIRMATION_BARS` | Jumlah candle terakhir yang wajib lolos |
 
 ## Gerbang pump dan filter pasar
 
@@ -69,26 +73,27 @@ Sebelum setup dievaluasi, kandidat harus lolos:
 - Status simbol dapat diperdagangkan jika metadata tersedia.
 - Volume 24 jam minimal `MIN_QUOTE_VOLUME_USDT_24H`.
 - Kenaikan 24 jam minimal `PUMP_MIN_24H_CHANGE_PCT`.
-- Volume berjalan minimal `PUMP_VOLUME_SURGE_MULT` kali rata-rata volume harian tertutup sebelumnya.
+- Volume 24 jam minimal `PUMP_VOLUME_SURGE_MULT` kali rata-rata volume harian tertutup sebelumnya.
+- Volume candle konfirmasi memenuhi filter rolling sesuai parameter di atas.
+- Filter korelasi BTC menolak entry jika penurunan BTC melewati `BTC_MAX_DROP_PCT` dalam `BTC_LOOKBACK_BARS`.
 - Usia listing minimal `MIN_LISTING_AGE_DAYS` bila filter usia aktif.
 - Spread order book maksimal `MAX_SPREAD_PCT` sebelum entry.
 
 ## Exit dan sizing
 
-Exit yang tersedia:
+Exit default memakai ATR:
 
 | Key | Makna |
 | --- | --- |
-| `USE_STOP_LOSS` | Aktifkan Stop Loss |
-| `SL_PCT` | Jarak Stop Loss tetap dari entry |
-| `USE_TP` | Aktifkan Take Profit |
-| `TP_PCT` | Target Take Profit tetap dari entry |
-| `USE_BREAKEVEN` | Aktifkan Breakeven |
-| `BE_TRIGGER_PCT` | Profit pemicu Breakeven |
-| `BE_LOCK_PCT` | Profit yang dikunci saat Breakeven aktif |
-| `USE_TRAILING` | Aktifkan Trailing |
-| `TRAILING_START_PCT` | Profit awal untuk mengaktifkan Trailing |
-| `TRAILING_STEP_PCT` | Jarak stop Trailing dari harga tertinggi |
+| `USE_ATR_EXIT` | Mengaktifkan exit adaptif ATR |
+| `ATR_PERIOD` | Periode ATR |
+| `ATR_MULT_SL` | Jarak Stop Loss dalam ATR |
+| `ATR_MULT_TP` | Jarak Take Profit dalam ATR |
+| `ATR_MULT_TRAIL` | Jarak trailing dalam ATR |
+| `ATR_MULT_BE_TRIGGER` | Pemicu breakeven dalam ATR |
+| `ATR_MULT_BE_LOCK` | Jarak lock breakeven dalam ATR |
+| `ATR_MULT_TRAIL_START` | Pemicu trailing dalam ATR |
+| `SL_PCT`, `TP_PCT` | Fallback exit persen ketika ATR dimatikan |
 
 Sizing yang tersedia:
 
@@ -97,9 +102,8 @@ Sizing yang tersedia:
 | `USE_RISK_PERCENT` | True memakai persentase saldo bebas |
 | `RISK_PERCENT` | Persentase saldo bebas yang dipakai saat mode persen aktif |
 | `POSITION_SIZE_USDT` | Nominal tetap saat mode persen mati |
-| `MAX_POSITION_USDT` | Plafon nominal per posisi, 0 berarti tanpa plafon di PAPER |
-| `BALANCE_BUFFER_PCT` | Saldo yang sengaja tidak dibelanjakan untuk fee dan pergerakan harga |
-| `BACKTEST_INITIAL_EQUITY_USDT` | Modal awal simulasi backtest |
+| `MAX_POSITION_USDT` | Plafon nominal per posisi |
+| `BALANCE_BUFFER_PCT` | Saldo yang sengaja tidak dibelanjakan |
 
 ## Backtest
 
