@@ -18,6 +18,28 @@ from synthetic_data import (
 )
 
 CFG = dict(cfg_mod.PUMP_CONFIG)
+# Konfigurasi fixture tetap memakai jendela sintetis yang pendek. Nilai
+# produksi kandidat di config.py tetap diuji lewat backtest historis; fixture
+# ini mengisolasi kontrak deteksi tanpa mengubah arti pengujian.
+CFG.update({
+    "CONFIRM_LOOKBACK_BARS": 48,
+    "SWING_LOOKBACK_BARS": 12,
+    "SWING_PIVOT_WING_BARS": 2,
+    "BREAKOUT_BUFFER_ATR_MULT": 0.10,
+    "RETEST_ZONE_ATR_MULT": 0.5,
+    "RETEST_VWAP_CONFLUENCE_ATR_MULT": 1.0,
+    "VWAP_MIN_BARS_AFTER_ANCHOR": 2,
+    "MAX_BARS_BREAKOUT_TO_RETEST": 12,
+    "INVALIDATION_ATR_MULT": 1.0,
+    "MAX_EXTENSION_ATR_MULT": 1.5,
+})
+
+# Berkas ini menguji deteksi setup dan jalur exit, BUKAN gerbang pump.
+# Gerbang pump tetap berjalan di run_backtest (tidak ada jalan belakang di
+# kode produksi), jadi setiap pemanggilan backtest di sini memakai ambang yang
+# dilonggarkan lewat cfg_gerbang_pump_nonaktif() dan menyediakan riwayat
+# harian sintetis lewat riwayat_harian(). Gerbang pump diuji sungguhan di
+# tests/test_pump_gate.py.
 
 # Berkas ini menguji deteksi setup dan jalur exit, BUKAN gerbang pump.
 # Gerbang pump tetap berjalan di run_backtest (tidak ada jalan belakang di

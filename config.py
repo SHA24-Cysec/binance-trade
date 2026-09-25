@@ -191,7 +191,7 @@ PUMP_CONFIG = {
     # --- Scan & seleksi kandidat ---
     "MARKET_SCAN_INTERVAL_SECONDS": 300,     # scan seluruh pasar tiap 5 menit
     "LOOP_INTERVAL_SECONDS": 15,             # cek TP/BE/trailing tiap 15 detik
-    "MIN_QUOTE_VOLUME_USDT_24H": 2_000_000,  # minimal volume 24 jam (hindari koin ilikuid/rawan manipulasi)
+    "MIN_QUOTE_VOLUME_USDT_24H": 3099455.404470322,  # kandidat walk-forward; dibatasi untuk pair yang lebih likuid
     # Berapa simbol teratas (urut volume kuotasi 24 jam) yang candle-nya
     # diunduh tiap siklus scan. Angka ini yang menjaga rate limit: satu
     # panggilan klines berbobot IP 2 sedangkan plafon REQUEST_WEIGHT adalah
@@ -205,10 +205,10 @@ PUMP_CONFIG = {
     # Dengan default saat ini minimumnya 28 candle, jadi 48 memberi ruang
     # tambahan untuk swing yang lebih lama. Limit endpoint klines adalah 1000
     # candle per panggilan (dicek 2026-09-25).
-    "CONFIRM_LOOKBACK_BARS": 48,
+    "CONFIRM_LOOKBACK_BARS": 53,
     # Posisi close di dalam range candle retest (0 = di low, 1 = di high).
     # Kunci lama ini dipakai ulang oleh market_scanner.detect_pullback_retest().
-    "MIN_CLOSE_POSITION_IN_RANGE": 0.35,
+    "MIN_CLOSE_POSITION_IN_RANGE": 0.2728258132117476,
 
     # ------------------------------------------------------------------
     # PARAMETER STRATEGI PULLBACK DAN RETEST
@@ -219,25 +219,32 @@ PUMP_CONFIG = {
     # pada periode pengembangan dan periode uji yang terpisah sebelum dipakai
     # dengan uang sungguhan.
     #
+    # KANDIDAT WALK-FORWARD DIIMPLEMENTASIKAN 2026-09-25:
+    # Nilai setup dan gerbang pump di bawah berasal dari kandidat OOS yang
+    # lolos minimum trade pada laporan optimization_report.md. Kandidat ini
+    # hanya tervalidasi pada pilot 180 hari dan 29 pair; hasilnya belum
+    # menjadi alasan untuk LIVE. Tetap gunakan PAPER dan jangan mematikan
+    # USE_EQUITY_STOP/USE_DAILY_STOP.
+    #
     # Berapa candle ke belakang yang dipindai untuk mencari swing high yang
     # menjadi level breakout.
-    "SWING_LOOKBACK_BARS": 12,
+    "SWING_LOOKBACK_BARS": 23,
     # Jumlah candle di kiri dan kanan yang harus lebih rendah agar sebuah
     # candle dianggap pivot high. Sayap kanan wajib sudah tertutup, itulah
     # yang mencegah level breakout memakai data masa depan.
-    "SWING_PIVOT_WING_BARS": 2,
+    "SWING_PIVOT_WING_BARS": 4,
     # Buffer di atas level agar breakout tidak dihitung dari selisih satu tick.
-    "BREAKOUT_BUFFER_ATR_MULT": 0.10,
+    "BREAKOUT_BUFFER_ATR_MULT": 0.12195139476385432,
     # Setengah lebar zona retest di atas dan di bawah level, dalam satuan ATR.
-    "RETEST_ZONE_ATR_MULT": 0.5,
+    "RETEST_ZONE_ATR_MULT": 0.82694964295392,
     # Jarak maksimum anchored VWAP terhadap level agar dianggap konfluen.
-    "RETEST_VWAP_CONFLUENCE_ATR_MULT": 1.0,
+    "RETEST_VWAP_CONFLUENCE_ATR_MULT": 1.6232842971148245,
     # Minimum candle setelah anchor sebelum anchored VWAP dipercaya. Tanpa ini
     # VWAP hanya mencerminkan satu candle, yaitu harga rata-rata candle itu.
-    "VWAP_MIN_BARS_AFTER_ANCHOR": 2,
+    "VWAP_MIN_BARS_AFTER_ANCHOR": 4,
     # Umur maksimum setup: kalau retest tidak datang dalam sekian candle,
     # setup dianggap gugur dan bot mencari breakout berikutnya.
-    "MAX_BARS_BREAKOUT_TO_RETEST": 12,
+    "MAX_BARS_BREAKOUT_TO_RETEST": 22,
     # Berapa kali harga boleh berkunjung ke zona sebelum setup dianggap lemah.
     # Kunjungan dihitung per peristiwa, bukan per candle.
     "MAX_RETEST_TOUCHES": 1,
@@ -248,10 +255,39 @@ PUMP_CONFIG = {
     # mendahului Stop Loss, dan Stop Loss berubah jadi pengaman yang praktis
     # tidak pernah terpakai. Sebaliknya kalau jauh lebih besar, Stop Loss yang
     # selalu lebih dulu kena dan exit invalidasi jadi tidak berarti.
-    "INVALIDATION_ATR_MULT": 1.0,
+    "INVALIDATION_ATR_MULT": 0.9545909967180242,
     # Anti-kejar: tolak entry kalau close sudah terlalu jauh di atas level,
     # karena stop yang masuk akal (di bawah level) jadi terlalu lebar.
-    "MAX_EXTENSION_ATR_MULT": 1.5,
+    "MAX_EXTENSION_ATR_MULT": 1.1749990586717776,
+
+    # ------------------------------------------------------------------
+    # GERBANG PUMP (saringan semesta, WAJIB, bukan sekadar prioritas urutan)
+    # ------------------------------------------------------------------
+    # Sebuah simbol hanya boleh masuk semesta kandidat kalau KEDUA syarat di
+    # bawah terpenuhi. Pemeriksaan terjadi SEBELUM deteksi pullback retest,
+    # jadi struktur setup hanya dicari pada koin yang memang sedang bergerak.
+    #
+    # Kenapa gerbang ini dihidupkan kembali: tanpa syarat kenaikan, semesta
+    # kandidat didominasi pair besar yang sedang sideways atau turun. Setup
+    # pullback retest pada koin yang tren harian dan volumenya tidak mendukung
+    # lebih sering berakhir sebagai retest yang gagal.
+    #
+    # Sumber data syarat 1 dan 2 (bagian volume 24 jam berjalan) adalah
+    # respons GET /api/v3/ticker/24hr yang SUDAH diambil sekali untuk seluruh
+    # pasar tiap siklus scan, jadi keduanya tidak menambah request.
+    #
+    # Minimal kenaikan harga 24 jam, dalam persen, dari field
+    # priceChangePercent. Koin yang turun 24 jam otomatis gugur.
+    "PUMP_MIN_24H_CHANGE_PCT": 9.21708317545895,
+    # Volume dianggap "sedang naik" bila quoteVolume 24 jam berjalan minimal
+    # sekian kali rata-rata volume kuotasi 7 hari PENUH sebelumnya (candle 1d
+    # yang sudah tertutup). Candle harian diminta HANYA untuk simbol yang
+    # sudah lolos syarat kenaikan, yaitu subset kecil, sehingga bobot IP
+    # tambahannya kecil (2 per simbol). Perbandingan terhadap rata-rata 7 hari
+    # dipilih daripada menyimpan riwayat volume di file JSON baru, supaya
+    # tidak ada masalah cold start dan supaya angka yang sama bisa dihitung
+    # ulang untuk titik waktu historis mana pun di backtest.
+    "PUMP_VOLUME_SURGE_MULT": 2.7149324753412643,
 
     # ------------------------------------------------------------------
     # GERBANG PUMP (saringan semesta, WAJIB, bukan sekadar prioritas urutan)

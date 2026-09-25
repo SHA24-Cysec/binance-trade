@@ -69,6 +69,24 @@ def K(o, h, l, c, v=1000.0, qv=None, t=0):
                  close_time=t + 299_999, quote_volume=qv if qv is not None else v * c)
 
 
+def _synthetic_strategy_config():
+    """Fixture pendek untuk audit deteksi setup tanpa mengubah produksi."""
+    c = dict(cfg_mod.PUMP_CONFIG)
+    c.update({
+        "CONFIRM_LOOKBACK_BARS": 48,
+        "SWING_LOOKBACK_BARS": 12,
+        "SWING_PIVOT_WING_BARS": 2,
+        "BREAKOUT_BUFFER_ATR_MULT": 0.10,
+        "RETEST_ZONE_ATR_MULT": 0.5,
+        "RETEST_VWAP_CONFLUENCE_ATR_MULT": 1.0,
+        "VWAP_MIN_BARS_AFTER_ANCHOR": 2,
+        "MAX_BARS_BREAKOUT_TO_RETEST": 12,
+        "INVALIDATION_ATR_MULT": 1.0,
+        "MAX_EXTENSION_ATR_MULT": 1.5,
+    })
+    return c
+
+
 class TestConfigHelper(unittest.TestCase):
     """Helper harus tahan input berantakan tanpa pernah melempar exception."""
 
@@ -832,7 +850,7 @@ class TestEntryTetapUtuh(unittest.TestCase):
     def test_deteksi_setup_masih_bekerja(self):
         from synthetic_data import skenario_pullback_retest
         hasil = scanner.detect_pullback_retest(
-            skenario_pullback_retest("lolos"), cfg_mod.PUMP_CONFIG)
+            skenario_pullback_retest("lolos"), _synthetic_strategy_config())
         self.assertTrue(hasil.ok, hasil.reason)
         self.assertGreater(hasil.breakout_level, 0)
         self.assertGreater(hasil.invalidation_price, 0)
@@ -840,7 +858,7 @@ class TestEntryTetapUtuh(unittest.TestCase):
     def test_setup_gagal_menyebut_alasan(self):
         from synthetic_data import skenario_pullback_retest
         hasil = scanner.detect_pullback_retest(
-            skenario_pullback_retest("wick_saja"), cfg_mod.PUMP_CONFIG)
+            skenario_pullback_retest("wick_saja"), _synthetic_strategy_config())
         self.assertFalse(hasil.ok)
         self.assertIn("breakout", hasil.reason)
 
@@ -853,7 +871,7 @@ class TestEntryTetapUtuh(unittest.TestCase):
         """Kontrak lama confirm_entry() tidak boleh berubah."""
         from synthetic_data import skenario_pullback_retest
         ok, alasan = scanner.confirm_entry(
-            skenario_pullback_retest("lolos"), cfg_mod.PUMP_CONFIG)
+            skenario_pullback_retest("lolos"), _synthetic_strategy_config())
         self.assertIsInstance(ok, bool)
         self.assertIsInstance(alasan, str)
         self.assertTrue(ok, alasan)
