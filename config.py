@@ -197,16 +197,26 @@ PUMP_CONFIG = {
     # panggilan klines berbobot IP 2 sedangkan plafon REQUEST_WEIGHT adalah
     # 6000 per menit per IP (dibaca dari /api/v3/exchangeInfo, dicek
     # 2026-09-25), ditambah 80 bobot untuk ticker 24 jam seluruh pasar.
-    "TOP_N_CANDIDATES_TO_CONFIRM": 10,
+    # OPTIMASI MANUAL (return-focused, DD dijaga): dinaikkan 10 -> 15 supaya
+    # lebih banyak kandidat dikonfirmasi tiap scan = lebih banyak peluang entry.
+    # Beban IP tetap kecil: 15 x weight 2 = 30 dari plafon 6000/menit.
+    "TOP_N_CANDIDATES_TO_CONFIRM": 15,
     "CONFIRM_INTERVAL": "5m",
     # Jendela candle tertutup untuk satu keputusan entry. Nilai minimum
     # dihitung oleh strategy.required_lookback_bars() dari parameter struktur
     # di bawah, dan divalidasi di settings_schema.py. Limit endpoint klines
     # adalah 1000 candle per panggilan (dicek 2026-09-25).
-    "CONFIRM_LOOKBACK_BARS": 53,
+    # OPTIMASI MANUAL: 53 -> 60. Wajib >= SWING_LOOKBACK_BARS(20) +
+    # 2*SWING_PIVOT_WING_BARS(3) + MAX_BARS_BREAKOUT_TO_RETEST(24) = 50.
+    # Diberi margin ke 60 supaya anchored VWAP punya lebih banyak riwayat.
+    "CONFIRM_LOOKBACK_BARS": 60,
     # Posisi close di dalam range candle retest (0 = di low, 1 = di high).
     # Kunci lama ini dipakai ulang oleh market_scanner.detect_pullback_retest().
-    "MIN_CLOSE_POSITION_IN_RANGE": 0.2728258132117476,
+    # OPTIMASI MANUAL: 0.273 -> 0.35. Menuntut candle retest menutup di bagian
+    # atas rentangnya = reclaim lebih meyakinkan = kualitas entry naik (menekan
+    # retest gagal). Ini penyeimbang dari gerbang pump yang dilonggarkan di
+    # bawah, supaya jumlah trade naik tanpa menurunkan kualitas drastis.
+    "MIN_CLOSE_POSITION_IN_RANGE": 0.35,
 
     # ------------------------------------------------------------------
     # PARAMETER STRATEGI PULLBACK DAN RETEST
@@ -226,20 +236,30 @@ PUMP_CONFIG = {
     #
     # Berapa candle ke belakang yang dipindai untuk mencari swing high yang
     # menjadi level breakout.
-    "SWING_LOOKBACK_BARS": 23,
+    # OPTIMASI MANUAL: 23 -> 20. Swing high yang lebih baru lebih responsif
+    # terhadap breakout terkini = lebih banyak setup.
+    "SWING_LOOKBACK_BARS": 20,
     # Jumlah candle di kiri dan kanan yang harus lebih rendah agar sebuah
     # candle dianggap pivot high. Sayap kanan wajib sudah tertutup, itulah
     # yang mencegah level breakout memakai data masa depan.
-    "SWING_PIVOT_WING_BARS": 4,
+    # OPTIMASI MANUAL: 4 -> 3. Sayap pivot lebih pendek mendeteksi lebih banyak
+    # pivot high valid = lebih banyak kandidat breakout. Tetap >=3 agar pivot
+    # tidak jadi noise satu-dua candle.
+    "SWING_PIVOT_WING_BARS": 3,
     # Minimum candle setelah anchor sebelum anchored VWAP dipercaya. Tanpa ini
     # VWAP hanya mencerminkan satu candle, yaitu harga rata-rata candle itu.
     "VWAP_MIN_BARS_AFTER_ANCHOR": 4,
     # Umur maksimum setup: kalau retest tidak datang dalam sekian candle,
     # setup dianggap gugur dan bot mencari breakout berikutnya.
-    "MAX_BARS_BREAKOUT_TO_RETEST": 22,
+    # OPTIMASI MANUAL: 22 -> 24. Jendela sedikit lebih panjang agar lebih banyak
+    # breakout sempat menghasilkan retest sebelum setup gugur.
+    "MAX_BARS_BREAKOUT_TO_RETEST": 24,
     # Berapa kali harga boleh berkunjung ke zona sebelum setup dianggap lemah.
     # Kunjungan dihitung per peristiwa, bukan per candle.
-    "MAX_RETEST_TOUCHES": 1,
+    # OPTIMASI MANUAL: 1 -> 2. Banyak retest valid menyentuh zona dua kali
+    # sebelum reclaim; mengizinkan 2 kunjungan menaikkan jumlah entry tanpa
+    # menerima zona yang sudah terlalu sering diuji (lemah).
+    "MAX_RETEST_TOUCHES": 2,
 
     # ------------------------------------------------------------------
     # GERBANG PUMP (saringan semesta, WAJIB, bukan sekadar prioritas urutan)
@@ -259,7 +279,11 @@ PUMP_CONFIG = {
     #
     # Minimal kenaikan harga 24 jam, dalam persen, dari field
     # priceChangePercent. Koin yang turun 24 jam otomatis gugur.
-    "PUMP_MIN_24H_CHANGE_PCT": 9.21708317545895,
+    # OPTIMASI MANUAL: 9.22 -> 6.0. Gerbang kenaikan dilonggarkan agar lebih
+    # banyak koin bermomentum masuk semesta kandidat = lebih banyak peluang.
+    # Tetap 6% (bukan 0) supaya strategi pullback-retest tetap membeli pullback
+    # DI DALAM tren naik, bukan di koin datar/turun.
+    "PUMP_MIN_24H_CHANGE_PCT": 6.0,
     # Volume dianggap "sedang naik" bila quoteVolume 24 jam berjalan minimal
     # sekian kali rata-rata volume kuotasi 7 hari PENUH sebelumnya (candle 1d
     # yang sudah tertutup). Candle harian diminta HANYA untuk simbol yang
@@ -268,7 +292,10 @@ PUMP_CONFIG = {
     # dipilih daripada menyimpan riwayat volume di file JSON baru, supaya
     # tidak ada masalah cold start dan supaya angka yang sama bisa dihitung
     # ulang untuk titik waktu historis mana pun di backtest.
-    "PUMP_VOLUME_SURGE_MULT": 2.7149324753412643,
+    # OPTIMASI MANUAL: 2.71 -> 2.0. Sedikit lebih longgar untuk menerima koin
+    # dengan volume yang sedang naik nyata (2x rata-rata 7 hari) tanpa menuntut
+    # lonjakan ekstrem yang jarang. Tetap >1 (syarat validasi).
+    "PUMP_VOLUME_SURGE_MULT": 2.0,
 
     "EXTRA_EXCLUDE_SYMBOLS": [],             # mis. ["SOMEUSDT"] kalau mau blacklist manual
 
@@ -427,7 +454,11 @@ PUMP_CONFIG = {
     # LIVE; naikkan bertahap HANYA dari data hasil nyata, bukan karena satu
     # backtest terlihat bagus.
     "USE_RISK_PERCENT": True,               # True = ukuran posisi % dari saldo USDT free
-    "RISK_PERCENT": 25.0,                      # dipakai jika USE_RISK_PERCENT = True
+    # OPTIMASI MANUAL: 25 -> 30. Karena hanya 1 posisi per rotasi, risiko
+    # konkuren = satu posisi. Dengan SL 1.8%, rugi per trade ~ 30% x 1.8% =
+    # 0,54% dari equity -- masih moderat dan jauh dari MAX_DRAWDOWN 12%.
+    # PENTING untuk LIVE: turunkan lagi & pasang MAX_POSITION_USDT nyata.
+    "RISK_PERCENT": 30.0,                      # dipakai jika USE_RISK_PERCENT = True
     "POSITION_SIZE_USDT": 5.0,              # dipakai jika USE_RISK_PERCENT = False
     # Modal awal simulasi backtest. Ini BUKAN saldo LIVE yang dibaca otomatis;
     # ubah sesuai akun yang ingin dimodelkan. Backtest memakai policy sizing
@@ -455,6 +486,15 @@ PUMP_CONFIG = {
     # hari-hari pertama LIVE, plafon keras ini membatasi nominal maksimum
     # yang dipertaruhkan per posisi berapa pun saldo Anda. Naikkan/0-kan
     # hanya setelah bot terbukti berperilaku benar dengan uang asli.
+    # CATATAN OPTIMASI (PENTING soal return PAPER):
+    # Plafon 100 pada modal 10.000 USDT membuat tiap posisi hanya ~1% modal,
+    # sehingga RISK_PERCENT praktis TIDAK PERNAH terpakai -- ini pengerem
+    # return terbesar. Untuk melepas rem itu KHUSUS di PAPER, "tanpa plafon"
+    # (MAX_POSITION_USDT = 0) diterapkan lewat file per-mode
+    # pump_bot_settings_paper.json (0 hanya sah di PAPER). Nilai DEFAULT di
+    # config.py ini sengaja DIPERTAHANKAN 100 supaya default LIVE tetap
+    # konservatif dan tetap LOLOS validasi (LIVE melarang plafon 0).
+    # Sebelum LIVE: isi plafon nominal nyata sesuai toleransi Anda.
     "MAX_POSITION_USDT": 100,
 
     # Bantalan saldo (persen) yang TIDAK ikut dibelanjakan, dipotong dari
@@ -468,16 +508,28 @@ PUMP_CONFIG = {
 
     # --- Exit ---
     "USE_TP": True,
-    "TP_PCT": 4.0,
+    # OPTIMASI MANUAL: 4.0 -> 5.0. Karena trailing aktif, TP berfungsi sebagai
+    # plafon; menaikkannya memberi ruang bagi pemenang untuk lari lebih jauh.
+    # R:R jadi 5.0/1.8 ~ 2.8:1.
+    "TP_PCT": 5.0,
     "USE_STOP_LOSS": True,                   # kerugian maksimum per-trade dari harga entry, exit paksa di harga pasar
+    # SL dipertahankan 1.8: cukup ketat untuk DD stabil, tapi tidak terlalu
+    # sempit sehingga posisi ke-stop oleh noise sebelum setup sempat bekerja.
     "SL_PCT": 1.8,                            # keluar paksa kalau rugi >= nilai ini (%) dari entry (SEBELUM Breakeven/Trailing aktif)
 
     "USE_BREAKEVEN": True,
-    "BE_TRIGGER_PCT": 1.0,
-    "BE_LOCK_PCT": 0.15,
+    # OPTIMASI MANUAL: BE trigger 1.0 -> 1.2, lock 0.15 -> 0.2. BE aktif sedikit
+    # lebih lambat agar pullback normal tidak buru-buru menendang ke BE
+    # (memberi ruang pemenang berkembang), tapi mengunci profit lebih tegas.
+    "BE_TRIGGER_PCT": 1.2,
+    "BE_LOCK_PCT": 0.2,
     "USE_TRAILING": True,
-    "TRAILING_START_PCT": 1.5,
-    "TRAILING_STEP_PCT": 0.6,
+    # OPTIMASI MANUAL: start 1.5 -> 1.8, step 0.6 -> 0.9. Trailing mulai setelah
+    # momentum terkonfirmasi, dan step lebih lebar memberi napas agar pemenang
+    # ikut tren lebih jauh (menangkap gerakan besar = return naik), bukan
+    # ke-trail keluar oleh pullback kecil. Invariant: step(0.9) <= SL(1.8).
+    "TRAILING_START_PCT": 1.8,
+    "TRAILING_STEP_PCT": 0.9,
     # CATATAN: MAX_HOLD_MINUTES (paksa keluar setelah sekian menit) sudah
     # DIHAPUS TOTAL, bukan dinonaktifkan. Alasannya: batas waktu memaksa exit
     # pada harga pasar apa pun tanpa melihat struktur, sehingga posisi yang
@@ -501,7 +553,10 @@ PUMP_CONFIG = {
     "TAKER_FEE_PCT": 0.1,                    # taker (order MARKET) Spot VIP0 = 0,1%
     "MAKER_FEE_PCT": 0.1,                    # maker (limit yang mengendap) Spot VIP0 = 0,1%
     "USE_BNB_FEE_DISCOUNT": True,           # True = diskon 25% (0,1% -> 0,075%)
-    "COOLDOWN_MINUTES_AFTER_CLOSE": 10,
+    # OPTIMASI MANUAL: 10 -> 5 (satu candle 5m). Cooldown lebih pendek memberi
+    # lebih banyak peluang re-entry setelah posisi ditutup, tanpa memicu
+    # entry beruntun dalam satu candle yang sama.
+    "COOLDOWN_MINUTES_AFTER_CLOSE": 5,
     "MIN_SECONDS_BETWEEN_TRADES": 60,
 
     # --- Kontrol risiko ---
@@ -513,10 +568,17 @@ PUMP_CONFIG = {
     # bekerja: saat DD stop / daily stop memicu, posisi terbuka ditutup paksa
     # satu kali per episode.
     "USE_EQUITY_STOP": True,               # matikan (False) utk nonaktifkan DD Stop
-    "MAX_DRAWDOWN_PERCENT": 15.0,
+    # OPTIMASI MANUAL: 15 -> 12. Jaring DD diperketat agar penurunan dari peak
+    # equity berhenti lebih awal = DD lebih stabil (inti permintaan Anda).
+    "MAX_DRAWDOWN_PERCENT": 12.0,
     "USE_DAILY_STOP": True,                # matikan (False) utk nonaktifkan Daily Stop
-    "MAX_DAILY_LOSS_PERCENT": 3.0,
-    "DAILY_PROFIT_TARGET_PERCENT": 10.0,
+    # OPTIMASI MANUAL: 3 -> 5. Sedikit lebih lega agar mesin return punya ruang
+    # dalam satu hari (dengan ~0,54% risiko/trade, ini ~9 trade rugi baru
+    # menghentikan hari), tetap terbatas untuk menjaga DD.
+    "MAX_DAILY_LOSS_PERCENT": 5.0,
+    # OPTIMASI MANUAL: 10 -> 15. Target profit harian dinaikkan supaya hari
+    # yang bagus tidak terlalu cepat menghentikan entry (prioritas return).
+    "DAILY_PROFIT_TARGET_PERCENT": 15.0,
     "CLOSE_ALL_AT_LIMIT": True,
     "DD_COOLDOWN_HOURS": 24,
 

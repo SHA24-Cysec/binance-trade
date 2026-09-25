@@ -42,17 +42,24 @@ def ticker(symbol: str, pct: float, qv: float, last: float = 1.0) -> dict:
 # (a) Syarat 1: kenaikan harga 24 jam
 # ======================================================================
 
-def test_naik_sembilan_persen_ditolak():
+def test_naik_di_bawah_ambang_ditolak():
+    # Threshold disematkan agar tes menguji LOGIKA gerbang, bukan nilai tuning
+    # default (yang boleh berubah saat optimasi). Kenaikan di bawah ambang
+    # harus ditolak.
+    cfg = dict(CFG)
+    cfg["PUMP_MIN_24H_CHANGE_PCT"] = 10.0
     ok, alasan = scanner.is_pumping_today(
-        "AUSDT", 9.0, 10_000_000.0, lambda s: harian(1_000_000.0), CFG,
+        "AUSDT", 9.0, 10_000_000.0, lambda s: harian(1_000_000.0), cfg,
         reference_ms=REF_MS)
     assert not ok
     assert "kenaikan 24 jam" in alasan
 
 
-def test_naik_sepuluh_persen_lolos_syarat_kenaikan():
+def test_naik_di_atas_ambang_lolos_syarat_kenaikan():
+    cfg = dict(CFG)
+    cfg["PUMP_MIN_24H_CHANGE_PCT"] = 9.0
     ok, alasan = scanner.is_pumping_today(
-        "AUSDT", 10.0, 10_000_000.0, lambda s: harian(1_000_000.0), CFG,
+        "AUSDT", 10.0, 10_000_000.0, lambda s: harian(1_000_000.0), cfg,
         reference_ms=REF_MS)
     assert ok, alasan
 
@@ -86,10 +93,16 @@ def test_syarat_kenaikan_tidak_memakai_request_klines():
 # (b) Syarat 2: volume sedang naik
 # ======================================================================
 
-def test_volume_dua_koma_lima_kali_ditolak():
-    """Rasio di bawah PUMP_VOLUME_SURGE_MULT default (2.7149...) ditolak."""
+def test_volume_di_bawah_ambang_ditolak():
+    """Rasio di bawah PUMP_VOLUME_SURGE_MULT (threshold disematkan) ditolak.
+
+    Ambang di-pin ke 3.0 agar tes menguji LOGIKA gerbang volume, bukan nilai
+    tuning default yang boleh berubah saat optimasi. Rasio 2.5x < 3.0 ditolak.
+    """
+    cfg = dict(CFG)
+    cfg["PUMP_VOLUME_SURGE_MULT"] = 3.0
     ok, alasan = scanner.is_pumping_today(
-        "AUSDT", 20.0, 2_500_000.0, lambda s: harian(1_000_000.0), CFG,
+        "AUSDT", 20.0, 2_500_000.0, lambda s: harian(1_000_000.0), cfg,
         reference_ms=REF_MS)
     assert not ok
     assert "2.50x" in alasan
