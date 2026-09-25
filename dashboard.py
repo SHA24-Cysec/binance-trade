@@ -546,38 +546,24 @@ def build_status():
             "cooldown_left_sec": cooldown_left,
         },
         "config": {
-            # Kalau ada posisi terbuka, tampilkan level yang BENAR-BENAR
-            # berlaku untuk posisi itu (dikunci saat entry, bisa dari ATR),
-            # bukan nilai config. Kalau ditampilkan nilai config sementara
-            # posisi memakai level ATR yang berbeda, dashboard akan
-            # menyesatkan justru saat informasinya paling dibutuhkan.
+            # Kalau ada posisi terbuka, tampilkan level yang benar-benar
+            # berlaku untuk posisi itu, bukan nilai config statis.
             "sl_pct": (
                 (state.get("sl_pct") or PUMP_CONFIG.get("SL_PCT"))
                 if PUMP_CONFIG.get("USE_STOP_LOSS") else None
             ),
             "tp_pct": state.get("tp_pct") or PUMP_CONFIG.get("TP_PCT"),
-            "exit_source": state.get("exit_source") or (
-                "ATR" if PUMP_CONFIG.get("USE_ATR_EXITS") else "FIXED"),
-            "atr_pct_at_entry": state.get("atr_pct_at_entry") or None,
-            # BE/Trailing juga mengikuti ATR, jadi tampilkan level yang
-            # benar-benar berlaku untuk posisi terbuka, bukan nilai config.
-            #
+            "exit_source": state.get("exit_source") or "FIXED",
             # CATATAN BUG (diperbaiki): dulu "be_trigger_pct" ditulis dua
-            # kali di dict yang sama. Python diam-diam memakai yang
-            # TERAKHIR, yaitu nilai config statis, sehingga level ATR yang
-            # sebenarnya terkunci pada posisi tidak pernah sampai ke layar.
-            # Persis kebalikan dari maksud komentar di atas. Jangan
-            # menambahkan kunci dengan nama sama lagi di sini.
+            # kali di dict yang sama. Python diam-diam memakai yang terakhir,
+            # yaitu nilai config statis. Jangan menambahkan kunci dengan nama
+            # sama lagi di sini.
             "be_trigger_pct": state.get("be_trigger_pct") or PUMP_CONFIG.get("BE_TRIGGER_PCT"),
             "trail_start_pct": state.get("trail_start_pct") or PUMP_CONFIG.get("TRAILING_START_PCT"),
             "trail_step_pct": state.get("trail_step_pct") or PUMP_CONFIG.get("TRAILING_STEP_PCT"),
-            "use_atr_exits": bool(PUMP_CONFIG.get("USE_ATR_EXITS")),
             # Alias lama yang dipakai template. Ikut mengambil nilai posisi
             # supaya angka di layar konsisten dengan kunci di atas.
             "trailing_start_pct": state.get("trail_start_pct") or PUMP_CONFIG.get("TRAILING_START_PCT"),
-            "setup_invalidation_exit": bool(PUMP_CONFIG.get("SETUP_INVALIDATION_EXIT")),
-            "setup_invalidation_price": state.get("setup_invalidation_price") or 0.0,
-            "setup_breakout_level": state.get("setup_breakout_level") or 0.0,
             "risk_percent": PUMP_CONFIG.get("RISK_PERCENT"),
             "max_position_usdt": PUMP_CONFIG.get("MAX_POSITION_USDT"),
         },
@@ -639,13 +625,8 @@ def _reject_if_backtest_disabled():
 
 
 BT_PARAM_KEYS = (
-    "USE_ATR_EXITS",
     "SL_PCT", "TP_PCT", "BE_TRIGGER_PCT", "BE_LOCK_PCT", "TRAILING_START_PCT",
-    "TRAILING_STEP_PCT",
-    "SETUP_INVALIDATION_EXIT", "INVALIDATION_ATR_MULT", "MAX_EXTENSION_ATR_MULT",
-    "RETEST_ZONE_ATR_MULT", "MAX_BARS_BREAKOUT_TO_RETEST",
-    "ATR_PERIOD", "ATR_MULTIPLIER_SL", "ATR_SL_MIN_PCT", "ATR_SL_MAX_PCT", "ATR_TP_RR_RATIO",
-    "ATR_BE_TRIGGER_MULT", "ATR_BE_LOCK_MULT", "ATR_TRAILING_START_MULT", "ATR_TRAILING_STEP_MULT",
+    "TRAILING_STEP_PCT", "MAX_BARS_BREAKOUT_TO_RETEST",
 )
 
 _bt_jobs: dict = {}
@@ -853,8 +834,8 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "Exit dievaluasi per-candle " + interval + " (bukan tiap "
                 + str(PUMP_CONFIG.get("LOOP_INTERVAL_SECONDS", 15)) + " detik seperti bot asli), "
                 "dengan urutan prioritas konservatif: STOP_LOSS -> TAKE_PROFIT -> BREAKEVEN -> "
-                "TRAILING -> SETUP_INVALIDATED. Stop Loss dianggap kena lebih dulu kalau "
-                "ambigu dalam satu candle, supaya hasil tidak melebih-lebihkan profit.",
+                "TRAILING. Stop Loss dianggap kena lebih dulu kalau ambigu dalam satu candle, "
+                "supaya hasil tidak melebih-lebihkan profit.",
                 "Entry dianggap terjadi tepat di harga penutupan candle sinyal. Slippage market "
                 "order dan spread belum dimodelkan. Fee taker beli+jual SUDAH dipotong.",
                 "Volume 24 jam juga direkonstruksi dari penjumlahan quote volume candle, "
@@ -1017,7 +998,6 @@ def api_backtest_defaults():
     out["default_max_symbols"] = 150
     out["mode"] = "portfolio"
     out["top_n_candidates"] = PUMP_CONFIG.get("TOP_N_CANDIDATES_TO_CONFIRM", 10)
-    out["setup_invalidation_exit"] = bool(PUMP_CONFIG.get("SETUP_INVALIDATION_EXIT", False))
     out["confirm_lookback_bars"] = strategy.confirm_window_bars(PUMP_CONFIG)
     out["required_lookback_bars"] = strategy.required_lookback_bars(PUMP_CONFIG)
     out["min_quote_volume"] = PUMP_CONFIG.get("MIN_QUOTE_VOLUME_USDT_24H", 0)
@@ -1435,9 +1415,6 @@ def _risk_summary(config: dict) -> dict:
         "SL_PCT": config.get("SL_PCT"),
         "USE_TP": config.get("USE_TP"),
         "TP_PCT": config.get("TP_PCT"),
-        "USE_ATR_EXITS": config.get("USE_ATR_EXITS"),
-        "ATR_SL_MIN_PCT": config.get("ATR_SL_MIN_PCT"),
-        "ATR_SL_MAX_PCT": config.get("ATR_SL_MAX_PCT"),
         "USE_EQUITY_STOP": config.get("USE_EQUITY_STOP"),
         "MAX_DRAWDOWN_PERCENT": config.get("MAX_DRAWDOWN_PERCENT"),
         "USE_DAILY_STOP": config.get("USE_DAILY_STOP"),

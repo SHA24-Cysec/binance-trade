@@ -6,7 +6,7 @@ Mode HYBRID (keputusan desain):
 - REST publik (keyless, unsigned) dipakai untuk yang tidak punya padanan WS
   atau saat WS basi/putus:
     * exchangeInfo (tidak ada stream WS-nya) -> di-cache + refresh berkala.
-    * kline historis (WS hanya candle live) -> untuk ATR/backfill.
+    * kline historis (WS hanya candle live) -> untuk backfill.
     * depth snapshot (untuk mengisi market order simulasi) -> selalu segar.
     * fallback harga/bookTicker saat WS basi atau belum panas.
 

@@ -4,8 +4,7 @@ Bot rotasi PULLBACK dan RETEST untuk Binance Spot. Bot memantau pair QUOTE
 yang likuid, mencari struktur breakout di atas swing high lalu pullback
 kembali ke level itu pada candle konfirmasi yang SUDAH tertutup, lalu masuk
 dengan SATU entry long (tanpa martingale dan tanpa averaging-down). Keluar
-lewat Take Profit, Breakeven, Trailing, batas waktu hold, atau invalidasi
-setup (close tertutup di bawah level breakout dikurangi ATR).
+lewat Take Profit, Stop Loss, Breakeven, atau Trailing.
 
 Nama file masih pump_scanner_bot.py demi kompatibilitas skrip dan layanan
 yang sudah ada. Pengurutan top gainer memang sudah dihapus (kandidat diurut
@@ -85,18 +84,6 @@ DEFAULT_STATE = {
     "trail_start_pct": 0.0,
     "trail_step_pct": 0.0,
     "exit_source": "",
-    "atr_pct_at_entry": 0.0,
-    # Level setup yang DIKUNCI saat entry untuk exit SETUP_INVALIDATED.
-    # Sengaja tidak dihitung ulang dari data baru: alasan keluar harus sama
-    # dengan alasan masuk. 0.0 berarti tidak tersedia (posisi lama dari versi
-    # sebelumnya), dan exit invalidasi otomatis dilewati untuk posisi itu.
-    "breakout_level": 0.0,
-    "setup_invalidation_price": 0.0,
-    "atr_abs_at_entry": 0.0,
-    # close_time candle terakhir yang sudah diperiksa untuk invalidasi setup,
-    # supaya satu candle tidak diperiksa berulang dan REST tidak dipanggil
-    # lebih sering daripada satu kali per candle.
-    "last_setup_check_close_time": 0,
     "last_scan_time": 0,
     "cooldown_until": 0,
     "last_trade_time": 0,
@@ -294,7 +281,6 @@ def _restore_pending_buy(config: dict, state: dict, pending: dict, order: dict,
     if qty <= 0:
         return False
     levels = pending.get("levels") if isinstance(pending.get("levels"), dict) else {}
-    setup = pending.get("setup") if isinstance(pending.get("setup"), dict) else {}
     state["current_symbol"] = symbol
     state["entry_price"] = quoted / executed
     state["qty"] = qty
@@ -304,13 +290,9 @@ def _restore_pending_buy(config: dict, state: dict, pending: dict, order: dict,
     state["trailing_active"] = False
     state["trailing_stop_price"] = 0.0
     for key in ("sl_pct", "tp_pct", "be_trigger_pct", "be_lock_pct",
-                "trail_start_pct", "trail_step_pct", "exit_source", "atr_pct_at_entry"):
+                "trail_start_pct", "trail_step_pct", "exit_source"):
         if key in levels:
             state[key] = levels[key]
-    state["breakout_level"] = float(setup.get("breakout_level") or 0.0)
-    state["setup_invalidation_price"] = float(setup.get("invalidation_price") or 0.0)
-    state["atr_abs_at_entry"] = float(setup.get("atr_abs") or 0.0)
-    state["last_setup_check_close_time"] = 0
     state["last_trade_time"] = state_mod.now_ms()
     state["sell_fail_count"] = 0
     return True
@@ -468,11 +450,6 @@ def reset_position(state: dict) -> None:
     state["trail_start_pct"] = 0.0
     state["trail_step_pct"] = 0.0
     state["exit_source"] = ""
-    state["atr_pct_at_entry"] = 0.0
-    state["breakout_level"] = 0.0
-    state["setup_invalidation_price"] = 0.0
-    state["atr_abs_at_entry"] = 0.0
-    state["last_setup_check_close_time"] = 0
     state["pending_order"] = None
 
 
@@ -697,7 +674,6 @@ def close_position(client: ExchangeClient, config: dict, filters_cache: dict,
 
 def open_position(client: ExchangeClient, config: dict, filters_cache: dict,
                    state: dict, candidate: "scanner.Candidate",
-                   klines: "list | None" = None,
                    reference_price: "float | None" = None) -> None:
     filters = filters_cache.get(candidate.symbol)
     if filters is None:
@@ -753,8 +729,7 @@ def open_position(client: ExchangeClient, config: dict, filters_cache: dict,
     # Simpan intent dan preview level SEBELUM request. Bila respons hilang
     # setelah exchange mengisi BUY, startup dapat memulihkan posisi dengan
     # clientOrderId tanpa menganggap akun kosong.
-    setup = getattr(candidate, "setup", None)
-    preview = strategy.resolve_exit_levels(config, klines, price_ref)
+    preview = strategy.resolve_exit_levels(config)
     client_order_id = _new_client_order_id("buy")
     state["pending_order"] = {
         "side": "BUY", "symbol": candidate.symbol, "qty": qty,
@@ -763,12 +738,7 @@ def open_position(client: ExchangeClient, config: dict, filters_cache: dict,
             "sl_pct": preview["sl_pct"], "tp_pct": preview["tp_pct"],
             "be_trigger_pct": preview["be_trigger_pct"], "be_lock_pct": preview["be_lock_pct"],
             "trail_start_pct": preview["trail_start_pct"], "trail_step_pct": preview["trail_step_pct"],
-            "exit_source": preview["source"], "atr_pct_at_entry": preview["atr_pct"] or 0.0,
-        },
-        "setup": {
-            "breakout_level": float(getattr(setup, "breakout_level", 0.0) or 0.0),
-            "invalidation_price": float(getattr(setup, "invalidation_price", 0.0) or 0.0),
-            "atr_abs": float(getattr(setup, "atr_abs", 0.0) or 0.0),
+            "exit_source": preview["source"],
         },
     }
     pending_intent = dict(state["pending_order"])
@@ -833,13 +803,9 @@ def open_position(client: ExchangeClient, config: dict, filters_cache: dict,
     state["reconciliation_required"] = False
     state["reconciliation_assets"] = []
 
-    # Level exit dihitung SEKALI di sini lalu DIKUNCI di state, memakai harga
-    # fill sungguhan sebagai acuan. Sengaja tidak dihitung ulang tiap iterasi:
-    # ATR bergerak, dan stop yang ikut bergerak TURUN setelah posisi dibuka
-    # berarti risiko per-trade membengkak diam-diam setelah Anda sudah
-    # berkomitmen. Stop hanya boleh mengetat lewat Breakeven/Trailing, tidak
-    # pernah melonggar.
-    levels = strategy.resolve_exit_levels(config, klines, fill_price)
+    # Level exit dihitung sekali di sini lalu dikunci di state. Stop hanya
+    # boleh mengetat lewat Breakeven/Trailing, tidak pernah melonggar.
+    levels = strategy.resolve_exit_levels(config)
     state["sl_pct"] = levels["sl_pct"]
     state["tp_pct"] = levels["tp_pct"]
     state["be_trigger_pct"] = levels["be_trigger_pct"]
@@ -847,39 +813,8 @@ def open_position(client: ExchangeClient, config: dict, filters_cache: dict,
     state["trail_start_pct"] = levels["trail_start_pct"]
     state["trail_step_pct"] = levels["trail_step_pct"]
     state["exit_source"] = levels["source"]
-    state["atr_pct_at_entry"] = levels["atr_pct"] or 0.0
     state["sell_fail_count"] = 0
 
-    # Level setup dikunci di sini, sekali, dari hasil deteksi yang MEMICU
-    # entry ini. Kalau dihitung ulang belakangan dari candle yang lebih baru,
-    # level bisa bergeser dan posisi ditutup karena alasan yang tidak pernah
-    # menjadi dasar entry.
-    setup = getattr(candidate, "setup", None)
-    if setup is not None and setup.breakout_level and setup.invalidation_price:
-        state["breakout_level"] = float(setup.breakout_level)
-        state["setup_invalidation_price"] = float(setup.invalidation_price)
-        state["atr_abs_at_entry"] = float(setup.atr_abs or 0.0)
-        # RELASI DENGAN STOP LOSS: level invalidasi berada di bawah level
-        # breakout, sedangkan Stop Loss dihitung dari harga entry. Keduanya
-        # sengaja dibiarkan berdiri sendiri, tetapi kalau Stop Loss jauh lebih
-        # longgar daripada level invalidasi, praktis exit invalidasi yang
-        # selalu lebih dulu bekerja. Log di bawah membuat hubungan itu
-        # terlihat, bukan tersembunyi.
-        sl_price = fill_price * (1 - levels["sl_pct"] / 100.0)
-        logger.info(
-            "%s: setup dikunci -> level %.8g, batas invalidasi %.8g, harga Stop Loss %.8g "
-            "(%s yang lebih dulu tersentuh akan menutup posisi)",
-            candidate.symbol, state["breakout_level"], state["setup_invalidation_price"],
-            sl_price,
-            "invalidasi setup" if state["setup_invalidation_price"] > sl_price else "Stop Loss",
-        )
-    else:
-        state["breakout_level"] = 0.0
-        state["setup_invalidation_price"] = 0.0
-        state["atr_abs_at_entry"] = 0.0
-        logger.warning("%s: level setup tidak tersedia saat entry, exit SETUP_INVALIDATED "
-                       "dilewati untuk posisi ini.", candidate.symbol)
-    state["last_setup_check_close_time"] = 0
     # Simpan SEKARANG (temuan T-04), jangan menunggu akhir iterasi loop:
     # crash beberapa ratus milidetik setelah BUY FILLED tidak boleh
     # meninggalkan POSISI YATIM (ada di exchange, tapi state di disk masih
@@ -952,92 +887,6 @@ def check_manual_control(client: ExchangeClient, config: dict, filters_cache: di
                 state["current_symbol"])
     close_position(client, config, filters_cache, state, "MANUAL_CLOSE_DASHBOARD")
 
-
-def check_setup_invalidation(client: ExchangeClient, config: dict, filters_cache: dict,
-                             state: dict) -> bool:
-    """Tutup posisi bila candle tertutup menembus batas invalidasi setup.
-
-    Semua candle sejak cursor state diambil kronologis. Jangan memakai limit
-    kecil tetap: downtime lebih dari beberapa candle tidak boleh menghapus
-    bukti invalidasi hanya karena harga kemudian rebound.
-    """
-    if not config.get("SETUP_INVALIDATION_EXIT"):
-        return False
-    symbol = state.get("current_symbol")
-    if not symbol or float(state.get("qty", 0) or 0) <= 0:
-        return False
-
-    batas = float(state.get("setup_invalidation_price") or 0.0)
-    if batas <= 0:
-        return False
-
-    interval = config.get("CONFIRM_INTERVAL", "5m")
-    interval_ms = strategy.interval_to_ms(interval)
-    now_ms = state_mod.now_ms()
-    last_checked = int(state.get("last_setup_check_close_time") or 0)
-    if last_checked and now_ms < last_checked + interval_ms:
-        return False
-
-    # Mulai satu interval sebelum close cursor. Filter close_time di bawah
-    # menghilangkan duplikat, sementara offset ini tetap aman untuk API yang
-    # memaknai startTime sebagai open_time.
-    entry_time = int(state.get("entry_time", 0) or 0)
-    after_time = max(last_checked, entry_time)
-    start_time = max(0, after_time - interval_ms + 1) if after_time else None
-    raw_all: list = []
-    cursor = start_time
-    max_pages = 20  # 20.000 candle, pagar terhadap respons API aneh.
-    try:
-        for _ in range(max_pages):
-            raw = client.get_klines(symbol, interval, limit=1000,
-                                    start_time_ms=cursor, end_time_ms=now_ms)
-            if not raw:
-                break
-            raw_all.extend(raw)
-            try:
-                next_cursor = int(raw[-1][0]) + interval_ms
-            except (IndexError, TypeError, ValueError):
-                raise ValueError("open_time candle invalid saat cek invalidasi")
-            if cursor is not None and next_cursor <= cursor:
-                raise ValueError("cursor candle tidak maju saat cek invalidasi")
-            cursor = next_cursor
-            if len(raw) < 1000:
-                break
-        else:
-            raise ValueError("terlalu banyak halaman candle untuk cek invalidasi")
-    except BinanceAPIError as exc:
-        logger.warning("Gagal mengambil candle %s untuk cek invalidasi setup: %s", symbol, exc)
-        return False
-    except (ValueError, TypeError) as exc:
-        logger.warning("Data candle %s untuk cek invalidasi setup tidak terbaca: %s", symbol, exc)
-        return False
-
-    try:
-        parsed = strategy.parse_klines(raw_all)
-    except ValueError as exc:
-        logger.warning("Candle %s ditolak parser saat cek invalidasi setup: %s", symbol, exc)
-        return False
-    # Hilangkan duplikat antar halaman, urutkan, dan proses hanya candle baru.
-    by_close = {k.close_time: k for k in parsed if k.close_time < now_ms and k.close_time > after_time}
-    closed = [by_close[t] for t in sorted(by_close)]
-    if not closed:
-        return False
-
-    for k in closed:
-        if k.close < batas:
-            logger.info(
-                "%s: candle %s tertutup di %.8g, di bawah batas invalidasi setup %.8g "
-                "(level breakout %.8g). Posisi ditutup.",
-                symbol, interval, k.close, batas, float(state.get("breakout_level") or 0.0),
-            )
-            close_position(client, config, filters_cache, state, "SETUP_INVALIDATED")
-            return True
-
-    # Cursor baru hanya disimpan setelah seluruh batch tervalidasi dan tidak
-    # ada kegagalan fetch/parser, sehingga candle tidak hilang saat error.
-    state["last_setup_check_close_time"] = closed[-1].close_time
-    state_mod.save_state(config["STATE_FILE"], state)
-    return False
 
 
 def manage_exit(client: ExchangeClient, config: dict, filters_cache: dict,
@@ -1145,35 +994,14 @@ def run(config: dict, lifecycle=None) -> int:
     have_bars = int(config.get("CONFIRM_LOOKBACK_BARS", 48))
     if have_bars < need_setup:
         logger.warning(
-            "CONFIRM_LOOKBACK_BARS=%d lebih kecil dari %d candle yang dibutuhkan ATR dan "
+            "CONFIRM_LOOKBACK_BARS=%d lebih kecil dari %d candle yang dibutuhkan "
             "struktur setup. Bot tetap mengambil %d candle per konfirmasi agar deteksi "
             "tidak selalu gagal, tetapi perbaiki nilai config ini supaya backtest dan live "
             "benar-benar memakai angka yang sama.",
             have_bars, need_setup, strategy.confirm_window_bars(config),
         )
-    if config.get("USE_ATR_EXITS"):
-        need = int(config.get("ATR_PERIOD", 14)) + 1
-        have = strategy.confirm_window_bars(config)
-        if have < need:
-            logger.warning(
-                "USE_ATR_EXITS aktif tapi jendela konfirmasi hanya %d candle, sedangkan "
-                "ATR(%d) butuh minimal %d candle. Akibatnya ATR akan selalu gagal dihitung "
-                "dan bot selalu jatuh ke SL/TP tetap.",
-                have, config.get("ATR_PERIOD", 14), need,
-            )
-        else:
-            logger.info("Mode exit: ATR adaptif (periode %d, SL %gx, batas %.2f%%-%.2f%%, RR %g:1)",
-                        config.get("ATR_PERIOD", 14), config.get("ATR_MULTIPLIER_SL", 2.0),
-                        config.get("ATR_SL_MIN_PCT", 1.2), config.get("ATR_SL_MAX_PCT", 4.0),
-                        config.get("ATR_TP_RR_RATIO", 2.0))
-            logger.info("           Breakeven & Trailing juga ikut ATR "
-                        "(BE %gx, lock %gx, trail mulai %gx, jarak %gx)",
-                        config.get("ATR_BE_TRIGGER_MULT", 0.5), config.get("ATR_BE_LOCK_MULT", 0.1),
-                        config.get("ATR_TRAILING_START_MULT", 1.0),
-                        config.get("ATR_TRAILING_STEP_MULT", 1.5))
-    else:
-        logger.info("Mode exit: SL/TP tetap (SL %.2f%%, TP %.2f%%)",
-                    config.get("SL_PCT", 0), config.get("TP_PCT", 0))
+    logger.info("Mode exit: SL/TP tetap (SL %.2f%%, TP %.2f%%)",
+                config.get("SL_PCT", 0), config.get("TP_PCT", 0))
     logger.info("=" * 70)
 
     client = create_exchange_client(config)
@@ -1212,7 +1040,7 @@ def run(config: dict, lifecycle=None) -> int:
         backtest memakai candle final menciptakan look-ahead/repaint mismatch.
         Karena itu satu candle ekstra diminta, candle yang close_time-nya
         belum lewat dibuang, lalu hanya window terbaru yang sudah selesai
-        dikembalikan. Cukup untuk deteksi setup dan ATR entry.
+        dikembalikan. Cukup untuk deteksi setup.
 
         Jumlah candle memakai strategy.confirm_window_bars(), fungsi yang
         sama dengan yang dipakai backtest, dashboard, dan watchlist, sehingga
@@ -1291,14 +1119,6 @@ def run(config: dict, lifecycle=None) -> int:
             if state["current_symbol"] and current_price is not None:
                 manage_exit(client, config, filters_cache, state, current_price)
 
-            # Exit invalidasi setup diperiksa SETELAH exit berbasis harga
-            # berjalan. Urutannya sengaja sama dengan urutan prioritas di
-            # backtest (Stop Loss lebih dulu, invalidasi setup paling akhir),
-            # supaya hasil backtest tetap mewakili perilaku bot saat dua exit
-            # bisa terpicu pada saat yang hampir bersamaan.
-            if state["current_symbol"]:
-                check_setup_invalidation(client, config, filters_cache, state)
-
             do_scan = time.time() * 1000 - state.get("last_scan_time", 0) > config["MARKET_SCAN_INTERVAL_SECONDS"] * 1000
             if do_scan:
                 state["last_scan_time"] = state_mod.now_ms()
@@ -1339,9 +1159,6 @@ def run(config: dict, lifecycle=None) -> int:
                                 best.symbol, best.quote_volume, best.price_change_pct,
                                 spread_pct, best.confirm_reason,
                             )
-                            # klines kandidat diambil ulang di sini supaya
-                            # ATR dihitung dari data yang sama dengan yang
-                            # dipakai saat deteksi setup.
                             # Filter usia listing (temuan S-08): koin yang
                             # baru listing sering pump buatan lalu kolaps.
                             # Dicek hanya untuk kandidat yang sudah lolos.
@@ -1364,14 +1181,8 @@ def run(config: dict, lifecycle=None) -> int:
                             else:
                                 continue_scan_entry = True
                             if continue_scan_entry:
-                                try:
-                                    entry_klines = klines_fetcher(best.symbol)
-                                except BinanceAPIError as exc:
-                                    logger.warning("Gagal ambil klines %s untuk hitung ATR: %s. "
-                                                    "Level exit akan pakai SL/TP tetap.", best.symbol, exc)
-                                    entry_klines = None
                                 open_position(client, config, filters_cache, state, best,
-                                              entry_klines, reference_price=ask)
+                                              reference_price=ask)
                         else:
                             logger.info("Kandidat %s dilewati: spread %.3f%% > batas %.3f%%.",
                                         best.symbol, spread_pct, config["MAX_SPREAD_PCT"])
@@ -1527,17 +1338,12 @@ def selftest() -> None:
     hasil = scanner.detect_pullback_retest(kl_ok, cfg)
     print(f"  Skenario breakout, pullback, close kembali di atas level -> ok={hasil.ok} ({hasil.reason})")
     assert hasil.ok, "Skenario retest sah harusnya lolos"
-    assert hasil.breakout_level and hasil.invalidation_price, "Level setup harus ikut dikembalikan"
+    assert hasil.breakout_level, "Level breakout harus ikut dikembalikan"
 
     kl_wick = skenario_pullback_retest("wick_saja")
     hasil_wick = scanner.detect_pullback_retest(kl_wick, cfg)
     print(f"  Skenario breakout hanya lewat sumbu -> ok={hasil_wick.ok} ({hasil_wick.reason})")
     assert not hasil_wick.ok, "Sumbu yang menembus tanpa close di atas level bukan breakout"
-
-    kl_jauh = skenario_pullback_retest("terlalu_jauh")
-    hasil_jauh = scanner.detect_pullback_retest(kl_jauh, cfg)
-    print(f"  Skenario harga sudah terlalu jauh di atas level -> ok={hasil_jauh.ok} ({hasil_jauh.reason})")
-    assert not hasil_jauh.ok, "Anti-kejar harus menolak entry yang sudah jauh di atas level"
 
     kl_gagal = skenario_pullback_retest("close_di_bawah_level")
     hasil_gagal = scanner.detect_pullback_retest(kl_gagal, cfg)
@@ -1547,85 +1353,6 @@ def selftest() -> None:
     ok_ce, reason_ce = scanner.confirm_entry(kl_ok, cfg)
     assert ok_ce and reason_ce == hasil.reason, "confirm_entry harus memakai detect_pullback_retest"
     print("  -> OK (confirm_entry konsisten dengan detect_pullback_retest)")
-
-    print("\n=== SELFTEST: exit SETUP_INVALIDATED ===")
-    from decimal import Decimal as _D
-    from binance_client import SymbolFilters as _SymbolFilters
-
-    class FakeKlineClient:
-        """Client tiruan yang hanya melayani get_klines dan order jual."""
-
-        def __init__(self, closes):
-            self.closes = closes
-            self.orders = []
-
-        def get_klines(self, symbol, interval, limit=500, start_time_ms=None, end_time_ms=None):
-            now = state_mod.now_ms()
-            rows = []
-            n = len(self.closes)
-            for idx, c in enumerate(self.closes):
-                # close_time dibuat SUDAH lewat supaya candle dianggap tertutup.
-                close_time = now - (n - idx) * 300_000
-                rows.append([close_time - 299_999, str(c), str(c + 0.2), str(c - 0.2),
-                             str(c), "1000", close_time, "100000", 10, "500", "50000", "0"])
-            return rows[-limit:]
-
-        def get_account(self):
-            return {"balances": [{"asset": "TEST", "free": "1", "locked": "0"},
-                                 {"asset": "USDT", "free": "1000", "locked": "0"}]}
-
-        def new_market_order(self, symbol, side, quantity=None, quote_order_qty=None):
-            self.orders.append((symbol, side, quantity))
-            qty = float(quantity or 0.0)
-            return {"executedQty": str(qty), "cummulativeQuoteQty": str(qty * 99.0)}
-
-        def get_dust_convertible(self, account_type="SPOT"):
-            return {"details": []}
-
-        def convert_dust(self, assets, account_type="SPOT"):
-            return {"totalTransfered": "0"}
-
-    fc_inval = {"TESTUSDT": _SymbolFilters(step_size=_D("0.01"), min_qty=_D("0.01"),
-                                           min_notional=_D("5"), tick_size=_D("0.0001"))}
-    cfg_inval = dict(cfg)
-    cfg_inval["SETUP_INVALIDATION_EXIT"] = True
-
-    def _state_posisi():
-        st = dict(DEFAULT_STATE)
-        st["current_symbol"] = "TESTUSDT"
-        st["entry_price"] = 101.9
-        st["qty"] = 1.0
-        st["entry_time"] = state_mod.now_ms() - 3_600_000
-        st["breakout_level"] = 101.0
-        st["setup_invalidation_price"] = 100.1
-        st["atr_abs_at_entry"] = 0.9
-        return st
-
-    st_kena = _state_posisi()
-    client_kena = FakeKlineClient([101.5, 101.2, 99.8])
-    ditutup = check_setup_invalidation(client_kena, cfg_inval, fc_inval, st_kena)
-    print(f"  Candle tertutup di 99.8 (batas 100.1) -> ditutup={ditutup}")
-    assert ditutup and st_kena["current_symbol"] is None, "Exit invalidasi harus menutup posisi"
-    assert client_kena.orders and client_kena.orders[-1][1] == "SELL", "Harus mengirim SELL"
-
-    st_aman = _state_posisi()
-    client_aman = FakeKlineClient([101.5, 101.2, 101.4])
-    ditutup2 = check_setup_invalidation(client_aman, cfg_inval, fc_inval, st_aman)
-    print(f"  Harga bertahan di atas level -> ditutup={ditutup2}")
-    assert not ditutup2 and st_aman["current_symbol"] == "TESTUSDT", \
-        "Posisi tidak boleh ditutup saat harga bertahan di atas batas invalidasi"
-
-    st_mati = _state_posisi()
-    cfg_mati = dict(cfg_inval)
-    cfg_mati["SETUP_INVALIDATION_EXIT"] = False
-    assert not check_setup_invalidation(FakeKlineClient([99.0]), cfg_mati, fc_inval, st_mati), \
-        "Fitur yang dimatikan tidak boleh menutup posisi"
-
-    st_lama = _state_posisi()
-    st_lama["setup_invalidation_price"] = 0.0   # posisi dari versi lama tanpa level
-    assert not check_setup_invalidation(FakeKlineClient([50.0]), cfg_inval, fc_inval, st_lama), \
-        "Posisi lama tanpa level tersimpan harus dilewati, bukan ditebak"
-    print("  -> OK (terpicu, tidak terpicu, bisa dimatikan, aman untuk state lama)")
 
     print("\n=== SELFTEST: simulasi exit (TP/Breakeven/Trailing) ===")
     from decimal import Decimal as D
@@ -1753,8 +1480,7 @@ def selftest() -> None:
 
     cfg_size = dict(cfg)
     cfg_size.update({"USE_RISK_PERCENT": True, "RISK_PERCENT": 95.0,
-                      "BALANCE_BUFFER_PCT": 0.5, "MAX_POSITION_USDT": 0,
-                      "USE_ATR_EXITS": False})
+                      "BALANCE_BUFFER_PCT": 0.5, "MAX_POSITION_USDT": 0})
 
     # Tanpa plafon: persentase harus BENAR-BENAR terpakai dan ikut tumbuh
     # bersama saldo. Inilah yang dulu tidak terjadi karena plafon 10 USDT.
@@ -1789,28 +1515,23 @@ def selftest() -> None:
     assert abs(got_fixed - 25.0) < 1e-6, f"Mode nominal tetap harus pakai 25 USDT, dapat {got_fixed}"
     print(f"  Mode nominal tetap (USE_RISK_PERCENT=False) -> {got_fixed:.2f} USDT -> OK")
 
-    print("\n=== SELFTEST: SL/TP adaptif berbasis ATR dipakai manage_exit ===")
-    # Membuktikan manage_exit benar-benar MEMAKAI level yang dikunci di state,
-    # bukan diam-diam kembali ke SL_PCT config. Kalau integrasi ini putus,
-    # bot akan tampak "punya fitur ATR" padahal exit-nya masih pakai nilai lama.
-    cfg_atr = dict(cfg_exit)
-    cfg_atr["SL_PCT"] = 3.0          # nilai config yang TIDAK boleh terpakai
-    state_atr = dict(DEFAULT_STATE)
-    state_atr["current_symbol"] = "TESTUSDT"
-    state_atr["entry_price"] = 100.0
-    state_atr["qty"] = 1.0
-    state_atr["entry_time"] = state_mod.now_ms()
-    state_atr["sl_pct"] = 1.0        # level terkunci dari ATR, jauh lebih ketat
-    state_atr["tp_pct"] = 2.0
+    print("\n=== SELFTEST: level exit yang dikunci di state dipakai manage_exit ===")
+    # Membuktikan manage_exit memakai level yang dikunci di state, bukan diam-diam
+    # kembali ke nilai config. Ini penting untuk posisi lama yang sudah dibuka.
+    cfg_locked = dict(cfg_exit)
+    cfg_locked["SL_PCT"] = 3.0
+    state_locked = dict(DEFAULT_STATE)
+    state_locked["current_symbol"] = "TESTUSDT"
+    state_locked["entry_price"] = 100.0
+    state_locked["qty"] = 1.0
+    state_locked["entry_time"] = state_mod.now_ms()
+    state_locked["sl_pct"] = 1.0
+    state_locked["tp_pct"] = 2.0
 
-    # Rugi -1.5%: masih aman menurut SL_PCT config (3%), tapi SUDAH melewati
-    # level ATR yang dikunci (1%). Posisi HARUS tertutup.
-    manage_exit(FakeTradeClient(), cfg_atr, filters_cache, state_atr, 98.5)
-    assert state_atr["current_symbol"] is None, \
-        "manage_exit harus memakai sl_pct dari state (1%), bukan SL_PCT config (3%)"
-    print("  SL terkunci dari ATR (1%) dipakai, bukan SL_PCT config (3%) -> OK")
+    manage_exit(FakeTradeClient(), cfg_locked, filters_cache, state_locked, 98.5)
+    assert state_locked["current_symbol"] is None,         "manage_exit harus memakai sl_pct dari state (1%), bukan SL_PCT config (3%)"
+    print("  SL terkunci di state (1%) dipakai, bukan SL_PCT config (3%) -> OK")
 
-    # TP juga harus memakai level terkunci.
     state_tp = dict(DEFAULT_STATE)
     state_tp["current_symbol"] = "TESTUSDT"
     state_tp["entry_price"] = 100.0
@@ -1818,17 +1539,13 @@ def selftest() -> None:
     state_tp["entry_time"] = state_mod.now_ms()
     state_tp["sl_pct"] = 1.0
     state_tp["tp_pct"] = 2.0
-    cfg_tp = dict(cfg_atr)
+    cfg_tp = dict(cfg_locked)
     cfg_tp["USE_BREAKEVEN"] = False
     cfg_tp["USE_TRAILING"] = False
     manage_exit(FakeTradeClient(), cfg_tp, filters_cache, state_tp, 102.5)
-    assert state_tp["current_symbol"] is None, \
-        "manage_exit harus memakai tp_pct dari state (2%), bukan TP_PCT config (6%)"
-    print("  TP terkunci dari ATR (2%) dipakai, bukan TP_PCT config (6%) -> OK")
+    assert state_tp["current_symbol"] is None,         "manage_exit harus memakai tp_pct dari state (2%), bukan TP_PCT config (6%)"
+    print("  TP terkunci di state (2%) dipakai, bukan TP_PCT config (6%) -> OK")
 
-    # State lama (dari versi bot sebelum fitur ini) tidak punya sl_pct sama
-    # sekali. Bot yang di-upgrade saat sedang memegang posisi TIDAK BOLEH
-    # kehilangan stop loss-nya -- harus jatuh ke SL_PCT config.
     state_old = dict(DEFAULT_STATE)
     del state_old["sl_pct"]
     del state_old["tp_pct"]
@@ -1836,55 +1553,21 @@ def selftest() -> None:
     state_old["entry_price"] = 100.0
     state_old["qty"] = 1.0
     state_old["entry_time"] = state_mod.now_ms()
-    manage_exit(FakeTradeClient(), cfg_atr, filters_cache, state_old, 96.0)  # -4%, lewat SL config 3%
-    assert state_old["current_symbol"] is None, \
-        "State versi lama tanpa sl_pct harus tetap terlindungi oleh SL_PCT config"
-    print("  State versi lama (tanpa sl_pct) tetap terlindungi SL_PCT config -> OK")
+    manage_exit(FakeTradeClient(), cfg_locked, filters_cache, state_old, 96.0)
+    assert state_old["current_symbol"] is None,         "State versi lama tanpa sl_pct harus tetap terlindungi oleh SL_PCT config"
+    print("  State versi lama tanpa sl_pct tetap terlindungi SL_PCT config -> OK")
 
-    print("\n=== SELFTEST: Breakeven & Trailing ikut skala ATR ===")
-    # Ini menutup celah pincang: kalau hanya SL/TP yang ikut ATR sementara
-    # BE/Trailing memakai angka tetap, trailing yang jauh lebih sempit dari
-    # ATR akan menutup posisi sebelum TP tercapai dan risk:reward terbalik.
+    print("\n=== SELFTEST: invariant Breakeven & Trailing tetap ===")
     cfg_full = dict(cfg)
-    cfg_full.update({"USE_ATR_EXITS": True, "ATR_PERIOD": 14,
-                      "ATR_MULTIPLIER_SL": 2.0, "ATR_SL_MIN_PCT": 0.5,
-                      "ATR_SL_MAX_PCT": 20.0, "ATR_TP_RR_RATIO": 2.0,
-                      "ATR_BE_TRIGGER_MULT": 0.5, "ATR_BE_LOCK_MULT": 0.1,
-                      "ATR_TRAILING_START_MULT": 1.0, "ATR_TRAILING_STEP_MULT": 1.5})
+    cfg_full.update({"SL_PCT": 2.5, "TP_PCT": 5.0,
+                     "BE_TRIGGER_PCT": 9.0, "BE_LOCK_PCT": 12.0,
+                     "TRAILING_START_PCT": 4.0, "TRAILING_STEP_PCT": 9.0})
+    lv_full = strategy.resolve_exit_levels(cfg_full)
+    assert lv_full["trail_step_pct"] <= lv_full["sl_pct"] + 1e-9
+    assert lv_full["be_trigger_pct"] <= lv_full["trail_start_pct"] + 1e-9
+    assert lv_full["be_lock_pct"] <= lv_full["be_trigger_pct"] + 1e-9
+    print("  Invariant exit tetap diterapkan -> OK")
 
-    # Koin dengan ATR 2%: semua level harus berskala ATR, bukan angka config.
-    ks_2pct = [strategy.Kline(0, 100, 101, 99, 100, 0) for _ in range(20)]
-    lv_full = strategy.resolve_exit_levels(cfg_full, ks_2pct, 100.0)
-    assert abs(lv_full["atr_pct"] - 2.0) < 1e-6, lv_full
-    assert abs(lv_full["be_trigger_pct"] - 1.0) < 1e-6, "BE trigger harus 0.5x ATR = 1.0%"
-    assert abs(lv_full["be_lock_pct"] - 0.2) < 1e-6, "BE lock harus 0.1x ATR = 0.2%"
-    assert abs(lv_full["trail_start_pct"] - 2.0) < 1e-6, "Trailing start harus 1.0x ATR = 2.0%"
-    assert abs(lv_full["trail_step_pct"] - 3.0) < 1e-6, "Trailing step harus 1.5x ATR = 3.0%"
-    print(f"  ATR 2% -> BE@{lv_full['be_trigger_pct']:.2f}% kunci {lv_full['be_lock_pct']:.2f}%, "
-          f"Trail@{lv_full['trail_start_pct']:.2f}% jarak {lv_full['trail_step_pct']:.2f}% -> OK")
-
-    # Trailing step TIDAK BOLEH lebih longgar dari SL. Kalau lebih longgar,
-    # SL selalu kena duluan dan trailing cuma ilusi.
-    cfg_wide = dict(cfg_full)
-    cfg_wide["ATR_SL_MAX_PCT"] = 2.5          # SL dibatasi ketat
-    cfg_wide["ATR_TRAILING_STEP_MULT"] = 5.0  # trailing sengaja dibuat sangat longgar
-    lv_wide = strategy.resolve_exit_levels(cfg_wide, ks_2pct, 100.0)
-    assert lv_wide["trail_step_pct"] <= lv_wide["sl_pct"] + 1e-9, \
-        (f"Trailing step ({lv_wide['trail_step_pct']}) tidak boleh melebihi SL "
-         f"({lv_wide['sl_pct']}) -- SL akan selalu kena duluan")
-    print(f"  Trailing step dibatasi agar <= SL ({lv_wide['trail_step_pct']:.2f}% "
-          f"vs SL {lv_wide['sl_pct']:.2f}%) -> OK")
-
-    # Breakeven harus terpicu SEBELUM trailing, kalau tidak urutannya kacau.
-    cfg_order = dict(cfg_full)
-    cfg_order["ATR_BE_TRIGGER_MULT"] = 9.0    # sengaja dibuat lebih besar dari trailing start
-    lv_order = strategy.resolve_exit_levels(cfg_order, ks_2pct, 100.0)
-    assert lv_order["be_trigger_pct"] <= lv_order["trail_start_pct"] + 1e-9, \
-        "Breakeven harus terpicu sebelum atau bersamaan dengan Trailing"
-    print(f"  BE dipaksa terpicu sebelum Trailing ({lv_order['be_trigger_pct']:.2f}% "
-          f"<= {lv_order['trail_start_pct']:.2f}%) -> OK")
-
-    # manage_exit harus MEMAKAI level BE/Trailing dari state, bukan config.
     st_be = dict(DEFAULT_STATE)
     st_be["current_symbol"] = "TESTUSDT"
     st_be["entry_price"] = 100.0
@@ -1892,25 +1575,18 @@ def selftest() -> None:
     st_be["entry_time"] = state_mod.now_ms()
     st_be["sl_pct"] = 10.0
     st_be["tp_pct"] = 20.0
-    st_be["be_trigger_pct"] = 5.0     # jauh lebih tinggi dari BE_TRIGGER_PCT config
+    st_be["be_trigger_pct"] = 5.0
     st_be["be_lock_pct"] = 1.0
     st_be["trail_start_pct"] = 8.0
     st_be["trail_step_pct"] = 3.0
     cfg_be_cfg = dict(cfg_exit)
-    cfg_be_cfg["BE_TRIGGER_PCT"] = 1.0   # nilai config yang TIDAK boleh terpakai
-    # Profit +2%: sudah lewat BE config (1%) tapi BELUM lewat BE state (5%).
-    # Kalau integrasi benar, Breakeven belum boleh aktif.
+    cfg_be_cfg["BE_TRIGGER_PCT"] = 1.0
     manage_exit(FakeTradeClient(), cfg_be_cfg, filters_cache, st_be, 102.0)
-    assert not st_be["be_active"], \
-        "Breakeven memakai BE_TRIGGER_PCT config, seharusnya memakai be_trigger_pct dari state"
-    print("  Profit +2% -> BE belum aktif (pakai trigger state 5%, bukan config 1%) -> OK")
-
-    # Profit +6%: sudah lewat BE state (5%), Breakeven harus aktif.
+    assert not st_be["be_active"],         "Breakeven memakai BE_TRIGGER_PCT config, seharusnya memakai be_trigger_pct dari state"
     manage_exit(FakeTradeClient(), cfg_be_cfg, filters_cache, st_be, 106.0)
     assert st_be["be_active"], "Breakeven harus aktif setelah melewati trigger dari state"
-    assert abs(st_be["be_stop_price"] - 101.0) < 1e-6, \
-        f"BE stop harus entry x (1 + be_lock 1%) = 101.0, dapat {st_be['be_stop_price']}"
-    print(f"  Profit +6% -> BE aktif, stop dikunci di {st_be['be_stop_price']:.2f} -> OK")
+    assert abs(st_be["be_stop_price"] - 101.0) < 1e-6
+    print("  BE/Trailing memakai level state saat tersedia -> OK")
 
     print("\n=== SELFTEST: perintah manual 'Jual Sekarang' dari dashboard (control file) ===")
     import tempfile

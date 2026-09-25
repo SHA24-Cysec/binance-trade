@@ -49,10 +49,10 @@ def test_position_sizing_shared_policy_has_buffer_and_cap() -> None:
 
 def test_fixed_exit_levels_enforce_be_and_trailing_invariants() -> None:
     levels = strategy.resolve_exit_levels({
-        "USE_ATR_EXITS": False, "SL_PCT": 2, "TP_PCT": 4,
+        "SL_PCT": 2, "TP_PCT": 4,
         "BE_TRIGGER_PCT": 1, "BE_LOCK_PCT": 3,
         "TRAILING_START_PCT": 2, "TRAILING_STEP_PCT": 5,
-    }, None, 100)
+    })
     assert levels["be_lock_pct"] <= levels["be_trigger_pct"] <= levels["trail_start_pct"]
     assert levels["trail_step_pct"] <= levels["sl_pct"]
 
@@ -100,7 +100,6 @@ def test_startup_pending_buy_is_restored_and_orphan_blocks_entry(tmp_path) -> No
         "side": "BUY", "symbol": "TESTUSDT", "qty": 2,
         "client_order_id": "pump-buy-test",
         "levels": {"sl_pct": 2, "tp_pct": 4},
-        "setup": {"breakout_level": 5, "invalidation_price": 4.8, "atr_abs": 0.1},
     }
     bot.reconcile_state_with_exchange(RecoverClient(), cfg, state)
     assert state["current_symbol"] == "TESTUSDT"
@@ -118,46 +117,6 @@ def test_startup_pending_buy_is_restored_and_orphan_blocks_entry(tmp_path) -> No
     bot.reconcile_state_with_exchange(OrphanClient(), cfg, orphan)
     assert orphan["reconciliation_required"] is True
     assert orphan["reconciliation_assets"] == ["PEPE"]
-
-
-def test_invalidation_pages_all_new_closed_candles_after_downtime(tmp_path) -> None:
-    now = state_mod.now_ms()
-    bar = strategy.interval_to_ms("5m")
-
-    class Client:
-        def get_klines(self, symbol, interval, limit=500, start_time_ms=None, end_time_ms=None):
-            # Harga sempat invalid lalu pulih. Implementasi lama yang hanya
-            # memeriksa tiga candle terakhir bisa melewatkan kejadian ini.
-            closes = [101.0, 99.0, 101.5, 102.0]
-            rows = []
-            for idx, close in enumerate(closes):
-                close_time = now - (len(closes) - idx) * bar
-                rows.append([close_time - bar + 1, "100", "102", "98", str(close),
-                             "10", close_time, "1000", 1, "1", "1", "0"])
-            return rows
-
-        def get_account(self):
-            return {"balances": [
-                {"asset": "TEST", "free": "1", "locked": "0"},
-                {"asset": "USDT", "free": "100", "locked": "0"},
-            ]}
-
-        def new_market_order(self, symbol, side, quantity=None, quote_order_qty=None,
-                             new_client_order_id=None):
-            return {"status": "FILLED", "executedQty": str(quantity),
-                    "cummulativeQuoteQty": str(float(quantity) * 100)}
-
-    cfg = _config(tmp_path)
-    cfg["CONFIRM_INTERVAL"] = "5m"
-    state = dict(bot.DEFAULT_STATE)
-    state.update({
-        "current_symbol": "TESTUSDT", "entry_price": 100, "qty": 1,
-        "entry_time": now - 10 * bar, "setup_invalidation_price": 100,
-        "breakout_level": 101, "last_setup_check_close_time": now - 10 * bar,
-    })
-    closed = bot.check_setup_invalidation(Client(), cfg, {"TESTUSDT": _filters()}, state)
-    assert closed is True
-    assert state["current_symbol"] is None
 
 
 def test_watchlist_uses_configured_interval_for_24h_window(monkeypatch) -> None:

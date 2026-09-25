@@ -84,7 +84,7 @@ def skenario_pullback_retest(nama: str = "lolos") -> list[Kline]:
       di_bawah_vwap          close retest di atas level tetapi di bawah anchored VWAP
       vwap_jauh              anchored VWAP jauh dari level (tanpa konfluensi)
       invalidasi             ada candle yang close di bawah batas invalidasi
-      datar                  seluruh candle identik (ATR nol)
+      datar                  seluruh candle identik
       volume_nol             sama dengan "lolos" tetapi volume nol
       data_kurang            jumlah candle di bawah required_lookback_bars()
     """

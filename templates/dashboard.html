@@ -624,18 +624,6 @@
         <label>Langkah Trailing %</label>
         <input type="number" id="btTrStep" step="0.1">
       </div>
-      <div class="bt-field">
-        <label>Invalidasi (x ATR)</label>
-        <input type="number" id="btInvalMult" step="0.1">
-      </div>
-      <div class="bt-field">
-        <label>Anti-kejar (x ATR)</label>
-        <input type="number" id="btExtMult" step="0.1">
-      </div>
-      <div class="bt-field">
-        <label>Exit invalidasi setup</label>
-        <input type="checkbox" id="btSetupExit">
-      </div>
       <div class="bt-field bt-actions">
         <label>&nbsp;</label>
         <div style="display:flex;gap:8px">
@@ -646,43 +634,6 @@
     </div>
     <div id="btEstimate" class="mut" style="font-size:11.5px;margin-top:10px;line-height:1.6"></div>
 
-    <div class="bt-sub">
-      <h3>⚡ Exit berbasis ATR</h3>
-      <p>
-        Kalau dinyalakan, <b>keenam</b> level exit dihitung dari volatilitas koin (ATR), bukan
-        dari angka tetap di atas. Field Stop Loss dan Take Profit otomatis diredupkan karena
-        nilainya akan ditimpa. Breakeven dan Trailing juga ikut skala ATR, supaya tidak pincang.
-        <br>Trailing di bawah 1,0&times; ATR mudah terpicu noise, jadi 1,5&times; adalah titik aman.
-      </p>
-      <div class="bt-form">
-        <div class="bt-field" style="justify-content:flex-end">
-          <label>Mode Exit</label>
-          <label class="bt-toggle" for="btUseAtr">
-            <input type="checkbox" id="btUseAtr" onchange="btSyncAtrUi()">
-            <span>Pakai ATR</span>
-          </label>
-        </div>
-        <div class="bt-field"><label>Periode ATR</label>
-          <input type="number" id="btAtrPeriod" step="1" min="2"></div>
-        <div class="bt-field"><label>Pengali SL</label>
-          <input type="number" id="btAtrMult" step="0.1"></div>
-        <div class="bt-field"><label>Batas Bawah SL %</label>
-          <input type="number" id="btAtrMin" step="0.1"></div>
-        <div class="bt-field"><label>Batas Atas SL %</label>
-          <input type="number" id="btAtrMax" step="0.1"></div>
-        <div class="bt-field"><label>Rasio TP (RR)</label>
-          <input type="number" id="btAtrRr" step="0.1"></div>
-        <div class="bt-field"><label>Pengali BE Trigger</label>
-          <input type="number" id="btAtrBeTrig" step="0.1"></div>
-        <div class="bt-field"><label>Pengali BE Lock</label>
-          <input type="number" id="btAtrBeLock" step="0.1"></div>
-        <div class="bt-field"><label>Pengali Trail Start</label>
-          <input type="number" id="btAtrTrStart" step="0.1"></div>
-        <div class="bt-field"><label>Pengali Trail Step</label>
-          <input type="number" id="btAtrTrStep" step="0.1"></div>
-      </div>
-      <div id="btAtrPreview" class="mut" style="font-size:11.5px;margin-top:10px;line-height:1.6"></div>
-    </div>
     <div id="btError" class="banner err" style="margin-top:12px"></div>
     <div id="btProgressWrap" style="display:none;margin-top:14px" class="bt-loading">
       <div class="bt-loading-top">
@@ -803,7 +754,7 @@ const cls = n => n>0?'pos':(n<0?'neg':'mut');
 
 // ======================= TAB NAVIGASI =======================
 // Tab murni di sisi klien: semua pane tetap ada di DOM (hanya
-// disembunyikan dengan atribut hidden) supaya fungsi render yang
+// disembunyikan dengan properti hidden) supaya fungsi render yang
 // memanggil getElementById tidak pernah menemukan elemen null.
 // Pilihan tab disimpan di localStorage agar tidak balik ke Ikhtisar
 // setiap kali halaman dimuat ulang.
@@ -907,7 +858,6 @@ function reasonTag(r){
     if(k.includes('TAKE_PROFIT')) return '<span class="tag tp">TP</span>';
     if(k.includes('BREAKEVEN')) return '<span class="tag be">BE</span>';
     if(k.includes('TRAILING')) return '<span class="tag tr">TRAIL</span>';
-    if(k.includes('SETUP_INVALIDATED')) return '<span class="tag fade">INVALID</span>';
     // Riwayat lama masih bisa menyimpan MOMENTUM_FADE. Ditandai "(lama)" supaya
     // jelas itu berasal dari strategi yang sudah tidak dipakai lagi.
     if(k.includes('MOMENTUM')) return '<span class="tag fade">FADE (lama)</span>';
@@ -1000,8 +950,6 @@ function renderStatus(s){
     <div class="posrow"><span class="k">Take Profit</span><span class="v mono">${c.tp_pct}%</span></div>
     <div class="posrow"><span class="k">Trigger Breakeven</span><span class="v mono">${c.be_trigger_pct}%</span></div>
     <div class="posrow"><span class="k">Mulai Trailing</span><span class="v mono">${c.trailing_start_pct}%</span></div>
-    <div class="posrow"><span class="k">Exit invalidasi setup</span><span class="v mono">${c.setup_invalidation_exit? 'aktif' : 'nonaktif'}</span></div>
-    ${c.setup_invalidation_price? `<div class="posrow"><span class="k">Batas invalidasi / level breakout</span><span class="v mono">${fmtP(c.setup_invalidation_price)} / ${fmtP(c.setup_breakout_level)}</span></div>` : ''}
     <div class="posrow"><span class="k">Risk per entry</span><span class="v mono">${c.risk_percent}%</span></div>
     <div class="posrow"><span class="k">Maks posisi</span><span class="v mono">${fmt(c.max_position_usdt)} ${s.quote}</span></div>`;
 }
@@ -1613,63 +1561,10 @@ async function loadBacktestDefaults(){
     document.getElementById('btBeLock').value = d.BE_LOCK_PCT;
     document.getElementById('btTrStart').value = d.TRAILING_START_PCT;
     document.getElementById('btTrStep').value = d.TRAILING_STEP_PCT;
-    document.getElementById('btInvalMult').value = d.INVALIDATION_ATR_MULT;
-    document.getElementById('btExtMult').value = d.MAX_EXTENSION_ATR_MULT;
-    document.getElementById('btSetupExit').checked = !!d.SETUP_INVALIDATION_EXIT;
-    document.getElementById('btUseAtr').checked = !!d.USE_ATR_EXITS;
-    document.getElementById('btAtrPeriod').value = d.ATR_PERIOD;
-    document.getElementById('btAtrMult').value = d.ATR_MULTIPLIER_SL;
-    document.getElementById('btAtrMin').value = d.ATR_SL_MIN_PCT;
-    document.getElementById('btAtrMax').value = d.ATR_SL_MAX_PCT;
-    document.getElementById('btAtrRr').value = d.ATR_TP_RR_RATIO;
-    document.getElementById('btAtrBeTrig').value = d.ATR_BE_TRIGGER_MULT;
-    document.getElementById('btAtrBeLock').value = d.ATR_BE_LOCK_MULT;
-    document.getElementById('btAtrTrStart').value = d.ATR_TRAILING_START_MULT;
-    document.getElementById('btAtrTrStep').value = d.ATR_TRAILING_STEP_MULT;
     if(d.default_days) document.getElementById('btDays').value = d.default_days;
     if(d.default_max_symbols) document.getElementById('btMaxSymbols').value = d.default_max_symbols;
-    btSyncAtrUi();
     btUpdateEstimate();
   }catch(e){ /* form tetap kosong, tidak fatal */ }
-}
-
-// Saat ATR aktif, SL% dan TP% tidak dipakai (ditimpa hasil hitungan ATR).
-// Diredupkan supaya tidak menyesatkan, plus preview level yang sebenarnya.
-function btSyncAtrUi(){
-  const on = document.getElementById('btUseAtr').checked;
-  ['btSl','btTp'].forEach(id=>{
-    const inp = document.getElementById(id);
-    if(!inp) return;
-    inp.disabled = on;
-    inp.parentElement.classList.toggle('dim', on);
-    inp.title = on ? 'Tidak dipakai saat ATR aktif -- nilainya dihitung dari ATR.' : '';
-  });
-  const box = document.getElementById('btAtrPreview');
-  if(!on){ box.innerHTML = '<b>Mode TETAP.</b> Semua level memakai angka persen di atas.'; return; }
-
-  const num = (id, def) => { const v = parseFloat(document.getElementById(id).value); return isFinite(v)? v : def; };
-  const mult=num('btAtrMult',2), lo=num('btAtrMin',1.2), hi=num('btAtrMax',4), rr=num('btAtrRr',2);
-  const mBe=num('btAtrBeTrig',.5), mLock=num('btAtrBeLock',.1),
-        mTs=num('btAtrTrStart',1), mStep=num('btAtrTrStep',1.5);
-  if(lo > hi){
-    box.innerHTML = '<span style="color:var(--amber)">⚠ Batas bawah SL lebih besar dari batas atas. Perbaiki dulu.</span>';
-    return;
-  }
-  let rows = [0.5,1,2,3,5].map(atr=>{
-    const sl = Math.min(Math.max(atr*mult, lo), hi);
-    const step = Math.min(atr*mStep, sl);           // trailing tak boleh melebihi SL
-    const trStart = atr*mTs;
-    const be = Math.min(atr*mBe, trStart);          // BE harus terpicu sebelum trailing
-    const f = (x)=>x.toFixed(2);
-    return `<tr><td>${f(atr)}%</td><td>${f(sl)}</td><td>${f(sl*rr)}</td><td>${f(be)}</td>
-            <td>${f(atr*mLock)}</td><td>${f(trStart)}</td><td>${f(step)}</td></tr>`;
-  }).join('');
-  box.innerHTML = `<b>Level yang akan berlaku</b> (dihitung ulang otomatis):
-    <table class="bt-cmp" style="max-width:640px">
-      <thead><tr><th>ATR koin</th><th>SL%</th><th>TP%</th><th>BE trig</th>
-        <th>BE lock</th><th>Trail@</th><th>Step</th></tr></thead>
-      <tbody>${rows}</tbody></table>
-    <span class="mut">Step otomatis dibatasi tidak melebihi SL, dan BE dipaksa terpicu sebelum Trailing.</span>`;
 }
 
 function btShowError(msg){
@@ -1756,22 +1651,8 @@ async function startBacktest(){
     BE_LOCK_PCT: document.getElementById('btBeLock').value,
     TRAILING_START_PCT: document.getElementById('btTrStart').value,
     TRAILING_STEP_PCT: document.getElementById('btTrStep').value,
-    INVALIDATION_ATR_MULT: document.getElementById('btInvalMult').value,
-    MAX_EXTENSION_ATR_MULT: document.getElementById('btExtMult').value,
-    SETUP_INVALIDATION_EXIT: document.getElementById('btSetupExit').checked,
-    USE_ATR_EXITS: document.getElementById('btUseAtr').checked,
-    ATR_PERIOD: document.getElementById('btAtrPeriod').value,
-    ATR_MULTIPLIER_SL: document.getElementById('btAtrMult').value,
-    ATR_SL_MIN_PCT: document.getElementById('btAtrMin').value,
-    ATR_SL_MAX_PCT: document.getElementById('btAtrMax').value,
-    ATR_TP_RR_RATIO: document.getElementById('btAtrRr').value,
-    ATR_BE_TRIGGER_MULT: document.getElementById('btAtrBeTrig').value,
-    ATR_BE_LOCK_MULT: document.getElementById('btAtrBeLock').value,
-    ATR_TRAILING_START_MULT: document.getElementById('btAtrTrStart').value,
-    ATR_TRAILING_STEP_MULT: document.getElementById('btAtrTrStep').value,
   };
 
-  // SL/TP dinonaktifkan saat ATR aktif, jadi .value bisa kosong -- jangan kirim.
   if(payload.SL_PCT === '') delete payload.SL_PCT;
   if(payload.TP_PCT === '') delete payload.TP_PCT;
 
@@ -1877,7 +1758,6 @@ function finishBacktestUI(){
 function btReasonTagClass(r){ return (r||'').toLowerCase(); }
 function btReasonLabel(r){
   const map = {STOP_LOSS:'SL', TAKE_PROFIT:'TP', BREAKEVEN:'BE', TRAILING_STOP:'TRAIL',
-               SETUP_INVALIDATED:'INVALID',
                MOMENTUM_FADE:'FADE (lama)', END_OF_DATA:'DATA HABIS'};
   return map[r] || r;
 }
@@ -1966,13 +1846,6 @@ function renderBacktestResult(res){
     <div class="posrow"><span class="k">Rentang data</span><span class="v mono" style="font-size:11.5px">${res.start_time||'—'} &rarr; ${res.end_time||'—'}</span></div>
     <div class="posrow"><span class="k">Titik waktu diproses</span><span class="v mono">${fmt(res.bars_total,0)} bar ${res.interval}</span></div>
     <div class="posrow"><span class="k">SL / TP / BE (trig,lock) / Trail (start,step)</span><span class="v mono" style="font-size:11.5px">${p.SL_PCT}% / ${p.TP_PCT}% / ${p.BE_TRIGGER_PCT}%,${p.BE_LOCK_PCT}% / ${p.TRAILING_START_PCT}%,${p.TRAILING_STEP_PCT}%</span></div>
-    <div class="posrow"><span class="k">Invalidasi / anti-kejar (x ATR)</span><span class="v mono">${p.INVALIDATION_ATR_MULT}x / ${p.MAX_EXTENSION_ATR_MULT}x</span></div>
-    <div class="posrow"><span class="k">Exit invalidasi setup</span><span class="v mono">${p.SETUP_INVALIDATION_EXIT? 'aktif':'nonaktif'}</span></div>
-    <div class="posrow"><span class="k">Mode exit</span><span class="v mono">${p.USE_ATR_EXITS? 'ATR' : 'TETAP'}</span></div>
-    ${p.USE_ATR_EXITS ? `
-      <div class="posrow"><span class="k">ATR: periode / pengali SL / RR</span><span class="v mono">${p.ATR_PERIOD} / ${p.ATR_MULTIPLIER_SL}x / ${p.ATR_TP_RR_RATIO}x</span></div>
-      <div class="posrow"><span class="k">ATR: batas SL</span><span class="v mono">${p.ATR_SL_MIN_PCT}% .. ${p.ATR_SL_MAX_PCT}%</span></div>
-      <div class="posrow"><span class="k">ATR: pengali BE (trig,lock) / Trail (start,step)</span><span class="v mono" style="font-size:11.5px">${p.ATR_BE_TRIGGER_MULT}x,${p.ATR_BE_LOCK_MULT}x / ${p.ATR_TRAILING_START_MULT}x,${p.ATR_TRAILING_STEP_MULT}x</span></div>` : ''}
     <div style="border-top:1px solid var(--border);margin:4px 0"></div>
     ${reasonRows || '<div class="posrow"><span class="k mut">Tidak ada trade terjadi pada rentang & parameter ini.</span></div>'}
     ${(res.warnings&&res.warnings.length)? '<div style="border-top:1px solid var(--border);margin:4px 0"></div>'+res.warnings.map(w=>`<div class="posrow"><span class="k" style="color:var(--amber)">⚠ ${w}</span></div>`).join('') : ''}

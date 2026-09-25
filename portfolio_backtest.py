@@ -14,7 +14,7 @@ Bedanya dengan backtest.py (satu simbol):
 
 Perbedaan itu penting karena bot asli hanya memegang SATU posisi. Ketika
 satu simbol memberi sinyal, bot mungkin sedang sibuk memegang simbol lain,
-atau memilih simbol lain yang setupnya lebih rapat terhadap level breakout.
+atau memilih simbol lain yang lebih likuid setelah setupnya lolos.
 Backtest satu simbol menghitung SEMUA sinyal sebagai trade, sehingga hasilnya
 hampir selalu lebih optimistis daripada yang bisa dicapai bot sungguhan.
 
@@ -32,10 +32,9 @@ CARA KERJA
 4. Maju bar demi bar melewati garis waktu gabungan:
      - kalau TIDAK punya posisi: evaluasi top-N kandidat dengan
        scanner.detect_pullback_retest(), kumpulkan yang lolos, lalu pilih
-       yang setupnya paling rapat terhadap level breakout (ukuran yang sama
-       dengan scanner.setup_quality_key()). Ini meniru find_best_candidate().
+       dengan scanner.setup_quality_key(). Ini meniru find_best_candidate().
      - kalau PUNYA posisi: kelola exit memakai logika yang sama dengan
-       backtest satu simbol (SL/TP/BE/Trailing/MaxHold/SETUP_INVALIDATED).
+       backtest satu simbol (SL/TP/BE/Trailing).
 5. Hormati cooldown setelah setiap posisi ditutup.
 
 Yang dipakai bersama dengan bot live (BUKAN ditulis ulang):
@@ -123,7 +122,6 @@ class PortfolioTrade:
     fee_pct: float
     sl_pct: float
     tp_pct: float
-    atr_pct: float
     exit_source: str
     rank_at_entry: int       # posisi simbol di papan kandidat (1 = volume terbesar)
     pct24h_at_entry: float
@@ -365,10 +363,6 @@ def run_portfolio_backtest(
     min_vol = float(config["MIN_QUOTE_VOLUME_USDT_24H"])
     top_n = int(config.get("TOP_N_CANDIDATES_TO_CONFIRM", 10))
     cooldown_ms = int(config["COOLDOWN_MINUTES_AFTER_CLOSE"]) * MS_PER_MIN
-    atr_need = max(int(config.get("ATR_PERIOD", 14)) + 1, lookback)
-
-    setup_exit_on = bool(config.get("SETUP_INVALIDATION_EXIT", False))
-
     # Jumlah candle minimum untuk satu keputusan entry dihitung oleh fungsi
     # bersama strategy.required_lookback_bars(), bukan angka hard-code seperti
     # sebelumnya. Kalau CONFIRM_LOOKBACK_BARS diset di bawah itu, jendela
@@ -383,7 +377,7 @@ def run_portfolio_backtest(
     if int(config.get("CONFIRM_LOOKBACK_BARS", 0)) < _butuh:
         _pre_warnings.append(
             f"CONFIRM_LOOKBACK_BARS={config.get('CONFIRM_LOOKBACK_BARS')} lebih kecil dari "
-            f"{_butuh} candle yang dibutuhkan ATR dan struktur setup. Simulasi memakai "
+            f"{_butuh} candle yang dibutuhkan struktur setup. Simulasi memakai "
             f"{lookback} candle agar deteksi tetap mungkin, tetapi perbaiki config supaya "
             "backtest dan bot live benar-benar memakai angka yang sama."
         )
@@ -497,12 +491,6 @@ def run_portfolio_backtest(
             elif trailing_active and candle.low <= trailing_stop:
                 exit_reason = "TRAILING_STOP"
                 exit_price = min(trailing_stop, candle.open)
-            elif (setup_exit_on and cur.get("invalidation", 0.0) > 0
-                    and candle.close < cur["invalidation"]):
-                # SETUP_INVALIDATED memakai level yang DIKUNCI saat entry,
-                # sama persis dengan bot live dan backtest satu simbol.
-                exit_reason = "SETUP_INVALIDATED"
-                exit_price = candle.close
 
             is_last = (bi == total_bars - 1)
             if exit_reason is None and is_last:
@@ -525,7 +513,7 @@ def run_portfolio_backtest(
                     reason=exit_reason, hold_minutes=hold_minutes,
                     pnl_pct=pnl_pct, gross_pnl_pct=gross, fee_pct=fee_round_trip,
                     sl_pct=cur["sl"], tp_pct=cur["tp"],
-                    atr_pct=cur["atr"], exit_source=cur["src"],
+                    exit_source=cur["src"],
                     rank_at_entry=rank_at_entry, pct24h_at_entry=pct24h_at_entry,
                     candidates_at_entry=cands_at_entry,
                     position_notional=position_notional, equity_before=equity_before_entry,
@@ -548,8 +536,8 @@ def run_portfolio_backtest(
             continue
 
         # Meniru find_best_candidate(): evaluasi top-N kandidat (urut volume),
-        # kumpulkan SEMUA yang setupnya sah, lalu pilih yang paling rapat
-        # terhadap level breakout. Pemutus seri adalah volume kuotasi.
+        # kumpulkan semua yang setupnya sah, lalu pilih dengan kunci kualitas
+        # yang sama dengan scanner.
         lolos = []
         for rank, (vol24, sym, i, pct) in enumerate(eligible[:top_n], start=1):
             kl = data[sym]
@@ -566,10 +554,9 @@ def run_portfolio_backtest(
         if not lolos:
             continue
 
-        lolos.sort(key=lambda row: (
-            row[5].extension_atr if row[5].extension_atr is not None else float("inf"),
-            -row[4],
-        ))
+        lolos.sort(key=lambda row: scanner.setup_quality_key(row[5],
+                                                             scanner.Candidate(row[2], "", row[1], row[4],
+                                                                               data[row[2]][row[3]].close)))
         rank, pct, sym, i, _vol24, setup_terpilih = lolos[0]
         sizing = strategy.resolve_position_notional(config, equity)
         if sizing["notional"] <= 0 or sizing["notional"] > equity:
@@ -606,19 +593,13 @@ def run_portfolio_backtest(
         pct24h_at_entry = pct
         cands_at_entry = len(eligible)
 
-        # Level exit dikunci memakai fungsi yang SAMA dengan bot live.
-        # ATR hanya dari candle sampai bar entry, tidak pernah dari masa
-        # depan, supaya tidak ada look-ahead bias.
-        atr_window = kl[max(0, i - atr_need + 1): i + 1]
-        lv = strategy.resolve_exit_levels(config, atr_window, entry_price)
+        # Level exit dikunci memakai fungsi yang sama dengan bot live.
+        lv = strategy.resolve_exit_levels(config)
         cur = {
             "sl": lv["sl_pct"], "tp": lv["tp_pct"],
             "be_trig": lv["be_trigger_pct"], "be_lock": lv["be_lock_pct"],
             "tr_start": lv["trail_start_pct"], "tr_step": lv["trail_step_pct"],
-            "atr": lv["atr_pct"] or 0.0, "src": lv["source"],
-            # Level invalidasi dikunci dari deteksi yang MEMICU entry ini,
-            # sama seperti open_position() di bot live.
-            "invalidation": float(setup_terpilih.invalidation_price or 0.0),
+            "src": lv["source"],
         }
 
     if progress_cb:
@@ -769,8 +750,8 @@ def selftest() -> bool:
         "USE_TRAILING": False, "SL_PCT": 2.0, "TP_PCT": 3.0,
         "BE_TRIGGER_PCT": 1.0, "BE_LOCK_PCT": 0.1,
         "TRAILING_START_PCT": 1.5, "TRAILING_STEP_PCT": 0.6,
-        "USE_ATR_EXITS": False, "ATR_PERIOD": 14, "TAKER_FEE_PCT": 0.1,
-        "SETUP_INVALIDATION_EXIT": False, "QUOTE_ASSET": "USDT",
+        "TAKER_FEE_PCT": 0.1,
+        "QUOTE_ASSET": "USDT",
         # Selftest ini menguji mesin portofolio, bukan gerbang pump. Gerbang
         # tetap berjalan (riwayat harian sintetis tetap wajib disediakan),
         # hanya ambangnya yang dilonggarkan. Gerbang pump diuji sungguhan di
@@ -780,10 +761,9 @@ def selftest() -> bool:
         # di bawah, kecuali yang sengaja dilonggarkan di atas.
     }
     from config import PUMP_CONFIG as _PC
-    for _k in ("SWING_LOOKBACK_BARS", "SWING_PIVOT_WING_BARS", "BREAKOUT_BUFFER_ATR_MULT",
-               "RETEST_ZONE_ATR_MULT", "RETEST_VWAP_CONFLUENCE_ATR_MULT",
+    for _k in ("SWING_LOOKBACK_BARS", "SWING_PIVOT_WING_BARS",
                "VWAP_MIN_BARS_AFTER_ANCHOR", "MAX_BARS_BREAKOUT_TO_RETEST",
-               "MAX_RETEST_TOUCHES", "INVALIDATION_ATR_MULT", "MAX_EXTENSION_ATR_MULT"):
+               "MAX_RETEST_TOUCHES"):
         cfg[_k] = _PC[_k]
 
     # Dua simbol membentuk setup pullback retest bersamaan. Bot hanya boleh
@@ -866,39 +846,13 @@ def selftest() -> bool:
         check("SL diprioritaskan saat SL & TP kena di satu candle",
               False, "tidak ada trade yang melewati candle ekstrem")
 
-    # --- exit SETUP_INVALIDATED benar-benar terpicu ---
-    # SL/TP sengaja dimatikan supaya yang diuji murni jalur invalidasi setup:
-    # posisi ditutup saat candle tertutup jatuh di bawah level yang dikunci
-    # pada saat entry.
-    from synthetic_data import seri_dengan_setup
-    cfg_inval = dict(cfg)
-    cfg_inval["SETUP_INVALIDATION_EXIT"] = True
-    cfg_inval["USE_STOP_LOSS"] = False
-    cfg_inval["USE_TP"] = False
-    inval_kl = seri_dengan_setup(harga=100.0, ekor="invalidasi", panjang_ekor=10)
-    res_inval = run_portfolio_backtest({"AUSDT": inval_kl}, cfg_inval, "5m",
-                                       daily_klines=_harian({"AUSDT": inval_kl}))
-    reasons = [t.reason for t in res_inval.trades]
-    check("skenario invalidasi benar-benar menghasilkan trade (tes tidak vakum)",
-          len(res_inval.trades) > 0, len(res_inval.trades))
-    check("SETUP_INVALIDATED benar-benar terpicu", "SETUP_INVALIDATED" in reasons, reasons)
-
-    # Kontrol negatif: harga bertahan di atas level, exit ini tidak boleh jalan.
-    tahan_kl = seri_dengan_setup(harga=100.0, ekor="bertahan", panjang_ekor=10)
-    res_tahan = run_portfolio_backtest({"AUSDT": tahan_kl}, cfg_inval, "5m",
-                                       daily_klines=_harian({"AUSDT": tahan_kl}))
-    reasons_tahan = [t.reason for t in res_tahan.trades]
-    check("harga bertahan -> SETUP_INVALIDATED tidak terpicu",
-          len(res_tahan.trades) > 0 and "SETUP_INVALIDATED" not in reasons_tahan,
-          reasons_tahan)
-
     # --- paritas dengan backtest satu simbol ---
     # Data yang sama, satu simbol saja, harus menghasilkan entry pada bar yang
     # sama di kedua mesin. Kalau berbeda, berarti salah satu mesin memakai
     # jendela atau urutan exit yang tidak sinkron.
     import backtest as _bt
+    from synthetic_data import seri_dengan_setup
     cfg_par = dict(cfg)
-    cfg_par["SETUP_INVALIDATION_EXIT"] = True
     par_kl = seri_dengan_setup(harga=100.0, ekor="naik", panjang_ekor=20)
     res_p1 = _bt.run_backtest(par_kl, dict(cfg_par, _symbol="AUSDT"), warmup_bars=0,
                               daily_klines=riwayat_harian(par_kl))

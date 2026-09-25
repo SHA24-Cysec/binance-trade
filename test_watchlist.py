@@ -76,13 +76,8 @@ def _synthetic_strategy_config():
         "CONFIRM_LOOKBACK_BARS": 48,
         "SWING_LOOKBACK_BARS": 12,
         "SWING_PIVOT_WING_BARS": 2,
-        "BREAKOUT_BUFFER_ATR_MULT": 0.10,
-        "RETEST_ZONE_ATR_MULT": 0.5,
-        "RETEST_VWAP_CONFLUENCE_ATR_MULT": 1.0,
         "VWAP_MIN_BARS_AFTER_ANCHOR": 2,
         "MAX_BARS_BREAKOUT_TO_RETEST": 12,
-        "INVALIDATION_ATR_MULT": 1.0,
-        "MAX_EXTENSION_ATR_MULT": 1.5,
     })
     return c
 
@@ -853,7 +848,6 @@ class TestEntryTetapUtuh(unittest.TestCase):
             skenario_pullback_retest("lolos"), _synthetic_strategy_config())
         self.assertTrue(hasil.ok, hasil.reason)
         self.assertGreater(hasil.breakout_level, 0)
-        self.assertGreater(hasil.invalidation_price, 0)
 
     def test_setup_gagal_menyebut_alasan(self):
         from synthetic_data import skenario_pullback_retest

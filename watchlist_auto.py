@@ -64,7 +64,7 @@ from typing import Callable, Optional
 
 import market_scanner as scanner
 import strategy
-from strategy import Kline, atr_percent
+from strategy import Kline
 
 logger = logging.getLogger("watchlist_auto")
 
@@ -188,17 +188,15 @@ def fetch_klines_paged(client, symbol: str, interval: str, bars: int,
 def score_symbol(sym: str, kl: list, meta: dict, config: dict) -> Optional[dict]:
     """Nilai satu simbol memakai logika keputusan bot yang asli.
 
-    detect_pullback_retest() dan atr_percent() yang dipanggil di sini adalah
-    fungsi yang sama persis dengan yang dipakai bot live, jadi angka jumlah
-    sinyal bukan perkiraan melainkan hasil menjalankan logika bot itu sendiri.
+    detect_pullback_retest() yang dipanggil di sini adalah fungsi yang sama
+    dengan yang dipakai bot live, jadi angka jumlah sinyal bukan perkiraan.
     """
     lookback = strategy.confirm_window_bars(config)
-    atr_period = int(config.get("ATR_PERIOD", 14))
     min_vol = float(config.get("MIN_QUOTE_VOLUME_USDT_24H", 2_000_000))
     interval = str(config.get("CONFIRM_INTERVAL", "5m"))
     interval_ms = strategy.interval_to_ms(interval)
     bars_per_day = max(1, round(24 * 60 * 60 * 1000 / interval_ms))
-    need = max(lookback, atr_period + 1, strategy.required_lookback_bars(config))
+    need = max(lookback, strategy.required_lookback_bars(config))
 
     if len(kl) < bars_per_day + need + 10:
         return None
@@ -212,24 +210,20 @@ def score_symbol(sym: str, kl: list, meta: dict, config: dict) -> Optional[dict]
 
     signals = 0
     gate_bars = 0
-    atrs: list = []
     roll_vols: list = []
     last_sig = -10 ** 9
     # Bot hanya memegang satu posisi dan tidak boleh langsung masuk lagi
     # setelah keluar, jadi dua setup yang terlalu berdekatan tidak mungkin
-    # keduanya dieksekusi. Jaraknya memakai COOLDOWN_MINUTES_AFTER_CLOSE
-    # (sebelumnya MAX_HOLD_MINUTES, yang sudah dihapus total dari repo ini).
-    # Konversi ke jumlah bar memakai interval aktif, bukan asumsi 5 menit.
+    # keduanya dieksekusi. Jaraknya memakai COOLDOWN_MINUTES_AFTER_CLOSE.
     min_gap = max(1, int(float(config.get("COOLDOWN_MINUTES_AFTER_CLOSE", 15))
                          * 60_000 / interval_ms))
 
     for j in range(bars_per_day + need, n):
         vol24 = pre[j + 1] - pre[j + 1 - bars_per_day]
         roll_vols.append(vol24)
-        # Skor watchlist sengaja HANYA memakai gerbang likuiditas supaya
-        # hasilnya menjadi superset kandidat: gerbang pump lengkap (kenaikan
-        # 24 jam + lonjakan volume) tetap dievaluasi scanner bot live
-        # terhadap data paling mutakhir saat pemindaian riil, bukan di sini.
+        # Skor watchlist sengaja hanya memakai gerbang likuiditas supaya
+        # hasilnya menjadi superset kandidat. Gerbang pump lengkap tetap
+        # dievaluasi scanner bot live terhadap data paling mutakhir.
         if vol24 < min_vol:
             continue
         gate_bars += 1
@@ -239,9 +233,6 @@ def score_symbol(sym: str, kl: list, meta: dict, config: dict) -> Optional[dict]
             continue
         last_sig = j
         signals += 1
-        a = atr_percent(kl[max(0, j - (atr_period + 1)): j + 1], period=atr_period)
-        if a:
-            atrs.append(a)
 
     if not roll_vols:
         return None
@@ -249,12 +240,8 @@ def score_symbol(sym: str, kl: list, meta: dict, config: dict) -> Optional[dict]
     days = n * interval_ms / 86_400_000
     uptime = sum(1 for v in roll_vols if v >= min_vol) / len(roll_vols) * 100.0
     vol_median = statistics.median(roll_vols)
-    atr_med = statistics.median(atrs) if atrs else None
 
     # Deteksi instrumen yang bukan crypto 24/7 (saham tokenisasi bStocks).
-    # Crypto spot berjalan terus, jadi porsi volume Sabtu+Minggu wajar di
-    # kisaran 20-28%. Saham tokenisasi anjlok jauh di bawah itu karena
-    # harganya ditambatkan ke bursa AS yang tutup akhir pekan.
     weekend_pct = None
     if days >= 10:
         import datetime as dt
@@ -266,49 +253,27 @@ def score_symbol(sym: str, kl: list, meta: dict, config: dict) -> Optional[dict]
             weekend_pct = (dow[5] + dow[6]) / tot * 100.0
 
     return _compose_score(sym, meta, config, signals, days, uptime, vol_median,
-                          atr_med, weekend_pct, gate_bars, n)
+                          weekend_pct, gate_bars, n)
 
 
 def _compose_score(sym, meta, config, signals, days, uptime, vol_median,
-                   atr_med, weekend_pct, gate_bars, n) -> dict:
-    """Gabungkan komponen jadi skor 0-100 (bobot sama dengan daftar bawaan)."""
+                   weekend_pct, gate_bars, n) -> dict:
+    """Gabungkan komponen skor dari sinyal, likuiditas, dan spread."""
     max_spread = float(config.get("MAX_SPREAD_PCT", 0.25))
     min_vol = float(config.get("MIN_QUOTE_VOLUME_USDT_24H", 2_000_000))
-    sl_min = float(config.get("ATR_SL_MIN_PCT", 1.2))
-    sl_max = float(config.get("ATR_SL_MAX_PCT", 4.0))
-    atr_mult = float(config.get("ATR_MULTIPLIER_SL", 2.0))
 
     spread = meta.get("spread_pct")
     sig30 = (signals / days * 30.0) if days > 0 else 0.0
 
-    # A. frekuensi sinyal (35)
     s_sig = min(35.0, sig30 / 25.0 * 35.0)
-    # B. likuiditas (25)
     ratio = vol_median / min_vol if min_vol else 0
     s_liq = uptime / 100.0 * 15.0 + min(10.0, (ratio ** 0.5) * 3.5)
-    # C. spread (20)
     s_spread = 0.0 if spread is None else max(0.0, (1.0 - spread / max_spread) * 20.0)
-    # D. kecocokan ATR dengan rentang SL (20)
     notes = []
-    if atr_med is None:
-        s_atr = 0.0
-        notes.append("ATR tidak terukur")
-    else:
-        raw_sl = atr_mult * atr_med
-        if raw_sl < sl_min:
-            s_atr = max(0.0, 20.0 * (raw_sl / sl_min) * 0.6)
-            notes.append(f"ATR rendah, SL sering dipaksa ke lantai {sl_min}%")
-        elif raw_sl > sl_max:
-            s_atr = max(0.0, 20.0 * (sl_max / raw_sl) * 0.6)
-            notes.append(f"ATR tinggi, SL sering kena plafon {sl_max}%")
-        else:
-            pos = (raw_sl - sl_min) / (sl_max - sl_min)
-            s_atr = 20.0 * (1.0 - abs(pos - 0.35) / 0.65 * 0.35)
 
     if uptime < 60:
         notes.append(f"likuiditas di atas ambang bot hanya {uptime:.0f}% waktu")
 
-    # Diskualifikasi struktural
     dq = None
     quote = str(config.get("QUOTE_ASSET", "USDT"))
     base = sym[:-len(quote)] if quote and sym.endswith(quote) else sym
@@ -323,21 +288,19 @@ def _compose_score(sym, meta, config, signals, days, uptime, vol_median,
 
     return {
         "symbol": sym, "tier": tier,
-        "score": round(s_sig + s_liq + s_spread + s_atr, 1),
+        "score": round(s_sig + s_liq + s_spread, 1),
         "signals": signals, "signals_per_30d": round(sig30, 2),
         "days": round(days, 1), "uptime": round(uptime, 1),
-        "vol_median": vol_median, "atr_pct": round(atr_med, 3) if atr_med else None,
+        "vol_median": vol_median,
         "spread_pct": spread, "weekend_pct": round(weekend_pct, 1) if weekend_pct else None,
         "gate_pct": round(gate_bars / n * 100, 2) if n else 0,
         "disqualified": dq, "notes": notes,
-        "note": _build_note(signals, days, uptime, atr_med, spread, notes),
+        "note": _build_note(signals, days, uptime, spread, notes),
     }
 
 
-def _build_note(signals, days, uptime, atr_med, spread, notes) -> str:
+def _build_note(signals, days, uptime, spread, notes) -> str:
     bits = [f"{signals} sinyal/{days:.0f}h"]
-    if atr_med:
-        bits.append(f"ATR {atr_med:.2f}%")
     if spread is not None:
         bits.append(f"spread {spread:.3f}%")
     bits.append(f"likuiditas {uptime:.0f}% waktu")

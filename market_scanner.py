@@ -97,13 +97,9 @@ class Candidate:
 class SetupResult:
     """Hasil evaluasi satu jendela candle terhadap aturan pullback retest.
 
-    ``ok`` True hanya kalau candle TERAKHIR yang tertutup adalah candle
+    ``ok`` True hanya kalau candle terakhir yang tertutup adalah candle
     konfirmasi retest. Field lain tetap diisi sebisanya walaupun ok False,
     supaya log bisa menjelaskan setup sampai mana prosesnya.
-
-    ``breakout_level``, ``zone_low``, ``zone_high``, dan ``atr_abs`` disimpan
-    supaya pemanggil dapat mengunci level invalidasi di state posisi saat
-    entry, tanpa perlu menghitung ulang dari data yang lebih baru.
     """
     ok: bool
     reason: str
@@ -112,10 +108,6 @@ class SetupResult:
     zone_high: Optional[float] = None
     anchor_index: Optional[int] = None
     anchored_vwap: Optional[float] = None
-    atr_pct: Optional[float] = None
-    atr_abs: Optional[float] = None
-    invalidation_price: Optional[float] = None
-    extension_atr: Optional[float] = None
     retest_touches: int = 0
 
 
@@ -538,142 +530,86 @@ def _breakout_level_for(klines: list[Kline], pivots: list[int], b: int,
 
 
 def detect_pullback_retest(klines: list[Kline], config: dict) -> SetupResult:
-    """Deteksi setup pullback dan retest pada jendela candle TERTUTUP.
+    """Deteksi setup pullback dan retest pada jendela candle tertutup.
 
-    Urutan kejadian yang dicari, semuanya di dalam satu jendela dan tanpa
-    menyimpan state antar panggilan:
+    Urutan kejadian yang dicari:
+      1. Breakout: close menembus swing high valid.
+      2. Anchor: candle breakout menjadi jangkar anchored VWAP.
+      3. Pullback: harga kembali menyentuh level breakout.
+      4. Retest terkonfirmasi: candle terakhir menyentuh level, close kembali
+         di atas level, close berada di bagian atas range candle, dan close di
+         atas anchored VWAP.
+      5. Batas umur setup dan jumlah kunjungan ke level tetap dijaga agar
+         setup lama atau terlalu sering dites tidak dipakai.
 
-      1. BREAKOUT. Candle yang close di atas swing high terakhir yang valid
-         ditambah BREAKOUT_BUFFER_ATR_MULT x ATR. Sumbu yang menembus tanpa
-         close di atas level TIDAK dihitung sebagai breakout.
-      2. ANCHOR. Candle breakout itu sendiri menjadi jangkar anchored VWAP
-         (candle anchor ikut dihitung).
-      3. PULLBACK. Harga turun kembali ke zona di sekitar level, dan anchored
-         VWAP berada dalam jarak RETEST_VWAP_CONFLUENCE_ATR_MULT x ATR dari
-         level (konfluensi level dan VWAP).
-      4. RETEST TERKONFIRMASI. Candle TERAKHIR yang tertutup menyentuh zona,
-         close kembali di atas level, close berada di bagian atas range candle
-         (MIN_CLOSE_POSITION_IN_RANGE), dan close di atas anchored VWAP.
-      5. INVALIDASI. Setup gugur bila ada candle tertutup yang close di bawah
-         level dikurangi INVALIDATION_ATR_MULT x ATR sebelum retest, atau bila
-         jarak breakout ke candle terakhir melewati MAX_BARS_BREAKOUT_TO_RETEST,
-         atau bila sentuhan zona sudah melebihi MAX_RETEST_TOUCHES.
-      6. ANTI-KEJAR. Entry ditolak bila close terakhir sudah lebih dari
-         MAX_EXTENSION_ATR_MULT x ATR di atas level.
-
-    Penentuan anchor DETERMINISTIK: jendela ditelusuri dari candle tertua ke
-    terbaru. Saat ada breakout dan belum ada setup aktif, anchor di-set. Saat
-    terjadi invalidasi, setup dihapus lalu pencarian breakout berikutnya
-    dilanjutkan. Yang dievaluasi di akhir adalah setup aktif terakhir yang
-    bertahan sampai candle terakhir.
-
-    SEMUA nilai default parameter adalah titik awal yang masih harus
-    divalidasi lewat backtest repo ini.
+    Fungsi ini murni dan tanpa state. Semua candle yang diterima harus sudah
+    tertutup dan berurutan kronologis.
     """
     swing_lookback = int(config.get("SWING_LOOKBACK_BARS", 12) or 12)
     wing = int(config.get("SWING_PIVOT_WING_BARS", 2) or 2)
-    buffer_mult = float(config.get("BREAKOUT_BUFFER_ATR_MULT", 0.10) or 0.0)
-    zone_mult = float(config.get("RETEST_ZONE_ATR_MULT", 0.5) or 0.0)
-    konfluensi_mult = float(config.get("RETEST_VWAP_CONFLUENCE_ATR_MULT", 1.0) or 0.0)
     vwap_min_bars = int(config.get("VWAP_MIN_BARS_AFTER_ANCHOR", 2) or 0)
     max_bars = int(config.get("MAX_BARS_BREAKOUT_TO_RETEST", 12) or 1)
     max_touches = int(config.get("MAX_RETEST_TOUCHES", 1) or 1)
-    invalid_mult = float(config.get("INVALIDATION_ATR_MULT", 1.0) or 0.0)
-    ext_mult = float(config.get("MAX_EXTENSION_ATR_MULT", 1.0) or 0.0)
     min_close_pos = float(config.get("MIN_CLOSE_POSITION_IN_RANGE", 0.35) or 0.0)
-    atr_period = int(config.get("ATR_PERIOD", 14) or 14)
 
     butuh = strategy.required_lookback_bars(config)
     n = len(klines)
     if n < butuh:
         return SetupResult(False, f"data candle kurang: {n} dari minimum {butuh}")
 
-    atr_abs = strategy.atr(klines, atr_period)
-    if atr_abs is None or atr_abs <= 0:
-        return SetupResult(False, "ATR tidak bisa dihitung atau nol (candle datar)")
-
     last = klines[-1]
     if last.close <= 0:
         return SetupResult(False, "harga close terakhir tidak valid")
-    atr_pct = atr_abs / last.close * 100.0
 
     pivots = _pivot_high_indexes(klines, wing)
     if not pivots:
-        return SetupResult(False, "tidak ada swing high (pivot) di dalam jendela",
-                           atr_pct=atr_pct, atr_abs=atr_abs)
+        return SetupResult(False, "tidak ada swing high (pivot) di dalam jendela")
 
-    # ---- Telusuri jendela dari candle tertua ke terbaru -------------
     anchor: Optional[int] = None
     level: Optional[float] = None
-    touches = 0            # jumlah KUNJUNGAN ke zona, bukan jumlah candle
-    sedang_di_zona = False
+    touches = 0
+    sedang_di_level = False
     alasan_gugur = ""
 
     for b in range(n):
         candle = klines[b]
 
         if anchor is not None and level is not None:
-            zone_low = level - zone_mult * atr_abs
-            zone_high = level + zone_mult * atr_abs
-            invalid_price = level - invalid_mult * atr_abs
-
-            # Invalidasi harga: close tertutup di bawah level - k x ATR.
-            if candle.close < invalid_price:
-                alasan_gugur = (f"setup gugur: close {candle.close:.8g} di bawah batas "
-                                f"invalidasi {invalid_price:.8g}")
-                anchor = None
-                level = None
-                touches = 0
-                sedang_di_zona = False
-                continue
-
-            # Invalidasi waktu: retest tidak kunjung datang.
             if b - anchor > max_bars:
                 alasan_gugur = (f"setup gugur: lebih dari {max_bars} candle sejak breakout "
                                 "tanpa retest terkonfirmasi")
                 anchor = None
                 level = None
                 touches = 0
-                sedang_di_zona = False
-                # Candle b masih boleh menjadi breakout baru, jadi jangan
-                # continue di sini, biarkan jatuh ke pemeriksaan breakout.
+                sedang_di_level = False
             else:
-                # Hitung KUNJUNGAN ke zona, bukan jumlah candle di dalam zona.
-                # Retest yang berlangsung tiga candle berturut-turut tetap
-                # dihitung satu kunjungan, karena itu memang satu peristiwa
-                # retest. Kalau dihitung per candle, MAX_RETEST_TOUCHES=1 akan
-                # menolak hampir semua retest normal.
                 if b > anchor:
-                    di_zona = zone_low <= candle.low <= zone_high
-                    if di_zona and not sedang_di_zona:
+                    di_level = candle.low <= level <= candle.high
+                    if di_level and not sedang_di_level:
                         touches += 1
-                    sedang_di_zona = di_zona
+                    sedang_di_level = di_level
                 continue
 
-        # Belum ada setup aktif: cari breakout pada candle b.
         lvl = _breakout_level_for(klines, pivots, b, swing_lookback, wing)
         if lvl is None:
             continue
-        if candle.close > lvl + buffer_mult * atr_abs:
+        if candle.close > lvl:
             anchor = b
             level = lvl
             touches = 0
-            sedang_di_zona = False
+            sedang_di_level = False
 
     if anchor is None or level is None:
         alasan = alasan_gugur or "tidak ada breakout dalam jendela"
-        return SetupResult(False, alasan, atr_pct=atr_pct, atr_abs=atr_abs)
+        return SetupResult(False, alasan)
 
-    zone_low = level - zone_mult * atr_abs
-    zone_high = level + zone_mult * atr_abs
-    invalid_price = level - invalid_mult * atr_abs
+    zone_low = level
+    zone_high = level
     idx_terakhir = n - 1
 
     dasar = dict(breakout_level=level, zone_low=zone_low, zone_high=zone_high,
-                 anchor_index=anchor, atr_pct=atr_pct, atr_abs=atr_abs,
-                 invalidation_price=invalid_price, retest_touches=touches)
+                 anchor_index=anchor, retest_touches=touches)
 
-    # ---- Syarat candle terakhir ------------------------------------
     if idx_terakhir == anchor:
         return SetupResult(False, "belum retest: breakout baru terjadi pada candle terakhir", **dasar)
 
@@ -691,24 +627,16 @@ def detect_pullback_retest(klines: list[Kline], config: dict) -> SetupResult:
         return SetupResult(False, "anchored VWAP tidak bisa dihitung (volume nol atau tidak tersedia)",
                            **dasar)
 
-    if abs(vwap - level) > konfluensi_mult * atr_abs:
-        return SetupResult(
-            False,
-            f"tanpa konfluensi: anchored VWAP {vwap:.8g} terlalu jauh dari level {level:.8g} "
-            f"(batas {konfluensi_mult:g} x ATR)",
-            **dasar)
-
     if touches > max_touches:
         return SetupResult(
             False,
-            f"sentuhan zona sudah {touches} kali, batas MAX_RETEST_TOUCHES {max_touches}",
+            f"sentuhan level sudah {touches} kali, batas MAX_RETEST_TOUCHES {max_touches}",
             **dasar)
 
-    if not (zone_low <= last.low <= zone_high):
+    if not (last.low <= level <= last.high):
         return SetupResult(
             False,
-            f"belum retest: low candle terakhir {last.low:.8g} berada di luar zona "
-            f"{zone_low:.8g}-{zone_high:.8g}",
+            f"belum retest: candle terakhir belum menyentuh level {level:.8g}",
             **dasar)
 
     if last.close <= level:
@@ -734,21 +662,10 @@ def detect_pullback_retest(klines: list[Kline], config: dict) -> SetupResult:
             f"close {last.close:.8g} masih di bawah anchored VWAP {vwap:.8g}",
             **dasar)
 
-    ekstensi = (last.close - level) / atr_abs
-    dasar["extension_atr"] = ekstensi
-    if ekstensi > ext_mult:
-        return SetupResult(
-            False,
-            f"anti-kejar: close sudah {ekstensi:.2f} x ATR di atas level, batas {ext_mult:g}",
-            **dasar)
-
     return SetupResult(
         True,
-        (f"retest sah: level {level:.8g}, zona {zone_low:.8g}-{zone_high:.8g}, "
-         f"anchored VWAP {vwap:.8g}, ATR {atr_pct:.2f}%, ekstensi {ekstensi:.2f} x ATR, "
-         f"batas invalidasi {invalid_price:.8g}"),
+        f"retest sah: level {level:.8g}, anchored VWAP {vwap:.8g}",
         **dasar)
-
 
 def confirm_entry(klines: list[Kline], config: dict) -> tuple[bool, str]:
     """Konfirmasi entry dengan alasan yang dapat dicatat ke log.
@@ -763,17 +680,12 @@ def confirm_entry(klines: list[Kline], config: dict) -> tuple[bool, str]:
 
 
 def setup_quality_key(setup: SetupResult, candidate: Candidate) -> tuple:
-    """Kunci pengurutan kandidat: retest paling rapat dulu, lalu paling likuid.
+    """Kunci pengurutan kandidat setelah setup lolos.
 
-    Ukuran utamanya adalah jarak close terakhir terhadap breakout_level dalam
-    satuan ATR. Semakin kecil, semakin dekat entry ke level yang menjadi dasar
-    stop dan invalidasi, sehingga risiko per trade lebih terdefinisi. Pemutus
-    seri adalah volume kuotasi 24 jam (lebih besar lebih dulu).
-
-    Ini keputusan desain, bukan hasil yang sudah tervalidasi.
+    Setelah filter berbasis volatilitas dihapus, pemutus urutan yang tersisa
+    adalah likuiditas 24 jam. Volume kuotasi lebih besar didahulukan.
     """
-    ekstensi = setup.extension_atr if setup.extension_atr is not None else float("inf")
-    return (ekstensi, -float(candidate.quote_volume))
+    return (-float(candidate.quote_volume),)
 
 
 def find_best_candidate(tickers: list, klines_fetcher, config: dict,

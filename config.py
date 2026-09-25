@@ -199,12 +199,10 @@ PUMP_CONFIG = {
     # 2026-09-25), ditambah 80 bobot untuk ticker 24 jam seluruh pasar.
     "TOP_N_CANDIDATES_TO_CONFIRM": 10,
     "CONFIRM_INTERVAL": "5m",
-    # Jendela candle tertutup untuk satu keputusan entry. Nilai minimum yang
-    # benar dihitung oleh strategy.required_lookback_bars() dari ATR_PERIOD
-    # dan parameter struktur di bawah, dan divalidasi di settings_schema.py.
-    # Dengan default saat ini minimumnya 28 candle, jadi 48 memberi ruang
-    # tambahan untuk swing yang lebih lama. Limit endpoint klines adalah 1000
-    # candle per panggilan (dicek 2026-09-25).
+    # Jendela candle tertutup untuk satu keputusan entry. Nilai minimum
+    # dihitung oleh strategy.required_lookback_bars() dari parameter struktur
+    # di bawah, dan divalidasi di settings_schema.py. Limit endpoint klines
+    # adalah 1000 candle per panggilan (dicek 2026-09-25).
     "CONFIRM_LOOKBACK_BARS": 53,
     # Posisi close di dalam range candle retest (0 = di low, 1 = di high).
     # Kunci lama ini dipakai ulang oleh market_scanner.detect_pullback_retest().
@@ -233,12 +231,6 @@ PUMP_CONFIG = {
     # candle dianggap pivot high. Sayap kanan wajib sudah tertutup, itulah
     # yang mencegah level breakout memakai data masa depan.
     "SWING_PIVOT_WING_BARS": 4,
-    # Buffer di atas level agar breakout tidak dihitung dari selisih satu tick.
-    "BREAKOUT_BUFFER_ATR_MULT": 0.12195139476385432,
-    # Setengah lebar zona retest di atas dan di bawah level, dalam satuan ATR.
-    "RETEST_ZONE_ATR_MULT": 0.82694964295392,
-    # Jarak maksimum anchored VWAP terhadap level agar dianggap konfluen.
-    "RETEST_VWAP_CONFLUENCE_ATR_MULT": 1.6232842971148245,
     # Minimum candle setelah anchor sebelum anchored VWAP dipercaya. Tanpa ini
     # VWAP hanya mencerminkan satu candle, yaitu harga rata-rata candle itu.
     "VWAP_MIN_BARS_AFTER_ANCHOR": 4,
@@ -248,17 +240,6 @@ PUMP_CONFIG = {
     # Berapa kali harga boleh berkunjung ke zona sebelum setup dianggap lemah.
     # Kunjungan dihitung per peristiwa, bukan per candle.
     "MAX_RETEST_TOUCHES": 1,
-    # Jarak di bawah level yang membatalkan setup, dan juga dipakai exit
-    # SETUP_INVALIDATED. CATATAN RELASI PENTING: Stop Loss tidak boleh jauh
-    # lebih longgar dari level ini. Kalau INVALIDATION_ATR_MULT jauh lebih
-    # kecil dari ATR_MULTIPLIER_SL, exit invalidasi akan hampir selalu
-    # mendahului Stop Loss, dan Stop Loss berubah jadi pengaman yang praktis
-    # tidak pernah terpakai. Sebaliknya kalau jauh lebih besar, Stop Loss yang
-    # selalu lebih dulu kena dan exit invalidasi jadi tidak berarti.
-    "INVALIDATION_ATR_MULT": 0.9545909967180242,
-    # Anti-kejar: tolak entry kalau close sudah terlalu jauh di atas level,
-    # karena stop yang masuk akal (di bawah level) jadi terlalu lebar.
-    "MAX_EXTENSION_ATR_MULT": 1.1749990586717776,
 
     # ------------------------------------------------------------------
     # GERBANG PUMP (saringan semesta, WAJIB, bukan sekadar prioritas urutan)
@@ -332,11 +313,10 @@ PUMP_CONFIG = {
     #     selama 120 hari untuk mengukur frekuensi pump.
     #   - 110 pair shortlist ditarik candle 5 menit selama 45 hari
     #     (= CONFIRM_INTERVAL bot, 12.960 candle per simbol).
-    #   - Pada tiap candle 5 menit itu dijalankan confirm_entry() ASLI dari
-    #     market_scanner.py, plus atr_percent() asli dari strategy.py.
-    #     Jadi angka "berapa kali koin
-    #     ini memicu sinyal" adalah hasil menjalankan logika keputusan bot
-    #     itu sendiri, bukan perkiraan.
+    #   - Pada tiap candle 5 menit itu dijalankan confirm_entry() asli dari
+    #     market_scanner.py. Jadi angka "berapa kali koin ini memicu sinyal"
+    #     adalah hasil menjalankan logika keputusan bot itu sendiri, bukan
+    #     perkiraan.
     #
     # Skor 0-100 menimbang empat hal yang benar-benar menentukan apakah
     # sebuah koin cocok dengan mesin ini:
@@ -344,9 +324,7 @@ PUMP_CONFIG = {
     #   25 poin  likuiditas: berapa persen waktu volume 24 jam koin itu
     #            berada di atas MIN_QUOTE_VOLUME_USDT_24H, plus volume median
     #   20 poin  spread bid-ask sekarang dibanding MAX_SPREAD_PCT
-    #   20 poin  kecocokan ATR 5 menit dengan rentang
-    #            ATR_SL_MIN_PCT..ATR_SL_MAX_PCT (SL yang selalu mentok di
-    #            lantai atau plafon berarti mekanisme ATR tidak bekerja)
+    #   20 poin  kestabilan operasional dan kelengkapan riwayat pasar
     #
     # Yang SENGAJA dibuang dari daftar:
     #   - 9 saham tokenisasi Binance (bStocks, mis. MSTRB, CRCLB, SOXLB).
@@ -402,15 +380,15 @@ PUMP_CONFIG = {
         # Sinyal di sini paling mungkin benar-benar bisa dieksekusi karena
         # koinnya hampir selalu memenuhi filter volume bot.
         {"symbol": "ZECUSDT",     "tier": "INTI",      "score": 93.0, "note": "33 sinyal/45h, spread 0,001% (tersempit), volume median 109 juta"},
-        {"symbol": "ENAUSDT",     "tier": "INTI",      "score": 92.5, "note": "34 sinyal/45h, ATR 1,04% pas di tengah rentang SL"},
+        {"symbol": "ENAUSDT",     "tier": "INTI",      "score": 92.5, "note": "34 sinyal/45h"},
         {"symbol": "ARBUSDT",     "tier": "INTI",      "score": 89.6, "note": "44 sinyal/45h, terbanyak di tier ini"},
         {"symbol": "NEARUSDT",    "tier": "INTI",      "score": 87.1, "note": "28 sinyal/45h, volume median 32 juta"},
         {"symbol": "UNIUSDT",     "tier": "INTI",      "score": 86.5, "note": "27 sinyal/45h, spread 0,011%"},
         {"symbol": "PENGUUSDT",   "tier": "INTI",      "score": 82.3, "note": "26 sinyal/45h, likuiditas 100% waktu"},
-        {"symbol": "DASHUSDT",    "tier": "INTI",      "score": 80.3, "note": "27 sinyal/45h, ATR 0,88%"},
+        {"symbol": "DASHUSDT",    "tier": "INTI",      "score": 80.3, "note": "27 sinyal/45h"},
         {"symbol": "PUMPUSDT",    "tier": "INTI",      "score": 79.1, "note": "21 sinyal/45h, volume median 11,5 juta"},
         {"symbol": "FILUSDT",     "tier": "INTI",      "score": 78.5, "note": "22 sinyal/45h, spread 0,011%"},
-        {"symbol": "INJUSDT",     "tier": "INTI",      "score": 78.4, "note": "23 sinyal/45h, ATR 0,72%"},
+        {"symbol": "INJUSDT",     "tier": "INTI",      "score": 78.4, "note": "23 sinyal/45h"},
         {"symbol": "AVAXUSDT",    "tier": "INTI",      "score": 76.9, "note": "17 sinyal/45h, likuiditas sangat stabil"},
         {"symbol": "SUIUSDT",     "tier": "INTI",      "score": 74.5, "note": "13 sinyal/45h, volume median 25 juta"},
 
@@ -419,9 +397,9 @@ PUMP_CONFIG = {
         # tidak memenuhi filter volume sehingga bot mengabaikannya.
         {"symbol": "CHIPUSDT",    "tier": "AKTIF",  "score": 76.5, "note": "32 sinyal/45h, tapi likuiditas cukup hanya 61% waktu"},
         {"symbol": "ZAMAUSDT",    "tier": "AKTIF",  "score": 71.7, "note": "18 sinyal/45h, pump tertinggi 51% dalam 120 hari"},
-        {"symbol": "CRVUSDT",     "tier": "AKTIF",  "score": 69.2, "note": "24 sinyal/45h, ATR 0,61% agak rendah untuk SL bot"},
+        {"symbol": "CRVUSDT",     "tier": "AKTIF",  "score": 69.2, "note": "24 sinyal/45h"},
         {"symbol": "TIAUSDT",     "tier": "AKTIF",  "score": 65.2, "note": "16 sinyal/45h, likuiditas cukup 72% waktu"},
-        {"symbol": "ETHFIUSDT",   "tier": "AKTIF",  "score": 64.4, "note": "16 sinyal/45h, ATR 0,65%"},
+        {"symbol": "ETHFIUSDT",   "tier": "AKTIF",  "score": 64.4, "note": "16 sinyal/45h"},
         {"symbol": "ZROUSDT",     "tier": "AKTIF",  "score": 60.8, "note": "19 sinyal/45h, spread 0,133% relatif lebar"},
         {"symbol": "POLUSDT",     "tier": "AKTIF",  "score": 59.6, "note": "hanya 7 sinyal/45h, tapi spread 0,010% dan likuid"},
         {"symbol": "SEIUSDT",     "tier": "AKTIF",  "score": 59.5, "note": "11 sinyal/45h, likuiditas cukup 64% waktu"},
@@ -443,10 +421,8 @@ PUMP_CONFIG = {
     # --- Ukuran posisi (tanpa martingale -- sekali entry per rotasi) ---
     #
     # PERINGATAN HASIL AUDIT 2026-09-24 (temuan K-01): RISK_PERCENT=100.0
-    # berarti SELURUH modal dipertaruhkan di setiap trade. Dengan SL plafon
-    # ATR 4%, setiap rugi menggerus ~4% dari TOTAL akun, dan 10 rugi beruntun
-    # (hal biasa pada strategi jangka pendek mana pun, termasuk pullback
-    # retest) menghapus lebih dari sepertiga akun.
+    # berarti SELURUH modal dipertaruhkan di setiap trade. Stop Loss beberapa
+    # persen saja dapat menggerus total akun secara cepat saat rugi beruntun.
     # Default di bawah (25%) adalah titik awal yang lebih masuk akal untuk
     # LIVE; naikkan bertahap HANYA dari data hasil nyata, bukan karena satu
     # backtest terlihat bagus.
@@ -496,72 +472,6 @@ PUMP_CONFIG = {
     "USE_STOP_LOSS": True,                   # kerugian maksimum per-trade dari harga entry, exit paksa di harga pasar
     "SL_PCT": 1.8,                            # keluar paksa kalau rugi >= nilai ini (%) dari entry (SEBELUM Breakeven/Trailing aktif)
 
-    # --- Stop Loss & Take Profit adaptif berbasis ATR (opsional) ---
-    #
-    # Kalau USE_ATR_EXITS = False, bot memakai SL_PCT/TP_PCT tetap persis
-    # seperti sebelumnya. (Default config ini True.)
-    #
-    # Kalau True, jarak SL dihitung dari volatilitas koin yang sedang dipegang:
-    #     SL% = batasi(ATR_MULTIPLIER_SL x ATR%, antara ATR_SL_MIN_PCT dan ATR_SL_MAX_PCT)
-    #     TP% = SL% x ATR_TP_RR_RATIO
-    #
-    # ALASAN pakai bentuk HIBRIDA (ATR dengan batas bawah & atas), bukan ATR
-    # murni: pengujian lintas banyak strategi/pasar oleh Kevin Davey
-    # (kjtradingsystems.com) menemukan ATR menang hanya ~66% kasus, dan ATR
-    # murni bisa menghasilkan jarak stop ekstrem saat volatilitas meledak
-    # (contohnya 3x ATR di Crude Oil berkisar dari $240 sampai $15.000+).
-    # Batas min/max menahan itu tanpa membuang sifat adaptif ATR.
-    #
-    # ALASAN fitur ini relevan untuk bot ini: bot memperdagangkan BANYAK koin
-    # berbeda (semua pair USDT yang lolos saringan volume), dan volatilitas
-    # antar koin berbeda jauh. SL tetap 1.8% bisa berarti 3x ATR di satu koin
-    # tapi hanya 0.8x ATR di koin lain.
-    # Data yang dikutip Volatility Box (595+ simbol, 2018-2025) menyebut stop
-    # di bawah 1.0x ATR terpicu noise >65% dalam 3 bar pertama, sedangkan di
-    # 1.5x ATR turun ke 38%.
-    #
-    # PERINGATAN JUJUR: angka-angka di atas berasal dari publikasi pihak
-    # ketiga (sebagian milik vendor), BUKAN dari data trading Anda sendiri.
-    # Bukti akademik yang lebih kuat (Barroso & Santa-Clara 2015) mendukung
-    # penyesuaian terhadap volatilitas, tapi studi momentum crypto di
-    # Financial Markets and Portfolio Management (2025) menegaskan volatility
-    # management TIDAK menghilangkan tail risk. Jadi JANGAN aktifkan ini
-    # begitu saja -- bandingkan dulu lewat backtest.py pada koin yang
-    # benar-benar lolos filter Anda:
-    #     python backtest.py --compare-atr --symbol <KOIN>USDT --days 30
-    "USE_ATR_EXITS": True,                  # default True = exit diskalakan ATR (fallback SL/TP tetap bila ATR gagal)
-    "ATR_PERIOD": 14,                        # standar Wilder; dihitung pada CONFIRM_INTERVAL (default 5m)
-    "ATR_MULTIPLIER_SL": 2.0,                # 2.0x = nilai yang paling sering optimal di literatur
-    "ATR_SL_MIN_PCT": 1.2,                   # lantai: jangan pernah pasang stop lebih sempit dari ini
-    "ATR_SL_MAX_PCT": 4.0,                   # plafon: lindungi dari ATR yang meledak
-    "ATR_TP_RR_RATIO": 2.0,                  # TP = SL x rasio ini (2:1, sesuai backtest yang dikutip di atas)
-
-    # Breakeven & Trailing juga ikut skala ATR saat USE_ATR_EXITS = True.
-    #
-    # KENAPA INI WAJIB, bukan sekadar pelengkap: kalau hanya SL/TP yang ikut
-    # ATR sementara BE/Trailing tetap memakai angka tetap, hasilnya PINCANG.
-    # Contoh nyata pada koin dengan ATR 3%:
-    #     SL  -> 4.0%  (lebar, ikut ATR)
-    #     TP  -> 8.0%  (lebar, ikut ATR)
-    #     Trailing step -> 0.6% tetap = hanya 0,20x ATR
-    # Pullback normal yang masih jauh di dalam 1x ATR langsung menyentuh
-    # trailing, jadi posisi tertutup di sekitar +0,9% padahal TP 8% belum
-    # tersentuh. Risk:reward jadi TERBALIK: risiko 4%, imbalan 0,9%.
-    # Pada backtest data sintetis, kondisi pincang ini membuat TAKE_PROFIT
-    # hanya tercapai 2,9% dari trade, sementara 91,2% ditutup BE/Trailing.
-    #
-    # Angka pengali di bawah memakai ATR sebagai satuan, bukan persen tetap:
-    #   BE_TRIGGER  = 0.5x ATR -> amankan modal setelah gerakan setengah ATR
-    #   BE_LOCK     = 0.1x ATR -> kunci profit tipis di atas entry
-    #   TRAIL_START = 1.0x ATR -> mulai trailing setelah gerakan satu ATR penuh
-    #   TRAIL_STEP  = 1.5x ATR -> jarak trailing di ATAS 1x ATR, supaya tidak
-    #                             terpicu noise biasa (data yang dikutip di
-    #                             atas: stop < 1.0x ATR terpicu noise >65%
-    #                             dalam 3 bar pertama; di 1.5x turun ke 38%)
-    "ATR_BE_TRIGGER_MULT": 0.5,
-    "ATR_BE_LOCK_MULT": 0.1,
-    "ATR_TRAILING_START_MULT": 1.0,
-    "ATR_TRAILING_STEP_MULT": 1.5,
     "USE_BREAKEVEN": True,
     "BE_TRIGGER_PCT": 1.0,
     "BE_LOCK_PCT": 0.15,
@@ -571,16 +481,7 @@ PUMP_CONFIG = {
     # CATATAN: MAX_HOLD_MINUTES (paksa keluar setelah sekian menit) sudah
     # DIHAPUS TOTAL, bukan dinonaktifkan. Alasannya: batas waktu memaksa exit
     # pada harga pasar apa pun tanpa melihat struktur, sehingga posisi yang
-    # masih valid secara setup bisa ditutup hanya karena jam dinding. Keluar
-    # sekarang sepenuhnya ditentukan harga dan struktur: Stop Loss, Take
-    # Profit, Breakeven, Trailing Stop, dan SETUP_INVALIDATION_EXIT di bawah.
-    # Exit SETUP_INVALIDATED: tutup posisi kalau satu candle CONFIRM_INTERVAL
-    # tertutup dengan close di bawah breakout_level - INVALIDATION_ATR_MULT x
-    # ATR. Level dan ATR dikunci di state posisi saat entry, tidak dihitung
-    # ulang dari data baru, supaya alasan keluar sama persis dengan alasan
-    # masuk. Exit ini berbasis candle tertutup sehingga bisa disimulasikan di
-    # backtest.py maupun portfolio_backtest.py.
-    "SETUP_INVALIDATION_EXIT": True,
+    # masih valid secara setup bisa ditutup hanya karena jam dinding.
 
     # --- Filter & jarak antar-trade ---
     # Spread maksimum (bid-ask) yang masih boleh dimasuki. Ini biaya NYATA

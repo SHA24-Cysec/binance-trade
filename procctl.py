@@ -169,7 +169,7 @@ class ProcessTreeHandle:
     """Windows Job Object untuk memastikan child tree ikut dihentikan.
 
     Di POSIX process group menangani fungsi yang sama. Jika assignment Job
-    Object gagal, atribut error berisi alasan dan caller tetap dapat memakai
+    Object gagal, field error berisi alasan dan caller tetap dapat memakai
     CTRL_BREAK lalu TerminateProcess pada PID utama.
     """
 

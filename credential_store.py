@@ -202,7 +202,7 @@ def permission_status(path: os.PathLike | str = ENV_PATH) -> dict:
             }
         except OSError as exc:
             return {"ok": False, "platform": "posix", "message": str(exc)}
-    # ACL Windows tidak disimpulkan hanya dari atribut file. Jalankan kembali
+    # ACL Windows tidak disimpulkan hanya dari metadata file. Jalankan kembali
     # verifikasi icacls supaya UI tidak menampilkan klaim yang stale.
     if os.name == "nt":  # pragma: no cover - Windows
         sid = _windows_current_sid()

@@ -25,10 +25,10 @@ def headers():
 
 def test_invalid_settings_never_create_confirmation(client):
     response = client.post("/api/settings/preview", json={
-        "mode": "PAPER", "values": {"ATR_SL_MIN_PCT": 9, "ATR_SL_MAX_PCT": 1}
+        "mode": "PAPER", "values": {"CONFIRM_LOOKBACK_BARS": 1}
     }, headers=headers())
     assert response.status_code == 400
-    assert "ATR_SL_MIN_PCT" in response.get_json()["fields"]
+    assert "CONFIRM_LOOKBACK_BARS" in response.get_json()["fields"]
     assert not dashboard._confirmations
 
 

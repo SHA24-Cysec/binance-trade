@@ -11,7 +11,7 @@ def test_schema_covers_every_final_config_key():
     # direproduksi tanpa membaca saldo LIVE. PUMP_MIN_24H_CHANGE_PCT dan
     # PUMP_VOLUME_SURGE_MULT ditambahkan bersama gerbang pump, sedangkan
     # MAX_HOLD_MINUTES dihapus total.
-    assert len(config.PUMP_CONFIG) == 92
+    assert len(config.PUMP_CONFIG) == 76
     assert set(ss.PARAMETER_SCHEMA) == set(config.PUMP_CONFIG)
 
 
@@ -25,11 +25,9 @@ def test_kunci_strategi_lama_benar_benar_hilang():
 
 
 def test_parameter_setup_baru_ada_di_schema():
-    baru = ("SWING_LOOKBACK_BARS", "SWING_PIVOT_WING_BARS", "BREAKOUT_BUFFER_ATR_MULT",
-            "RETEST_ZONE_ATR_MULT", "RETEST_VWAP_CONFLUENCE_ATR_MULT",
+    baru = ("SWING_LOOKBACK_BARS", "SWING_PIVOT_WING_BARS",
             "VWAP_MIN_BARS_AFTER_ANCHOR", "MAX_BARS_BREAKOUT_TO_RETEST",
-            "MAX_RETEST_TOUCHES", "INVALIDATION_ATR_MULT", "MAX_EXTENSION_ATR_MULT",
-            "MIN_CLOSE_POSITION_IN_RANGE", "SETUP_INVALIDATION_EXIT",
+            "MAX_RETEST_TOUCHES", "MIN_CLOSE_POSITION_IN_RANGE",
             "PUMP_MIN_24H_CHANGE_PCT", "PUMP_VOLUME_SURGE_MULT")
     for kunci in baru:
         assert kunci in ss.PARAMETER_SCHEMA, kunci
@@ -50,14 +48,6 @@ def test_override_lama_yang_memuat_kunci_terhapus_tidak_dianggap_rusak(tmp_path,
     assert data == {"RISK_PERCENT": 12.5}
     assert any("dihapus" in e for e in errors)
     assert not list(tmp_path.glob("settings-paper.json.corrupt-*"))
-
-
-def test_relasi_invalidasi_tidak_boleh_lebih_dangkal_dari_zona_retest():
-    kandidat = dict(config.PUMP_CONFIG)
-    kandidat["RETEST_ZONE_ATR_MULT"] = 1.5
-    kandidat["INVALIDATION_ATR_MULT"] = 0.5
-    _cleaned, errors, _warn = ss.validate_candidate(kandidat, "PAPER")
-    assert "INVALIDATION_ATR_MULT" in errors
 
 
 def test_relasi_lookback_minimum_mengikuti_struktur_setup():
@@ -103,25 +93,10 @@ def test_corrupt_override_is_archived_and_marked(tmp_path, monkeypatch):
     assert list(tmp_path.glob("settings-paper.json.corrupt-*"))
 
 
-def test_build_config_reports_tampered_invalid_override(tmp_path, monkeypatch):
-    path = tmp_path / "settings-paper.json"
-    path.write_text(json.dumps({"ATR_SL_MIN_PCT": 9, "ATR_SL_MAX_PCT": 1}), encoding="utf-8")
-    monkeypatch.setattr(ss, "settings_file", lambda mode: path)
-    monkeypatch.setattr(ss, "settings_error_file", lambda mode: tmp_path / "no-error.json")
-    _, errors = config.build_config_for_mode("PAPER")
-    assert any("ATR_SL_MIN_PCT" in item for item in errors)
-    # Editor masih dapat memuat nilai invalid agar pengguna bisa memperbaikinya.
-    _, structural_errors = config.build_config_for_mode("PAPER", validate=False)
-    assert structural_errors == []
-
-
 def test_relation_validation_and_live_position_cap():
     candidate = config.default_config_for_mode("LIVE")
-    candidate["ATR_SL_MIN_PCT"] = 8
-    candidate["ATR_SL_MAX_PCT"] = 2
     candidate["MAX_POSITION_USDT"] = 0
     _, errors, _ = ss.validate_candidate(candidate, "LIVE")
-    assert "ATR_SL_MIN_PCT" in errors
     assert "MAX_POSITION_USDT" in errors
 
 

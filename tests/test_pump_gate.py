@@ -271,7 +271,6 @@ def test_backtest_portofolio_memakai_gerbang_yang_sama():
 
     cfg = dict(CFG)
     cfg.update({"MIN_QUOTE_VOLUME_USDT_24H": 0, "COOLDOWN_MINUTES_AFTER_CLOSE": 0,
-                "SETUP_INVALIDATION_EXIT": False,
                 "PUMP_MIN_24H_CHANGE_PCT": -1000.0, "PUMP_VOLUME_SURGE_MULT": 0.0})
 
     longgar = pbt.run_portfolio_backtest(data, cfg, "5m", daily_klines=daily)

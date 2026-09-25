@@ -44,11 +44,11 @@ REMOVED_CONFIG_KEYS = {
     # kunci lamanya tetap dibuang dari file override supaya nilainya tidak
     # diam-diam dianggap masih berlaku.
     "MIN_PUMP_PCT_24H",
-    "MOMENTUM_FADE_EXIT",        # diganti SETUP_INVALIDATION_EXIT
+    "MOMENTUM_FADE_EXIT",
     "MOMENTUM_FADE_RANK_THRESHOLD",
+    "SETUP_INVALIDATION_EXIT",
     # Batas waktu hold. Dihapus total karena memaksa exit berdasarkan jam
-    # dinding, bukan harga atau struktur. Tidak ada penggantinya: posisi kini
-    # hanya ditutup oleh SL/TP/Breakeven/Trailing/SETUP_INVALIDATED.
+    # dinding, bukan harga atau struktur. Tidak ada penggantinya.
     "MAX_HOLD_MINUTES",
 }
 _WRITE_LOCK = threading.RLock()
@@ -118,21 +118,16 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "MIN_QUOTE_VOLUME_USDT_24H": _field("Scan", "Minimum volume kuotasi", "Volume 24 jam minimum.", "float", minimum=0, maximum=1e15, unit="USDT"),
     "TOP_N_CANDIDATES_TO_CONFIRM": _field("Scan", "Jumlah kandidat konfirmasi", "Berapa kandidat teratas yang diperiksa.", "int", minimum=1, maximum=1000),
     "CONFIRM_INTERVAL": _field("Scan", "Interval konfirmasi", "Interval candle konfirmasi setup.", "str", editor="select", options=["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"]),
-    "CONFIRM_LOOKBACK_BARS": _field("Scan", "Jumlah candle konfirmasi", "Jumlah candle tertutup untuk deteksi setup dan ATR. Limit endpoint klines 1000 per panggilan.", "int", minimum=3, maximum=1000, unit="candle"),
+    "CONFIRM_LOOKBACK_BARS": _field("Scan", "Jumlah candle konfirmasi", "Jumlah candle tertutup untuk deteksi setup. Limit endpoint klines 1000 per panggilan.", "int", minimum=3, maximum=1000, unit="candle"),
     "MIN_CLOSE_POSITION_IN_RANGE": _field("Scan", "Minimum posisi close", "Posisi close candle retest di dalam rentang high-low.", "float", minimum=0, maximum=1),
 
     # Parameter strategi pullback dan retest. Semua default di config.py masih
     # harus divalidasi lewat backtest repo ini.
     "SWING_LOOKBACK_BARS": _field("Setup Pullback", "Lookback swing high", "Berapa candle ke belakang dipindai untuk mencari level breakout.", "int", minimum=3, maximum=500, unit="candle"),
     "SWING_PIVOT_WING_BARS": _field("Setup Pullback", "Sayap pivot", "Candle di kiri dan kanan yang harus lebih rendah agar sebuah candle menjadi pivot high.", "int", minimum=1, maximum=50, unit="candle"),
-    "BREAKOUT_BUFFER_ATR_MULT": _field("Setup Pullback", "Buffer breakout", "Jarak di atas level yang wajib dilewati close agar dianggap breakout.", "float", minimum=0, maximum=10),
-    "RETEST_ZONE_ATR_MULT": _field("Setup Pullback", "Lebar zona retest", "Setengah lebar zona di atas dan di bawah level, dalam satuan ATR.", "float", minimum=0.01, maximum=10),
-    "RETEST_VWAP_CONFLUENCE_ATR_MULT": _field("Setup Pullback", "Konfluensi VWAP", "Jarak maksimum anchored VWAP terhadap level.", "float", minimum=0.01, maximum=20),
     "VWAP_MIN_BARS_AFTER_ANCHOR": _field("Setup Pullback", "Minimum candle setelah anchor", "Candle minimum setelah breakout sebelum anchored VWAP dipercaya.", "int", minimum=1, maximum=200, unit="candle"),
     "MAX_BARS_BREAKOUT_TO_RETEST": _field("Setup Pullback", "Umur maksimum setup", "Batas jarak candle dari breakout ke retest.", "int", minimum=1, maximum=500, unit="candle"),
     "MAX_RETEST_TOUCHES": _field("Setup Pullback", "Maksimum kunjungan zona", "Berapa kali harga boleh kembali ke zona sebelum setup dianggap lemah.", "int", minimum=1, maximum=20),
-    "INVALIDATION_ATR_MULT": _field("Setup Pullback", "Jarak invalidasi", "Jarak di bawah level yang membatalkan setup dan memicu exit SETUP_INVALIDATED.", "float", minimum=0.01, maximum=20),
-    "MAX_EXTENSION_ATR_MULT": _field("Setup Pullback", "Batas anti-kejar", "Jarak maksimum close di atas level agar entry masih diizinkan.", "float", minimum=0.01, maximum=20),
     # Gerbang pump: saringan semesta WAJIB yang dijalankan sebelum deteksi
     # setup. Didaftarkan di grup yang sama dengan parameter pullback retest
     # supaya muncul berdampingan di tab Setelan dashboard.
@@ -161,19 +156,9 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "BALANCE_BUFFER_PCT": _field("Ukuran Posisi", "Bantalan saldo", "Saldo yang tidak dibelanjakan untuk fee dan pergerakan harga.", "float", minimum=0, maximum=50, unit="%"),
 
     "USE_TP": _field("SL dan TP", "Aktifkan Take Profit", "Menutup posisi saat target tercapai.", "bool", dangerous=True),
-    "TP_PCT": _field("SL dan TP", "Take Profit", "Target profit tetap saat ATR tidak aktif.", "float", minimum=0.01, maximum=1000, unit="%"),
+    "TP_PCT": _field("SL dan TP", "Take Profit", "Target profit tetap.", "float", minimum=0.01, maximum=1000, unit="%"),
     "USE_STOP_LOSS": _field("SL dan TP", "Aktifkan Stop Loss", "Jaring pengaman kerugian per trade.", "bool", dangerous=True),
-    "SL_PCT": _field("SL dan TP", "Stop Loss", "Batas rugi tetap saat ATR tidak aktif.", "float", minimum=0.01, maximum=100, unit="%", dangerous=True),
-    "USE_ATR_EXITS": _field("ATR", "Gunakan exit ATR", "Skalakan level exit dengan volatilitas.", "bool"),
-    "ATR_PERIOD": _field("ATR", "Periode ATR", "Periode Wilder ATR.", "int", minimum=2, maximum=500, unit="candle"),
-    "ATR_MULTIPLIER_SL": _field("ATR", "Pengali ATR untuk SL", "Pengali ATR sebelum batas min dan max.", "float", minimum=0.01, maximum=100),
-    "ATR_SL_MIN_PCT": _field("ATR", "Batas bawah SL ATR", "Jarak SL ATR minimum.", "float", minimum=0.01, maximum=100, unit="%"),
-    "ATR_SL_MAX_PCT": _field("ATR", "Batas atas SL ATR", "Jarak SL ATR maksimum.", "float", minimum=0.01, maximum=100, unit="%", dangerous=True),
-    "ATR_TP_RR_RATIO": _field("ATR", "Rasio TP terhadap SL", "Target TP sebagai kelipatan SL.", "float", minimum=0.01, maximum=100),
-    "ATR_BE_TRIGGER_MULT": _field("ATR", "Pengali trigger BE", "Trigger breakeven dalam satuan ATR.", "float", minimum=0, maximum=100),
-    "ATR_BE_LOCK_MULT": _field("ATR", "Pengali kunci BE", "Profit yang dikunci dalam satuan ATR.", "float", minimum=0, maximum=100),
-    "ATR_TRAILING_START_MULT": _field("ATR", "Pengali mulai trailing", "Mulai trailing dalam satuan ATR.", "float", minimum=0, maximum=100),
-    "ATR_TRAILING_STEP_MULT": _field("ATR", "Pengali langkah trailing", "Jarak trailing dalam satuan ATR.", "float", minimum=0.01, maximum=100),
+    "SL_PCT": _field("SL dan TP", "Stop Loss", "Batas rugi tetap.", "float", minimum=0.01, maximum=100, unit="%", dangerous=True),
 
     "USE_BREAKEVEN": _field("Breakeven dan Trailing", "Aktifkan breakeven", "Mengunci posisi setelah profit minimum.", "bool"),
     "BE_TRIGGER_PCT": _field("Breakeven dan Trailing", "Trigger breakeven", "Profit untuk mengaktifkan breakeven tetap.", "float", minimum=0, maximum=1000, unit="%"),
@@ -181,7 +166,6 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "USE_TRAILING": _field("Breakeven dan Trailing", "Aktifkan trailing", "Mengikuti kenaikan harga dengan stop dinamis.", "bool"),
     "TRAILING_START_PCT": _field("Breakeven dan Trailing", "Mulai trailing", "Profit untuk mengaktifkan trailing tetap.", "float", minimum=0, maximum=1000, unit="%"),
     "TRAILING_STEP_PCT": _field("Breakeven dan Trailing", "Jarak trailing", "Jarak stop dari harga tertinggi.", "float", minimum=0.01, maximum=100, unit="%"),
-    "SETUP_INVALIDATION_EXIT": _field("Breakeven dan Trailing", "Exit saat setup batal", "Keluar saat candle tertutup menembus batas invalidasi yang dikunci saat entry.", "bool"),
 
     "MAX_SPREAD_PCT": _field("Fee dan Filter", "Spread maksimum", "Spread bid-ask maksimum untuk entry.", "float", minimum=0, maximum=100, unit="%", dangerous=True),
     "TAKER_FEE_PCT": _field("Fee dan Filter", "Fee taker", "Asumsi fee order market.", "float", minimum=0, maximum=10, unit="%"),
@@ -465,31 +449,14 @@ def validate_candidate(candidate: dict, mode: str) -> tuple[dict, dict[str, str]
             errors[key] = message
 
     if not errors:
-        relation("ATR_SL_MIN_PCT", cleaned["ATR_SL_MIN_PCT"] <= cleaned["ATR_SL_MAX_PCT"],
-                 "harus lebih kecil atau sama dengan batas atas ATR")
-        if cleaned["USE_ATR_EXITS"]:
-            relation("CONFIRM_LOOKBACK_BARS",
-                     cleaned["CONFIRM_LOOKBACK_BARS"] >= cleaned["ATR_PERIOD"] + 1,
-                     "harus minimal ATR_PERIOD + 1 saat ATR aktif")
         # Relasi jendela konfirmasi terhadap struktur setup. Dihitung lewat
-        # SATU fungsi bersama supaya angka minimum tidak pernah berbeda antara
+        # satu fungsi bersama supaya angka minimum tidak pernah berbeda antara
         # validasi, bot live, dan backtest.
         butuh_bars = _required_lookback_bars(cleaned)
         relation("CONFIRM_LOOKBACK_BARS",
                  cleaned["CONFIRM_LOOKBACK_BARS"] >= butuh_bars,
-                 f"harus minimal {butuh_bars} candle untuk ATR dan struktur setup "
+                 f"harus minimal {butuh_bars} candle untuk struktur setup "
                  "(SWING_LOOKBACK_BARS + 2 x SWING_PIVOT_WING_BARS + MAX_BARS_BREAKOUT_TO_RETEST)")
-        # Zona retest tidak boleh lebih dalam dari batas invalidasi. Kalau
-        # lebih dalam, candle yang baru menyentuh dasar zona sudah otomatis
-        # membatalkan setup, sehingga retest tidak akan pernah sah.
-        relation("INVALIDATION_ATR_MULT",
-                 cleaned["INVALIDATION_ATR_MULT"] >= cleaned["RETEST_ZONE_ATR_MULT"],
-                 "harus lebih besar atau sama dengan RETEST_ZONE_ATR_MULT")
-        # Batas anti-kejar harus di atas buffer breakout, kalau tidak setiap
-        # breakout yang sah langsung dianggap terlalu jauh.
-        relation("MAX_EXTENSION_ATR_MULT",
-                 cleaned["MAX_EXTENSION_ATR_MULT"] >= cleaned["BREAKOUT_BUFFER_ATR_MULT"],
-                 "harus lebih besar atau sama dengan BREAKOUT_BUFFER_ATR_MULT")
         # Gerbang pump. Ambang yang terlalu longgar membuat gerbang ini tidak
         # menyaring apa pun, ambang yang terlalu ketat membuat bot praktis
         # tidak pernah punya kandidat. Keduanya tetap diizinkan, tapi diberi
@@ -583,7 +550,6 @@ def dangerous_relaxations(old: dict, new: dict) -> list[str]:
         ("MAX_DRAWDOWN_PERCENT", "MAX_DRAWDOWN_PERCENT dinaikkan"),
         ("MAX_DAILY_LOSS_PERCENT", "MAX_DAILY_LOSS_PERCENT dinaikkan"),
         ("SL_PCT", "jarak Stop Loss diperlebar"),
-        ("ATR_SL_MAX_PCT", "batas atas Stop Loss ATR diperlebar"),
         ("MAX_SPREAD_PCT", "batas spread entry diperlebar"),
     ):
         if float(new.get(key, 0)) > float(old.get(key, 0)):
