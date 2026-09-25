@@ -120,8 +120,9 @@ asli. Slippage nyata, antrean order book, dan likuiditas riil bisa berbeda.
 ## Stop Loss & Take Profit: tetap atau berbasis ATR
 
 Sejak versi ini bot mendukung dua cara menentukan jarak exit, diatur lewat
-`USE_ATR_EXITS` di `config.py`. **Defaultnya `False`**, artinya perilaku lama
-(SL_PCT/TP_PCT tetap) tidak berubah sama sekali kalau Anda tidak menyentuhnya.
+`USE_ATR_EXITS` di `config.py`. **Defaultnya `True`**, artinya level exit
+dihitung dari ATR per simbol (dengan lantai dan plafon, lihat tabel ATR),
+kecuali ATR gagal dihitung yang otomatis jatuh ke SL/TP tetap.
 
 ### Cara kerja mode ATR
 
@@ -419,10 +420,11 @@ Dua cara menekannya:
    KEDUA syarat ini terpenuhi:
    - kenaikan harga 24 jam (`priceChangePercent` dari ticker yang sudah
      diambil di langkah 1, tanpa request tambahan) **>= `PUMP_MIN_24H_CHANGE_PCT`**
-     (default 10%); dan
+     (default 9,22%, hasil optimasi walk-forward); dan
    - volume sedang naik, yaitu `quoteVolume` 24 jam berjalan
      **>= `PUMP_VOLUME_SURGE_MULT` x rata-rata volume kuotasi 7 hari penuh
-     sebelumnya** (default 1,5x). Rata-rata dihitung dari candle `1d` yang
+     sebelumnya** (default 2,71x, hasil optimasi walk-forward). Rata-rata
+     dihitung dari candle `1d` yang
      sudah tertutup, dan candle harian itu **hanya diminta untuk simbol yang
      sudah lolos syarat kenaikan**, jadi beban rate limit tetap kecil
      (bobot IP 2 per simbol).
@@ -478,24 +480,25 @@ backtest portofolio, dan penyegar watchlist.
 
 | Parameter | Default | Arti |
 |---|---|---|
-| `SWING_LOOKBACK_BARS` | 12 | Berapa candle terakhir yang dicari swing high-nya |
-| `SWING_PIVOT_WING_BARS` | 2 | Jumlah candle di kiri dan kanan yang harus lebih rendah agar sebuah high disebut pivot. Sayap kanan wajib sudah tertutup, jadi tidak ada look-ahead |
-| `BREAKOUT_BUFFER_ATR_MULT` | 0.10 | Jarak minimum di atas level agar sebuah close dianggap breakout, dalam satuan ATR |
-| `VWAP_MIN_BARS_AFTER_ANCHOR` | 2 | Minimum candle setelah candle breakout sebelum anchored VWAP dianggap bermakna |
-| `RETEST_ZONE_ATR_MULT` | 0.5 | Setengah lebar zona retest di sekitar level, dalam satuan ATR |
-| `RETEST_VWAP_CONFLUENCE_ATR_MULT` | 1.0 | Jarak maksimum anchored VWAP dari level agar konfluensi dianggap ada |
-| `MIN_CLOSE_POSITION_IN_RANGE` | 0.35 | Posisi minimum close terhadap range candle retest, 0 berarti di dasar dan 1 di puncak |
-| `MAX_BARS_BREAKOUT_TO_RETEST` | 12 | Batas umur setup, dihitung dari candle breakout |
+| `SWING_LOOKBACK_BARS` | 23 | Berapa candle terakhir yang dicari swing high-nya |
+| `SWING_PIVOT_WING_BARS` | 4 | Jumlah candle di kiri dan kanan yang harus lebih rendah agar sebuah high disebut pivot. Sayap kanan wajib sudah tertutup, jadi tidak ada look-ahead |
+| `BREAKOUT_BUFFER_ATR_MULT` | 0.122 | Jarak minimum di atas level agar sebuah close dianggap breakout, dalam satuan ATR |
+| `VWAP_MIN_BARS_AFTER_ANCHOR` | 4 | Minimum candle setelah candle breakout sebelum anchored VWAP dianggap bermakna |
+| `RETEST_ZONE_ATR_MULT` | 0.827 | Setengah lebar zona retest di sekitar level, dalam satuan ATR |
+| `RETEST_VWAP_CONFLUENCE_ATR_MULT` | 1.623 | Jarak maksimum anchored VWAP dari level agar konfluensi dianggap ada |
+| `MIN_CLOSE_POSITION_IN_RANGE` | 0.273 | Posisi minimum close terhadap range candle retest, 0 berarti di dasar dan 1 di puncak |
+| `MAX_BARS_BREAKOUT_TO_RETEST` | 22 | Batas umur setup, dihitung dari candle breakout |
 | `MAX_RETEST_TOUCHES` | 1 | Berapa kali harga boleh mengunjungi zona sebelum setup dianggap lelah |
-| `INVALIDATION_ATR_MULT` | 1.0 | Jarak di bawah level yang membatalkan setup dan memicu exit `SETUP_INVALIDATED` |
-| `MAX_EXTENSION_ATR_MULT` | 1.5 | Anti-kejar: jarak maksimum close di atas level agar entry masih diizinkan |
+| `INVALIDATION_ATR_MULT` | 0.955 | Jarak di bawah level yang membatalkan setup dan memicu exit `SETUP_INVALIDATED` |
+| `MAX_EXTENSION_ATR_MULT` | 1.175 | Anti-kejar: jarak maksimum close di atas level agar entry masih diizinkan |
 | `SETUP_INVALIDATION_EXIT` | True | Aktifkan exit saat candle tertutup menembus batas invalidasi |
-| `CONFIRM_LOOKBACK_BARS` | 48 | Panjang jendela candle untuk satu keputusan entry |
-| `PUMP_MIN_24H_CHANGE_PCT` | 10.0 | Gerbang pump syarat 1: kenaikan harga 24 jam minimum (persen) agar sebuah simbol boleh menjadi kandidat. Koin yang turun 24 jam gugur di sini |
-| `PUMP_VOLUME_SURGE_MULT` | 1.5 | Gerbang pump syarat 2: volume kuotasi 24 jam berjalan minimal sekian kali rata-rata volume kuotasi 7 hari penuh sebelumnya (candle `1d` yang sudah tertutup) |
+| `CONFIRM_LOOKBACK_BARS` | 53 | Panjang jendela candle untuk satu keputusan entry |
+| `PUMP_MIN_24H_CHANGE_PCT` | 9.22 | Gerbang pump syarat 1: kenaikan harga 24 jam minimum (persen) agar sebuah simbol boleh menjadi kandidat. Koin yang turun 24 jam gugur di sini |
+| `PUMP_VOLUME_SURGE_MULT` | 2.71 | Gerbang pump syarat 2: volume kuotasi 24 jam berjalan minimal sekian kali rata-rata volume kuotasi 7 hari penuh sebelumnya (candle `1d` yang sudah tertutup) |
 
-Nilai default di atas adalah **titik awal yang belum tervalidasi**, bukan
-rekomendasi. Jalankan backtest sendiri sebelum memakainya.
+Nilai default di atas adalah hasil optimasi walk-forward pada commit
+`update optimasi` (2026-09-25) dan masih **titik awal yang harus divalidasi
+ulang lewat backtest Anda sendiri**, bukan rekomendasi mutlak.
 
 `strategy.required_lookback_bars(config)` menghitung jumlah candle minimum
 (`SWING_LOOKBACK_BARS + 2 x SWING_PIVOT_WING_BARS + MAX_BARS_BREAKOUT_TO_RETEST`,

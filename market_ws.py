@@ -33,7 +33,7 @@ import json
 import logging
 import threading
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 try:
     import websocket  # type: ignore  # dari paket websocket-client

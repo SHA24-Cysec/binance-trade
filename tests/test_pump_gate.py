@@ -86,17 +86,18 @@ def test_syarat_kenaikan_tidak_memakai_request_klines():
 # (b) Syarat 2: volume sedang naik
 # ======================================================================
 
-def test_volume_satu_koma_empat_kali_ditolak():
+def test_volume_dua_koma_lima_kali_ditolak():
+    """Rasio di bawah PUMP_VOLUME_SURGE_MULT default (2.7149...) ditolak."""
     ok, alasan = scanner.is_pumping_today(
-        "AUSDT", 20.0, 1_400_000.0, lambda s: harian(1_000_000.0), CFG,
+        "AUSDT", 20.0, 2_500_000.0, lambda s: harian(1_000_000.0), CFG,
         reference_ms=REF_MS)
     assert not ok
-    assert "1.40x" in alasan
+    assert "2.50x" in alasan
 
 
-def test_volume_satu_koma_lima_kali_lolos():
+def test_volume_tiga_kali_lolos():
     ok, alasan = scanner.is_pumping_today(
-        "AUSDT", 20.0, 1_500_000.0, lambda s: harian(1_000_000.0), CFG,
+        "AUSDT", 20.0, 3_000_000.0, lambda s: harian(1_000_000.0), CFG,
         reference_ms=REF_MS)
     assert ok, alasan
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import backtest
 import config as cfg_mod
 import market_scanner as scanner
+import pytest
 import strategy
 from strategy import Kline
 from synthetic_data import (
@@ -33,13 +34,6 @@ CFG.update({
     "INVALIDATION_ATR_MULT": 1.0,
     "MAX_EXTENSION_ATR_MULT": 1.5,
 })
-
-# Berkas ini menguji deteksi setup dan jalur exit, BUKAN gerbang pump.
-# Gerbang pump tetap berjalan di run_backtest (tidak ada jalan belakang di
-# kode produksi), jadi setiap pemanggilan backtest di sini memakai ambang yang
-# dilonggarkan lewat cfg_gerbang_pump_nonaktif() dan menyediakan riwayat
-# harian sintetis lewat riwayat_harian(). Gerbang pump diuji sungguhan di
-# tests/test_pump_gate.py.
 
 # Berkas ini menguji deteksi setup dan jalur exit, BUKAN gerbang pump.
 # Gerbang pump tetap berjalan di run_backtest (tidak ada jalan belakang di
@@ -377,3 +371,46 @@ def test_alasan_exit_max_hold_time_tidak_ada_lagi_di_kode():
         src = inspect.getsource(mod)
         assert "MAX_HOLD_TIME" not in src, mod.__name__
         assert "MAX_HOLD_MINUTES" not in src, mod.__name__
+
+
+# ======================================================================
+# Regresi audit B-06: fill exit gap-aware di kedua mesin backtest
+# ======================================================================
+
+def test_backtest_sl_tertembus_gap_diisi_pada_open():
+    """Candle yang DIBUKA sudah di bawah level SL -> exit pada harga open
+    (pasca-gap), bukan pada level SL. Konsisten dengan paper_engine yang
+    mengisi stop pada harga book pasca-gap (regresi B-06)."""
+    import portfolio_backtest as pbt
+
+    kl = seri_dengan_setup(ekor="bertahan", panjang_ekor=0)
+    entry = kl[-1].close
+    idx = len(kl)
+    # Satu candle gap: langsung membuka 5% di bawah entry (SL 3% tertembus).
+    kl.append(make_candle(idx, entry * 0.95, entry * 0.951, entry * 0.949,
+                          entry * 0.95, volume=5_000_000.0))
+
+    cfg = cfg_gerbang_pump_nonaktif(dict(CFG))
+    cfg.update({
+        "MIN_QUOTE_VOLUME_USDT_24H": 1_000_000,
+        "USE_ATR_EXITS": False, "USE_STOP_LOSS": True, "SL_PCT": 3.0,
+        "USE_TP": False, "USE_BREAKEVEN": False, "USE_TRAILING": False,
+        "SETUP_INVALIDATION_EXIT": False, "_symbol": "AUSDT",
+    })
+    daily = riwayat_harian(kl, quote_volume_harian=1_000.0)
+
+    hasil = backtest.run_backtest(kl, cfg, warmup_bars=0, daily_klines=daily)
+    assert len(hasil.trades) == 1
+    t = hasil.trades[0]
+    assert t.reason == "STOP_LOSS"
+    # Exit di harga open pasca-gap (-5%), BUKAN di level SL (-3%).
+    assert t.exit_price == pytest.approx(entry * 0.95)
+    assert t.gross_pnl_pct == pytest.approx(-5.0)
+
+    # Mesin portofolio harus perilakunya identik.
+    res_p = pbt.run_portfolio_backtest({"AUSDT": kl}, cfg, "5m", daily_klines={"AUSDT": daily})
+    assert len(res_p.trades) == 1
+    tp = res_p.trades[0]
+    assert tp.reason == "STOP_LOSS"
+    assert tp.exit_price == pytest.approx(entry * 0.95)
+    assert tp.gross_pnl_pct == pytest.approx(-5.0)

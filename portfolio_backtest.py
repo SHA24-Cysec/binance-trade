@@ -482,18 +482,21 @@ def run_portfolio_backtest(
             # Urutan prioritas SENGAJA konservatif dan identik dengan
             # backtest.py: risiko dianggap terealisasi lebih dulu kalau
             # dalam satu candle harga menyentuh SL maupun TP.
+            # Fill gap-aware (perbaikan audit B-06): candle yang DIBUKA sudah
+            # menembus level diisi pada harga pembukaan, sama seperti
+            # paper_engine mengisi stop pada harga book pasca-gap.
             if config["USE_STOP_LOSS"] and pnl_low <= -cur["sl"]:
                 exit_reason = "STOP_LOSS"
-                exit_price = sl_price
+                exit_price = min(sl_price, candle.open)
             elif config["USE_TP"] and pnl_high >= cur["tp"]:
                 exit_reason = "TAKE_PROFIT"
-                exit_price = entry_price * (1 + cur["tp"] / 100.0)
+                exit_price = max(entry_price * (1 + cur["tp"] / 100.0), candle.open)
             elif be_active and candle.low <= be_stop:
                 exit_reason = "BREAKEVEN"
-                exit_price = be_stop
+                exit_price = min(be_stop, candle.open)
             elif trailing_active and candle.low <= trailing_stop:
                 exit_reason = "TRAILING_STOP"
-                exit_price = trailing_stop
+                exit_price = min(trailing_stop, candle.open)
             elif (setup_exit_on and cur.get("invalidation", 0.0) > 0
                     and candle.close < cur["invalidation"]):
                 # SETUP_INVALIDATED memakai level yang DIKUNCI saat entry,
@@ -613,9 +616,8 @@ def run_portfolio_backtest(
             "be_trig": lv["be_trigger_pct"], "be_lock": lv["be_lock_pct"],
             "tr_start": lv["trail_start_pct"], "tr_step": lv["trail_step_pct"],
             "atr": lv["atr_pct"] or 0.0, "src": lv["source"],
-            # Level setup dikunci dari deteksi yang MEMICU entry ini, sama
-            # seperti open_position() di bot live.
-            "level": float(setup_terpilih.breakout_level or 0.0),
+            # Level invalidasi dikunci dari deteksi yang MEMICU entry ini,
+            # sama seperti open_position() di bot live.
             "invalidation": float(setup_terpilih.invalidation_price or 0.0),
         }
 
@@ -796,7 +798,6 @@ def selftest() -> bool:
 
     up_a = seri_banyak_setup(harga=100.0, siklus=10, volume=9_000_000.0)
     up_b = seri_banyak_setup(harga=200.0, siklus=10, volume=5_000_000.0)
-    bars = len(up_a)
 
     res = run_portfolio_backtest({"AUSDT": up_a, "BUSDT": up_b}, cfg, "5m",
                                  daily_klines=_harian({"AUSDT": up_a, "BUSDT": up_b}))

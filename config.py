@@ -289,35 +289,6 @@ PUMP_CONFIG = {
     # ulang untuk titik waktu historis mana pun di backtest.
     "PUMP_VOLUME_SURGE_MULT": 2.7149324753412643,
 
-    # ------------------------------------------------------------------
-    # GERBANG PUMP (saringan semesta, WAJIB, bukan sekadar prioritas urutan)
-    # ------------------------------------------------------------------
-    # Sebuah simbol hanya boleh masuk semesta kandidat kalau KEDUA syarat di
-    # bawah terpenuhi. Pemeriksaan terjadi SEBELUM deteksi pullback retest,
-    # jadi struktur setup hanya dicari pada koin yang memang sedang bergerak.
-    #
-    # Kenapa gerbang ini dihidupkan kembali: tanpa syarat kenaikan, semesta
-    # kandidat didominasi pair besar yang sedang sideways atau turun. Setup
-    # pullback retest pada koin yang tren harian dan volumenya tidak mendukung
-    # lebih sering berakhir sebagai retest yang gagal.
-    #
-    # Sumber data syarat 1 dan 2 (bagian volume 24 jam berjalan) adalah
-    # respons GET /api/v3/ticker/24hr yang SUDAH diambil sekali untuk seluruh
-    # pasar tiap siklus scan, jadi keduanya tidak menambah request.
-    #
-    # Minimal kenaikan harga 24 jam, dalam persen, dari field
-    # priceChangePercent. Koin yang turun 24 jam otomatis gugur.
-    "PUMP_MIN_24H_CHANGE_PCT": 10.0,
-    # Volume dianggap "sedang naik" bila quoteVolume 24 jam berjalan minimal
-    # sekian kali rata-rata volume kuotasi 7 hari PENUH sebelumnya (candle 1d
-    # yang sudah tertutup). Candle harian diminta HANYA untuk simbol yang
-    # sudah lolos syarat kenaikan, yaitu subset kecil, sehingga bobot IP
-    # tambahannya kecil (2 per simbol). Perbandingan terhadap rata-rata 7 hari
-    # dipilih daripada menyimpan riwayat volume di file JSON baru, supaya
-    # tidak ada masalah cold start dan supaya angka yang sama bisa dihitung
-    # ulang untuk titik waktu historis mana pun di backtest.
-    "PUMP_VOLUME_SURGE_MULT": 1.5,
-
     "EXTRA_EXCLUDE_SYMBOLS": [],             # mis. ["SOMEUSDT"] kalau mau blacklist manual
 
     # --- Filter usia listing (proteksi koin baru) ---
@@ -527,8 +498,8 @@ PUMP_CONFIG = {
 
     # --- Stop Loss & Take Profit adaptif berbasis ATR (opsional) ---
     #
-    # Kalau USE_ATR_EXITS = False (default), bot memakai SL_PCT/TP_PCT tetap
-    # persis seperti sebelumnya -- tidak ada perubahan perilaku sama sekali.
+    # Kalau USE_ATR_EXITS = False, bot memakai SL_PCT/TP_PCT tetap persis
+    # seperti sebelumnya. (Default config ini True.)
     #
     # Kalau True, jarak SL dihitung dari volatilitas koin yang sedang dipegang:
     #     SL% = batasi(ATR_MULTIPLIER_SL x ATR%, antara ATR_SL_MIN_PCT dan ATR_SL_MAX_PCT)
@@ -558,7 +529,7 @@ PUMP_CONFIG = {
     # begitu saja -- bandingkan dulu lewat backtest.py pada koin yang
     # benar-benar lolos filter Anda:
     #     python backtest.py --compare-atr --symbol <KOIN>USDT --days 30
-    "USE_ATR_EXITS": True,                  # default False = perilaku lama (SL/TP tetap) tidak berubah
+    "USE_ATR_EXITS": True,                  # default True = exit diskalakan ATR (fallback SL/TP tetap bila ATR gagal)
     "ATR_PERIOD": 14,                        # standar Wilder; dihitung pada CONFIRM_INTERVAL (default 5m)
     "ATR_MULTIPLIER_SL": 2.0,                # 2.0x = nilai yang paling sering optimal di literatur
     "ATR_SL_MIN_PCT": 1.2,                   # lantai: jangan pernah pasang stop lebih sempit dari ini
@@ -802,10 +773,6 @@ def require_valid_mode(config: dict = None) -> str:
 
 def is_paper(config: dict = None) -> bool:
     return get_mode(config) == "PAPER"
-
-
-def is_live(config: dict = None) -> bool:
-    return get_mode(config) == "LIVE"
 
 
 def backtest_enabled(config: dict = None) -> bool:

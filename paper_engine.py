@@ -44,7 +44,7 @@ from __future__ import annotations
 import logging
 import time
 from decimal import Decimal, ROUND_DOWN
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 from binance_client import BinanceAPIError, SymbolFilters
 from paper_store import PaperStore, _d
@@ -57,7 +57,6 @@ _ZERO = Decimal("0")
 ERR_INVALID_QTY = (-1013, "Filter failure: LOT_SIZE")
 ERR_MIN_NOTIONAL = (-1013, "Filter failure: NOTIONAL")
 ERR_PRICE_FILTER = (-1013, "Filter failure: PRICE_FILTER")
-ERR_PRECISION = (-1111, "Precision is over the maximum defined for this asset.")
 ERR_INSUFFICIENT = (-2010, "Account has insufficient balance for requested action.")
 ERR_DUPLICATE = (-2010, "Duplicate order sent.")
 ERR_BAD_PARAM = (-1102, "Mandatory parameter was not sent, was empty/null, or malformed.")
@@ -482,12 +481,12 @@ class PaperMatchingEngine:
             return
         # Lepas dana terkunci untuk bagian yang terisi, lalu terapkan fills.
         if side == "BUY":
-            self.store.consume_locked(quote, spent)
+            self._consume_locked_tracked(order, quote, spent)
             # fee dari base; kredit base bersih.
             self._credit_base_after_fee(base, fills, maker=True, order=order,
                                         quote=quote, spent=spent)
         else:
-            self.store.consume_locked(base, filled)
+            self._consume_locked_tracked(order, base, filled)
             self._credit_quote_after_fee(quote, fills, maker=True, order=order,
                                          base=base)
         # Perbarui akumulasi eksekusi.
@@ -631,10 +630,10 @@ class PaperMatchingEngine:
         if filled <= 0:
             return
         if side == "SELL":
-            self.store.consume_locked(base, filled)
+            self._consume_locked_tracked(order, base, filled)
             self._credit_quote_after_fee(quote, fills, maker=False, order=order, base=base)
         else:
-            self.store.consume_locked(quote, spent)
+            self._consume_locked_tracked(order, quote, spent)
             self._credit_base_after_fee(base, fills, maker=False, order=order,
                                         quote=quote, spent=spent)
         new_exec = _d(order["executedQty"]) + filled
@@ -660,18 +659,41 @@ class PaperMatchingEngine:
             order.pop(k, None)
         self.store.archive_order(order)
 
+    def _consume_locked_tracked(self, order: dict, asset: str, amount: Decimal) -> None:
+        """consume_locked + perbarui _lockedRemaining order.
+
+        Tanpa pembaruan ini, _lockedRemaining berhenti cocok dengan sisa kunci
+        nyata di store begitu order terisi sebagian, dan
+        _release_leftover_lock() melepas jumlah yang salah (temuan audit B-05).
+        """
+        self.store.consume_locked(asset, amount)
+        prev = _d(order.get("_lockedRemaining", "0"))
+        order["_lockedRemaining"] = str(prev - amount) if prev > amount else str(_ZERO)
+
     def _release_leftover_lock(self, order: dict) -> None:
         asset = order.get("_lockedAsset")
         if not asset:
             return
-        side = order["side"]
-        remaining_qty = _d(order["origQty"]) - _d(order["executedQty"])
-        if remaining_qty <= 0:
-            return
-        if side == "BUY":
-            leftover = remaining_qty * _d(order["price"]) if _d(order["price"]) > 0 else _ZERO
+        raw = order.get("_lockedRemaining")
+        if raw is not None:
+            # Sisa kunci PERSIS seperti yang tercatat saat penempatan dikurangi
+            # setiap bagian yang sudah terisi. Ini menangani semua bentuk order:
+            # LIMIT BUY (kunci qty x limitPrice), STOP BUY market (kunci
+            # qty x stopPrice dengan price="0"), dan SELL (kunci qty base).
+            leftover = _d(raw)
         else:
-            leftover = remaining_qty
+            # Kompatibilitas order lama tanpa _lockedRemaining: hitung ulang
+            # dari sisa kuantitas (perilaku lama, tidak akurat untuk stop BUY).
+            side = order["side"]
+            remaining_qty = _d(order["origQty"]) - _d(order["executedQty"])
+            if remaining_qty <= 0:
+                return
+            if side == "BUY":
+                leftover = remaining_qty * _d(order["price"]) if _d(order["price"]) > 0 else _ZERO
+            else:
+                leftover = remaining_qty
+        # unlock_funds sudah meng-clamp ke total locked aset, jadi rilis tidak
+        # pernah melampaui saldo yang memang sedang terkunci.
         if leftover > 0:
             self.store.unlock_funds(asset, leftover)
 

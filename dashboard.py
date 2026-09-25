@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import logging
 import os
 import re
 import secrets
@@ -45,12 +46,12 @@ import state as state_mod
 import strategy
 from atomic_io import replace_with_retry, timestamp_tag
 from credential_store import (
-    ENV_PATH, credential_status, read_credentials, update_env,
+    ENV_PATH, credential_status, update_env,
 )
 from runtime_control import BotControlError, BotProcessManager
 from settings_schema import (
     PARAMETER_SCHEMA, audit_change, compute_overrides, dangerous_relaxations,
-    diff_values, load_mode_override, public_schema, read_audit,
+    diff_values, public_schema, read_audit,
     save_mode_override, save_runtime_mode, validate_balances,
     validate_candidate,
 )
@@ -60,6 +61,11 @@ try:
     _HAS_CLIENT = True
 except Exception:  # pragma: no cover - kalau requests tidak ada, tetap jalan tanpa live
     _HAS_CLIENT = False
+
+# Logger modul. Dipakai antara lain oleh handler kegagalan metadata backtest
+# portofolio; tanpa ini cabang except malah melempar NameError (temuan audit
+# B-04) dan membatalkan job yang seharusnya tetap berjalan.
+logger = logging.getLogger(__name__)
 
 
 class _PaperDashboardClient:
@@ -841,6 +847,9 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "ticker/24hr historis (Binance tidak menyediakannya). Nilainya sangat dekat "
                 "tetapi tidak identik dengan yang dilihat bot saat itu. Volume itulah yang "
                 "menentukan simbol mana yang masuk top-N kandidat per bar.",
+                "Fill exit memperhitungkan gap: candle yang DIBUKA sudah menembus level "
+                "SL/TP/BE/Trailing diisi pada harga pembukaan candle itu, konsisten dengan "
+                "simulasi PAPER, bukan pada harga levelnya.",
                 "Exit dievaluasi per-candle " + interval + " (bukan tiap "
                 + str(PUMP_CONFIG.get("LOOP_INTERVAL_SECONDS", 15)) + " detik seperti bot asli), "
                 "dengan urutan prioritas konservatif: STOP_LOSS -> TAKE_PROFIT -> BREAKEVEN -> "

@@ -19,7 +19,7 @@ Versi acuan: Python 3.10+.
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Optional
 
 from binance_client import SymbolFilters, build_filters_cache, SignedEndpointBlockedError
 from exchange_client import ExchangeClient

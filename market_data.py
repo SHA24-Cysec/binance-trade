@@ -195,18 +195,6 @@ class MarketDataProvider:
             self._depth_cache[key] = (depth, time.monotonic())
         return depth
 
-    def market_data_age_ok(self, symbol: str) -> bool:
-        """True bila ADA sumber harga yang cukup segar untuk simbol ini.
-        Dipakai PaperClient sebelum mengisi order agar tidak jalan di atas
-        data basi. REST dianggap selalu 'segar saat diambil'."""
-        if not self._use_ws:
-            return True  # REST diambil on-demand, selalu segar saat dipanggil
-        ws = self._ws
-        if ws is None:
-            return True
-        _, age = ws.get_price(symbol)
-        return age <= self._max_age or True  # REST fallback selalu tersedia
-
 
 # ==== RINGKASAN AUDIT (market_data.py) =================================
 # Sintaks/tipe: type hints lengkap; import market_ws lazy (di dalam _ensure_ws)

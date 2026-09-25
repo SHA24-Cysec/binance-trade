@@ -55,7 +55,8 @@ from binance_client import (
 )
 from exchange_client import ExchangeClient, create_exchange_client
 from config import (
-    PUMP_CONFIG, CONFIG_LOAD_ERRORS, get_base_url, is_paper, require_valid_mode,
+    PUMP_CONFIG, CONFIG_LOAD_ERRORS, get_base_url, get_control_file, is_paper,
+    require_valid_mode,
 )
 import market_scanner as scanner
 import state as state_mod
@@ -1045,7 +1046,6 @@ def manage_exit(client: ExchangeClient, config: dict, filters_cache: dict,
         return
 
     pnl_pct = (current_price / state["entry_price"] - 1.0) * 100.0
-    hold_minutes = (state_mod.now_ms() - state["entry_time"]) / 60000.0
 
     # Ambil level yang dikunci saat entry. Fallback ke config dipakai untuk
     # posisi lama yang dibuka sebelum fitur ini ada (state file versi lama),
@@ -1466,10 +1466,12 @@ def selftest() -> None:
                                volume=quote_volume_harian, quote_volume=quote_volume_harian)
                 for i in range(7)]
 
-    # Rata-rata harian per simbol dibuat supaya rasio volumenya jelas:
-    #   AUSDT  5.000.000 / 2.000.000 = 2,50x  -> lolos
-    #   BUSDT  3.000.000 / 1.000.000 = 3,00x  -> lolos
-    #   EUSDT  4.000.000 / 4.000.000 = 1,00x  -> GAGAL syarat volume
+    # Rata-rata harian per simbol dibuat supaya rasio volumenya jelas
+    # terhadap PUMP_VOLUME_SURGE_MULT produksi (2.7149...) dan ambang
+    # likuiditas MIN_QUOTE_VOLUME_USDT_24H produksi (3.099.455):
+    #   AUSDT  6.000.000 / 2.000.000 = 3.00x  -> lolos
+    #   BUSDT  4.000.000 / 1.000.000 = 4.00x  -> lolos
+    #   EUSDT  4.000.000 / 4.000.000 = 1.00x  -> GAGAL syarat volume
     #   FUSDT  belum punya 7 candle harian     -> GAGAL (koin baru listing)
     RATA_HARIAN = {
         "AUSDT": 2_000_000.0, "BUSDT": 1_000_000.0, "CUSDT": 1_000_000.0,
@@ -1487,8 +1489,8 @@ def selftest() -> None:
     ref_ms = 7 * HARI_MS + 1           # semua candle harian di atas sudah tertutup
 
     tickers = [
-        {"symbol": "AUSDT", "priceChangePercent": "15.0", "quoteVolume": "5000000", "lastPrice": "1.0"},
-        {"symbol": "BUSDT", "priceChangePercent": "25.0", "quoteVolume": "3000000", "lastPrice": "2.0"},
+        {"symbol": "AUSDT", "priceChangePercent": "15.0", "quoteVolume": "6000000", "lastPrice": "1.0"},
+        {"symbol": "BUSDT", "priceChangePercent": "25.0", "quoteVolume": "4000000", "lastPrice": "2.0"},
         {"symbol": "CUSDT", "priceChangePercent": "-3.0", "quoteVolume": "9000000", "lastPrice": "0.5"},   # gagal: turun 24 jam
         {"symbol": "DUSDT", "priceChangePercent": "40.0", "quoteVolume": "10000", "lastPrice": "0.1"},     # gagal: volume kurang
         {"symbol": "EUSDT", "priceChangePercent": "20.0", "quoteVolume": "4000000", "lastPrice": "1.0"},   # gagal: volume tidak naik
@@ -2208,10 +2210,11 @@ def selftest() -> None:
     age2 = listing_age_days(cl_age, "BARUUSDT", NOW10)
     assert abs(age2 - 2.0) < 1e-9, f"usia harus 2 hari, dapat {age2}"
     age2b = listing_age_days(cl_age, "BARUUSDT", NOW10)
+    assert age2b == age2, "Hasil cache harus sama dengan hasil panggilan pertama"
     assert cl_age.calls == 1, "Hasil kedua harus dari cache, bukan panggilan API baru"
     assert listing_age_days(AgeClient(None), "KOSONGUSDT", NOW10) == 0.0, \
         "Tanpa riwayat -> usia 0 (akan ditolak ambang minimum)"
-    print(f"  Usia 10 hari / 2 hari dihitung benar, cache hemat API, tanpa riwayat -> 0 -> OK")
+    print("  Usia 10 hari / 2 hari dihitung benar, cache hemat API, tanpa riwayat -> 0 -> OK")
 
     print("\nSEMUA SELFTEST LULUS.")
     print("(Selftest ini TIDAK menghubungi Binance sama sekali -- murni logika lokal.)")

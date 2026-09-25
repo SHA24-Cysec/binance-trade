@@ -74,7 +74,6 @@ WEIGHT_BOOK_ALL = 4
 WEIGHT_KLINES = 2
 DEFAULT_WEIGHT_LIMIT = 6000
 
-BARS_PER_DAY_5M = 288
 KLINE_PAGE = 1000
 
 
@@ -204,7 +203,6 @@ def score_symbol(sym: str, kl: list, meta: dict, config: dict) -> Optional[dict]
     if len(kl) < bars_per_day + need + 10:
         return None
 
-    closes = [k.close for k in kl]
     qv = [k.quote_volume for k in kl]
     n = len(kl)
 
@@ -228,9 +226,10 @@ def score_symbol(sym: str, kl: list, meta: dict, config: dict) -> Optional[dict]
     for j in range(bars_per_day + need, n):
         vol24 = pre[j + 1] - pre[j + 1 - bars_per_day]
         roll_vols.append(vol24)
-        # Kenaikan 24 jam TIDAK lagi menjadi gerbang sejak strategi pindah ke
-        # pullback retest. Yang tersisa hanyalah gerbang likuiditas, sama
-        # dengan semesta kandidat bot live.
+        # Skor watchlist sengaja HANYA memakai gerbang likuiditas supaya
+        # hasilnya menjadi superset kandidat: gerbang pump lengkap (kenaikan
+        # 24 jam + lonjakan volume) tetap dievaluasi scanner bot live
+        # terhadap data paling mutakhir saat pemindaian riil, bukan di sini.
         if vol24 < min_vol:
             continue
         gate_bars += 1

@@ -26,12 +26,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Optional
-
-# Diekspor ulang di sini supaya modul lain bisa `from exchange_client import
-# SignedEndpointBlockedError` tanpa perlu tahu ia sebenarnya didefinisikan di
-# lapisan REST tingkat rendah.
-from binance_client import BinanceAPIError, SignedEndpointBlockedError  # noqa: F401
+from typing import Optional
 
 logger = logging.getLogger("exchange_client")
 

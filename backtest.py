@@ -283,7 +283,6 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
     cur_src = "FIXED"
     # Level setup yang DIKUNCI saat entry, meniru state posisi bot live.
     cur_invalidation = 0.0
-    cur_level = 0.0
 
     i = max(warmup_bars, window - 1, lookback, atr_need - 1)
     start_idx = i
@@ -345,7 +344,6 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
                     # Level invalidasi dikunci dari setup yang MEMICU entry
                     # ini, persis seperti open_position() di bot live. Tidak
                     # pernah dihitung ulang dari candle setelah entry.
-                    cur_level = float(setup.breakout_level or 0.0)
                     cur_invalidation = float(setup.invalidation_price or 0.0)
             i += 1
             continue
@@ -382,18 +380,24 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
         # menambahkan fitur ini. Baru setelah itu TAKE_PROFIT (harga
         # TERTINGGI candle), lalu BREAKEVEN/TRAILING_STOP (harga TERENDAH),
         # baru SETUP_INVALIDATED.
+        #
+        # Fill GAP-AWARE (perbaikan audit B-06): kalau candle DIBUKA sudah
+        # menembus level (gap), harga exit realistis adalah harga pembukaan,
+        # bukan level stopnya -- konsisten dengan paper_engine yang mengisi
+        # stop pada harga book pasca-gap. Tanpa ini backtest terlalu optimis
+        # pada pair yang sering gap.
         if config["USE_STOP_LOSS"] and pnl_low <= -cur_sl:
             exit_reason = "STOP_LOSS"
-            exit_price = sl_price
+            exit_price = min(sl_price, candle.open)
         elif config["USE_TP"] and pnl_high >= cur_tp:
             exit_reason = "TAKE_PROFIT"
-            exit_price = entry_price * (1 + cur_tp / 100.0)
+            exit_price = max(entry_price * (1 + cur_tp / 100.0), candle.open)
         elif be_active and candle.low <= be_stop:
             exit_reason = "BREAKEVEN"
-            exit_price = be_stop
+            exit_price = min(be_stop, candle.open)
         elif trailing_active and candle.low <= trailing_stop:
             exit_reason = "TRAILING_STOP"
-            exit_price = trailing_stop
+            exit_price = min(trailing_stop, candle.open)
         elif setup_exit_on and cur_invalidation > 0 and candle.close < cur_invalidation:
             # SETUP_INVALIDATED diperiksa PALING AKHIR, sesuai urutan di bot
             # live (manage_exit lebih dulu, baru check_setup_invalidation).
@@ -770,13 +774,18 @@ def selftest():
     # setelah profit). Exit invalidasi setup sengaja dimatikan di sini supaya
     # yang diuji benar-benar jalur Stop Loss.
     sl_klines = seri_dengan_setup(ekor="bertahan", panjang_ekor=0)
-    t2 = sl_klines[-1].close_time + 1
     entry_ref_price = sl_klines[-1].close
     t2 = sl_klines[-1].close_time + 1
     p2 = entry_ref_price
+    # Candle penurunan dibuat GAP-FREE (open = close candle sebelumnya) supaya
+    # harga exit SL memang jatuh tepat di level SL. Sejak fill gap-aware
+    # (audit B-06), candle yang membuka di bawah level akan diisi pada open,
+    # sehingga skenario yang sengaja menguji "exit tepat di level" tidak boleh
+    # mengandung gap antar-candle.
     for _ in range(5):
+        prev = p2
         p2 = p2 * 0.98  # turun bertahap, total lebih dari 3% dalam beberapa candle
-        sl_klines.append(_make_candle(t2, p2 * 1.001, p2 * 1.002, p2 * 0.998, p2, vol=5_000_000.0))
+        sl_klines.append(_make_candle(t2, prev, prev, p2 * 0.998, p2, vol=5_000_000.0))
         t2 += 300_000
 
     sl_cfg = dict(cfg)
@@ -947,7 +956,7 @@ def selftest():
     price = 100.0
     synth = []
     t = 0
-    while len(synth) < 4000:
+    while len(synth) < 16000:
         vol = _random.uniform(0.002, 0.02)      # volatilitas siklus ini
         up_bars = _random.randint(30, 60)
         down_bars = _random.randint(20, 40)
@@ -966,7 +975,11 @@ def selftest():
 
     cfg_la = dict(base_atr_cfg)
     cfg_la.update({"MIN_QUOTE_VOLUME_USDT_24H": 0.0, "COOLDOWN_MINUTES_AFTER_CLOSE": 0})
-    short_run = run_backtest(synth[:2500], cfg_la, warmup_bars=bars_per_day("5m"),
+    # Parameter struktur produksi (SWING 23, WING 4, MAX_BARS 22, VWAP_MIN 4)
+    # jauh lebih selektif daripada versi lama, sehingga kepadatan trade pada
+    # data acak ini rendah. Data diperpanjang dan jendela pendek diperbesar
+    # supaya uji look-ahead tetap punya >= 10 trade pembanding.
+    short_run = run_backtest(synth[:8000], cfg_la, warmup_bars=bars_per_day("5m"),
                               daily_klines=riwayat_harian(synth))
     long_run = run_backtest(synth, cfg_la, warmup_bars=bars_per_day("5m"),
                              daily_klines=riwayat_harian(synth))
@@ -1178,11 +1191,11 @@ def main():
           f"({args.days} hari + warmup 1 hari)...")
     # Sumber data backtest SELALU endpoint publik produksi (perbaikan audit
     # 2026-09-24, temuan S-04), BUKAN ikut MODE aktif. Backtest wajib memakai
-    # adalah data sintetis; jawaban resmi Binance Developer Community
     # data historis PRODUKSI publik agar kalibrasi parameter relevan untuk
-    # LIVE. Data dari sumber non-produksi tidak bisa
-    # dipakai mengkalibrasi parameter untuk LIVE. Endpoint market data
-    # bersifat publik, jadi tidak butuh API key.
+    # LIVE. Data dari sumber non-produksi, misalnya sandbox Binance yang
+    # berisi data sintetis (jawaban resmi Binance Developer Community),
+    # tidak bisa dipakai mengkalibrasi parameter untuk LIVE. Endpoint market
+    # data bersifat publik, jadi tidak butuh API key.
     client = BinanceSpotClient("", "", cfg["LIVE_BASE_URL"], allow_signed=False)
     end_ms = int(time.time() * 1000)
     start_ms = end_ms - (args.days + 1) * MS_PER_DAY

@@ -43,13 +43,20 @@ def make_candle(index: int, open_: float, high: float, low: float, close: float,
     )
 
 
-def sideways_base(n: int = 30, harga: float = 100.0, pivot_index: int = 20,
+def sideways_base(n: int = 56, harga: float = 100.0, pivot_index: int = 46,
                   pivot_high: float = 101.0, volume: float = 1_000.0) -> list[Kline]:
     """Deret candle datar dengan SATU pivot high yang jelas.
 
     Pivot high inilah yang menjadi breakout_level pada skenario di bawah.
     Candle di kiri dan kanan pivot sengaja dibuat lebih rendah supaya pivot
     terdeteksi untuk SWING_PIVOT_WING_BARS sampai beberapa candle.
+
+    Panjang default 56 candle dipilih supaya seluruh skenario di bawah
+    memenuhi required_lookback_bars() untuk parameter struktur produksi
+    terkini (SWING_LOOKBACK_BARS 23 + 2 x SWING_PIVOT_WING_BARS 4 +
+    MAX_BARS_BREAKOUT_TO_RETEST 22 -> jendela minimum 53 candle), dengan
+    pivot tetap berada di dalam swing lookback produksi maupun versi lama
+    yang dipin di fixture tes.
     """
     out = []
     for i in range(n):
@@ -111,8 +118,12 @@ def skenario_pullback_retest(nama: str = "lolos") -> list[Kline]:
 
     # Breakout standar: close 102.2, di atas 101 ditambah buffer.
     base.append(make_candle(i, 100.2, 102.3, 100.1, 102.2, volume)); i += 1
+    # Tiga candle menjauh lalu mulai turun kembali. Jumlah TIGA ini dijaga
+    # supaya candle retest skenario "lolos" adalah candle ke-4 setelah
+    # anchor (breakout), memenuhi VWAP_MIN_BARS_AFTER_ANCHOR produksi (4).
     base.append(make_candle(i, 102.2, 102.5, 101.8, 102.0, volume)); i += 1
     base.append(make_candle(i, 102.0, 102.2, 101.4, 101.6, volume)); i += 1
+    base.append(make_candle(i, 101.6, 101.8, 101.15, 101.45, volume)); i += 1
 
     if nama == "kedaluwarsa":
         # Harga menggantung di atas level jauh melewati batas umur setup, lalu
@@ -234,9 +245,13 @@ def blok_setup(harga: float, mulai_index: int, volume: float = 5_000_000.0):
     level = harga * 1.012
     # Candle breakout, close jelas di atas level.
     out.append(make_candle(i, harga * 1.002, level * 1.013, harga * 0.999, level * 1.012, volume)); i += 1
-    # Dua candle menjauh lalu mulai turun kembali.
+    # Tiga candle menjauh lalu mulai turun kembali. Jumlah TIGA ini dijaga
+    # supaya candle retest adalah candle ke-4 setelah anchor (breakout),
+    # memenuhi VWAP_MIN_BARS_AFTER_ANCHOR produksi (4). Semua low tetap di
+    # dalam zona retest sehingga dihitung SATU kunjungan (MAX_RETEST_TOUCHES 1).
     out.append(make_candle(i, level * 1.012, level * 1.014, level * 1.006, level * 1.008, volume)); i += 1
-    out.append(make_candle(i, level * 1.008, level * 1.010, level * 1.002, level * 1.004, volume)); i += 1
+    out.append(make_candle(i, level * 1.008, level * 1.010, level * 1.004, level * 1.006, volume)); i += 1
+    out.append(make_candle(i, level * 1.006, level * 1.008, level * 1.002, level * 1.004, volume)); i += 1
     # Candle retest: low masuk zona, close kembali di atas level.
     out.append(make_candle(i, level * 1.001, level * 1.009, level * 0.997, level * 1.008, volume)); i += 1
     return out, level * 1.008, i

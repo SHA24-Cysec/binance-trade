@@ -942,7 +942,7 @@ function renderStatus(s){
   const oc=document.getElementById('cardPnl');
   if(p.has_position && p.pnl_usdt!=null){
     document.getElementById('openPnlVal').innerHTML='<span class="'+cls(p.pnl_usdt)+'">'+sign(p.pnl_usdt)+fmt(p.pnl_usdt)+' '+s.quote+'</span>';
-    document.getElementById('openPnlSub').innerHTML='<span class="'+cls(p.pnl_pct)+'">'+sign(p.pnl_pct)+fmt(p.pnl_pct)+'%</span> · '+p.symbol;
+    document.getElementById('openPnlSub').innerHTML='<span class="'+cls(p.pnl_pct)+'">'+sign(p.pnl_pct)+fmt(p.pnl_pct)+'%</span> · '+esc(p.symbol);
     oc.className='card '+(p.pnl_usdt>=0?'good':'bad');
   } else {
     document.getElementById('openPnlVal').textContent='—';
@@ -969,7 +969,7 @@ function renderStatus(s){
         <div class="n ${pnlColor}">${p.pnl_pct!=null?sign(p.pnl_pct)+fmt(p.pnl_pct)+'%':'—'}</div>
         <div class="s">${p.pnl_usdt!=null?sign(p.pnl_usdt)+fmt(p.pnl_usdt)+' '+s.quote:'menunggu harga live'}</div>
       </div>
-      <div class="posrow"><span class="k">Simbol</span><span class="v">${p.symbol}</span></div>
+      <div class="posrow"><span class="k">Simbol</span><span class="v">${esc(p.symbol)}</span></div>
       <div class="posrow"><span class="k">Harga entry</span><span class="v mono">${fmtP(p.entry_price)}</span></div>
       <div class="posrow"><span class="k">Harga live</span><span class="v mono">${p.live_price!=null?fmtP(p.live_price):'—'}</span></div>
       <div class="posrow"><span class="k">Qty</span><span class="v mono">${fmt(p.qty,6)}</span></div>
