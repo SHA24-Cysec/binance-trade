@@ -2022,7 +2022,14 @@ def api_paper_reset_commit():
 
 
 def main(*, auto_start_bot: bool = False) -> int:
-    """Jalankan dashboard. run.py memakai auto_start_bot=True."""
+    """Jalankan dashboard.
+
+    Default auto_start_bot=False: dashboard menyala tanpa menjalankan bot,
+    sehingga status bot tetap STOPPED sampai pengguna menekan Start di
+    dashboard. run.py juga memanggil dengan auto_start_bot=False. Nilai True
+    hanya untuk pemanggil khusus yang memang ingin bot langsung hidup, dan
+    tetap dipaksa False bila DASHBOARD_HOST bukan loopback.
+    """
     start_auto_refresher()
     if watchlist_auto_enabled(PUMP_CONFIG):
         print(f"Penyegaran watchlist otomatis aktif "

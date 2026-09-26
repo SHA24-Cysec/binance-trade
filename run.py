@@ -4,6 +4,11 @@
 Dashboard berjalan di proses utama dan tetap hidup ketika bot Stop atau
 Restart. Bot adalah child process dashboard. Menjalankan dashboard.py atau
 pump_scanner_bot.py secara terpisah tetap didukung.
+
+Bot TIDAK dijalankan otomatis saat peluncur ini dipakai. Setelah dashboard
+hidup, status bot adalah STOPPED dan bot baru berjalan ketika pengguna
+menekan tombol Start di dashboard (alur /api/control/prepare lalu
+/api/control/execute dengan action START).
 """
 
 from __future__ import annotations
@@ -26,7 +31,7 @@ def _safe_console() -> None:
 def main() -> int:
     _safe_console()
     from dashboard import main as dashboard_main
-    return dashboard_main(auto_start_bot=True)
+    return dashboard_main(auto_start_bot=False)
 
 
 if __name__ == "__main__":
