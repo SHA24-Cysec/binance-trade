@@ -24,7 +24,11 @@ CARA KERJA
 1. Ambil daftar pair dari ticker 24 jam, saring persis seperti
    market_scanner.filter_and_rank_candidates (buang stablecoin, token
    leveraged, simbol yang dikecualikan, dan yang volumenya di bawah ambang).
-2. Unduh candle historis untuk SEMUA simbol yang lolos saringan.
+2. Unduh candle historis untuk SEMUA simbol yang lolos saringan, lalu tulis
+   LANGSUNG ke satu file SQLite temporary per job (backtest_storage.py).
+   Candle TIDAK pernah ditumpuk sebagai dict[str, list[Kline]] penuh di RAM:
+   hanya satu simbol yang hidup di RAM pada satu waktu saat diunduh, dan
+   selama simulasi hanya beberapa simbol aktif (cache LRU) yang dimuat utuh.
 3. Bangun "papan kandidat" per bar waktu: untuk setiap titik waktu, saring
    simbol yang volume 24 jam bergulirnya lolos ambang, lalu urutkan dari
    volume terbesar. Urutan volume ini meniru batas anggaran request bot live
@@ -44,6 +48,7 @@ Yang dipakai bersama dengan bot live (BUKAN ditulis ulang):
     strategy.resolve_exit_levels()     -> level SL/TP/BE/Trailing
     backtest.compute_rolling_24h_stats -> statistik 24 jam bergulir
     backtest.fetch_full_klines()       -> pengambilan candle
+    backtest_storage.KlineStore        -> penyimpanan candle di SQLite temporary
 Menyalin logika ini akan menciptakan risiko backtest diam-diam menyimpang
 dari bot sungguhan, jenis bug yang baru ketahuan setelah kehilangan uang.
 
@@ -87,13 +92,19 @@ KETERBATASAN YANG TETAP ADA (baca sebelum percaya hasilnya)
 from __future__ import annotations
 
 import logging
+import sqlite3
 import time
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from strategy import Kline
 import strategy
 import market_scanner as scanner
+import backtest_storage as storage
+import backtest_cache as kcache
+from backtest_storage import KlineStore, SymbolSeries
+from backtest_cache import KlineCache
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +116,10 @@ from backtest import (
     fetch_full_klines,
     initial_backtest_equity,
 )
+
+# Penanda "belum ada di memo". Dipakai sebagai nilai default dict.get() karena
+# None adalah nilai memo yang SAH (riwayat harian tidak memenuhi syarat).
+_BELUM_DIHITUNG = object()
 
 
 @dataclass
@@ -200,8 +215,54 @@ def select_universe(tickers: list, config: dict, max_symbols: Optional[int] = No
 
 
 # ======================================================================
-# Tahap 2: unduh candle untuk semua simbol
+# Tahap 2: unduh candle semua simbol ke SQLite temporary
 # ======================================================================
+
+def new_backtest_store(config: Optional[dict] = None) -> KlineStore:
+    """Buat store SQLite temporary untuk SATU job backtest.
+
+    Lokasinya selalu direktori temporary OS lewat ``tempfile.mkdtemp``, jadi
+    dua job backtest yang berjalan bersamaan tidak mungkin memakai file yang
+    sama. Pemanggil WAJIB menutupnya dengan ``store.cleanup()`` di blok
+    ``finally``, termasuk pada jalur error dan pembatalan.
+    """
+    cfg = config or {}
+    cache_size = int(cfg.get("BACKTEST_SYMBOL_CACHE_SIZE",
+                             storage.DEFAULT_SYMBOL_CACHE_SIZE)
+                     or storage.DEFAULT_SYMBOL_CACHE_SIZE)
+    return KlineStore.create_temp(cache_size=max(1, cache_size))
+
+
+def open_kline_cache(config: Optional[dict] = None) -> Optional[KlineCache]:
+    """Buka cache candle lintas job kalau diaktifkan config.
+
+    Kegagalan membuka cache (disk penuh, izin tulis, file rusak) TIDAK boleh
+    menggagalkan backtest: fungsi ini mencatat peringatan lalu mengembalikan
+    None, dan pemanggil jatuh ke unduh penuh seperti sebelum ada cache.
+    Pemanggil wajib menutupnya di blok ``finally`` (tutup saja, jangan
+    dihapus -- isinya memang untuk dipakai job berikutnya).
+    """
+    cfg = config or {}
+    if not bool(cfg.get("BACKTEST_CACHE_ENABLED", True)):
+        return None
+    path = str(cfg.get("BACKTEST_CACHE_FILE") or "").strip()
+    if not path:
+        return None
+    try:
+        cache = KlineCache(
+            path,
+            fresh_hours=float(cfg.get("BACKTEST_CACHE_FRESH_HOURS",
+                                      kcache.DEFAULT_FRESH_HOURS) or 0),
+            ttl_days=float(cfg.get("BACKTEST_CACHE_TTL_DAYS",
+                                   kcache.DEFAULT_TTL_DAYS) or 0),
+        )
+        cache.prune()
+        return cache
+    except (sqlite3.Error, OSError, kcache.CacheError) as exc:  # noqa: BLE001
+        logger.warning("Cache candle backtest tidak bisa dipakai (%s). Backtest "
+                       "tetap berjalan dengan mengunduh penuh.", exc)
+        return None
+
 
 def fetch_universe_klines(
     client,
@@ -209,18 +270,32 @@ def fetch_universe_klines(
     interval: str,
     start_ms: int,
     end_ms: int,
+    store: KlineStore,
     progress_cb: Optional[Callable[[float, str], None]] = None,
     sleep_between_symbols: float = 0.0,
     cancel_cb: Optional[Callable[[], bool]] = None,
-) -> tuple[dict, list]:
-    """Unduh candle untuk setiap simbol. Return (data, gagal).
+    cache: Optional[KlineCache] = None,
+) -> tuple[list[str], list]:
+    """Unduh candle tiap simbol LANGSUNG ke ``store``. Return (berhasil, gagal).
+
+    Beda dengan versi lama yang mengembalikan ``dict[str, list[Kline]]``:
+    hasil unduhan satu simbol ditulis ke SQLite lalu referensinya dilepas,
+    sehingga hanya SATU simbol yang hidup di RAM pada satu waktu. Yang
+    dikembalikan hanya daftar nama simbol yang berhasil (urut sesuai urutan
+    unduh) dan daftar kegagalan.
+
+    ``cache`` opsional (backtest_cache.KlineCache): kalau diberikan, hanya
+    rentang waktu yang BELUM pernah diunduh yang diminta ke Binance, dan
+    jendela segar (bawaan 24 jam terakhir) tetap selalu diunduh ulang.
+    Tanpa cache, perilakunya persis seperti sebelumnya yaitu unduh penuh.
 
     Satu simbol yang gagal TIDAK membatalkan seluruh backtest -- simbol itu
     dicatat di daftar gagal lalu dilewati. Dengan ratusan simbol, memaksa
     semuanya berhasil berarti satu koin bermasalah bisa menggagalkan proses
-    yang sudah berjalan sepuluh menit.
+    yang sudah berjalan sepuluh menit. Kegagalan MENULIS ke SQLite
+    diperlakukan sama: dicatat sebagai kegagalan simbol, bukan crash job.
     """
-    data: dict = {}
+    ok_symbols: list[str] = []
     failed: list = []
     total = max(1, len(symbols))
 
@@ -228,12 +303,14 @@ def fetch_universe_klines(
         if cancel_cb is not None and cancel_cb():
             raise BacktestError("Backtest dibatalkan.")
         try:
-            kl = fetch_full_klines(client, sym, interval, start_ms, end_ms,
-                                   sleep_between_calls=0.0)
+            kl = _klines_untuk_simbol(client, sym, interval, start_ms, end_ms,
+                                      cache)
             if kl:
-                data[sym] = kl
+                store.write_symbol(sym, kl)
+                ok_symbols.append(sym)
             else:
                 failed.append({"symbol": sym, "error": "tidak ada data candle pada rentang ini"})
+            del kl
         except Exception as exc:  # noqa: BLE001
             failed.append({"symbol": sym, "error": str(exc)[:160]})
 
@@ -242,7 +319,29 @@ def fetch_universe_klines(
         if sleep_between_symbols:
             time.sleep(sleep_between_symbols)
 
-    return data, failed
+    return ok_symbols, failed
+
+
+def _klines_untuk_simbol(client, symbol: str, interval: str, start_ms: int,
+                         end_ms: int,
+                         cache: Optional[KlineCache]) -> list[Kline]:
+    """Candle satu simbol: dari cache bila ada, sisanya diunduh.
+
+    Tanpa cache, ini sekadar ``fetch_full_klines`` seperti versi sebelumnya.
+    Dengan cache, yang diminta ke Binance hanya rentang yang belum tercatat
+    di tabel cakupan, ditambah jendela segar yang memang selalu diperbarui.
+    """
+    if cache is None:
+        return fetch_full_klines(client, symbol, interval, start_ms, end_ms,
+                                 sleep_between_calls=0.0)
+
+    for awal, akhir in cache.missing_ranges(symbol, interval, start_ms, end_ms):
+        bagian = fetch_full_klines(client, symbol, interval, awal, akhir,
+                                   sleep_between_calls=0.0)
+        # Cakupan dicatat walau hasilnya kosong: rentang yang memang tidak
+        # punya candle (koin belum listing) tidak boleh diminta ulang tiap job.
+        cache.put(symbol, interval, bagian, awal, akhir)
+    return cache.read(symbol, interval, start_ms, end_ms)
 
 
 def fetch_universe_daily_klines(
@@ -250,10 +349,11 @@ def fetch_universe_daily_klines(
     symbols: list[str],
     start_ms: int,
     end_ms: int,
+    store: KlineStore,
     progress_cb: Optional[Callable[[float, str], None]] = None,
     cancel_cb: Optional[Callable[[], bool]] = None,
-) -> dict:
-    """Unduh candle 1d tiap simbol untuk gerbang pump.
+) -> list[str]:
+    """Unduh candle 1d tiap simbol ke ``store`` untuk gerbang pump.
 
     Dipakai supaya rata-rata volume 7 hari di backtest memakai candle harian
     ASLI Binance, sama dengan yang dibaca bot live, bukan hasil penjumlahan
@@ -261,12 +361,20 @@ def fetch_universe_daily_klines(
 
     ``start_ms`` sebaiknya sudah dimundurkan minimal 8 hari dari awal periode
     simulasi, supaya bar paling awal pun punya 7 candle harian penuh di
-    belakangnya. Simbol yang gagal diunduh dibiarkan kosong: gerbang pump akan
-    menolaknya (fail closed), bukan meloloskannya.
+    belakangnya. Simbol yang gagal diunduh tidak menulis baris apa pun;
+    ``ensure_daily_series()`` nanti menambalnya dari agregasi candle intraday,
+    persis seperti perilaku lama saat ``daily_klines`` tidak memuat simbol itu.
+
+    Candle harian SENGAJA tidak ikut cache lintas job: seluruh jendela 38
+    hari muat dalam SATU request per simbol, sedangkan kebijakan kesegaran
+    ketat mengharuskan candle harian terakhir selalu diunduh ulang. Jadi
+    cache hanya akan menambah kerumitan tanpa mengurangi satu request pun.
+
+    Return daftar simbol yang candle hariannya berhasil disimpan.
     """
     from strategy import parse_klines
 
-    out: dict = {}
+    tersimpan: list[str] = []
     total = max(1, len(symbols))
     for idx, sym in enumerate(symbols):
         if cancel_cb is not None and cancel_cb():
@@ -274,43 +382,145 @@ def fetch_universe_daily_klines(
         try:
             raw = client.get_klines(sym, interval="1d", limit=1000,
                                     start_time_ms=start_ms, end_time_ms=end_ms)
-            out[sym] = parse_klines(raw)
+            harian = parse_klines(raw)
+            if harian:
+                store.write_daily(sym, harian)
+                tersimpan.append(sym)
         except Exception as exc:  # noqa: BLE001 - satu simbol gagal tidak menghentikan backtest
-            logger.warning("Candle harian %s gagal diunduh (%s). Simbol ini akan "
-                           "ditolak gerbang pump.", sym, str(exc)[:120])
+            logger.warning("Candle harian %s gagal diunduh (%s). Gerbang pump "
+                           "akan memakai agregasi candle intraday simbol ini.",
+                           sym, str(exc)[:120])
         if progress_cb:
             progress_cb((idx + 1) / total, sym)
-    return out
+    return tersimpan
+
+
+def ensure_daily_series(store: KlineStore, symbols: list[str]) -> None:
+    """Pastikan setiap simbol punya deret harian tersimpan di ``store``.
+
+    Simbol yang candle 1d-nya tidak tersedia ditambal dengan
+    ``scanner.aggregate_to_daily()`` dari candle intraday-nya sendiri, sama
+    dengan perilaku lama ketika argumen ``daily_klines`` tidak memuat simbol
+    tersebut. Agregasi dikerjakan SATU simbol pada satu waktu lalu langsung
+    ditulis ke SQLite, jadi tidak ada dict harian penuh yang menumpuk di RAM.
+    """
+    for sym in symbols:
+        if store.daily_count(sym) > 0:
+            continue
+        harian = scanner.aggregate_to_daily(store.load_klines(sym))
+        if harian:
+            store.write_daily(sym, harian)
 
 
 # ======================================================================
 # Tahap 3: bangun papan kandidat per bar
 # ======================================================================
 
-def build_timeline(data: dict, interval: str) -> tuple[list, dict, dict]:
-    """Siapkan struktur yang bisa ditelusuri per titik waktu.
+def build_timeline(store: KlineStore, interval: str,
+                   symbols: Optional[list[str]] = None,
+                   ) -> tuple[list[int], dict[str, SymbolSeries]]:
+    """Siapkan struktur yang bisa ditelusuri per titik waktu, dari SQLite.
 
     Return:
-        timeline : daftar open_time unik terurut, gabungan semua simbol
-        index_of : {symbol: {open_time: index candle}} untuk pencarian O(1)
-        stats_of : {symbol: list stats 24 jam sejajar dengan candle}
+        timeline  : daftar open_time unik terurut, gabungan semua simbol
+        series_of : {symbol: SymbolSeries} berisi array open_time, close_time,
+                    dan statistik 24 jam bergulir
 
-    Memakai open_time sebagai kunci (bukan indeks candle) karena tiap simbol
-    bisa punya jumlah candle berbeda: koin yang listing belakangan tidak
-    punya candle di awal periode, dan sesekali ada celah data.
+    ``SymbolSeries`` menggantikan pasangan ``index_of``/``stats_of`` versi
+    lama: pencarian index memakai bisect pada array int64 (bukan dict
+    {open_time: index} per simbol), dan statistik disimpan sebagai dua array
+    float64 plus penanda kesiapan (bukan satu dict per bar). Statistiknya
+    sendiri tetap dihitung oleh ``backtest.compute_rolling_24h_stats``, fungsi
+    yang sama dengan backtest satu simbol, supaya angkanya identik.
+
+    Prakomputasi membaca SATU simbol pada satu waktu dari SQLite lalu melepas
+    list Kline-nya, jadi puncak RAM tahap ini setara satu simbol, bukan
+    seluruh semesta.
     """
     window = bars_per_day(interval)
-    index_of: dict = {}
-    stats_of: dict = {}
+    daftar = list(symbols) if symbols is not None else store.symbols()
+    series_of: dict[str, SymbolSeries] = {}
     all_times: set = set()
 
-    for sym, kl in data.items():
-        index_of[sym] = {k.open_time: i for i, k in enumerate(kl)}
-        stats_of[sym] = compute_rolling_24h_stats(kl, window)
-        all_times.update(k.open_time for k in kl)
+    for sym in daftar:
+        klines = store.load_klines(sym)
+        if not klines:
+            continue
+        stats = compute_rolling_24h_stats(klines, window)
+        series = SymbolSeries.build(sym, klines, stats,
+                                    store.daily_close_times(sym))
+        series_of[sym] = series
+        all_times.update(series.open_times())
+        del klines, stats
 
     timeline = sorted(all_times)
-    return timeline, index_of, stats_of
+    return timeline, series_of
+
+
+class _PumpGateAverages:
+    """Memo rata-rata volume harian untuk gerbang pump per titik waktu.
+
+    ``scanner.pump_gate_ok_at()`` adalah gabungan dua fungsi bersama:
+    ``average_prior_daily_quote_volume()`` lalu ``evaluate_pump_gate()``.
+    Bagian pertama hanya berubah hasilnya ketika ada candle harian BARU yang
+    tertutup, yaitu sekali per hari per simbol, sedangkan loop utama
+    membutuhkannya sekali per bar per simbol (288 kali lebih sering pada
+    interval 5 menit). Memo ini menyimpan hasilnya dengan kunci
+    (simbol, jumlah candle harian yang sudah tertutup pada waktu acuan),
+    sehingga candle harian tidak dibaca ulang dari SQLite tiap bar.
+
+    Keputusan akhirnya tetap diambil ``scanner.evaluate_pump_gate()``, fungsi
+    yang sama dengan bot live, jadi tidak ada aturan gerbang yang ditulis
+    ulang di sini.
+    """
+
+    __slots__ = ("_store", "_memo")
+
+    def __init__(self, store: KlineStore) -> None:
+        self._store = store
+        self._memo: dict[str, dict[int, Optional[float]]] = {}
+
+    def memo_for(self, symbol: str) -> dict:
+        """Kamus memo milik satu simbol (dipakai langsung di hot path)."""
+        return self._memo.setdefault(str(symbol), {})
+
+    def compute(self, symbol: str, reference_ms: int, key: int) -> Optional[float]:
+        """Hitung dan simpan rata-rata untuk satu kunci memo yang belum ada."""
+        rata, _alasan = scanner.average_prior_daily_quote_volume(
+            self._store.daily_klines(symbol), reference_ms)
+        self.memo_for(symbol)[int(key)] = rata
+        return rata
+
+    def average_at(self, symbol: str, series: SymbolSeries,
+                   reference_ms: int) -> Optional[float]:
+        """Rata-rata volume harian penuh sebelum ``reference_ms`` untuk simbol."""
+        key = series.closed_daily_count(reference_ms)
+        memo = self.memo_for(symbol)
+        if key in memo:
+            return memo[key]
+        return self.compute(symbol, reference_ms, key)
+
+
+def _resolve_symbol_cache_size(config: dict, top_n: int) -> int:
+    """Berapa simbol yang boleh utuh (list[Kline]) di RAM bersamaan.
+
+    Nilai dasar diambil dari ``BACKTEST_SYMBOL_CACHE_SIZE`` (bawaan 8 simbol,
+    lihat backtest_storage.DEFAULT_SYMBOL_CACHE_SIZE) dan boleh dinaikkan
+    pengguna yang RAM-nya lega. Lantai minimumnya adalah ``2 x top_n + 4``,
+    bukan ``top_n`` saja, karena isi papan kandidat top-N BERGANTI sebagian
+    antar bar; cache seukuran satu papan akan saling menendang dan memaksa
+    pembacaan ulang satu simbol PENUH dari SQLite ribuan kali, persis pola
+    yang harus dihindari di hot path.
+
+    Angka lantai ini bukan tebakan. Pada uji 150 simbol x 30 hari candle 5
+    menit (2026-09-26): cache 12 -> 323 kali muat ulang penuh, 25,6 detik;
+    cache 24 -> 21 kali muat ulang, 17,5 detik (versi dict lama: 16,7 detik).
+    Puncak RSS proses tetap 128 MB melawan 865 MB versi lama.
+    """
+    diminta = int(config.get("BACKTEST_SYMBOL_CACHE_SIZE",
+                             storage.DEFAULT_SYMBOL_CACHE_SIZE)
+                  or storage.DEFAULT_SYMBOL_CACHE_SIZE)
+    return max(1, diminta, 2 * int(top_n) + 4)
 
 
 # ======================================================================
@@ -318,50 +528,60 @@ def build_timeline(data: dict, interval: str) -> tuple[list, dict, dict]:
 # ======================================================================
 
 def run_portfolio_backtest(
-    data: dict,
+    store: KlineStore,
     config: dict,
     interval: str,
     warmup_ms: int = 0,
-    daily_klines: Optional[dict] = None,
     progress_cb: Optional[Callable[[float], None]] = None,
     cancel_cb: Optional[Callable[[], bool]] = None,
     max_skipped_records: int = 400,
 ) -> PortfolioResult:
     """Jalankan simulasi satu-posisi melintasi seluruh semesta simbol.
 
-    ``daily_klines`` opsional: {symbol: list[Kline] 1d} untuk gerbang pump.
-    Kalau tidak diberikan, deret harian dibangun dengan menjumlahkan candle
-    intraday simbol yang bersangkutan (scanner.aggregate_to_daily), jadi
-    gerbang tetap berlaku tanpa request tambahan. Rata-rata 7 hari SELALU
-    dihitung dari candle harian yang sudah tertutup pada bar yang sedang
-    diuji, jadi tidak ada look-ahead.
+    ``store`` adalah :class:`backtest_storage.KlineStore`, satu file SQLite
+    temporary berisi candle seluruh semesta. Dari sinilah semua candle
+    dibaca; tidak ada ``dict[str, list[Kline]]`` penuh yang dipegang fungsi
+    ini. Kepemilikan store ada di PEMANGGIL: dia yang membuatnya dan wajib
+    memanggil ``store.cleanup()`` di blok ``finally``.
+
+    Candle harian untuk gerbang pump juga diambil dari ``store`` (tabel
+    ``daily_klines``). Simbol yang belum punya deret harian ditambal dari
+    agregasi candle intraday-nya sendiri lewat ``ensure_daily_series()``,
+    jadi gerbang tetap berlaku tanpa request tambahan. Rata-rata 7 hari
+    SELALU dihitung dari candle harian yang sudah tertutup pada bar yang
+    sedang diuji, jadi tidak ada look-ahead.
     """
-    if not data:
+    semua_simbol = store.symbols()
+    if not semua_simbol:
         raise BacktestError("Tidak ada data candle untuk disimulasikan.")
 
     # Jalur direct API juga wajib melewati structural policy yang sama dengan
     # scanner, bukan hanya jalur select_universe dashboard.
     tradable_meta = config.get("_historical_tradable_symbols")
-    original_count = len(data)
-    data = {sym: kl for sym, kl in data.items()
-            if scanner.is_structurally_allowed_symbol(sym, config, tradable_meta)}
-    if not data:
+    original_count = len(semua_simbol)
+    symbols = [sym for sym in semua_simbol
+               if scanner.is_structurally_allowed_symbol(sym, config, tradable_meta)]
+    if not symbols:
         raise BacktestError("Tidak ada data yang lolos policy semesta bersama.")
+    lolos_policy = len(symbols)
 
-    # Deret harian per simbol untuk gerbang pump. Dihitung SEKALI di depan,
-    # bukan per bar, supaya simulasi tetap ringan.
-    daily_of: dict = {}
-    for _sym, _kl in data.items():
-        _harian = (daily_klines or {}).get(_sym)
-        daily_of[_sym] = _harian if _harian else scanner.aggregate_to_daily(_kl)
+    # Deret harian per simbol untuk gerbang pump. Disiapkan SEKALI di depan
+    # (satu simbol pada satu waktu, langsung ke SQLite), bukan per bar.
+    ensure_daily_series(store, symbols)
+    gate_averages = _PumpGateAverages(store)
 
-    timeline, index_of, stats_of = build_timeline(data, interval)
+    timeline, series_of = build_timeline(store, interval, symbols)
     if not timeline:
         raise BacktestError("Garis waktu kosong, tidak ada candle yang bisa diproses.")
+    symbols = [sym for sym in symbols if sym in series_of]
 
     lookback = strategy.confirm_window_bars(config)
     min_vol = float(config["MIN_QUOTE_VOLUME_USDT_24H"])
     top_n = int(config.get("TOP_N_CANDIDATES_TO_CONFIRM", 10))
+    # Simbol yang sedang dipegang dan papan kandidat top-N harus muat di
+    # cache LRU store, kalau tidak hot path akan membaca ulang satu simbol
+    # penuh dari SQLite pada setiap bar.
+    store.set_cache_size(_resolve_symbol_cache_size(config, top_n))
     cooldown_ms = int(config["COOLDOWN_MINUTES_AFTER_CLOSE"]) * MS_PER_MIN
     # Jumlah candle minimum untuk satu keputusan entry dihitung oleh fungsi
     # bersama strategy.required_lookback_bars(), bukan angka hard-code seperti
@@ -369,7 +589,7 @@ def run_portfolio_backtest(
     # tetap dinaikkan oleh confirm_window_bars() supaya backtest tidak diam-diam
     # menghasilkan nol trade, tetapi pengguna tetap diberi peringatan.
     _pre_warnings: list = []
-    if len(data) != original_count:
+    if lolos_policy != original_count:
         _pre_warnings.append("Sebagian data dibuang oleh policy semesta bersama (stablecoin, leveraged token, blacklist, quote, atau status metadata).")
     if tradable_meta is None or config.get("_tradable_status_is_current_snapshot"):
         _pre_warnings.append("Status TRADING historis tidak tersedia dari candle Binance. Policy status hanya dapat diverifikasi dari metadata saat ini bila caller menyediakannya.")
@@ -417,6 +637,15 @@ def run_portfolio_backtest(
     first_allowed_time = timeline[0] + warmup_ms
     total_bars = len(timeline)
 
+    # Materialisasi sekali di depan untuk hot path. Papan kandidat dihitung
+    # untuk SETIAP simbol pada SETIAP bar, jadi pencarian dict dan pemanggilan
+    # method per simbol per bar akan menjadi jutaan operasi tambahan.
+    papan_input = []
+    for sym in symbols:
+        ot, ct, pct_arr, vol_arr, ready_arr, daily_ct = series_of[sym].board_arrays()
+        papan_input.append((sym, ot, ct, pct_arr, vol_arr, ready_arr, daily_ct,
+                            gate_averages.memo_for(sym), len(ot)))
+
     for bi, t_now in enumerate(timeline):
         if progress_cb and bi % 50 == 0:
             progress_cb(bi / total_bars)
@@ -427,34 +656,44 @@ def run_portfolio_backtest(
         # Dihitung sekali per bar, meniru satu snapshot ticker per rotasi
         # pada bot live.
         board = []
-        for sym, kl in data.items():
-            i = index_of[sym].get(t_now)
-            if i is None:
+        for (sym, ot, ct, pct_arr, vol_arr, ready_arr, daily_ct, memo, n_bar) in papan_input:
+            pos = bisect_left(ot, t_now)
+            if pos >= n_bar or ot[pos] != t_now:
                 continue
-            st = stats_of[sym][i]
-            if st is None:
+            if not ready_arr[pos]:
                 continue
-            if st["vol24h"] < min_vol:
+            vol24 = vol_arr[pos]
+            if vol24 < min_vol:
                 continue
-            # Gerbang pump, fungsi yang sama dengan bot live dan backtest satu
-            # simbol. Dievaluasi pada TITIK WAKTU bar ini.
-            if not scanner.pump_gate_ok_at(daily_of.get(sym), kl[i].close_time,
-                                           st["pct24h"], st["vol24h"], config):
+            # Gerbang pump, fungsi keputusan yang sama dengan bot live dan
+            # backtest satu simbol. Dievaluasi pada TITIK WAKTU bar ini.
+            # Rata-rata volume harian di-memo per jumlah candle harian yang
+            # sudah tertutup, karena nilainya hanya berubah sekali per hari
+            # sementara loop ini berjalan sekali per bar.
+            ref_ms = ct[pos]
+            kunci_memo = bisect_right(daily_ct, ref_ms)
+            rata_harian = memo.get(kunci_memo, _BELUM_DIHITUNG)
+            if rata_harian is _BELUM_DIHITUNG:
+                rata_harian = gate_averages.compute(sym, ref_ms, kunci_memo)
+            pct24 = pct_arr[pos]
+            gate_ok, _gate_reason = scanner.evaluate_pump_gate(
+                pct24, vol24, rata_harian, config)
+            if not gate_ok:
                 continue
-            board.append((st["vol24h"], sym, i, st["pct24h"]))
+            board.append((vol24, sym, pos, pct24))
         # Urut dari volume kuotasi 24 jam terbesar, sama seperti urutan
         # pengambilan candle di bot live. Ini BUKAN penilaian kualitas setup.
         board.sort(key=lambda x: -x[0])
 
         # ============ SUDAH PUNYA POSISI: kelola exit ============
         if holding is not None:
-            hi = index_of[holding].get(t_now)
+            hi = series_of[holding].index_at(t_now)
             if hi is None:
                 # Celah data pada simbol yang sedang dipegang. Posisi
                 # dipertahankan; bar ini dilewati untuk simbol tersebut.
                 continue
 
-            candle = data[holding][hi]
+            candle = store.klines(holding)[hi]
             # Sinyal dan entry berada pada bar berbeda saat latency aktif;
             # jangan mengevaluasi exit pada bar yang baru dipakai untuk fill.
             if candle.open_time <= entry_time:
@@ -551,7 +790,7 @@ def run_portfolio_backtest(
         # yang sama dengan scanner.
         lolos = []
         for rank, (vol24, sym, i, pct) in enumerate(eligible[:top_n], start=1):
-            kl = data[sym]
+            kl = store.klines(sym)
             if i + 1 < lookback:
                 continue
             window_kl = kl[max(0, i - lookback + 1): i + 1]
@@ -567,7 +806,7 @@ def run_portfolio_backtest(
 
         lolos.sort(key=lambda row: scanner.setup_quality_key(row[5],
                                                              scanner.Candidate(row[2], "", row[1], row[4],
-                                                                               data[row[2]][row[3]].close)))
+                                                                               store.klines(row[2])[row[3]].close)))
         rank, pct, sym, i, _vol24, setup_terpilih = lolos[0]
         sizing = strategy.resolve_position_notional(config, equity)
         if sizing["notional"] <= 0 or sizing["notional"] > equity:
@@ -589,7 +828,7 @@ def run_portfolio_backtest(
                 if len(skipped) >= max_skipped_records:
                     break
 
-        kl = data[sym]
+        kl = store.klines(sym)
         entry_idx = i + entry_delay_bars
         if entry_idx >= len(kl):
             warnings.append(f"Sinyal {sym} terakhir tidak memiliki bar eksekusi setelah latency entry; trade dilewati.")
@@ -617,7 +856,7 @@ def run_portfolio_backtest(
 
         # Level exit dikunci memakai fungsi yang sama dengan bot live.
         level_cfg = dict(config)
-        level_cfg["_atr_value"] = strategy.atr(data[sym][:i + 1], int(config.get("ATR_PERIOD", 14) or 14))
+        level_cfg["_atr_value"] = strategy.atr(kl[:i + 1], int(config.get("ATR_PERIOD", 14) or 14))
         lv = strategy.resolve_exit_levels(level_cfg)
         cur = {
             "sl": lv["sl_pct"], "tp": lv["tp_pct"],
@@ -631,8 +870,8 @@ def run_portfolio_backtest(
 
     return PortfolioResult(
         interval=interval,
-        symbols_scanned=len(data),
-        symbols_with_data=len(data),
+        symbols_scanned=len(symbols),
+        symbols_with_data=len(symbols),
         bars_total=total_bars,
         start_time=timeline[0],
         end_time=timeline[-1],
@@ -756,9 +995,13 @@ def selftest() -> bool:
     # --- build_timeline menggabungkan waktu dari simbol berbeda ---
     a = [_mk(i, 100, 101, 99, 100) for i in range(5)]
     b = [_mk(i, 50, 51, 49, 50) for i in range(3, 9)]
-    tl, idx, _st = build_timeline({"AUSDT": a, "BUSDT": b}, "5m")
-    check("timeline gabungan unik & terurut", tl == sorted(set(tl)) and len(tl) == 9, len(tl))
-    check("index_of memetakan waktu ke posisi", idx["BUSDT"][b[0].open_time] == 0)
+    with KlineStore.from_klines({"AUSDT": a, "BUSDT": b}) as _store_tl:
+        tl, seri = build_timeline(_store_tl, "5m")
+        check("timeline gabungan unik & terurut", tl == sorted(set(tl)) and len(tl) == 9, len(tl))
+        check("SymbolSeries memetakan waktu ke posisi",
+              seri["BUSDT"].index_at(b[0].open_time) == 0)
+        check("SymbolSeries menolak waktu yang tidak ada",
+              seri["BUSDT"].index_at(b[0].open_time - 1) is None)
 
     # --- satu posisi saja pada satu waktu ---
     cfg = {
@@ -803,11 +1046,20 @@ def selftest() -> bool:
         tujuh candle harian penuh sebelum bar pertama."""
         return {sym: riwayat_harian(kl) for sym, kl in data_dict.items()}
 
+    def _jalankan(data_dict: dict, cfg_uji: dict) -> PortfolioResult:
+        """Simulasi dari store SQLite temporary, lalu filenya dihapus.
+
+        Data sintetis selftest memang kecil, jadi boleh masuk lewat
+        KlineStore.from_klines(). Jalur produksi menulis per simbol langsung
+        dari hasil unduhan, tanpa dict penuh.
+        """
+        with KlineStore.from_klines(data_dict, _harian(data_dict)) as _st:
+            return run_portfolio_backtest(_st, cfg_uji, "5m")
+
     up_a = seri_banyak_setup(harga=100.0, siklus=10, volume=9_000_000.0)
     up_b = seri_banyak_setup(harga=200.0, siklus=10, volume=5_000_000.0)
 
-    res = run_portfolio_backtest({"AUSDT": up_a, "BUSDT": up_b}, cfg, "5m",
-                                 daily_klines=_harian({"AUSDT": up_a, "BUSDT": up_b}))
+    res = _jalankan({"AUSDT": up_a, "BUSDT": up_b}, cfg)
     overlaps = 0
     for i in range(len(res.trades)):
         for j in range(i + 1, len(res.trades)):
@@ -827,8 +1079,7 @@ def selftest() -> bool:
     # --- cooldown dihormati ---
     cfg_cd = dict(cfg)
     cfg_cd["COOLDOWN_MINUTES_AFTER_CLOSE"] = 60
-    res_cd = run_portfolio_backtest({"AUSDT": up_a, "BUSDT": up_b}, cfg_cd, "5m",
-                                    daily_klines=_harian({"AUSDT": up_a, "BUSDT": up_b}))
+    res_cd = _jalankan({"AUSDT": up_a, "BUSDT": up_b}, cfg_cd)
     viol = 0
     for i in range(1, len(res_cd.trades)):
         gap_min = (res_cd.trades[i].entry_time - res_cd.trades[i - 1].exit_time) / 60000.0
@@ -860,8 +1111,7 @@ def selftest() -> bool:
         if k.close_time == entry_pertama:
             tandai = True
 
-    res_sl = run_portfolio_backtest({"AUSDT": seq_sl}, cfg, "5m",
-                                    daily_klines=_harian({"AUSDT": seq_sl}))
+    res_sl = _jalankan({"AUSDT": seq_sl}, cfg)
     check("skenario SL-vs-TP benar-benar menghasilkan trade (tes tidak vakum)",
           len(res_sl.trades) > 0, len(res_sl.trades))
     spanning = [t for t in res_sl.trades if t.entry_time == entry_pertama]
@@ -883,8 +1133,7 @@ def selftest() -> bool:
     par_kl = seri_dengan_setup(harga=100.0, ekor="naik", panjang_ekor=20)
     res_p1 = _bt.run_backtest(par_kl, dict(cfg_par, _symbol="AUSDT"), warmup_bars=0,
                               daily_klines=riwayat_harian(par_kl))
-    res_p2 = run_portfolio_backtest({"AUSDT": par_kl}, cfg_par, "5m",
-                                    daily_klines=_harian({"AUSDT": par_kl}))
+    res_p2 = _jalankan({"AUSDT": par_kl}, cfg_par)
     check("paritas entry satu simbol vs portofolio",
           [t.entry_time for t in res_p1.trades] == [t.entry_time for t in res_p2.trades],
           f"{[t.entry_time for t in res_p1.trades]} vs {[t.entry_time for t in res_p2.trades]}")
@@ -895,15 +1144,13 @@ def selftest() -> bool:
     # --- filter volume menyingkirkan simbol ilikuid ---
     cfg_vol = dict(cfg)
     cfg_vol["MIN_QUOTE_VOLUME_USDT_24H"] = 1e15   # tak ada yang lolos
-    res_vol = run_portfolio_backtest({"AUSDT": up_a}, cfg_vol, "5m",
-                                     daily_klines=_harian({"AUSDT": up_a}))
+    res_vol = _jalankan({"AUSDT": up_a}, cfg_vol)
     check("filter volume menyaring semua", len(res_vol.trades) == 0, len(res_vol.trades))
     # Kontrol positif: data yang sama tanpa ambang volume mustahil harus
     # tetap menghasilkan trade. Tanpa ini, tes di atas ikut hijau kalau
     # mesinnya rusak dan tidak pernah membuka posisi sama sekali.
     check("kontrol positif: data sama tanpa ambang volume tetap menghasilkan trade",
-          len(run_portfolio_backtest({"AUSDT": up_a}, cfg, "5m",
-                                     daily_klines=_harian({"AUSDT": up_a})).trades) > 0)
+          len(_jalankan({"AUSDT": up_a}, cfg).trades) > 0)
 
     # --- ringkasan konsisten ---
     s = summarize_portfolio(res)
@@ -942,3 +1189,88 @@ def selftest() -> bool:
 if __name__ == "__main__":
     import sys
     sys.exit(0 if selftest() else 1)
+
+
+# ==== RINGKASAN AUDIT (portfolio_backtest.py) =========================
+# Perubahan: penyimpanan candle dipindah dari dict[str, list[Kline]] penuh di
+#   RAM ke satu file SQLite temporary per job (backtest_storage.KlineStore).
+#   fetch_universe_klines(), fetch_universe_daily_klines(), build_timeline(),
+#   dan run_portfolio_backtest() DIGANTI isinya, bukan ditambah jalur baru.
+#   Tidak ada flag use_sqlite dan tidak ada fungsi _v2; jalur dict lama sudah
+#   tidak ada lagi. Satu-satunya pintu masuk dict adalah
+#   KlineStore.from_klines() untuk data sintetis selftest/tes.
+# Pemanggil (grep seluruh repo, termasuk tests/, 2026-09-26):
+#   - dashboard.py::_bt_run_job -> satu-satunya pemanggil produksi, sudah
+#     diperbarui (store dibuat + dibersihkan di finally).
+#   - selftest() di file ini -> diperbarui memakai KlineStore.from_klines().
+#   - tests/test_portfolio_backtest.py -> tes baru untuk migrasi ini.
+#   - test_watchlist.py hanya meng-import modulnya untuk cek konsistensi
+#     config, tidak memanggil fungsi yang berubah (diperiksa, tidak perlu
+#     diubah).
+#   Tidak ada modul live (pump_scanner_bot.py, live_client.py, paper_engine.py,
+#   market_data.py, market_ws.py, backtest.py) yang menyentuh fungsi ini.
+# Sintaks/tipe: type hints lengkap pada seluruh tanda tangan yang berubah;
+#   build_timeline sekarang mengembalikan (timeline, dict[str, SymbolSeries]);
+#   docstring lama yang menyebut index_of/stats_of dan "dict di RAM" sudah
+#   ditulis ulang agar tidak menyesatkan. Tidak ada print()/TODO/kode sisa.
+# Keamanan: modul ini tidak merakit SQL sama sekali; seluruh akses lewat
+#   KlineStore yang memakai placeholder "?". Nama simbol berasal dari respons
+#   Binance publik, tetap diperlakukan sebagai parameter, bukan identifier.
+#   Path file dibuat tempfile.mkdtemp() di backtest_storage, bukan hardcode.
+# Race condition/thread-safety: _bt_run_job berjalan di thread terpisah,
+#   sedangkan progress/cancel dibaca thread HTTP. Store dibuat dan dipakai
+#   di thread job yang sama; koneksi sqlite3 dibuka check_same_thread=False
+#   dan seluruh aksesnya diserialisasi RLock milik store, jadi cleanup() dari
+#   thread lain pun aman. Dua job backtest paralel memakai dua direktori
+#   temporary berbeda sehingga tidak ada state bersama. cancel_cb dan
+#   progress_cb tetap dipanggil pada titik yang sama persis seperti sebelumnya
+#   (per simbol saat unduh, tiap 50 bar untuk progres, tiap 200 bar untuk
+#   pembatalan).
+# RAM sebelum vs sesudah (diukur 2026-09-26, data sintetis 150 simbol x 30
+#   hari candle 5 menit = 1,3 juta candle, puncak RSS proses):
+#     versi dict lama : 865 MB  (seluruh Kline + index_of + stats_of hidup
+#                                bersamaan; ~1,3 juta objek Kline)
+#     versi SQLite    : 129 MB  (6,7x lebih hemat; objek Kline yang hidup
+#                                bersamaan maksimal 24 simbol = ~207 ribu,
+#                                sisanya array numerik 41 byte per bar)
+#   Hasil trade kedua versi identik (hash SHA-256 dari daftar trade+skipped+
+#   warnings sama persis: 32843ff6a14a4ec5).
+# Performa (mesin dan data yang sama, tanpa jaringan):
+#     150 simbol x 30 hari : lama 16,7 detik, baru 16,7 detik.
+#      30 simbol x 10 hari : lama 0,49 detik, baru 0,63 detik (selisih 0,14
+#       detik ada di prakomputasi yang kini membaca ulang dari SQLite;
+#       loop simulasinya sendiri justru lebih cepat, 0,33 vs 0,39 detik,
+#       karena gerbang pump dan statistik tidak lagi lewat dict per bar).
+#   Angka ini kecil dibanding fase unduh yang untuk 150 simbol memakan menit.
+# Pilihan desain hot path: kombinasi (a) prakomputasi statistik per simbol
+#   dari pembacaan SQLite yang dialirkan satu simbol pada satu waktu, dan
+#   (b) cache LRU array candle untuk simbol aktif (lihat
+#   _resolve_symbol_cache_size). Query per baris di dalam loop per-bar
+#   SENGAJA dihindari; satu-satunya pembacaan di dalam loop adalah cache-miss
+#   simbol yang baru masuk papan kandidat (terukur 21 kali untuk 8.640 bar).
+# Kompatibilitas pemanggil: tanda tangan fetch_universe_klines(),
+#   fetch_universe_daily_klines(), build_timeline(), dan
+#   run_portfolio_backtest() BERUBAH (argumen store, tanpa daily_klines).
+#   dashboard.py sudah disesuaikan pada commit yang sama. select_universe()
+#   dan summarize_portfolio() tidak berubah sama sekali.
+# Cache candle lintas job (tambahan setelah migrasi SQLite): open_kline_cache()
+#   membuka backtest_cache.KlineCache bila BACKTEST_CACHE_ENABLED, dan
+#   _klines_untuk_simbol() hanya mengunduh rentang yang belum tercatat di
+#   cakupan cache. Tanpa cache, jalurnya persis fetch_full_klines() seperti
+#   sebelumnya, jadi tidak ada dua implementasi paralel: satu fungsi, satu
+#   percabangan tunggal pada argumen cache.
+#   Terukur 2026-09-26 (klien palsu, 150 simbol x 30 hari): job pertama 1.350
+#   request, job berikutnya 150 request (89 persen lebih sedikit) karena hanya
+#   jendela segar 24 jam yang diunduh ulang. Isi candle identik, jadi hasil
+#   simulasi tidak berubah (diuji test_hasil_simulasi_sama_dengan_dan_tanpa_cache).
+#   Kegagalan cache TIDAK menggagalkan job: open_kline_cache() mengembalikan
+#   None sambil logger.warning, lalu backtest kembali ke unduh penuh.
+#   Candle harian sengaja TIDAK di-cache; alasannya ditulis di docstring
+#   fetch_universe_daily_klines (satu request per simbol, dan kebijakan
+#   kesegaran ketat tetap mengharuskan candle harian terakhir diunduh ulang).
+# Catatan terbuka: statistik 24 jam tetap dihitung
+#   backtest.compute_rolling_24h_stats (fungsi bersama) supaya angkanya tidak
+#   bisa menyimpang dari backtest satu simbol, walaupun menghitungnya lewat
+#   window function SQL akan sedikit lebih cepat. Konsistensi hasil dinilai
+#   lebih mahal daripada selisih ratusan milidetik itu.
+# =======================================================================

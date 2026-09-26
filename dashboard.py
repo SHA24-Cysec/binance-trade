@@ -682,6 +682,16 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
             job = _bt_jobs.get(job_id)
             return bool(job and job.get("cancel"))
 
+    # Candle backtest disimpan di satu file SQLite temporary milik job ini,
+    # bukan di dict RAM (lihat portfolio_backtest.py). Store dibuat dan
+    # dipakai HANYA di thread job ini, lalu dihapus di blok finally supaya
+    # file temporary tidak tertinggal, termasuk saat error atau dibatalkan.
+    store = None
+    # Cache candle lintas job (file permanen, lihat backtest_cache.py).
+    # Hanya ditutup di finally, TIDAK dihapus: isinya memang untuk dipakai
+    # ulang oleh job berikutnya supaya tidak mengunduh dari nol.
+    kline_cache = None
+
     try:
         cfg = bt.apply_overrides(PUMP_CONFIG, overrides)
         bt.validate_params(cfg)
@@ -769,11 +779,13 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
             set_progress(0.03 + frac * 0.77,
                          f"mengunduh {sym} ({int(frac * len(universe))}/{len(universe)})")
 
-        data, failed = pbt.fetch_universe_klines(
-            client, universe, interval, fetch_start_ms, end_ms,
-            progress_cb=dl_progress, cancel_cb=cancelled,
+        store = pbt.new_backtest_store(cfg)
+        kline_cache = pbt.open_kline_cache(cfg)
+        symbols_with_data, failed = pbt.fetch_universe_klines(
+            client, universe, interval, fetch_start_ms, end_ms, store,
+            progress_cb=dl_progress, cancel_cb=cancelled, cache=kline_cache,
         )
-        if not data:
+        if not symbols_with_data:
             raise bt.BacktestError(
                 "Tidak ada satu pun simbol yang berhasil diunduh datanya. "
                 "Periksa koneksi ke Binance."
@@ -785,9 +797,9 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
         # simbol) supaya angka rata-ratanya sama dengan yang dibaca bot live,
         # dan dimundurkan 8 hari agar bar paling awal pun punya riwayat penuh.
         set_progress(0.80, "mengunduh volume harian untuk gerbang pump...")
-        daily_data = pbt.fetch_universe_daily_klines(
-            client, list(data.keys()),
-            fetch_start_ms - 8 * bt.MS_PER_DAY, end_ms,
+        pbt.fetch_universe_daily_klines(
+            client, symbols_with_data,
+            fetch_start_ms - 8 * bt.MS_PER_DAY, end_ms, store,
             progress_cb=lambda frac, sym: set_progress(
                 0.80 + frac * 0.02, f"volume harian {sym}"),
             cancel_cb=cancelled,
@@ -796,7 +808,7 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
         # --- Tahap 3: simulasi ----------------------------------------
         set_progress(0.82, "menjalankan simulasi portofolio...")
         result = pbt.run_portfolio_backtest(
-            data, cfg, interval, warmup_ms=warmup_ms, daily_klines=daily_data,
+            store, cfg, interval, warmup_ms=warmup_ms,
             progress_cb=lambda f: set_progress(0.82 + f * 0.17,
                                                "menjalankan simulasi portofolio..."),
             cancel_cb=cancelled,
@@ -833,9 +845,10 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
             "interval": interval,
             "days": days,
             "universe_requested": len(universe),
-            "universe_with_data": len(data),
+            "universe_with_data": len(symbols_with_data),
             "symbols_failed": failed[:50],
             "symbols_failed_count": len(failed),
+            "cache": (kline_cache.stats() if kline_cache is not None else None),
             "bars_total": result.bars_total,
             "start_time": (_ts(result.start_time) or "") + " UTC" if result.start_time else None,
             "end_time": (_ts(result.end_time) or "") + " UTC" if result.end_time else None,
@@ -882,6 +895,14 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
         with _bt_jobs_lock:
             if job_id in _bt_jobs:
                 _bt_jobs[job_id].update({"status": "error", "error": f"Error tak terduga: {exc}"})
+    finally:
+        # Wajib dijalankan pada SEMUA jalur: selesai, error, maupun
+        # pembatalan lewat cancel_cb (yang melempar BacktestError).
+        if store is not None:
+            store.cleanup()
+        if kline_cache is not None:
+            # Ditutup, bukan dihapus. File cache sengaja bertahan lintas job.
+            kline_cache.close()
 
 
 @app.route("/api/backtest/start", methods=["POST"])
@@ -2044,3 +2065,38 @@ def main(*, auto_start_bot: bool = False) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main(auto_start_bot=False))
+
+
+# ==== RINGKASAN AUDIT (dashboard.py, bagian backtest portofolio) ======
+# Lingkup perubahan: HANYA _bt_run_job(). Tidak ada endpoint, kebijakan
+#   keamanan, atau alur bot/paper/live yang disentuh. Diff-nya 20 baris
+#   tambah, 8 baris hapus, semuanya di sekitar pemanggilan portfolio_backtest.
+# Apa yang berubah: candle backtest tidak lagi ditampung dict RAM. Job
+#   membuat satu store SQLite temporary lewat pbt.new_backtest_store(cfg),
+#   meneruskannya ke fetch_universe_klines()/fetch_universe_daily_klines()/
+#   run_portfolio_backtest(), lalu menghapusnya di blok finally.
+# Pemanggil: _bt_run_job hanya dipanggil dari /api/backtest/start lewat
+#   threading.Thread (grep seluruh repo, 2026-09-26). Tidak ada pemanggil
+#   lain, termasuk di tests/; tes baru memanggilnya langsung di
+#   tests/test_dashboard_backtest_job.py.
+# Sintaks/tipe: variabel `data`/`daily_data` yang sudah tidak ada diganti
+#   `symbols_with_data` (list[str]) dan dipakai konsisten di payload
+#   ("universe_with_data"). Komentar tahap 2b tetap akurat karena candle 1d
+#   memang masih diunduh terpisah, hanya tujuan simpannya yang berubah.
+# Keamanan: tidak ada SQL di file ini; path file temporary dibuat
+#   tempfile.mkdtemp() di dalam backtest_storage, bukan path tetap milik
+#   dashboard, sehingga tidak ada penulisan ke direktori aplikasi.
+# Race condition: store dibuat DAN dipakai di thread job yang sama; hanya
+#   cleanup() yang boleh datang dari jalur lain dan itu dijaga lock internal
+#   store. Dua job backtest paralel memakai dua direktori temporary berbeda.
+#   Pembacaan progress/cancel tetap lewat _bt_jobs_lock seperti sebelumnya.
+# Kebocoran sumber daya: blok finally menjamin file terhapus pada jalur
+#   sukses, BacktestError (termasuk pembatalan), maupun exception tak terduga;
+#   diuji tests/test_dashboard_backtest_job.py.
+# Cache candle lintas job: kline_cache dibuka pbt.open_kline_cache(cfg) dan di
+#   finally hanya DITUTUP, tidak dihapus, karena isinya memang untuk job
+#   berikutnya. Bedakan dengan store sementara yang selalu dihapus. Ringkasan
+#   isi cache ikut dilaporkan di payload["cache"] supaya pengguna tahu berapa
+#   baris yang dipakai ulang, bukan menebak. Kalau cache gagal dibuka,
+#   nilainya None dan job berjalan seperti sebelum ada cache.
+# =======================================================================

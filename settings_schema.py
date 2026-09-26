@@ -180,6 +180,10 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "BACKTEST_ENTRY_SPREAD_PCT": _field("Ukuran Posisi", "Spread entry backtest", "Total spread bid-ask yang dibebankan pada simulasi entry.", "float", minimum=0, maximum=10, unit="%"),
     "BACKTEST_SLIPPAGE_PCT": _field("Ukuran Posisi", "Slippage backtest", "Slippage adverse per eksekusi backtest.", "float", minimum=0, maximum=10, unit="%"),
     "BACKTEST_ENTRY_DELAY_BARS": _field("Ukuran Posisi", "Latency entry backtest", "Jumlah bar tunggu setelah sinyal sebelum simulasi entry.", "int", minimum=0, maximum=10, unit="bar"),
+    "BACKTEST_CACHE_ENABLED": _field("Sistem", "Cache candle backtest", "Pakai ulang candle yang sudah pernah diunduh supaya backtest ulang tidak mengunduh dari nol.", "bool"),
+    "BACKTEST_CACHE_FILE": _field("Sistem", "File cache backtest", "Path runtime internal cache candle backtest.", "str", read_only=True),
+    "BACKTEST_CACHE_FRESH_HOURS": _field("Sistem", "Jendela segar cache", "Rentang jam terakhir yang selalu diunduh ulang karena candle belum tertutup.", "int", minimum=0, maximum=168, unit="jam"),
+    "BACKTEST_CACHE_TTL_DAYS": _field("Sistem", "Umur cache backtest", "Data simbol yang tidak dipakai selama sekian hari dibuang. Nol berarti tidak pernah dipangkas.", "int", minimum=0, maximum=3650, unit="hari"),
     "MAX_POSITION_USDT": _field("Ukuran Posisi", "Plafon posisi", "Nol berarti tanpa plafon di PAPER, tetapi dilarang di LIVE.", "float", minimum=0, maximum=1e9, unit="USDT", dangerous=True),
     "BALANCE_BUFFER_PCT": _field("Ukuran Posisi", "Bantalan saldo", "Saldo yang tidak dibelanjakan untuk fee dan pergerakan harga.", "float", minimum=0, maximum=50, unit="%"),
 
@@ -669,3 +673,23 @@ def public_schema(defaults: dict, current: dict) -> list[dict]:
             row["modified"] = defaults.get(key) != current.get(key)
         fields.append(row)
     return fields
+
+
+# ==== RINGKASAN AUDIT (settings_schema.py, bagian cache backtest) =====
+# Lingkup perubahan: HANYA empat entri _field() baru untuk kunci cache
+#   backtest. Tidak ada validator, relasi, daftar kunci terhapus, atau logika
+#   penyimpanan override yang disentuh.
+# Kenapa wajib: PARAMETER_SCHEMA adalah kontrak satu-satu dengan PUMP_CONFIG
+#   (dijaga tests/test_config_settings.py). Menambah kunci config tanpa entri
+#   skema akan membuat tes itu merah dan panel setelan menolak override.
+# Sintaks/tipe: BACKTEST_CACHE_ENABLED bool; BACKTEST_CACHE_FILE str dan
+#   read_only=True mengikuti pola path runtime lain (STATE_FILE, LOG_FILE,
+#   RATE_LIMIT_STATE_FILE) supaya path tidak bisa diubah lewat HTTP;
+#   FRESH_HOURS dan TTL_DAYS int dengan batas wajar (0-168 jam, 0-3650 hari).
+# Keamanan: tidak ada entri yang ditandai dangerous karena tidak satu pun
+#   menyentuh risiko order; path cache dibuat read_only sehingga endpoint
+#   setelan tidak bisa dipakai mengarahkan penulisan file ke lokasi lain.
+#   test_schema_public_payload_never_contains_credentials tetap hijau.
+# Race condition: tidak relevan, modul ini hanya deklarasi skema; penulisan
+#   override tetap lewat _WRITE_LOCK dan interprocess_lock yang sudah ada.
+# =======================================================================

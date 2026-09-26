@@ -500,6 +500,21 @@ PUMP_CONFIG = {
     "BACKTEST_ENTRY_SPREAD_PCT": 0.10,
     "BACKTEST_SLIPPAGE_PCT": 0.05,
     "BACKTEST_ENTRY_DELAY_BARS": 1,
+    # --- Cache candle backtest (lintas job, bukan data live) ---
+    # Backtest portofolio mengunduh ratusan simbol sekaligus. Tanpa cache,
+    # setiap percobaan parameter mengunduh ulang candle yang isinya sama.
+    # Cache ini menyimpan candle yang sudah pernah diunduh ke satu file
+    # SQLite permanen, lalu job berikutnya hanya mengunduh bagian yang
+    # belum ada. Bot live TIDAK pernah membaca file ini.
+    "BACKTEST_CACHE_ENABLED": True,
+    "BACKTEST_CACHE_FILE": "Data/backtest_cache.sqlite3",
+    # Cakupan cache hanya dipercaya sampai sekian jam sebelum sekarang.
+    # Sisanya selalu diunduh ulang, karena candle terakhir belum tertutup
+    # dan bursa sesekali merevisi data.
+    "BACKTEST_CACHE_FRESH_HOURS": 24,
+    # Data simbol yang tidak dipakai selama sekian hari dibuang otomatis.
+    # Nol berarti cache tidak pernah dipangkas sendiri.
+    "BACKTEST_CACHE_TTL_DAYS": 30,
 
     # --- Plafon nominal per posisi ---
     #
@@ -912,6 +927,9 @@ def _finalize_config_dict(cfg: dict) -> dict:
     cfg["RATE_LIMIT_STATE_FILE"] = _runtime_path(
         str(cfg.get("RATE_LIMIT_STATE_FILE", "binance_rate_limit_state.json"))
     )
+    cfg["BACKTEST_CACHE_FILE"] = _runtime_path(
+        str(cfg.get("BACKTEST_CACHE_FILE", "Data/backtest_cache.sqlite3"))
+    )
     return cfg
 
 
@@ -1091,3 +1109,24 @@ def get_maker_fee_pct(config: dict = None) -> float:
     if cfg.get("USE_BNB_FEE_DISCOUNT"):
         fee *= 0.75
     return fee
+
+
+# ==== RINGKASAN AUDIT (config.py, bagian cache backtest) ==============
+# Lingkup perubahan: HANYA penambahan empat kunci cache backtest
+#   (BACKTEST_CACHE_ENABLED, BACKTEST_CACHE_FILE, BACKTEST_CACHE_FRESH_HOURS,
+#   BACKTEST_CACHE_TTL_DAYS) plus satu baris _runtime_path() untuk path cache.
+#   Tidak ada kunci strategi, risiko, mode, atau kredensial yang disentuh.
+# Pemanggil: kunci ini hanya dibaca portfolio_backtest.open_kline_cache().
+#   Modul live (pump_scanner_bot.py, paper_engine.py, live_client.py) tidak
+#   membacanya sama sekali, jadi perilaku trading tidak berubah.
+# Sintaks/tipe: nilai default bertipe bool/str/int, sama dengan tipe yang
+#   dideklarasikan di settings_schema.PARAMETER_SCHEMA. Tes
+#   tests/test_config_settings.py::test_schema_covers_every_final_config_key
+#   memverifikasi tidak ada kunci yang lupa didaftarkan ke skema.
+# Keamanan: BACKTEST_CACHE_FILE di-absolutkan _runtime_path() ke folder repo
+#   sehingga tidak bisa menulis ke direktori acak hanya karena cwd berbeda,
+#   dan pola Data/ serta *.sqlite3 sudah ditambahkan ke .gitignore supaya
+#   file cache tidak pernah ter-commit.
+# Race condition: tidak ada state proses baru di sini; koordinasi akses file
+#   cache ditangani backtest_cache.py (WAL + busy_timeout + lock).
+# =======================================================================
