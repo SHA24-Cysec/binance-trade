@@ -488,7 +488,7 @@ PUMP_CONFIG = {
     # konkuren = satu posisi. Dengan SL 1.8%, rugi per trade ~ 30% x 1.8% =
     # 0,54% dari equity -- masih moderat dan jauh dari MAX_DRAWDOWN 12%.
     # PENTING untuk LIVE: turunkan lagi & pasang MAX_POSITION_USDT nyata.
-    "RISK_PERCENT": 30.0,                      # dipakai jika USE_RISK_PERCENT = True
+    "RISK_PERCENT": 100.0,                      # dipakai jika USE_RISK_PERCENT = True
     "POSITION_SIZE_USDT": 5.0,              # dipakai jika USE_RISK_PERCENT = False
     # Modal awal simulasi backtest. Ini BUKAN saldo LIVE yang dibaca otomatis;
     # ubah sesuai akun yang ingin dimodelkan. Backtest memakai policy sizing
