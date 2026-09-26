@@ -79,6 +79,11 @@ def test_settings_write_failure_is_reported_without_audit(client, monkeypatch):
 def test_live_risk_relaxation_requires_phrase(client, monkeypatch):
     defaults = config.default_config_for_mode("LIVE")
     defaults["MAX_POSITION_USDT"] = 100
+    # RISK_PERCENT default repo bisa berada di batas atas skema (100%),
+    # sehingga "+1" akan ditolak validasi sebelum sempat menguji alur frasa
+    # risiko. Test ini menguji ALUR KONFIRMASI kenaikan risiko, bukan nilai
+    # default, jadi titik awal dibuat di bawah plafon skema.
+    defaults["RISK_PERCENT"] = 50.0
     current = deepcopy(defaults)
     monkeypatch.setattr(dashboard, "_config_pair", lambda mode: (deepcopy(defaults), deepcopy(current), []))
     monkeypatch.setattr(dashboard._process_manager, "status", lambda mode=None: {"status": "STOPPED"})

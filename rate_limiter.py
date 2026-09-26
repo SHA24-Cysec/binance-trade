@@ -9,12 +9,15 @@ masing-masing.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 import threading
 import time
 from contextlib import contextmanager
 from typing import Iterator
+
+logger = logging.getLogger("rate_limiter")
 
 try:
     import fcntl  # type: ignore
@@ -165,6 +168,16 @@ class SharedRequestWeightLimiter:
                 if state["blocked_until"] > now and not ignore_block:
                     raise RateLimitBlockedError(state["blocked_until"] - now)
                 if state["used"] + requested <= effective_limit or state["used"] == 0:
+                    # Klausa used == 0 sengaja meloloskan request tunggal yang
+                    # bobotnya melebihi limit efektif agar tidak deadlock.
+                    # Perbaikan audit 2026-09-27 (temuan RENDAH-02): kejadian
+                    # langka ini dicatat supaya anomali weight terlihat di log.
+                    if state["used"] == 0 and requested > effective_limit:
+                        logger.warning(
+                            "Rate limiter meloloskan satu request berbobot %d "
+                            "yang melebihi limit efektif %d pada jendela kosong.",
+                            requested, effective_limit,
+                        )
                     state["used"] += requested
                     return
                 wait = max(0.05, state["window_start"] + self.window_seconds - now)

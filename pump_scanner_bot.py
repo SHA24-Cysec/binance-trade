@@ -50,7 +50,8 @@ import time
 import uuid
 
 from binance_client import (
-    BinanceAPIError, SymbolFilters, build_filters_cache, build_trading_symbols,
+    BinanceAPIError, BinanceRateLimitError, SymbolFilters, build_filters_cache,
+    build_trading_symbols,
 )
 from exchange_client import ExchangeClient, create_exchange_client
 from config import (
@@ -682,6 +683,50 @@ def _native_stop_price(state: dict, filters: SymbolFilters | None,
     return raw
 
 
+# ==== Klasifikasi error Binance untuk proteksi native (perbaikan KRITIS-01) ====
+# BinanceAPIError HANYA dilempar saat Binance MEMBALAS request dengan body
+# error (lihat binance_client._request). Kegagalan jaringan murni muncul
+# sebagai requests.RequestException dan tidak pernah masuk klasifikasi ini.
+# Karena itu aman membedakan dua dunia:
+#   1) Penolakan DETERMINISTIK: Binance menjamin order TIDAK pernah tercipta
+#      (filter harga/qty, presisi, saldo kurang, timestamp di luar recvWindow,
+#      simbol salah). Intent boleh disimpulkan FAILED sehingga jalur pemulihan
+#      yang sudah ada berjalan: exit lokal TETAP hidup dan proteksi dipasang
+#      ulang. Tanpa klasifikasi ini, posisi bisa telanjang total: tidak ada
+#      order proteksi di bursa DAN exit lokal terblokir tanpa batas waktu.
+#   2) Status TIDAK PASTI (5xx, 429/418, kode tak dikenal): tetap fail-closed
+#      sebagai UNKNOWN supaya tidak pernah ada dua proteksi/dua exit untuk
+#      satu posisi.
+_DEFINITIVE_REJECT_CODES = {
+    -1013,  # Filter failure (PRICE_FILTER / LOT_SIZE / NOTIONAL, dst)
+    -1021,  # Timestamp di luar recvWindow: request ditolak sebelum diproses
+    -1100, -1101, -1102, -1103, -1104, -1106,  # parameter ilegal/kurang/berlebih
+    -1111,  # presisi qty/price salah
+    -1121,  # simbol tidak valid
+    -2010,  # NEW_ORDER_REJECTED (saldo kurang, dsb)
+}
+_NOT_FOUND_CODES = {-2013}  # "Order does not exist." / "Order list does not exist."
+# GET pada intent yang belum pernah dikonfirmasi tercipta baru boleh
+# disimpulkan FAILED setelah usia minimum ini, sebagai penyangga terhadap
+# jeda propagasi POST yang (secara teori) masih diproses bursa.
+_NOT_FOUND_MIN_INTENT_AGE_MS = 10_000
+
+
+def _is_definitive_reject(exc: BinanceAPIError) -> bool:
+    """True bila Binance MENJAMIN order tidak pernah tercipta."""
+    if isinstance(exc, BinanceRateLimitError):
+        # 429/418 lapisan rate limit: konservatif, tetap fail-closed.
+        return False
+    return getattr(exc, "code", None) in _DEFINITIVE_REJECT_CODES
+
+
+def _is_order_not_found(exc: BinanceAPIError) -> bool:
+    """True bila error berarti order/order-list tidak ada di bursa."""
+    if getattr(exc, "code", None) in _NOT_FOUND_CODES:
+        return True
+    return "does not exist" in str(getattr(exc, "msg", "") or "").lower()
+
+
 def _arm_native_oco(client: ExchangeClient, config: dict,
                     filters: SymbolFilters | None, state: dict) -> bool:
     """Pasang OCO SELL native dan simpan seluruh intent sebelum POST.
@@ -774,6 +819,26 @@ def _arm_native_oco(client: ExchangeClient, config: dict,
         return False
     except BinanceAPIError as exc:
         intent = state.get("native_oco")
+        if _is_definitive_reject(exc):
+            # Perbaikan KRITIS-01: Binance MENOLAK order-list secara
+            # deterministik, order dijamin tidak tercipta. Exit lokal tidak
+            # boleh diblokir, dan _ensure_native_protection boleh mencoba
+            # fallback native stop karena tidak mungkin ada proteksi ganda.
+            if isinstance(intent, dict):
+                intent["status"] = "FAILED"
+                intent["last_error"] = str(exc)
+            state["_native_stop_exit_blocked"] = False
+            state["native_protection_retry_at"] = now + 60_000
+            state["reconciliation_required"] = True
+            state["reconciliation_assets"] = [symbol]
+            state_mod.save_state(config["STATE_FILE"], state)
+            logger.critical(
+                "OCO native %s DITOLAK deterministik (code=%s): %s. "
+                "Order dipastikan tidak tercipta; local SL/TP tetap aktif "
+                "dan fallback stop akan dicoba.",
+                symbol, getattr(exc, "code", None), exc,
+            )
+            return False
         if isinstance(intent, dict):
             intent["status"] = "UNKNOWN"
             intent["last_error"] = str(exc)
@@ -874,8 +939,13 @@ def _arm_native_stop(client: ExchangeClient, config: dict,
         )
     except (BinanceAPIError, NotImplementedError) as exc:
         intent = state.get("native_stop")
+        # Perbaikan KRITIS-01: penolakan deterministik Binance berarti order
+        # dijamin tidak tercipta, jadi statusnya FAILED (bukan UNKNOWN) agar
+        # jalur pemulihan berjalan dan exit lokal tidak pernah tertahan.
+        definitive = (isinstance(exc, NotImplementedError)
+                      or (isinstance(exc, BinanceAPIError) and _is_definitive_reject(exc)))
         if isinstance(intent, dict):
-            intent["status"] = "UNKNOWN" if isinstance(exc, BinanceAPIError) else "FAILED"
+            intent["status"] = "FAILED" if definitive else "UNKNOWN"
             intent["last_error"] = str(exc)
         state["reconciliation_required"] = True
         state["reconciliation_assets"] = [symbol]
@@ -969,6 +1039,28 @@ def _reconcile_native_oco(client: ExchangeClient, config: dict,
             ),
         )
     except BinanceAPIError as exc:
+        # Perbaikan KRITIS-01: bila order-list TIDAK ADA di bursa padahal
+        # intent tidak pernah dikonfirmasi tercipta (POST gagal/timeout,
+        # order_list_id masih None), kesimpulannya deterministik: POST tidak
+        # pernah mendarat. Tanpa cabang ini, GET yang terus melempar error
+        # "does not exist" membuat exit lokal terblokir selamanya sementara
+        # tidak ada satu pun proteksi di bursa (posisi telanjang permanen).
+        never_confirmed = intent.get("order_list_id") is None
+        age_ms = state_mod.now_ms() - int(intent.get("created_at") or 0)
+        if (_is_order_not_found(exc) and never_confirmed
+                and age_ms >= _NOT_FOUND_MIN_INTENT_AGE_MS):
+            state["native_oco"] = None
+            state["_native_stop_exit_blocked"] = False
+            state["native_protection_retry_at"] = state_mod.now_ms() + 60_000
+            state["reconciliation_required"] = True
+            state["reconciliation_assets"] = [symbol]
+            state_mod.save_state(config["STATE_FILE"], state)
+            logger.critical(
+                "OCO %s dipastikan TIDAK PERNAH tercipta di bursa (%s). "
+                "Exit lokal diaktifkan kembali dan proteksi akan dipasang ulang.",
+                symbol, exc,
+            )
+            return False
         intent["status"] = "UNKNOWN"
         intent["last_error"] = str(exc)
         state["_native_stop_exit_blocked"] = True
@@ -1091,6 +1183,25 @@ def _reconcile_native_stop(client: ExchangeClient, config: dict,
             ),
         )
     except BinanceAPIError as exc:
+        # Perbaikan KRITIS-01: analogi dengan _reconcile_native_oco. Order
+        # stop yang tidak pernah dikonfirmasi tercipta (order_id None) dan
+        # dinyatakan tidak ada oleh bursa berarti POST tidak pernah mendarat.
+        never_confirmed = intent.get("order_id") is None
+        age_ms = state_mod.now_ms() - int(intent.get("created_at") or 0)
+        if (_is_order_not_found(exc) and never_confirmed
+                and age_ms >= _NOT_FOUND_MIN_INTENT_AGE_MS):
+            state["native_stop"] = None
+            state["_native_stop_exit_blocked"] = False
+            state["native_protection_retry_at"] = state_mod.now_ms() + 60_000
+            state["reconciliation_required"] = True
+            state["reconciliation_assets"] = [symbol]
+            state_mod.save_state(config["STATE_FILE"], state)
+            logger.critical(
+                "Proteksi native %s dipastikan TIDAK PERNAH tercipta di bursa (%s). "
+                "Exit lokal diaktifkan kembali dan proteksi akan dipasang ulang.",
+                symbol, exc,
+            )
+            return False
         intent["status"] = "UNKNOWN"
         intent["last_error"] = str(exc)
         state["_native_stop_exit_blocked"] = True
@@ -1872,6 +1983,13 @@ def run(config: dict, lifecycle=None) -> int:
         )
     else:
         logger.warning("MODE LIVE AKTIF: order memakai UANG ASLI di Binance produksi.")
+        if not config.get("USE_EQUITY_STOP") and not config.get("USE_DAILY_STOP"):
+            logger.critical(
+                "PERINGATAN RISIKO: USE_EQUITY_STOP dan USE_DAILY_STOP dua-duanya "
+                "NONAKTIF di mode LIVE. Tidak ada rem drawdown maupun rem kerugian "
+                "harian, dan CLOSE_ALL_AT_LIMIT tidak akan pernah terpicu. "
+                "Sangat disarankan mengaktifkan minimal salah satu sebelum lanjut."
+            )
     need_setup = strategy.required_lookback_bars(config)
     have_bars = int(config.get("CONFIRM_LOOKBACK_BARS", 48))
     if have_bars < need_setup:
@@ -2107,7 +2225,7 @@ def run(config: dict, lifecycle=None) -> int:
                             logger.info("Kandidat %s dilewati: spread %.3f%% > batas %.3f%%.",
                                         best.symbol, spread_pct, config["MAX_SPREAD_PCT"])
                     else:
-                        logger.info("Tidak ada setup pullback retest yang sah pada scan ini.")
+                        logger.info("Tidak ada setup momentum (3-dari-4 konfirmasi) yang sah pada scan ini.")
 
             if time.time() - last_heartbeat >= config["HEARTBEAT_INTERVAL_SECONDS"]:
                 last_heartbeat = time.time()

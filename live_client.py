@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from binance_client import BinanceSpotClient
+from binance_client import BinanceSpotClient, _fmt_num
 from config import get_base_url
 from exchange_client import ExchangeClient
 from market_data import MarketDataProvider
@@ -93,14 +93,19 @@ class LiveClient(ExchangeClient):
                   quote_order_qty: Optional[float] = None,
                   new_client_order_id: Optional[str] = None) -> dict:
         params = {"symbol": symbol, "side": side, "type": order_type}
+        # Perbaikan audit 2026-09-27 (temuan SEDANG-03): angka WAJIB melewati
+        # _fmt_num seperti di jalur order lain (new_market_order, stop, OCO).
+        # Float mentah bisa dirender Python sebagai notasi ilmiah (mis.
+        # 0.00001 -> "1e-05") yang ditolak Binance dengan -1100, dan _fmt_num
+        # juga menolak NaN/inf sebelum request terkirim.
         if quantity is not None:
-            params["quantity"] = quantity
+            params["quantity"] = _fmt_num(quantity)
         if quote_order_qty is not None:
-            params["quoteOrderQty"] = quote_order_qty
+            params["quoteOrderQty"] = _fmt_num(quote_order_qty)
         if price is not None:
-            params["price"] = price
+            params["price"] = _fmt_num(price)
         if stop_price is not None:
-            params["stopPrice"] = stop_price
+            params["stopPrice"] = _fmt_num(stop_price)
         if time_in_force is not None:
             params["timeInForce"] = time_in_force
         if new_client_order_id is not None:

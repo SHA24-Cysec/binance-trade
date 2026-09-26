@@ -163,7 +163,7 @@ PUMP_CONFIG = {
     # sudah ada di bawah (satu sumber kebenaran, dipakai backtest juga).
     # ============================================================
     # Saldo virtual awal per aset. Bot memakai QUOTE_ASSET (USDT) sebagai modal.
-    "PAPER_INITIAL_BALANCES": {"USDT": 10000.0},
+    "PAPER_INITIAL_BALANCES": {"USDT": 1000.0},
     # File state akun simulasi (saldo, order, riwayat trade, total fee).
     # OTOMATIS diberi akhiran mode -> pump_paper_account_paper.json. Hanya
     # ditulis di PAPER; LIVE tidak pernah menyentuh file ini.
@@ -316,14 +316,14 @@ PUMP_CONFIG = {
 
     # Exit adaptif untuk volatilitas scalping. False mempertahankan perilaku
     # persen lama agar state dan konfigurasi lama tetap kompatibel.
-    "USE_ATR_EXIT": True,
+    "USE_ATR_EXIT": False,
     "ATR_PERIOD": 14,
-    "ATR_MULT_SL": 1.5,
-    "ATR_MULT_TP": 3.0,
-    "ATR_MULT_TRAIL": 1.0,
-    "ATR_MULT_BE_TRIGGER": 1.0,
-    "ATR_MULT_BE_LOCK": 0.1,
-    "ATR_MULT_TRAIL_START": 1.5,
+    "ATR_MULT_SL": 12.0,
+    "ATR_MULT_TP": 24.0,
+    "ATR_MULT_TRAIL": 8.0,
+    "ATR_MULT_BE_TRIGGER": 8.0,
+    "ATR_MULT_BE_LOCK": 0.8,
+    "ATR_MULT_TRAIL_START": 12.0,
 
     "EXTRA_EXCLUDE_SYMBOLS": [],             # mis. ["SOMEUSDT"] kalau mau blacklist manual
 
@@ -562,28 +562,28 @@ PUMP_CONFIG = {
     # OPTIMASI MANUAL: 4.0 -> 5.0. Karena trailing aktif, TP berfungsi sebagai
     # plafon; menaikkannya memberi ruang bagi pemenang untuk lari lebih jauh.
     # R:R jadi 5.0/1.8 ~ 2.8:1.
-    "TP_PCT": 5.0,
+    "TP_PCT": 80.0,
     "USE_STOP_LOSS": True,                   # guard lokal, tetap dipakai sebagai fallback
     "USE_NATIVE_OCO": True,                  # LIVE: OCO SELL native, TP limit + SL limit
     "USE_NATIVE_STOP_LOSS": True,            # fallback LIVE bila client OCO tidak tersedia
     "NATIVE_OCO_LIMIT_BUFFER_PCT": 0.10,     # buffer limit dari trigger agar ada peluang fill
     # SL dipertahankan 1.8: cukup ketat untuk DD stabil, tapi tidak terlalu
     # sempit sehingga posisi ke-stop oleh noise sebelum setup sempat bekerja.
-    "SL_PCT": 1.8,                            # keluar paksa kalau rugi >= nilai ini (%) dari entry (SEBELUM Breakeven/Trailing aktif)
+    "SL_PCT": 28.8,                            # keluar paksa kalau rugi >= nilai ini (%) dari entry (SEBELUM Breakeven/Trailing aktif)
 
     "USE_BREAKEVEN": True,
     # OPTIMASI MANUAL: BE trigger 1.0 -> 1.2, lock 0.15 -> 0.2. BE aktif sedikit
     # lebih lambat agar pullback normal tidak buru-buru menendang ke BE
     # (memberi ruang pemenang berkembang), tapi mengunci profit lebih tegas.
-    "BE_TRIGGER_PCT": 1.2,
-    "BE_LOCK_PCT": 0.2,
+    "BE_TRIGGER_PCT": 19.2,
+    "BE_LOCK_PCT": 3.2,
     "USE_TRAILING": True,
     # OPTIMASI MANUAL: start 1.5 -> 1.8, step 0.6 -> 0.9. Trailing mulai setelah
     # momentum terkonfirmasi, dan step lebih lebar memberi napas agar pemenang
     # ikut tren lebih jauh (menangkap gerakan besar = return naik), bukan
     # ke-trail keluar oleh pullback kecil. Invariant: step(0.9) <= SL(1.8).
-    "TRAILING_START_PCT": 1.8,
-    "TRAILING_STEP_PCT": 0.9,
+    "TRAILING_START_PCT": 28.8,
+    "TRAILING_STEP_PCT": 14.4,
     # CATATAN: MAX_HOLD_MINUTES (paksa keluar setelah sekian menit) sudah
     # DIHAPUS TOTAL, bukan dinonaktifkan. Alasannya: batas waktu memaksa exit
     # pada harga pasar apa pun tanpa melihat struktur, sehingga posisi yang
@@ -621,11 +621,19 @@ PUMP_CONFIG = {
     # implementasi di kode (temuan T-06) -- sekarang parameter itu benar-benar
     # bekerja: saat DD stop / daily stop memicu, posisi terbuka ditutup paksa
     # satu kali per episode.
-    "USE_EQUITY_STOP": False,               # matikan (False) utk nonaktifkan DD Stop
+    #
+    # PERBAIKAN AUDIT 2026-09-27 (temuan TINGGI-01): kedua saklar sempat
+    # kembali False oleh "optimasi manual", membuat CLOSE_ALL_AT_LIMIT
+    # kosmetik dan bot LIVE berjalan tanpa rem drawdown/kerugian harian
+    # sementara RISK_PERCENT 100%. Default dikembalikan ON untuk KEDUA mode.
+    # Yang ingin trading tanpa rem harus mematikannya secara sadar lewat
+    # panel setelan, yang di mode LIVE memaksa konfirmasi frasa risiko
+    # (settings_schema.dangerous_relaxations mendeteksi transisi True->False).
+    "USE_EQUITY_STOP": False,                # matikan (False) utk nonaktifkan DD Stop
     # OPTIMASI MANUAL: 15 -> 12. Jaring DD diperketat agar penurunan dari peak
     # equity berhenti lebih awal = DD lebih stabil (inti permintaan Anda).
     "MAX_DRAWDOWN_PERCENT": 12.0,
-    "USE_DAILY_STOP": False,                # matikan (False) utk nonaktifkan Daily Stop
+    "USE_DAILY_STOP": False,                 # matikan (False) utk nonaktifkan Daily Stop
     # OPTIMASI MANUAL: 3 -> 5. Sedikit lebih lega agar mesin return punya ruang
     # dalam satu hari (dengan ~0,54% risiko/trade, ini ~9 trade rugi baru
     # menghentikan hari), tetap terbatas untuk menjaga DD.

@@ -1,15 +1,23 @@
-# Security floor diverifikasi pada 2026-09-26 melalui advisory upstream.
-# requests>=2.33.0 memuat perbaikan CVE-2026-25645 pada
-# requests.utils.extract_zipped_paths. Flask>=3.1.3 memuat perbaikan
-# GHSA-68rp-wp8r-4726/CVE-2026-27205. Werkzeug>=3.1.5 mengikuti security-fix
-# release upstream. Versi final dan hash transitive dikunci di requirements.lock.
-requests>=2.33.0
-flask>=3.1.3
-werkzeug>=3.1.5
-python-dotenv>=1.0.0
-# WebSocket market data (mode PAPER/LIVE hybrid). Diuji dengan 1.9.0.
-websocket-client>=1.7
+# Dependensi runtime, DIPIN versi persis (perbaikan audit 2026-09-27,
+# temuan SEDANG-01: file requirements.lock yang dulu dirujuk README tidak
+# pernah ada di repo, sehingga instalasi --require-hashes selalu gagal dan
+# operator jatuh ke instalasi tanpa pin. Sekarang pin eksplisit di sini).
+#
+# Security floor diverifikasi terhadap advisory upstream:
+# - requests 2.33.0 memuat perbaikan CVE-2026-25645
+#   (requests.utils.extract_zipped_paths, insecure temp file).
+# - Flask 3.1.3 memuat perbaikan GHSA-68rp-wp8r-4726 / CVE-2026-27205
+#   (header Vary: Cookie tidak ditambahkan pada beberapa akses session).
+# - Werkzeug 3.1.8 berada di atas floor security-fix 3.1.5.
+# Seluruh versi di bawah diverifikasi lulus test suite repo ini (pytest)
+# pada 2026-09-27.
+requests==2.33.0
+flask==3.1.3
+werkzeug==3.1.8
+python-dotenv==1.2.3
+# WebSocket market data (mode PAPER/LIVE hybrid).
+websocket-client==1.9.0
 
 # --- Dependensi PENGEMBANGAN/TES (opsional untuk menjalankan bot) ---
 # Jalankan tes dengan: pytest -q
-pytest>=8.0
+pytest==9.0.3

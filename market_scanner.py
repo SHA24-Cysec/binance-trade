@@ -616,6 +616,15 @@ def detect_pullback_retest(klines: list[Kline], config: dict) -> SetupResult:
     sudah close dan kronologis. Konfirmasi terdiri dari EMA cross, RSI sehat,
     MACD histogram menguat, dan higher low setelah pump awal. Tidak ada candle
     yang belum close atau data masa depan yang digunakan.
+
+    CATATAN NAMA (audit 2026-09-27, temuan RENDAH-05): nama fungsi
+    dipertahankan demi kompatibilitas pemanggil lama (backtest.py,
+    portfolio_backtest.py, watchlist_auto.py), tetapi strategi ini SUDAH
+    BUKAN pullback-retest sungguhan. Tidak ada verifikasi harga kembali
+    menguji level breakout: ``breakout_level`` diisi close candle terakhir
+    sebagai referensi harga entry, dan ``retest_touches`` selalu 0 (field
+    warisan skema SetupResult lama). Jangan menganggap ada filter retest
+    yang menyaring false breakout.
     """
     n = len(klines)
     period = 14
@@ -645,6 +654,9 @@ def detect_pullback_retest(klines: list[Kline], config: dict) -> SetupResult:
                f"({confirmations}/4), {volume_detail}")
     if confirmations < 3:
         return SetupResult(False, f"konfirmasi entry kurang dari 3/4: {details}")
+    # breakout_level = close terakhir (referensi harga entry, BUKAN level
+    # retest) dan retest_touches = 0 adalah field warisan; lihat catatan
+    # nama pada docstring di atas.
     return SetupResult(True, f"momentum pump sah: {details}",
                        breakout_level=klines[-1].close,
                        zone_low=klines[-1].low, zone_high=klines[-1].high,

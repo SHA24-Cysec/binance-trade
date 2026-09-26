@@ -123,6 +123,10 @@ QUOTE = PUMP_CONFIG.get("QUOTE_ASSET", "USDT")
 # toh cuma file terakhir yang dibaca bot, ini juga mencegah spam UI).
 _MANUAL_CLOSE_COOLDOWN_SECONDS = 5.0
 _last_manual_close_request = {"ts": 0.0}
+# Perbaikan audit 2026-09-27 (temuan RENDAH-01): check-then-set timestamp
+# cooldown harus atomik. Tanpa lock, dua request paralel bisa sama-sama lolos
+# pemeriksaan sebelum salah satunya menulis timestamp.
+_manual_close_lock = threading.Lock()
 
 # Token acak PER PROSES untuk melindungi endpoint POST /api/manual/close dari
 # CSRF (perbaikan audit 2026-09-24, temuan S-05). Tanpa ini, situs jahat yang
@@ -1344,24 +1348,36 @@ def api_manual_close():
         return jsonify({"error": "Token admin tidak valid atau tidak ada."}), 403
 
     now = time.time()
-    if now - _last_manual_close_request["ts"] < _MANUAL_CLOSE_COOLDOWN_SECONDS:
-        return jsonify({"error": "Tunggu sebentar, permintaan sebelumnya baru saja dikirim."}), 429
+    # Reservasi slot cooldown secara ATOMIK (check dan set dalam satu lock)
+    # supaya dobel-klik/permintaan paralel tidak bisa lolos berbarengan.
+    with _manual_close_lock:
+        if now - _last_manual_close_request["ts"] < _MANUAL_CLOSE_COOLDOWN_SECONDS:
+            return jsonify({"error": "Tunggu sebentar, permintaan sebelumnya baru saja dikirim."}), 429
+        _last_manual_close_request["ts"] = now
+
+    def _release_cooldown() -> None:
+        # Validasi gagal = tidak ada perintah terkirim; slot dikembalikan
+        # supaya operator tidak menunggu 5 detik hanya karena salah simbol.
+        with _manual_close_lock:
+            if _last_manual_close_request["ts"] == now:
+                _last_manual_close_request["ts"] = 0.0
 
     state = load_state()
     symbol = state.get("current_symbol")
     qty = float(state.get("qty", 0) or 0)
     if not symbol or qty <= 0:
+        _release_cooldown()
         return jsonify({"error": "Tidak ada posisi terbuka saat ini untuk dijual."}), 400
 
     data = request.get_json(force=True, silent=True) or {}
     confirm_symbol = str(data.get("symbol", "")).strip().upper()
     if confirm_symbol and confirm_symbol != symbol:
+        _release_cooldown()
         return jsonify({
             "error": f"Simbol tidak cocok (diminta {confirm_symbol}, posisi saat ini {symbol}). "
                      "Muat ulang dashboard dan coba lagi."
         }), 409
 
-    _last_manual_close_request["ts"] = now
     state_mod.save_control(CONTROL_FILE, {
         "action": "CLOSE_POSITION",
         "symbol": symbol,

@@ -13,13 +13,9 @@ Bot rotasi Binance Spot untuk mode PAPER dan LIVE. Bot memindai pair dengan quot
 
 ## Cara jalan cepat
 
-Instalasi reproducible memakai lock file ber-hash:
-
-```bash
-python -m pip install --require-hashes -r requirements.lock
-```
-
-Untuk instalasi development yang mengikuti rentang versi sumber:
+Instalasi memakai versi yang dipin persis di requirements.txt (perbaikan
+audit 2026-09-27: file requirements.lock yang dulu dirujuk di sini tidak
+pernah ada di repo, sehingga perintah instalasinya selalu gagal):
 
 ```bash
 python -m pip install -r requirements.txt

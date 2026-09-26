@@ -29,7 +29,25 @@ except ImportError:  # pragma: no cover, POSIX
 
 
 _REPLACE_DELAYS = (0.02, 0.04, 0.08, 0.16, 0.32, 0.50)
-_INTERPROCESS_THREAD_LOCK = threading.RLock()
+
+# Perbaikan audit 2026-09-27 (temuan RENDAH-03): sebelumnya SATU RLock global
+# menserialisasi seluruh interprocess_lock dalam proses meski menyasar file
+# berbeda (state, settings, audit, rate limit saling menunggu tanpa perlu).
+# Sekarang setiap path lock mendapat RLock sendiri; sifat reentrant per path
+# dipertahankan, dan tidak ada risiko deadlock ordering baru karena pemanggil
+# yang sama tidak pernah memegang dua path lock bersarang dengan urutan
+# berlawanan (pola pemakaian di repo ini: satu lock per operasi tulis).
+_PATH_LOCKS: dict[str, threading.RLock] = {}
+_PATH_LOCKS_GUARD = threading.Lock()
+
+
+def _thread_lock_for(lock_path: str) -> threading.RLock:
+    with _PATH_LOCKS_GUARD:
+        lock = _PATH_LOCKS.get(lock_path)
+        if lock is None:
+            lock = threading.RLock()
+            _PATH_LOCKS[lock_path] = lock
+        return lock
 
 
 @contextmanager
@@ -44,7 +62,7 @@ def interprocess_lock(path: os.PathLike | str) -> Iterator[None]:
     lock_path = f"{target}.lock"
     parent = os.path.dirname(lock_path) or "."
     Path(parent).mkdir(parents=True, exist_ok=True)
-    with _INTERPROCESS_THREAD_LOCK:
+    with _thread_lock_for(os.path.abspath(lock_path)):
         with open(lock_path, "a+", encoding="utf-8") as handle:
             if fcntl is not None:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
