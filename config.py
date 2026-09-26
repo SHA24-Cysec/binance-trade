@@ -147,6 +147,12 @@ PUMP_CONFIG = {
     # Base URL REST produksi publik. Dipakai KEDUA mode untuk DATA PASAR
     # (PAPER: hanya data; LIVE: data + order bertanda tangan).
     "LIVE_BASE_URL": "https://api.binance.com",
+    # REQUEST_WEIGHT Binance dihitung per IP. Semua client proses produksi
+    # berbagi ledger file ini agar bot, dashboard, dan backtest tidak berebut
+    # kuota secara buta. File runtime diabaikan Git.
+    "RATE_LIMIT_STATE_FILE": "binance_rate_limit_state.json",
+    "RATE_LIMIT_WEIGHT_LIMIT": 6000,
+    "RATE_LIMIT_SAFETY_MARGIN": 100,
     "API_KEY": os.environ.get("BINANCE_API_KEY", ""),    # hanya WAJIB untuk LIVE; PAPER mengabaikannya
     "API_SECRET": os.environ.get("BINANCE_API_SECRET", ""),  # hanya WAJIB untuk LIVE; PAPER mengabaikannya
 
@@ -345,8 +351,10 @@ PUMP_CONFIG = {
     # yang sedang "dekat" dengan kondisi masuk bot. Panel watchlist
     # menampilkan harga, perubahan 24 jam, volume, dan status tiap koin
     # terhadap gerbang semesta scanner yang masih berlaku, yaitu
-    # MIN_QUOTE_VOLUME_USDT_24H dan MAX_SPREAD_PCT. Gerbang kenaikan 24 jam
-    # sudah dihapus bersama strategi lama.
+    # MIN_QUOTE_VOLUME_USDT_24H dan MAX_SPREAD_PCT. Gerbang pump scanner
+    # yang memerlukan kenaikan 24 jam serta volume harian TIDAK ditampilkan
+    # sebagai status watchlist karena panel ini sengaja tidak mengunduh candle
+    # harian tambahan dan tidak memengaruhi keputusan entry.
     #
     # ------------------------------------------------------------------
     # DARI MANA DAFTAR INI BERASAL (metodologi, bukan tebakan)
@@ -486,6 +494,12 @@ PUMP_CONFIG = {
     # ubah sesuai akun yang ingin dimodelkan. Backtest memakai policy sizing
     # yang sama dengan live terhadap angka ini.
     "BACKTEST_INITIAL_EQUITY_USDT": 10_000.0,
+    # Asumsi execution backtest. Entry live memakai ask setelah sinyal,
+    # sehingga simulasi tidak boleh otomatis membeli di close sinyal tanpa
+    # spread, slippage, dan latency.
+    "BACKTEST_ENTRY_SPREAD_PCT": 0.10,
+    "BACKTEST_SLIPPAGE_PCT": 0.05,
+    "BACKTEST_ENTRY_DELAY_BARS": 1,
 
     # --- Plafon nominal per posisi ---
     #
@@ -534,7 +548,10 @@ PUMP_CONFIG = {
     # plafon; menaikkannya memberi ruang bagi pemenang untuk lari lebih jauh.
     # R:R jadi 5.0/1.8 ~ 2.8:1.
     "TP_PCT": 5.0,
-    "USE_STOP_LOSS": True,                   # kerugian maksimum per-trade dari harga entry, exit paksa di harga pasar
+    "USE_STOP_LOSS": True,                   # guard lokal, tetap dipakai sebagai fallback
+    "USE_NATIVE_OCO": True,                  # LIVE: OCO SELL native, TP limit + SL limit
+    "USE_NATIVE_STOP_LOSS": True,            # fallback LIVE bila client OCO tidak tersedia
+    "NATIVE_OCO_LIMIT_BUFFER_PCT": 0.10,     # buffer limit dari trigger agar ada peluang fill
     # SL dipertahankan 1.8: cukup ketat untuk DD stabil, tapi tidak terlalu
     # sempit sehingga posisi ke-stop oleh noise sebelum setup sempat bekerja.
     "SL_PCT": 1.8,                            # keluar paksa kalau rugi >= nilai ini (%) dari entry (SEBELUM Breakeven/Trailing aktif)
@@ -589,11 +606,11 @@ PUMP_CONFIG = {
     # implementasi di kode (temuan T-06) -- sekarang parameter itu benar-benar
     # bekerja: saat DD stop / daily stop memicu, posisi terbuka ditutup paksa
     # satu kali per episode.
-    "USE_EQUITY_STOP": True,               # matikan (False) utk nonaktifkan DD Stop
+    "USE_EQUITY_STOP": False,               # matikan (False) utk nonaktifkan DD Stop
     # OPTIMASI MANUAL: 15 -> 12. Jaring DD diperketat agar penurunan dari peak
     # equity berhenti lebih awal = DD lebih stabil (inti permintaan Anda).
     "MAX_DRAWDOWN_PERCENT": 12.0,
-    "USE_DAILY_STOP": True,                # matikan (False) utk nonaktifkan Daily Stop
+    "USE_DAILY_STOP": False,                # matikan (False) utk nonaktifkan Daily Stop
     # OPTIMASI MANUAL: 3 -> 5. Sedikit lebih lega agar mesin return punya ruang
     # dalam satu hari (dengan ~0,54% risiko/trade, ini ~9 trade rugi baru
     # menghentikan hari), tetap terbatas untuk menjaga DD.
@@ -611,6 +628,13 @@ PUMP_CONFIG = {
     # pump-bot.service di repo ini). Dengan supervisor aktif, berhenti total
     # hanya berarti jeda singkat, bukan posisi telanjang berjam-jam.
     "MAX_CONSECUTIVE_ERRORS": 20,
+    # Supervisor dashboard boleh menghidupkan kembali bot yang crash, tetapi
+    # dibatasi agar exception deterministik tidak menjadi restart loop tanpa
+    # akhir. Stop manual/dashboard selalu menonaktifkan auto-restart episode itu.
+    "SUPERVISOR_AUTO_RESTART": True,
+    "SUPERVISOR_MAX_RESTARTS": 5,
+    "SUPERVISOR_RESTART_WINDOW_SECONDS": 300,
+    "SUPERVISOR_RESTART_BACKOFF_SECONDS": 5,
 
     # --- File state & log (OTOMATIS dipisah per mode, lihat catatan) ---
     # Nilai di bawah adalah NAMA DASAR. Saat config.py di-import, nama final
@@ -885,6 +909,9 @@ def _finalize_config_dict(cfg: dict) -> dict:
     cfg["LOG_FILE"] = _runtime_path(get_log_file(cfg))
     cfg["CONTROL_FILE"] = _runtime_path(get_control_file(cfg))
     cfg["PAPER_ACCOUNT_STATE_FILE"] = _runtime_path(get_paper_account_file(cfg))
+    cfg["RATE_LIMIT_STATE_FILE"] = _runtime_path(
+        str(cfg.get("RATE_LIMIT_STATE_FILE", "binance_rate_limit_state.json"))
+    )
     return cfg
 
 

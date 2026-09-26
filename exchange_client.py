@@ -71,7 +71,7 @@ class ExchangeClient(ABC):
     def get_price(self, symbol: str, max_retries: int = 3) -> float: ...
 
     @abstractmethod
-    def get_book_ticker(self, symbol: str) -> dict: ...
+    def get_book_ticker(self, symbol: str, max_retries: int = 3) -> dict: ...
 
     @abstractmethod
     def get_depth(self, symbol: str, limit: int = 100) -> dict: ...
@@ -103,6 +103,21 @@ class ExchangeClient(ABC):
         depan. LiveClient meneruskannya ke POST /api/v3/order.
         """
 
+    def place_native_stop_loss(self, symbol: str, quantity: float,
+                               stop_price: float,
+                               new_client_order_id: str) -> dict:
+        """Pasang proteksi exchange-side bila implementation mendukungnya."""
+        raise NotImplementedError("native stop loss tidak tersedia pada client ini")
+
+    def place_native_oco(self, symbol: str, quantity: float,
+                        above_price: float, above_stop_price: float,
+                        below_price: float, below_stop_price: float,
+                        list_client_order_id: str,
+                        above_client_order_id: str,
+                        below_client_order_id: str) -> dict:
+        """Pasang OCO SELL exchange-side bila implementation mendukungnya."""
+        raise NotImplementedError("native OCO tidak tersedia pada client ini")
+
     @abstractmethod
     def get_order(self, symbol: str, order_id: Optional[int] = None,
                   orig_client_order_id: Optional[str] = None) -> dict: ...
@@ -110,6 +125,17 @@ class ExchangeClient(ABC):
     @abstractmethod
     def cancel_order(self, symbol: str, order_id: Optional[int] = None,
                      orig_client_order_id: Optional[str] = None) -> dict: ...
+
+    def get_order_list(self, order_list_id: Optional[int] = None,
+                       list_client_order_id: Optional[str] = None) -> dict:
+        """Ambil status order list OCO untuk rekonsiliasi."""
+        raise NotImplementedError("query order list tidak tersedia pada client ini")
+
+    def cancel_order_list(self, symbol: str,
+                          order_list_id: Optional[int] = None,
+                          list_client_order_id: Optional[str] = None) -> dict:
+        """Batalkan OCO sebelum exit manual bila implementation mendukungnya."""
+        raise NotImplementedError("cancel order list tidak tersedia pada client ini")
 
     @abstractmethod
     def get_open_orders(self, symbol: Optional[str] = None) -> list: ...

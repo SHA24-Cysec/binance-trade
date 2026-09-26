@@ -160,6 +160,26 @@ def resolve_position_notional(config: dict, quote_free: float) -> dict:
     }
 
 
+def backtest_buy_execution_price(open_price: float, spread_pct: float = 0.0,
+                                  slippage_pct: float = 0.0) -> float:
+    """Perkiraan harga ask adverse untuk entry backtest.
+
+    ``spread_pct`` adalah spread total bid-ask. Separuh spread dibebankan ke
+    sisi BUY, lalu slippage tambahan dibebankan sebagai adverse movement.
+    """
+    price = float(open_price)
+    adverse = max(0.0, float(spread_pct)) / 200.0 + max(0.0, float(slippage_pct)) / 100.0
+    return price * (1.0 + adverse)
+
+
+def backtest_sell_execution_price(price: float, spread_pct: float = 0.0,
+                                  slippage_pct: float = 0.0) -> float:
+    """Perkiraan harga bid adverse untuk exit backtest."""
+    raw = max(0.0, float(price))
+    adverse = max(0.0, float(spread_pct)) / 200.0 + max(0.0, float(slippage_pct)) / 100.0
+    return raw * max(0.0, 1.0 - adverse)
+
+
 def ema(closes: list[float], period: int) -> list[float]:
     """Hitung EMA kronologis dan mengembalikan seluruh deret EMA.
 

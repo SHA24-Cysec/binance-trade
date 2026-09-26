@@ -112,8 +112,8 @@ class PaperClient(ExchangeClient):
     def get_price(self, symbol: str, max_retries: int = 3) -> float:
         return self.market.get_price(symbol, max_retries=max_retries)
 
-    def get_book_ticker(self, symbol: str) -> dict:
-        return self.market.get_book_ticker(symbol)
+    def get_book_ticker(self, symbol: str, max_retries: int = 3) -> dict:
+        return self.market.get_book_ticker(symbol, max_retries=max_retries)
 
     def get_depth(self, symbol: str, limit: int = 100) -> dict:
         return self.market.get_depth(symbol, limit=limit)

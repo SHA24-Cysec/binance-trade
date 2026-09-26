@@ -229,6 +229,13 @@ class MarketWebSocket:
         except Exception as exc:  # noqa: BLE001
             logger.debug("Gagal kirim pesan langganan WS: %s", exc)
 
+    @staticmethod
+    def _next_backoff(current: float, connected_before_close: bool) -> float:
+        """Reset backoff setelah koneksi sehat, naikkan hanya crash beruntun."""
+        if connected_before_close:
+            return 1.0
+        return min(float(current) * 2.0, 60.0)
+
     def _run_loop(self) -> None:
         backoff = 1.0
         while not self._stop.is_set():
@@ -250,14 +257,18 @@ class MarketWebSocket:
                                       reconnect=None)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("WebSocket run_forever error: %s", exc)
+            connected_before_close = self._connected.is_set()
             self._connected.clear()
             if self._stop.is_set():
                 break
-            # Backoff eksponensial dibatasi 60 detik.
-            logger.info("WebSocket terputus. Menyambung ulang dalam %.0f detik.", backoff)
-            if self._stop.wait(timeout=backoff):
+            # Koneksi yang pernah sehat tidak boleh mewarisi backoff crash
+            # beruntun dari sesi sebelumnya. Crash sebelum on_open baru
+            # menaikkan backoff eksponensial sampai 60 detik.
+            wait = backoff
+            logger.info("WebSocket terputus. Menyambung ulang dalam %.0f detik.", wait)
+            if self._stop.wait(timeout=wait):
                 break
-            backoff = min(backoff * 2.0, 60.0)
+            backoff = self._next_backoff(backoff, connected_before_close)
         logger.info("Thread WebSocket berhenti.")
 
     def _on_open(self, _app) -> None:  # noqa: ANN001

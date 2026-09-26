@@ -33,8 +33,12 @@ class LiveClient(ExchangeClient):
         api_key = config.get("API_KEY", "")
         api_secret = config.get("API_SECRET", "")
         # Klien bertanda tangan untuk order & akun (uang asli).
-        self.signed = BinanceSpotClient(api_key, api_secret, get_base_url(config),
-                                        allow_signed=True)
+        self.signed = BinanceSpotClient(
+            api_key, api_secret, get_base_url(config), allow_signed=True,
+            rate_limit_state_file=config.get("RATE_LIMIT_STATE_FILE"),
+            rate_limit_limit=int(config.get("RATE_LIMIT_WEIGHT_LIMIT", 6000) or 6000),
+            rate_limit_safety_margin=int(config.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100),
+        )
         # Data pasar bersama (WS + REST keyless), sumber sama seperti PAPER.
         self.market = MarketDataProvider(config)
         logger.info("LiveClient siap (UANG ASLI). endpoint=%s", get_base_url(config))
@@ -62,8 +66,8 @@ class LiveClient(ExchangeClient):
     def get_price(self, symbol: str, max_retries: int = 3) -> float:
         return self.market.get_price(symbol, max_retries=max_retries)
 
-    def get_book_ticker(self, symbol: str) -> dict:
-        return self.market.get_book_ticker(symbol)
+    def get_book_ticker(self, symbol: str, max_retries: int = 3) -> dict:
+        return self.market.get_book_ticker(symbol, max_retries=max_retries)
 
     def get_depth(self, symbol: str, limit: int = 100) -> dict:
         return self.market.get_depth(symbol, limit=limit)
@@ -101,8 +105,48 @@ class LiveClient(ExchangeClient):
             params["timeInForce"] = time_in_force
         if new_client_order_id is not None:
             params["newClientOrderId"] = new_client_order_id
-        # Diteruskan langsung ke endpoint order Binance (bertanda tangan).
-        return self.signed._request("POST", "/api/v3/order", params, signed=True)
+        # POST order non-idempotent. Status jaringan UNKNOWN harus
+        # direkonsiliasi memakai clientOrderId, bukan diulang otomatis.
+        return self.signed._request("POST", "/api/v3/order", params,
+                                    signed=True, max_retries=1)
+
+    def place_native_stop_loss(self, symbol: str, quantity: float,
+                               stop_price: float,
+                               new_client_order_id: str) -> dict:
+        return self.signed.new_stop_loss_order(
+            symbol, quantity=quantity, stop_price=stop_price,
+            new_client_order_id=new_client_order_id,
+        )
+
+    def place_native_oco(self, symbol: str, quantity: float,
+                        above_price: float, above_stop_price: float,
+                        below_price: float, below_stop_price: float,
+                        list_client_order_id: str,
+                        above_client_order_id: str,
+                        below_client_order_id: str) -> dict:
+        return self.signed.new_oco_sell_order(
+            symbol, quantity=quantity,
+            above_price=above_price, above_stop_price=above_stop_price,
+            below_price=below_price, below_stop_price=below_stop_price,
+            list_client_order_id=list_client_order_id,
+            above_client_order_id=above_client_order_id,
+            below_client_order_id=below_client_order_id,
+        )
+
+    def get_order_list(self, order_list_id: Optional[int] = None,
+                       list_client_order_id: Optional[str] = None) -> dict:
+        return self.signed.get_order_list(
+            order_list_id=order_list_id,
+            list_client_order_id=list_client_order_id,
+        )
+
+    def cancel_order_list(self, symbol: str,
+                          order_list_id: Optional[int] = None,
+                          list_client_order_id: Optional[str] = None) -> dict:
+        return self.signed.cancel_order_list(
+            symbol, order_list_id=order_list_id,
+            list_client_order_id=list_client_order_id,
+        )
 
     def get_order(self, symbol: str, order_id: Optional[int] = None,
                   orig_client_order_id: Optional[str] = None) -> dict:

@@ -19,6 +19,7 @@ from atomic_io import (
     append_json_line,
     archive_corrupt,
     atomic_write_json,
+    interprocess_lock,
     read_json,
 )
 
@@ -52,6 +53,12 @@ REMOVED_CONFIG_KEYS = {
     "MAX_HOLD_MINUTES",
 }
 _WRITE_LOCK = threading.RLock()
+
+
+class ConcurrentSettingsError(RuntimeError):
+    """Override berubah setelah preview, sehingga commit ditolak aman."""
+
+
 _SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,40}$")
 _ASSET_RE = re.compile(r"^[A-Z0-9]{2,12}$")
 
@@ -103,7 +110,10 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "MODE": _field("Sistem", "Mode aktif", "Diubah melalui panel Mode.", "str", read_only=True, managed_by="mode"),
     "SHOW_BACKTEST_IN_LIVE": _field("Sistem", "Tampilkan backtest di LIVE", "Mengizinkan beban backtest saat bot LIVE.", "bool", dangerous=True),
     "LIVE_BASE_URL": _field("Sistem", "URL REST Binance", "Endpoint produksi yang dikunci oleh aplikasi.", "str", read_only=True),
-    "API_KEY": _field("Sistem", "API key", "Dikelola melalui panel Kredensial.", "str", read_only=True, managed_by="credentials"),
+    "RATE_LIMIT_STATE_FILE": _field("Sistem", "Ledger rate limit", "File runtime bersama untuk koordinasi REQUEST_WEIGHT lintas proses.", "str", read_only=True),
+    "RATE_LIMIT_WEIGHT_LIMIT": _field("Sistem", "Batas REQUEST_WEIGHT", "Batas weight Binance per menit dan IP.", "int", read_only=True),
+    "RATE_LIMIT_SAFETY_MARGIN": _field("Sistem", "Cadangan REQUEST_WEIGHT", "Cadangan agar request tidak mendekati batas IP.", "int", read_only=True),
+    "API_KEY":  _field("Sistem", "API key", "Dikelola melalui panel Kredensial.", "str", read_only=True, managed_by="credentials"),
     "API_SECRET": _field("Sistem", "API secret", "Write-only melalui panel Kredensial.", "str", read_only=True, managed_by="credentials"),
     "PAPER_INITIAL_BALANCES": _field("Akun PAPER", "Saldo awal PAPER", "Diubah hanya saat reset akun PAPER.", "dict", read_only=True, editor="balances", managed_by="paper_reset"),
     "PAPER_ACCOUNT_STATE_FILE": _field("Sistem", "File akun PAPER", "Path runtime internal.", "str", read_only=True),
@@ -167,12 +177,18 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "RISK_PERCENT": _field("Ukuran Posisi", "Persen saldo per entry", "Persentase saldo bebas yang digunakan.", "float", minimum=0.01, maximum=100, unit="%", dangerous=True),
     "POSITION_SIZE_USDT": _field("Ukuran Posisi", "Ukuran posisi tetap", "Nominal saat mode persen dimatikan.", "float", minimum=0.01, maximum=1e9, unit="USDT", dangerous=True),
     "BACKTEST_INITIAL_EQUITY_USDT": _field("Ukuran Posisi", "Modal awal backtest", "Saldo USDT awal yang dipakai model sizing pada backtest.", "float", minimum=0.01, maximum=1e12, unit="USDT"),
+    "BACKTEST_ENTRY_SPREAD_PCT": _field("Ukuran Posisi", "Spread entry backtest", "Total spread bid-ask yang dibebankan pada simulasi entry.", "float", minimum=0, maximum=10, unit="%"),
+    "BACKTEST_SLIPPAGE_PCT": _field("Ukuran Posisi", "Slippage backtest", "Slippage adverse per eksekusi backtest.", "float", minimum=0, maximum=10, unit="%"),
+    "BACKTEST_ENTRY_DELAY_BARS": _field("Ukuran Posisi", "Latency entry backtest", "Jumlah bar tunggu setelah sinyal sebelum simulasi entry.", "int", minimum=0, maximum=10, unit="bar"),
     "MAX_POSITION_USDT": _field("Ukuran Posisi", "Plafon posisi", "Nol berarti tanpa plafon di PAPER, tetapi dilarang di LIVE.", "float", minimum=0, maximum=1e9, unit="USDT", dangerous=True),
     "BALANCE_BUFFER_PCT": _field("Ukuran Posisi", "Bantalan saldo", "Saldo yang tidak dibelanjakan untuk fee dan pergerakan harga.", "float", minimum=0, maximum=50, unit="%"),
 
     "USE_TP": _field("SL dan TP", "Aktifkan Take Profit", "Menutup posisi saat target tercapai.", "bool", dangerous=True),
     "TP_PCT": _field("SL dan TP", "Take Profit", "Target profit tetap.", "float", minimum=0.01, maximum=1000, unit="%"),
     "USE_STOP_LOSS": _field("SL dan TP", "Aktifkan Stop Loss", "Jaring pengaman kerugian per trade.", "bool", dangerous=True),
+    "USE_NATIVE_OCO": _field("SL dan TP", "OCO exchange-side LIVE", "Pasang OCO SELL native berisi TP limit dan SL limit setelah BUY LIVE terisi.", "bool", dangerous=True),
+    "USE_NATIVE_STOP_LOSS": _field("SL dan TP", "Stop Loss exchange-side fallback", "Fallback STOP_LOSS market native bila pemasangan OCO tidak didukung.", "bool", dangerous=True),
+    "NATIVE_OCO_LIMIT_BUFFER_PCT": _field("SL dan TP", "Buffer limit OCO", "Jarak limit order dari trigger OCO agar ada peluang fill setelah trigger.", "float", minimum=0.01, maximum=5, unit="%", dangerous=True),
     "SL_PCT": _field("SL dan TP", "Stop Loss", "Batas rugi tetap.", "float", minimum=0.01, maximum=100, unit="%", dangerous=True),
 
     "USE_BREAKEVEN": _field("Breakeven dan Trailing", "Aktifkan breakeven", "Mengunci posisi setelah profit minimum.", "bool"),
@@ -197,8 +213,12 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "CLOSE_ALL_AT_LIMIT": _field("Drawdown dan Daily Stop", "Tutup posisi saat limit", "Tutup posisi saat kill switch aktif.", "bool", dangerous=True),
     "DD_COOLDOWN_HOURS": _field("Drawdown dan Daily Stop", "Cooldown drawdown", "Durasi jeda setelah drawdown stop.", "int", minimum=1, maximum=87600, unit="jam"),
     "MAX_CONSECUTIVE_ERRORS": _field("Sistem", "Maksimum error beruntun", "Bot berhenti setelah error API beruntun.", "int", minimum=1, maximum=100000),
+    "SUPERVISOR_AUTO_RESTART": _field("Sistem", "Supervisor auto-restart", "Hidupkan kembali bot setelah crash dengan batas percobaan.", "bool", read_only=True),
+    "SUPERVISOR_MAX_RESTARTS": _field("Sistem", "Batas restart supervisor", "Maksimum restart dalam satu jendela waktu.", "int", minimum=0, maximum=100, read_only=True),
+    "SUPERVISOR_RESTART_WINDOW_SECONDS": _field("Sistem", "Jendela restart supervisor", "Jendela penghitungan restart berulang.", "int", minimum=60, maximum=86400, read_only=True),
+    "SUPERVISOR_RESTART_BACKOFF_SECONDS": _field("Sistem", "Backoff restart supervisor", "Jeda minimum sebelum bot dihidupkan kembali.", "int", minimum=1, maximum=3600, read_only=True),
 
-    "STATE_FILE": _field("Sistem", "File state posisi", "Path runtime internal per mode.", "str", read_only=True),
+    "STATE_FILE":  _field("Sistem", "File state posisi", "Path runtime internal per mode.", "str", read_only=True),
     "LOG_FILE": _field("Sistem", "File log", "Path runtime internal per mode.", "str", read_only=True),
     "HEARTBEAT_INTERVAL_SECONDS": _field("Sistem", "Interval heartbeat log", "Jarak heartbeat di log bot.", "int", minimum=5, maximum=86400, unit="detik"),
     "CONTROL_FILE": _field("Sistem", "File kontrol", "Path komunikasi dashboard ke bot.", "str", read_only=True),
@@ -236,11 +256,18 @@ def load_runtime_mode(default: str = "PAPER") -> tuple[str, list[str]]:
         return default, errors
 
 
-def save_runtime_mode(mode: str) -> None:
+def save_runtime_mode(mode: str, *, expected_current: str | None = None) -> None:
     raw = str(mode).strip().upper()
     if raw not in VALID_MODES:
         raise ValueError(f"Mode tidak valid: {mode!r}")
-    with _WRITE_LOCK:
+    with _WRITE_LOCK, interprocess_lock(RUNTIME_FILE):
+        if expected_current is not None:
+            current, load_errors = load_runtime_mode()
+            current = str(current).strip().upper()
+            if load_errors or current != str(expected_current).strip().upper():
+                raise ConcurrentSettingsError(
+                    "Mode runtime berubah setelah checklist; ulangi perpindahan mode."
+                )
         atomic_write_json(RUNTIME_FILE, {"active_mode": raw})
         try:
             RUNTIME_ERROR_FILE.unlink(missing_ok=True)
@@ -248,7 +275,7 @@ def save_runtime_mode(mode: str) -> None:
             pass
 
 
-def load_mode_override(mode: str) -> tuple[dict, list[str]]:
+def _load_mode_override_unlocked(mode: str) -> tuple[dict, list[str]]:
     raw_mode = str(mode).strip().upper()
     path = settings_file(raw_mode)
     marker_path = settings_error_file(raw_mode)
@@ -288,12 +315,28 @@ def load_mode_override(mode: str) -> tuple[dict, list[str]]:
         return {}, errors
 
 
-def save_mode_override(mode: str, overrides: dict) -> None:
+def load_mode_override(mode: str) -> tuple[dict, list[str]]:
     raw_mode = str(mode).strip().upper()
     if raw_mode not in VALID_MODES:
         raise ValueError("Mode override tidak valid.")
-    with _WRITE_LOCK:
-        atomic_write_json(settings_file(raw_mode), overrides)
+    with interprocess_lock(settings_file(raw_mode)):
+        return _load_mode_override_unlocked(raw_mode)
+
+
+def save_mode_override(mode: str, overrides: dict,
+                       *, expected_existing: dict | None = None) -> None:
+    raw_mode = str(mode).strip().upper()
+    if raw_mode not in VALID_MODES:
+        raise ValueError("Mode override tidak valid.")
+    path = settings_file(raw_mode)
+    with _WRITE_LOCK, interprocess_lock(path):
+        if expected_existing is not None:
+            existing, load_errors = _load_mode_override_unlocked(raw_mode)
+            if load_errors or existing != expected_existing:
+                raise ConcurrentSettingsError(
+                    "Override settings berubah setelah preview; ulangi preview terlebih dahulu."
+                )
+        atomic_write_json(path, overrides)
         try:
             settings_error_file(raw_mode).unlink(missing_ok=True)
         except OSError:
@@ -564,6 +607,8 @@ def dangerous_relaxations(old: dict, new: dict) -> list[str]:
     for key, label in (
         ("USE_TP", "Take Profit dimatikan"),
         ("USE_STOP_LOSS", "Stop Loss dimatikan"),
+        ("USE_NATIVE_OCO", "OCO exchange-side dimatikan"),
+        ("USE_NATIVE_STOP_LOSS", "Stop Loss exchange-side dimatikan"),
         ("USE_EQUITY_STOP", "Equity Stop dimatikan"),
         ("USE_DAILY_STOP", "Daily Stop dimatikan"),
         ("CLOSE_ALL_AT_LIMIT", "penutupan posisi pada limit dimatikan"),
@@ -588,7 +633,7 @@ def audit_change(event: dict) -> None:
     for forbidden in ("API_SECRET", "BINANCE_API_SECRET", "secret"):
         safe.pop(forbidden, None)
     safe.setdefault("time", datetime.now(timezone.utc).isoformat())
-    with _WRITE_LOCK:
+    with _WRITE_LOCK, interprocess_lock(AUDIT_FILE):
         append_json_line(AUDIT_FILE, safe)
 
 

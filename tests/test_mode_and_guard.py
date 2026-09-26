@@ -10,6 +10,7 @@ import pytest
 
 import config
 from binance_client import BinanceSpotClient, SignedEndpointBlockedError
+from rate_limiter import RateLimitBlockedError, SharedRequestWeightLimiter
 
 
 # ------------------------------------------------------------------
@@ -45,6 +46,39 @@ def test_create_exchange_client_rejects_invalid_mode():
 # ------------------------------------------------------------------
 # Guard endpoint bertanda tangan
 # ------------------------------------------------------------------
+def test_shared_rate_limiter_coordinates_instances(tmp_path):
+    state_file = tmp_path / "rate-limit.json"
+    first = SharedRequestWeightLimiter(str(state_file), limit=100, safety_margin=0)
+    second = SharedRequestWeightLimiter(str(state_file), limit=100, safety_margin=0)
+
+    first.reserve(60)
+    assert second.headroom() == 0.4
+    first.block(2)
+    with pytest.raises(RateLimitBlockedError):
+        second.reserve(1)
+
+
+def test_market_order_disables_automatic_retry(monkeypatch):
+    client = BinanceSpotClient("KEY", "SECRET", "https://api.binance.com")
+    calls = []
+
+    def fake_request(method, path, params=None, signed=False, max_retries=3):
+        calls.append({"method": method, "path": path,
+                      "params": params, "signed": signed,
+                      "max_retries": max_retries})
+        return {"status": "FILLED"}
+
+    monkeypatch.setattr(client, "_request", fake_request)
+    client.new_market_order("TESTUSDT", "BUY", quote_order_qty=25,
+                            new_client_order_id="pump-test")
+
+    assert len(calls) == 1
+    assert calls[0]["method"] == "POST"
+    assert calls[0]["path"] == "/api/v3/order"
+    assert calls[0]["max_retries"] == 1
+    assert calls[0]["params"]["quoteOrderQty"] == "25"
+
+
 def test_keyless_client_blocks_signed_even_with_key():
     """Klien allow_signed=False menolak request signed meski API key diisi."""
     # API key sengaja diisi untuk membuktikan guard tidak bergantung pada

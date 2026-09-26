@@ -13,8 +13,16 @@ Bot rotasi Binance Spot untuk mode PAPER dan LIVE. Bot memindai pair dengan quot
 
 ## Cara jalan cepat
 
+Instalasi reproducible memakai lock file ber-hash:
+
 ```bash
-pip install -r requirements.txt
+python -m pip install --require-hashes -r requirements.lock
+```
+
+Untuk instalasi development yang mengikuti rentang versi sumber:
+
+```bash
+python -m pip install -r requirements.txt
 python pump_scanner_bot.py --selftest
 python dashboard.py
 ```
@@ -105,6 +113,35 @@ Sizing yang tersedia:
 | `MAX_POSITION_USDT` | Plafon nominal per posisi |
 | `BALANCE_BUFFER_PCT` | Saldo yang sengaja tidak dibelanjakan |
 
+### Proteksi exchange-side LIVE
+
+Saat `MODE=LIVE`, `USE_STOP_LOSS=True`, `USE_TP=True`, dan `USE_NATIVE_OCO=True`,
+bot memasang satu OCO SELL Binance setelah BUY benar-benar terisi. Leg atas
+adalah `TAKE_PROFIT_LIMIT`, leg bawah adalah `STOP_LOSS_LIMIT`. Harga kedua leg
+dibulatkan ke `tickSize` dan divalidasi terhadap bid terbaru. Buffer limit OCO
+dapat diatur lewat `NATIVE_OCO_LIMIT_BUFFER_PCT`.
+
+Alur aman proteksi:
+
+- list client ID dan client ID kedua leg disimpan ke file state sebelum request POST;
+- bila POST timeout atau statusnya tidak pasti, bot tidak mengulang POST dan tidak
+  memasang proteksi kedua secara buta. Status dicari dengan query order-list;
+- sebelum exit manual atau exit lokal, OCO direkonsiliasi lalu dibatalkan. SELL
+  market ditahan bila cancel tidak dapat diverifikasi;
+- bila salah satu leg OCO berstatus FILLED, saldo direkonsiliasi dan bot tidak
+  mengirim SELL kedua;
+- bila client jelas tidak mendukung OCO atau validasi lokal gagal, bot dapat
+  memakai `STOP_LOSS` market native sebagai fallback. Error POST Binance yang
+  statusnya UNKNOWN tidak memicu fallback;
+- Take Profit, breakeven, dan trailing lokal tetap tersedia sebagai logika
+  exit, tetapi OCO menjadi proteksi exchange-side utama saat konfigurasi aktif;
+- kegagalan pemasangan tidak menghapus local SL. `reconciliation_required` tetap
+  aktif sehingga entry baru fail-closed.
+
+Implementasi ini tidak mengirim order ke LIVE selama selftest dan test suite.
+Pengujian integrasi order hanya boleh memakai fake client atau kredensial
+Binance Spot Testnet yang terpisah.
+
 ## Backtest
 
 Selftest lokal tanpa jaringan:
@@ -120,6 +157,13 @@ python backtest.py --symbol SOLUSDT --days 30
 ```
 
 Dashboard menjalankan backtest portofolio lintas simbol melalui API internal, dengan satu job berjalan pada satu waktu agar tidak membebani rate limit.
+
+Asumsi dan keterbatasan penting: model memakai OHLC candle, bukan order book atau
+antrian matching. Entry dan exit simulasi dianggap terisi penuh pada satu harga
+adverse, sehingga partial fill, depth yang habis, rejection filter, dan urutan
+tick di dalam candle belum dapat direkonstruksi. Gap pada open ditangani dengan
+harga open saat level exit sudah ditembus, dan bila SL serta TP tersentuh pada
+candle yang sama SL diprioritaskan secara konservatif.
 
 ## Dashboard
 

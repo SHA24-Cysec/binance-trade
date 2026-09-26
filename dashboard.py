@@ -50,8 +50,8 @@ from credential_store import (
 )
 from runtime_control import BotControlError, BotProcessManager
 from settings_schema import (
-    PARAMETER_SCHEMA, audit_change, compute_overrides, dangerous_relaxations,
-    diff_values, public_schema, read_audit,
+    PARAMETER_SCHEMA, ConcurrentSettingsError, audit_change, compute_overrides,
+    dangerous_relaxations, diff_values, public_schema, read_audit,
     save_mode_override, save_runtime_mode, validate_balances,
     validate_candidate,
 )
@@ -80,7 +80,11 @@ class _PaperDashboardClient:
 
     def __init__(self) -> None:
         self._market = BinanceSpotClient(
-            "", "", get_base_url(PUMP_CONFIG), allow_signed=False)
+            "", "", get_base_url(PUMP_CONFIG), allow_signed=False,
+            rate_limit_state_file=PUMP_CONFIG.get("RATE_LIMIT_STATE_FILE"),
+            rate_limit_limit=int(PUMP_CONFIG.get("RATE_LIMIT_WEIGHT_LIMIT", 6000) or 6000),
+            rate_limit_safety_margin=int(PUMP_CONFIG.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100),
+        )
         self._account_file = PUMP_CONFIG.get("PAPER_ACCOUNT_STATE_FILE",
                                              "pump_paper_account_paper.json")
 
@@ -133,6 +137,8 @@ _ADMIN_TOKEN = secrets.token_urlsafe(32)
 # Dashboard adalah satu-satunya pemilik proses bot yang dimulainya.
 _process_manager = BotProcessManager()
 _runtime_lock = threading.RLock()
+_cache_lock = threading.RLock()
+_credential_lock = threading.RLock()
 _confirm_lock = threading.RLock()
 _confirmations: dict[str, dict] = {}
 _rate_lock = threading.RLock()
@@ -306,9 +312,10 @@ def _refresh_runtime_globals() -> None:
         LOG_FILE = PUMP_CONFIG.get("LOG_FILE") or get_log_file()
         CONTROL_FILE = PUMP_CONFIG.get("CONTROL_FILE") or get_control_file()
         QUOTE = PUMP_CONFIG.get("QUOTE_ASSET", "USDT")
-        _price_cache.clear()
-        _balance_cache.update({"data": None, "ts": 0})
-        _watchlist_cache.update({"data": None, "ts": 0, "error": None})
+        with _cache_lock:
+            _price_cache.clear()
+            _balance_cache.update({"data": None, "ts": 0})
+            _watchlist_cache.update({"data": None, "ts": 0, "error": None})
         start_auto_refresher()
 
 
@@ -316,22 +323,26 @@ def get_client():
     global _client
     if not _HAS_CLIENT:
         return None
-    if _client is None:
-        try:
-            if is_paper(PUMP_CONFIG):
-                # PAPER: klien read-only (saldo virtual dari file, market data
-                # REST publik keyless). Tidak pernah menyentuh endpoint signed.
-                _client = _PaperDashboardClient()
-            else:
-                # LIVE: klien bertanda tangan untuk menampilkan saldo asli.
-                _client = BinanceSpotClient(
-                    PUMP_CONFIG.get("API_KEY", ""),
-                    PUMP_CONFIG.get("API_SECRET", ""),
-                    get_base_url(PUMP_CONFIG),
-                )
-        except Exception:
-            _client = None
-    return _client
+    with _runtime_lock:
+        if _client is None:
+            try:
+                if is_paper(PUMP_CONFIG):
+                    # PAPER: klien read-only (saldo virtual dari file, market data
+                    # REST publik keyless). Tidak pernah menyentuh endpoint signed.
+                    _client = _PaperDashboardClient()
+                else:
+                    # LIVE: klien bertanda tangan untuk menampilkan saldo asli.
+                    _client = BinanceSpotClient(
+                        PUMP_CONFIG.get("API_KEY", ""),
+                        PUMP_CONFIG.get("API_SECRET", ""),
+                        get_base_url(PUMP_CONFIG),
+                        rate_limit_state_file=PUMP_CONFIG.get("RATE_LIMIT_STATE_FILE"),
+                        rate_limit_limit=int(PUMP_CONFIG.get("RATE_LIMIT_WEIGHT_LIMIT", 6000) or 6000),
+                        rate_limit_safety_margin=int(PUMP_CONFIG.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100),
+                    )
+            except Exception:
+                _client = None
+        return _client
 
 
 def load_state() -> dict:
@@ -349,15 +360,17 @@ def get_live_price(symbol: str):
     if not symbol:
         return None
     now = time.time()
-    cached = _price_cache.get(symbol)
-    if cached and now - cached[1] < PRICE_TTL:
-        return cached[0]
+    with _cache_lock:
+        cached = _price_cache.get(symbol)
+        if cached and now - cached[1] < PRICE_TTL:
+            return cached[0]
     client = get_client()
     if client is None:
         return None
     try:
         price = client.get_price(symbol)
-        _price_cache[symbol] = (price, now)
+        with _cache_lock:
+            _price_cache[symbol] = (price, now)
         return price
     except Exception:
         return cached[0] if cached else None
@@ -366,8 +379,11 @@ def get_live_price(symbol: str):
 def get_live_balance():
     """Saldo akun (butuh API key). Return dict {asset: free} atau None."""
     now = time.time()
-    if _balance_cache["data"] is not None and now - _balance_cache["ts"] < BALANCE_TTL:
-        return _balance_cache["data"]
+    with _cache_lock:
+        cached_data = _balance_cache["data"]
+        cached_ts = _balance_cache["ts"]
+    if cached_data is not None and now - cached_ts < BALANCE_TTL:
+        return cached_data
     client = get_client()
     if client is None or (not is_paper(PUMP_CONFIG) and not PUMP_CONFIG.get("API_KEY")):
         return None
@@ -379,11 +395,13 @@ def get_live_balance():
             locked = float(b.get("locked", 0) or 0)
             if free > 0 or locked > 0:
                 balances[b["asset"]] = {"free": free, "locked": locked}
-        _balance_cache["data"] = balances
-        _balance_cache["ts"] = now
+        with _cache_lock:
+            _balance_cache["data"] = balances
+            _balance_cache["ts"] = now
         return balances
     except Exception:
-        return _balance_cache["data"]
+        with _cache_lock:
+            return _balance_cache["data"]
 
 
 # --- Parsing log untuk riwayat trade & event ---
@@ -625,8 +643,10 @@ def _reject_if_backtest_disabled():
 
 
 BT_PARAM_KEYS = (
-    "SL_PCT", "TP_PCT", "BE_TRIGGER_PCT", "BE_LOCK_PCT", "TRAILING_START_PCT",
-    "TRAILING_STEP_PCT", "MAX_BARS_BREAKOUT_TO_RETEST",
+    "USE_ATR_EXIT", "ATR_PERIOD", "ATR_MULT_SL", "ATR_MULT_TP",
+    "ATR_MULT_BE_TRIGGER", "ATR_MULT_BE_LOCK", "ATR_MULT_TRAIL_START",
+    "ATR_MULT_TRAIL", "SL_PCT", "TP_PCT", "BE_TRIGGER_PCT", "BE_LOCK_PCT",
+    "TRAILING_START_PCT", "TRAILING_STEP_PCT", "MAX_BARS_BREAKOUT_TO_RETEST",
 )
 
 _bt_jobs: dict = {}
@@ -696,7 +716,12 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "Klien Binance tidak tersedia (modul 'requests' tidak termuat). "
                 "Backtest butuh akses ke data historis publik Binance."
             )
-        client = BinanceSpotClient("", "", PUMP_CONFIG["LIVE_BASE_URL"], allow_signed=False)
+        client = BinanceSpotClient(
+            "", "", PUMP_CONFIG["LIVE_BASE_URL"], allow_signed=False,
+            rate_limit_state_file=PUMP_CONFIG.get("RATE_LIMIT_STATE_FILE"),
+            rate_limit_limit=int(PUMP_CONFIG.get("RATE_LIMIT_WEIGHT_LIMIT", 6000) or 6000),
+            rate_limit_safety_margin=int(PUMP_CONFIG.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100),
+        )
 
         # --- Tahap 1: tentukan semesta simbol -------------------------
         set_progress(0.01, "mengambil daftar pasar...")
@@ -1060,32 +1085,35 @@ def build_watchlist() -> dict:
                 "auto": _auto_status(auto_meta)}
 
     now = time.time()
-    cache = _watchlist_cache
     tickers = None
     error = None
 
-    if cache["data"] is not None and now - cache["ts"] < WATCHLIST_TTL:
-        tickers = cache["data"]
-        error = cache["error"]
+    with _cache_lock:
+        cached_watchlist = dict(_watchlist_cache)
+    if cached_watchlist["data"] is not None and now - cached_watchlist["ts"] < WATCHLIST_TTL:
+        tickers = cached_watchlist["data"]
+        error = cached_watchlist["error"]
     else:
         client = get_client()
         if client is None:
             error = "Klien Binance tidak tersedia (requests belum terpasang?)."
-            tickers = cache["data"]
+            tickers = cached_watchlist["data"]
         else:
             try:
                 raw = client.get_ticker_24hr_all()
                 tickers = {t["symbol"]: t for t in raw if isinstance(t, dict) and "symbol" in t}
-                cache["data"] = tickers
-                cache["ts"] = now
-                cache["error"] = None
+                with _cache_lock:
+                    _watchlist_cache["data"] = tickers
+                    _watchlist_cache["ts"] = now
+                    _watchlist_cache["error"] = None
                 error = None
             except Exception as exc:  # noqa: BLE001
                 # Pakai data lama kalau ada, supaya panel tidak berkedip
                 # kosong setiap kali ada satu request gagal.
                 error = f"Gagal mengambil data pasar: {str(exc)[:120]}"
-                tickers = cache["data"]
-                cache["error"] = error
+                with _cache_lock:
+                    tickers = _watchlist_cache["data"]
+                    _watchlist_cache["error"] = error
 
     min_vol = float(PUMP_CONFIG.get("MIN_QUOTE_VOLUME_USDT_24H", 0))
 
@@ -1401,10 +1429,9 @@ def _credentials_tested_for_active_values() -> bool:
     secret = str(PUMP_CONFIG.get("API_SECRET", ""))
     if not key or not secret:
         return False
-    return compare_digest(
-        str(_credential_test_state.get("fingerprint") or ""),
-        _credential_fingerprint(key, secret),
-    )
+    with _credential_lock:
+        fingerprint = str(_credential_test_state.get("fingerprint") or "")
+    return compare_digest(fingerprint, _credential_fingerprint(key, secret))
 
 
 def _risk_summary(config: dict) -> dict:
@@ -1567,15 +1594,18 @@ def api_settings_preview():
     else:
         policy = "REQUIRE_EMPTY"
 
+    baseline_overrides = compute_overrides(defaults, current)
     overrides = compute_overrides(defaults, cleaned)
     # Saldo awal dikelola panel reset, tetapi override itu tidak boleh hilang
     # hanya karena pengguna menyimpan parameter strategi lain.
     if current.get("PAPER_INITIAL_BALANCES") != defaults.get("PAPER_INITIAL_BALANCES"):
+        baseline_overrides["PAPER_INITIAL_BALANCES"] = deepcopy(current.get("PAPER_INITIAL_BALANCES"))
         overrides["PAPER_INITIAL_BALANCES"] = deepcopy(current.get("PAPER_INITIAL_BALANCES"))
     token = _make_confirmation("settings", {
         "mode": mode,
         "candidate": cleaned,
         "overrides": overrides,
+        "baseline_overrides": baseline_overrides,
         "baseline_revision": _revision(current),
         "position_policy": policy,
         "relaxations": relaxations,
@@ -1608,7 +1638,12 @@ def api_settings_commit():
 
     process_before = _process_manager.status(get_mode(PUMP_CONFIG))
     try:
-        save_mode_override(mode, payload["overrides"])
+        save_mode_override(
+            mode, payload["overrides"],
+            expected_existing=payload.get("baseline_overrides"),
+        )
+    except ConcurrentSettingsError as exc:
+        return jsonify({"error": str(exc)}), 409
     except (OSError, ValueError) as exc:
         return jsonify({"error": f"Settings gagal ditulis secara atomik: {exc}"}), 500
     diff = diff_values(current, payload["candidate"])
@@ -1724,6 +1759,8 @@ def api_mode_commit():
     target = payload["target"]
     if target == "LIVE" and str(data.get("phrase", "")) != "LIVE":
         return jsonify({"error": "Ketik LIVE persis untuk mengaktifkan mode uang asli."}), 400
+    if get_mode(PUMP_CONFIG) != payload.get("from"):
+        return jsonify({"error": "Mode aktif berubah setelah checklist. Ulangi perpindahan mode."}), 409
     process = _process_manager.status(get_mode(PUMP_CONFIG))
     if process["status"] not in ("STOPPED", "CRASHED") or _process_manager.position()["has_position"]:
         return jsonify({"error": "Kondisi proses atau posisi berubah. Ulangi perpindahan mode."}), 409
@@ -1737,12 +1774,14 @@ def api_mode_commit():
         return jsonify({"error": f"Tunggu {left:.1f} detik sebelum ganti mode."}), 429
     old = get_mode(PUMP_CONFIG)
     try:
-        save_runtime_mode(target)
+        save_runtime_mode(target, expected_current=payload.get("from"))
         config_mod.reload_config()
         _refresh_runtime_globals()
+    except ConcurrentSettingsError as exc:
+        return jsonify({"error": str(exc)}), 409
     except (OSError, ValueError) as exc:
         try:
-            save_runtime_mode(old)
+            save_runtime_mode(old, expected_current=target)
             config_mod.reload_config()
             _refresh_runtime_globals()
         except Exception:
@@ -1757,9 +1796,11 @@ def api_mode_commit():
 @app.route("/api/credentials/status")
 def api_credentials_status():
     status = credential_status(ENV_PATH)
+    with _credential_lock:
+        tested_at = _credential_test_state.get("tested_at")
     status.update({
         "connection_tested": _credentials_tested_for_active_values(),
-        "tested_at": _credential_test_state.get("tested_at"),
+        "tested_at": tested_at,
         "recommendation": "Gunakan key tanpa izin withdrawal dan aktifkan pembatasan IP bila tersedia.",
     })
     return jsonify(status)
@@ -1792,7 +1833,8 @@ def api_credentials_save():
         _refresh_runtime_globals()
     except (OSError, ValueError) as exc:
         return jsonify({"error": f"Gagal menyimpan kredensial: {exc}"}), 400
-    _credential_test_state.update({"fingerprint": None, "tested_at": None, "account": None})
+    with _credential_lock:
+        _credential_test_state.update({"fingerprint": None, "tested_at": None, "account": None})
     audit_warning = _write_audit({
         "event": "CREDENTIALS_CHANGED", "mode": get_mode(PUMP_CONFIG),
         "key_changed": new_key != old_key, "secret_changed": new_secret != old_secret,
@@ -1821,7 +1863,12 @@ def api_credentials_test():
             or any(ord(ch) < 33 or ord(ch) > 126 for ch in key + secret)):
         return jsonify({"error": "Format kredensial tidak valid."}), 400
     try:
-        client = BinanceSpotClient(key, secret, get_base_url(PUMP_CONFIG), allow_signed=True)
+        client = BinanceSpotClient(
+            key, secret, get_base_url(PUMP_CONFIG), allow_signed=True,
+            rate_limit_state_file=PUMP_CONFIG.get("RATE_LIMIT_STATE_FILE"),
+            rate_limit_limit=int(PUMP_CONFIG.get("RATE_LIMIT_WEIGHT_LIMIT", 6000) or 6000),
+            rate_limit_safety_margin=int(PUMP_CONFIG.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100),
+        )
         client.sync_time()
         account = client.get_account()
     except BinanceAPIError as exc:
@@ -1832,15 +1879,17 @@ def api_credentials_test():
         }), 400
     except Exception:
         return jsonify({"error": "Uji koneksi gagal karena jaringan atau layanan Binance tidak tersedia."}), 502
-    _credential_test_state.update({
-        "fingerprint": _credential_fingerprint(key, secret),
-        "tested_at": datetime.now(timezone.utc).isoformat(),
-        "account": {"account_type": account.get("accountType"),
-                    "can_trade": bool(account.get("canTrade")),
-                    "permissions": account.get("permissions", [])},
-    })
+    tested_account = {"account_type": account.get("accountType"),
+                      "can_trade": bool(account.get("canTrade")),
+                      "permissions": account.get("permissions", [])}
+    with _credential_lock:
+        _credential_test_state.update({
+            "fingerprint": _credential_fingerprint(key, secret),
+            "tested_at": datetime.now(timezone.utc).isoformat(),
+            "account": tested_account,
+        })
     return jsonify({"ok": True, "message": "Koneksi signed read-only berhasil.",
-                    "account": _credential_test_state["account"],
+                    "account": tested_account,
                     "api_key_last4": key[-4:]})
 
 

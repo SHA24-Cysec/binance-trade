@@ -258,11 +258,18 @@ def evaluate_pump_gate(price_change_pct, quote_volume,
 
     if btc_drop_pct is None:
         btc_drop_pct = config.get("_btc_drop_pct")
-    if config.get("BTC_FILTER_ENABLED", False) and btc_drop_pct is not None:
-        max_drop = abs(float(config.get("BTC_MAX_DROP_PCT", 5.0) or 0.0))
-        if float(btc_drop_pct) <= -max_drop:
-            return False, (f"BTC turun {float(btc_drop_pct):.2f}% dalam "
-                           f"{int(config.get("BTC_LOOKBACK_BARS", 3) or 3)} candle")
+    if config.get("BTC_FILTER_ENABLED", False):
+        if btc_drop_pct is None:
+            if config.get("_btc_filter_fail_closed", False):
+                return False, "data filter BTC tidak tersedia, simbol ditolak (fail closed)"
+            # Pemanggil murni/backtest lama boleh tidak mengaktifkan filter
+            # BTC karena tidak membawa deret BTC historis. Jalur LIVE selalu
+            # mengatur _btc_filter_fail_closed=True secara eksplisit.
+        else:
+            max_drop = abs(float(config.get("BTC_MAX_DROP_PCT", 5.0) or 0.0))
+            if float(btc_drop_pct) <= -max_drop:
+                return False, (f"BTC turun {float(btc_drop_pct):.2f}% dalam "
+                               f"{int(config.get("BTC_LOOKBACK_BARS", 3) or 3)} candle")
 
     if not _angka_wajar(quote_volume):
         return False, f"quote_volume 24 jam tidak wajar ({quote_volume!r})"

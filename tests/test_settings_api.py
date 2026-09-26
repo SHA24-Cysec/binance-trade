@@ -39,7 +39,7 @@ def test_settings_preview_then_commit_is_transactional(client, monkeypatch):
     monkeypatch.setattr(dashboard._process_manager, "status", lambda mode=None: {"status": "STOPPED"})
     saved = {}
     audits = []
-    monkeypatch.setattr(dashboard, "save_mode_override", lambda mode, values: saved.update(mode=mode, values=values))
+    monkeypatch.setattr(dashboard, "save_mode_override", lambda mode, values, **kwargs: saved.update(mode=mode, values=values))
     monkeypatch.setattr(dashboard, "audit_change", audits.append)
     monkeypatch.setattr(dashboard.config_mod, "reload_config", lambda: dashboard.PUMP_CONFIG)
     monkeypatch.setattr(dashboard, "_refresh_runtime_globals", lambda: None)
@@ -63,7 +63,7 @@ def test_settings_write_failure_is_reported_without_audit(client, monkeypatch):
     defaults = config.default_config_for_mode("PAPER")
     monkeypatch.setattr(dashboard, "_config_pair", lambda mode: (deepcopy(defaults), deepcopy(defaults), []))
     monkeypatch.setattr(dashboard._process_manager, "status", lambda mode=None: {"status": "STOPPED"})
-    monkeypatch.setattr(dashboard, "save_mode_override", lambda mode, values: (_ for _ in ()).throw(OSError("disk penuh")))
+    monkeypatch.setattr(dashboard, "save_mode_override", lambda mode, values, **kwargs: (_ for _ in ()).throw(OSError("disk penuh")))
     audits = []
     monkeypatch.setattr(dashboard, "audit_change", audits.append)
     prepared = client.post("/api/settings/preview", json={

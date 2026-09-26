@@ -42,7 +42,12 @@ class MarketDataProvider:
         base_url = get_base_url(config)
         # KEYLESS: tidak ada API key, tidak ada tanda tangan. Ini pengaman
         # tambahan agar lapisan data pasar tak pernah bisa mengirim signed.
-        self.rest = BinanceSpotClient("", "", base_url, allow_signed=False)
+        self.rest = BinanceSpotClient(
+            "", "", base_url, allow_signed=False,
+            rate_limit_state_file=config.get("RATE_LIMIT_STATE_FILE"),
+            rate_limit_limit=int(config.get("RATE_LIMIT_WEIGHT_LIMIT", 6000) or 6000),
+            rate_limit_safety_margin=int(config.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100),
+        )
 
         self._use_ws = use_websocket(config)
         self._max_age = float(config.get("MAX_MARKET_DATA_AGE_SECONDS", 10.0))
@@ -106,6 +111,9 @@ class MarketDataProvider:
                 except Exception:  # noqa: BLE001
                     pass
                 self._ws = None
+            # Instance ini dapat dipakai ulang setelah close(). Langganan lama
+            # berada di koneksi yang sudah mati dan harus dikirim ulang.
+            self._subscribed.clear()
 
     # ------------------------------------------------------------------
     # Infrastruktur
@@ -159,7 +167,7 @@ class MarketDataProvider:
                     return float(price)
         return self.rest.get_price(symbol, max_retries=max_retries)
 
-    def get_book_ticker(self, symbol: str) -> dict:
+    def get_book_ticker(self, symbol: str, max_retries: int = 3) -> dict:
         if self._use_ws:
             self._ensure_symbol_stream(symbol)
             ws = self._ws
@@ -174,7 +182,7 @@ class MarketDataProvider:
                         "askPrice": f"{book['ask']:.8f}",
                         "askQty": f"{book.get('askQty', 0.0):.8f}",
                     }
-        return self.rest.get_book_ticker(symbol)
+        return self.rest.get_book_ticker(symbol, max_retries=max_retries)
 
     # ------------------------------------------------------------------
     # Depth / order book (REST snapshot segar, cache pendek)

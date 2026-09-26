@@ -230,6 +230,7 @@
   .bt-form{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}
   .bt-form > *{min-width:0}
   .bt-field{display:flex;flex-direction:column;gap:6px;min-width:0}
+  .bt-field[hidden]{display:none}
   .bt-field label{font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;font-weight:700}
   .bt-field input,.bt-field select{width:100%;max-width:100%;background:rgba(14,17,22,.6);
     border:1px solid var(--border);border-radius:8px;padding:9px 10px;color:var(--txt);
@@ -601,28 +602,63 @@
                oninput="btUpdateEstimate()">
       </div>
       <div class="bt-field">
+        <label>Mode exit</label>
+        <select id="btExitMode" onchange="btUpdateExitMode()" title="Pilih mode exit yang sama dengan bot live, atau bandingkan dengan mode lainnya.">
+          <option value="atr" selected>ATR adaptif</option>
+          <option value="fixed">Persentase tetap</option>
+        </select>
+      </div>
+      <div class="bt-field" data-exit-mode="atr">
+        <label>ATR Period</label>
+        <input type="number" id="btAtrPeriod" min="1" step="1">
+      </div>
+      <div class="bt-field" data-exit-mode="atr">
+        <label>ATR Multiplier SL</label>
+        <input type="number" id="btAtrSl" min="0.0001" step="0.1">
+      </div>
+      <div class="bt-field" data-exit-mode="atr">
+        <label>ATR Multiplier TP</label>
+        <input type="number" id="btAtrTp" min="0.0001" step="0.1">
+      </div>
+      <div class="bt-field" data-exit-mode="atr">
+        <label>ATR Multiplier BE Trigger</label>
+        <input type="number" id="btAtrBeTrig" min="0.0001" step="0.1">
+      </div>
+      <div class="bt-field" data-exit-mode="atr">
+        <label>ATR Multiplier BE Lock</label>
+        <input type="number" id="btAtrBeLock" min="0" step="0.1">
+      </div>
+      <div class="bt-field" data-exit-mode="atr">
+        <label>ATR Multiplier Trail Start</label>
+        <input type="number" id="btAtrTrStart" min="0.0001" step="0.1">
+      </div>
+      <div class="bt-field" data-exit-mode="atr">
+        <label>ATR Multiplier Trail Step</label>
+        <input type="number" id="btAtrTrStep" min="0.0001" step="0.1">
+      </div>
+      <div class="bt-field" data-exit-mode="fixed" hidden>
         <label>Stop Loss %</label>
-        <input type="number" id="btSl" step="0.1">
+        <input type="number" id="btSl" min="0.01" step="0.1">
       </div>
-      <div class="bt-field">
+      <div class="bt-field" data-exit-mode="fixed" hidden>
         <label>Take Profit %</label>
-        <input type="number" id="btTp" step="0.1">
+        <input type="number" id="btTp" min="0.01" step="0.1">
       </div>
-      <div class="bt-field">
+      <div class="bt-field" data-exit-mode="fixed" hidden>
         <label>Trigger Breakeven %</label>
-        <input type="number" id="btBeTrig" step="0.1">
+        <input type="number" id="btBeTrig" min="0.01" step="0.1">
       </div>
-      <div class="bt-field">
+      <div class="bt-field" data-exit-mode="fixed" hidden>
         <label>Kunci Breakeven %</label>
         <input type="number" id="btBeLock" step="0.1">
       </div>
-      <div class="bt-field">
+      <div class="bt-field" data-exit-mode="fixed" hidden>
         <label>Mulai Trailing %</label>
-        <input type="number" id="btTrStart" step="0.1">
+        <input type="number" id="btTrStart" min="0.01" step="0.1">
       </div>
-      <div class="bt-field">
+      <div class="bt-field" data-exit-mode="fixed" hidden>
         <label>Langkah Trailing %</label>
-        <input type="number" id="btTrStep" step="0.1">
+        <input type="number" id="btTrStep" min="0.01" step="0.1">
       </div>
       <div class="bt-field bt-actions">
         <label>&nbsp;</label>
@@ -631,6 +667,9 @@
           <button id="btCancelBtn" onclick="cancelBacktest()" style="display:none;background:rgba(244,63,94,.16);color:#fda4af;border:1px solid rgba(244,63,94,.35)">✕ Batal</button>
         </div>
       </div>
+    </div>
+    <div class="mut" style="font-size:11.5px;margin-top:10px;line-height:1.6">
+      Mode ATR memakai multiplier ATR seperti bot live. Mode persentase tetap memakai SL, TP, BE, dan trailing berbasis persen. Pilihan ini hanya berlaku untuk simulasi backtest.
     </div>
     <div id="btEstimate" class="mut" style="font-size:11.5px;margin-top:10px;line-height:1.6"></div>
 
@@ -862,7 +901,7 @@ function reasonTag(r){
     // jelas itu berasal dari strategi yang sudah tidak dipakai lagi.
     if(k.includes('MOMENTUM')) return '<span class="tag fade">FADE (lama)</span>';
     if(k.includes('MANUAL_CLOSE')) return '<span class="tag manual">MANUAL</span>';
-    return '<span class="tag dry">'+k+'</span>';
+    return '<span class="tag dry">'+esc(k)+'</span>';
   });
   return parts.join(' ');
 }
@@ -891,7 +930,7 @@ function renderStatus(s){
   const p=s.position;
   const oc=document.getElementById('cardPnl');
   if(p.has_position && p.pnl_usdt!=null){
-    document.getElementById('openPnlVal').innerHTML='<span class="'+cls(p.pnl_usdt)+'">'+sign(p.pnl_usdt)+fmt(p.pnl_usdt)+' '+s.quote+'</span>';
+    document.getElementById('openPnlVal').innerHTML='<span class="'+cls(p.pnl_usdt)+'">'+sign(p.pnl_usdt)+fmt(p.pnl_usdt)+' '+esc(s.quote)+'</span>';
     document.getElementById('openPnlSub').innerHTML='<span class="'+cls(p.pnl_pct)+'">'+sign(p.pnl_pct)+fmt(p.pnl_pct)+'%</span> · '+esc(p.symbol);
     oc.className='card '+(p.pnl_usdt>=0?'good':'bad');
   } else {
@@ -917,13 +956,13 @@ function renderStatus(s){
     pb.innerHTML=`
       <div class="bigpnl">
         <div class="n ${pnlColor}">${p.pnl_pct!=null?sign(p.pnl_pct)+fmt(p.pnl_pct)+'%':'—'}</div>
-        <div class="s">${p.pnl_usdt!=null?sign(p.pnl_usdt)+fmt(p.pnl_usdt)+' '+s.quote:'menunggu harga live'}</div>
+        <div class="s">${p.pnl_usdt!=null?sign(p.pnl_usdt)+fmt(p.pnl_usdt)+' '+esc(s.quote):'menunggu harga live'}</div>
       </div>
       <div class="posrow"><span class="k">Simbol</span><span class="v">${esc(p.symbol)}</span></div>
       <div class="posrow"><span class="k">Harga entry</span><span class="v mono">${fmtP(p.entry_price)}</span></div>
       <div class="posrow"><span class="k">Harga live</span><span class="v mono">${p.live_price!=null?fmtP(p.live_price):'—'}</span></div>
       <div class="posrow"><span class="k">Qty</span><span class="v mono">${fmt(p.qty,6)}</span></div>
-      <div class="posrow"><span class="k">Nilai posisi</span><span class="v mono">${p.position_value!=null?fmt(p.position_value)+' '+s.quote:'—'}</span></div>
+      <div class="posrow"><span class="k">Nilai posisi</span><span class="v mono">${p.position_value!=null?fmt(p.position_value)+' '+esc(s.quote):'—'}</span></div>
       <div class="posrow"><span class="k">Lama hold</span><span class="v">${hold}</span></div>
       ${beRow}${trRow}`;
     window._currentPositionSymbol = p.symbol;
@@ -947,12 +986,12 @@ function renderStatus(s){
   const c=s.config;
   document.getElementById('configBox').innerHTML=`
     <div class="posrow"><span class="k">Mode exit</span><span class="v mono">${c.exit_source==='ATR'?'ATR':'PERSEN LAMA'}</span></div>
-    <div class="posrow"><span class="k">Stop Loss</span><span class="v mono">${c.sl_pct!=null? c.sl_pct+(c.exit_source==='ATR'?' harga':'%') : 'nonaktif'}</span></div>
-    <div class="posrow"><span class="k">Take Profit</span><span class="v mono">${c.tp_pct}${c.exit_source==='ATR'?' harga':'%'}</span></div>
-    <div class="posrow"><span class="k">Trigger Breakeven</span><span class="v mono">${c.be_trigger_pct}%</span></div>
-    <div class="posrow"><span class="k">Mulai Trailing</span><span class="v mono">${c.trailing_start_pct}%</span></div>
-    <div class="posrow"><span class="k">Risk per entry</span><span class="v mono">${c.risk_percent}%</span></div>
-    <div class="posrow"><span class="k">Maks posisi</span><span class="v mono">${fmt(c.max_position_usdt)} ${s.quote}</span></div>`;
+    <div class="posrow"><span class="k">Stop Loss</span><span class="v mono">${c.sl_pct!=null? esc(c.sl_pct)+(c.exit_source==='ATR'?' harga':'%') : 'nonaktif'}</span></div>
+    <div class="posrow"><span class="k">Take Profit</span><span class="v mono">${esc(c.tp_pct)}${c.exit_source==='ATR'?' harga':'%'}</span></div>
+    <div class="posrow"><span class="k">Trigger Breakeven</span><span class="v mono">${esc(c.be_trigger_pct)}%</span></div>
+    <div class="posrow"><span class="k">Mulai Trailing</span><span class="v mono">${esc(c.trailing_start_pct)}%</span></div>
+    <div class="posrow"><span class="k">Risk per entry</span><span class="v mono">${esc(c.risk_percent)}%</span></div>
+    <div class="posrow"><span class="k">Maks posisi</span><span class="v mono">${fmt(c.max_position_usdt)} ${esc(s.quote)}</span></div>`;
 }
 
 // ======================= JUAL SEKARANG (MANUAL) =======================
@@ -1051,11 +1090,11 @@ function startManualClosePolling(symbol){
 
 function renderSummary(sum, quote){
   const rc=document.getElementById('cardRealized');
-  document.getElementById('realizedVal').innerHTML='<span class="'+cls(sum.total_pnl)+'">'+sign(sum.total_pnl)+fmt(sum.total_pnl)+' '+quote+'</span>';
+  document.getElementById('realizedVal').innerHTML='<span class="'+cls(sum.total_pnl)+'">'+sign(sum.total_pnl)+fmt(sum.total_pnl)+' '+esc(quote)+'</span>';
   document.getElementById('realizedSub').textContent=sum.total_trades+' trade selesai';
   rc.className='card '+(sum.total_pnl>=0?'good':'bad');
   document.getElementById('winVal').textContent= sum.total_trades? fmt(sum.win_rate,1)+'%':'—';
-  document.getElementById('winSub').innerHTML= sum.total_trades? ('<span class="pos">'+sum.wins+'W</span> / <span class="neg">'+sum.losses+'L</span> · terbaik '+sign(sum.best_pct)+fmt(sum.best_pct,1)+'%') : 'belum ada trade';
+  document.getElementById('winSub').innerHTML= sum.total_trades? ('<span class="pos">'+fmt(sum.wins,0)+'W</span> / <span class="neg">'+fmt(sum.losses,0)+'L</span> · terbaik '+sign(sum.best_pct)+fmt(sum.best_pct,1)+'%') : 'belum ada trade';
 }
 
 function renderTrades(trades, quote){
@@ -1067,8 +1106,8 @@ function renderTrades(trades, quote){
   if(!closed.length){tb.innerHTML='<tr><td colspan="8" class="empty">Belum ada trade yang selesai.</td></tr>';return;}
   tb.innerHTML=closed.map(t=>`
     <tr>
-      <td class="mono mut">${t.sell_time||'—'}${t.paper?' <span class="tag dry">PAPER</span>':''}</td>
-      <td><b>${t.symbol}</b></td>
+      <td class="mono mut">${esc(t.sell_time||'—')}${t.paper?' <span class="tag dry">PAPER</span>':''}</td>
+      <td><b>${esc(t.symbol)}</b></td>
       <td class="mono">${fmtP(t.entry||t.buy_price)}</td>
       <td class="mono">${fmtP(t.sell_price)}</td>
       <td class="mono">${fmt(t.qty,4)}</td>
@@ -1081,7 +1120,7 @@ function renderTrades(trades, quote){
 function renderLogs(events){
   const lb=document.getElementById('logBox');
   if(!events||!events.length){lb.innerHTML='<div class="empty">Belum ada log.</div>';return;}
-  lb.innerHTML=events.map(e=>`<div class="logline ${e.level}">${e.raw.replace(/</g,'&lt;')}</div>`).join('');
+  lb.innerHTML=events.map(e=>`<div class="logline ${safeLogClass(e.level)}">${esc(e.raw)}</div>`).join('');
 }
 
 function renderChart(trades){
@@ -1147,7 +1186,7 @@ function renderWatchlist(w){
   // bisa masuk semesta kandidat bot.
   const chipOrder=[['LIKUID','siap'],['TIPIS',''],['TIDAK ADA DATA','']];
   let chips=chipOrder.filter(([k])=>counts[k])
-    .map(([k,c])=>`<span class="wl-chip ${c}">${k} <b>${counts[k]}</b></span>`).join('');
+    .map(([k,c])=>`<span class="wl-chip ${c}">${k} <b>${fmt(counts[k],0)}</b></span>`).join('');
   chips+=`<span class="wl-chip">ambang volume <b>${wlVol(cfg.min_quote_volume_24h)}</b></span>`;
   document.getElementById('wlChips').innerHTML=chips;
 
@@ -1177,24 +1216,24 @@ function renderWatchlist(w){
     : `Daftar ini diambil dari <b>config.py</b>`;
   let extra='';
   if(a.enabled&&a.meta){
-    extra=` Penilaian terakhir memeriksa ${a.meta.symbols_examined||0} simbol `+
-      `memakai riwayat ${a.meta.days||0} hari (${a.meta.weight_spent||0} weight, `+
+    extra=` Penilaian terakhir memeriksa ${fmt(a.meta.symbols_examined||0,0)} simbol `+
+      `memakai riwayat ${fmt(a.meta.days||0,0)} hari (${fmt(a.meta.weight_spent||0,0)} weight, `+
       `${fmt(a.meta.duration_seconds||0,0)} detik).`;
-    if(a.meta.stopped_reason) extra+=` Catatan: ${a.meta.stopped_reason}.`;
+    if(a.meta.stopped_reason) extra+=` Catatan: ${esc(a.meta.stopped_reason)}.`;
   }else if(a.enabled&&!a.last_run){
     extra=` Penyegaran otomatis aktif tapi belum pernah selesai, `+
       `jadi yang tampil masih daftar cadangan dari config.py.`;
   }
   if(a.enabled&&a.last_error){
-    extra+=` <b style="color:var(--amber)">Penyegaran terakhir gagal: ${String(a.last_error).replace(/</g,'&lt;')}</b>`;
+    extra+=` <b style="color:var(--amber)">Penyegaran terakhir gagal: ${esc(a.last_error)}</b>`;
   }
 
   if(w.error){
-    note.innerHTML=`<b style="color:var(--amber)">⚠️ ${w.error.replace(/</g,'&lt;')}</b><br>`+
+    note.innerHTML=`<b style="color:var(--amber)">⚠️ ${esc(w.error)}</b><br>`+
       `Daftar tetap ditampilkan memakai data terakhir yang berhasil diambil.`;
   }else{
     note.innerHTML=`${sumberTxt} dan <b>hanya untuk dipantau</b>, tidak mengubah perilaku bot. `+
-      `Bot tetap memindai seluruh pair ${cfg.quote_asset||'USDT'}. `+
+      `Bot tetap memindai seluruh pair ${esc(cfg.quote_asset||'USDT')}. `+
       `Status <b>LIKUID</b> berarti volume 24 jam koin ≥ ${wlVol(cfg.min_quote_volume_24h)}, `+
       `<b>bukan</b> berarti bot pasti membeli. Deteksi setup pullback retest pada candle `+
       `tidak dihitung di panel ini.${extra}`;
@@ -1209,7 +1248,7 @@ function renderWatchlist(w){
   const stCls={'LIKUID':'st-siap','TIPIS':'st-tipis','TIDAK ADA DATA':'st-nodata'};
 
   tb.innerHTML=items.map(r=>{
-    const tierCls='ti-'+String(r.tier||'lainnya').toLowerCase();
+    const tierCls=safeTierClass(r.tier);
     const st=r.status||'TIDAK ADA DATA';
     const rowCls=(st==='LIKUID')?' class="siap"':'';
 
@@ -1231,19 +1270,20 @@ function renderWatchlist(w){
       : `<span class="mono">${fmt(r.range_position*100,0)}%</span>`;
 
     const volCls=r.pass_volume===false?' class="mut"':'';
-    const title=(r.note||'').replace(/"/g,'&quot;');
+    const rawTitle=String(r.note||'');
+    const title=esc(rawTitle);
     const scoreTxt=(r.score===null||r.score===undefined)?'':` · skor ${fmt(r.score,1)}`;
 
     return `<tr${rowCls}>
-      <td><span class="wl-sym">${r.symbol}</span>
-          <div class="wl-gap" title="${title}">${title.slice(0,58)}${title.length>58?'…':''}</div></td>
-      <td><span class="tag ${tierCls}" title="tier${scoreTxt}">${r.tier}</span></td>
+      <td><span class="wl-sym">${esc(r.symbol)}</span>
+          <div class="wl-gap" title="${title}">${title.slice(0,58)}${rawTitle.length>58?'…':''}</div></td>
+      <td><span class="tag ${tierCls}" title="tier${scoreTxt}">${esc(r.tier)}</span></td>
       <td class="mono">${fmtP(r.price)}</td>
       <td class="mono ${cls(r.change_24h)}">${r.change_24h===null?'—':sign(r.change_24h)+fmt(r.change_24h,2)+'%'}</td>
       <td>${bar}</td>
       <td${volCls}><span class="mono">${wlVol(r.quote_volume_24h)}</span></td>
       <td>${rp}</td>
-      <td><span class="tag ${stCls[st]||'st-nodata'}">${st}</span></td>
+      <td><span class="tag ${stCls[st]||'st-nodata'}">${esc(st)}</span></td>
     </tr>`;
   }).join('');
 }
@@ -1283,6 +1323,14 @@ setInterval(refresh, 5000);
 const esc = v => String(v===null||v===undefined?'':v).replace(/[&<>"']/g, c=>({
   '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
 }[c]));
+const safeTierClass = v => {
+  const k=String(v===null||v===undefined?'':v).toUpperCase();
+  return ({INTI:'ti-inti',AKTIF:'ti-aktif',SPEKULATIF:'ti-spekulatif'})[k] || 'ti-lainnya';
+};
+const safeLogClass = v => {
+  const k=String(v===null||v===undefined?'':v).toUpperCase();
+  return ({INFO:'INFO',WARNING:'WARNING',WARN:'WARNING',ERROR:'ERROR',DEBUG:'DEBUG'})[k] || 'INFO';
+};
 let _controlState = null;
 let _pendingBotAction = null;
 let _settingsFields = [];
@@ -1543,6 +1591,13 @@ setInterval(loadControlStatus,4000);
 // ============================ BACKTEST ============================
 let btPolling = null;
 
+function btUpdateExitMode(){
+  const mode = document.getElementById('btExitMode').value;
+  document.querySelectorAll('[data-exit-mode]').forEach(el=>{
+    el.hidden = el.getAttribute('data-exit-mode') !== mode;
+  });
+}
+
 async function loadBacktestDefaults(){
   try{
     const r = await fetch('/api/backtest/defaults');
@@ -1556,12 +1611,21 @@ async function loadBacktestDefaults(){
     }
     document.getElementById('btDays').value = d.default_days;
     // Tidak ada batas maksimum hari yang dipaksakan (rentang backtest bebas).
+    document.getElementById('btExitMode').value = d.USE_ATR_EXIT ? 'atr' : 'fixed';
+    document.getElementById('btAtrPeriod').value = d.ATR_PERIOD;
+    document.getElementById('btAtrSl').value = d.ATR_MULT_SL;
+    document.getElementById('btAtrTp').value = d.ATR_MULT_TP;
+    document.getElementById('btAtrBeTrig').value = d.ATR_MULT_BE_TRIGGER;
+    document.getElementById('btAtrBeLock').value = d.ATR_MULT_BE_LOCK;
+    document.getElementById('btAtrTrStart').value = d.ATR_MULT_TRAIL_START;
+    document.getElementById('btAtrTrStep').value = d.ATR_MULT_TRAIL;
     document.getElementById('btSl').value = d.SL_PCT;
     document.getElementById('btTp').value = d.TP_PCT;
     document.getElementById('btBeTrig').value = d.BE_TRIGGER_PCT;
     document.getElementById('btBeLock').value = d.BE_LOCK_PCT;
     document.getElementById('btTrStart').value = d.TRAILING_START_PCT;
     document.getElementById('btTrStep').value = d.TRAILING_STEP_PCT;
+    btUpdateExitMode();
     if(d.default_days) document.getElementById('btDays').value = d.default_days;
     if(d.default_max_symbols) document.getElementById('btMaxSymbols').value = d.default_max_symbols;
     btUpdateEstimate();
@@ -1643,9 +1707,18 @@ async function startBacktest(){
   if(!(maxSym >= 2)){ btShowError('Jumlah simbol minimal 2, supaya ada persaingan antar-simbol untuk disimulasikan.'); return; }
   if(maxSym > 600){ btShowError('Jumlah simbol maksimal 600.'); return; }
 
+  const exitMode = document.getElementById('btExitMode').value;
   const payload = {
     days: days,
     max_symbols: maxSym,
+    USE_ATR_EXIT: exitMode === 'atr',
+    ATR_PERIOD: document.getElementById('btAtrPeriod').value,
+    ATR_MULT_SL: document.getElementById('btAtrSl').value,
+    ATR_MULT_TP: document.getElementById('btAtrTp').value,
+    ATR_MULT_BE_TRIGGER: document.getElementById('btAtrBeTrig').value,
+    ATR_MULT_BE_LOCK: document.getElementById('btAtrBeLock').value,
+    ATR_MULT_TRAIL_START: document.getElementById('btAtrTrStart').value,
+    ATR_MULT_TRAIL: document.getElementById('btAtrTrStep').value,
     SL_PCT: document.getElementById('btSl').value,
     TP_PCT: document.getElementById('btTp').value,
     BE_TRIGGER_PCT: document.getElementById('btBeTrig').value,
@@ -1756,11 +1829,17 @@ function finishBacktestUI(){
   document.getElementById('btProgressWrap').style.display = 'none';
 }
 
-function btReasonTagClass(r){ return (r||'').toLowerCase(); }
+function btReasonTagClass(r){
+  const key=String(r===null||r===undefined?'':r).toUpperCase();
+  const map={STOP_LOSS:'stop_loss',TAKE_PROFIT:'take_profit',BREAKEVEN:'breakeven',
+             TRAILING_STOP:'trailing_stop',MOMENTUM_FADE:'fade',END_OF_DATA:'end_of_data'};
+  return map[key] || 'dry';
+}
 function btReasonLabel(r){
+  const key=String(r===null||r===undefined?'':r).toUpperCase();
   const map = {STOP_LOSS:'SL', TAKE_PROFIT:'TP', BREAKEVEN:'BE', TRAILING_STOP:'TRAIL',
                MOMENTUM_FADE:'FADE (lama)', END_OF_DATA:'DATA HABIS'};
-  return map[r] || r;
+  return esc(map[key] || key);
 }
 
 // Kontribusi PnL per simbol, diurutkan dari penyumbang terbesar.
@@ -1768,13 +1847,14 @@ function renderSymbolBreakdown(s){
   const box = document.getElementById('btSymbolBox');
   const top = s.top_symbols || [];
   if(!top.length){ box.innerHTML = '<div class="empty">Belum ada trade.</div>'; return; }
-  const max = Math.max(...top.map(x=>Math.abs(x.pnl_pct)), 1);
+  const max = Math.max(...top.map(x=>Math.abs(Number(x.pnl_pct))), 1);
   box.innerHTML = top.map(x=>{
-    const w = Math.max(2, Math.abs(x.pnl_pct)/max*100);
-    const col = x.pnl_pct>=0 ? 'var(--green)' : 'var(--red)';
+    const pnl = Number(x.pnl_pct);
+    const w = Math.max(2, Math.abs(pnl)/max*100);
+    const col = pnl>=0 ? 'var(--green)' : 'var(--red)';
     return `<div style="margin-bottom:9px">
       <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px">
-        <span><b>${x.symbol}</b> <span class="mut">${x.trades}x</span></span>
+        <span><b>${esc(x.symbol)}</b> <span class="mut">${fmt(x.trades,0)}x</span></span>
         <span class="mono ${cls(x.pnl_pct)}">${sign(x.pnl_pct)}${fmt(x.pnl_pct)}%</span>
       </div>
       <div style="height:5px;border-radius:99px;background:var(--inset,rgba(148,163,184,.12))">
@@ -1795,7 +1875,7 @@ function renderSkipped(res){
     return;
   }
   box.innerHTML = '<div class="logbox" style="max-height:220px">' + sk.map(x=>
-    `<div class="logline INFO"><b>${x.symbol}</b> terlewat pada ${x.time}, bot sedang memegang ${x.holding}</div>`
+    `<div class="logline INFO"><b>${esc(x.symbol)}</b> terlewat pada ${esc(x.time)}, bot sedang memegang ${esc(x.holding)}</div>`
   ).join('') + '</div>';
 }
 
@@ -1807,11 +1887,11 @@ function renderBacktestResult(res){
     <div class="card ${s.total_return_pct>=0?'good':'bad'}"><div class="accent-bar"></div>
       <div class="label">Return Total (compounding)</div>
       <div class="value mono ${cls(s.total_return_pct)}">${sign(s.total_return_pct)}${fmt(s.total_return_pct)}%</div>
-      <div class="sub">${s.total_trades} trade diambil bot</div></div>
+      <div class="sub">${fmt(s.total_trades,0)} trade diambil bot</div></div>
     <div class="card"><div class="accent-bar"></div>
       <div class="label">Win Rate</div>
       <div class="value mono">${s.total_trades? fmt(s.win_rate,1)+'%':'—'}</div>
-      <div class="sub"><span class="pos">${s.wins}W</span> / <span class="neg">${s.losses}L</span></div></div>
+      <div class="sub"><span class="pos">${fmt(s.wins,0)}W</span> / <span class="neg">${fmt(s.losses,0)}L</span></div></div>
     <div class="card"><div class="accent-bar"></div>
       <div class="label">Max Drawdown</div>
       <div class="value mono neg">-${fmt(s.max_drawdown_pct)}%</div>
@@ -1841,19 +1921,27 @@ function renderBacktestResult(res){
   // info box
   const p = res.params_used;
   let reasonRows = Object.entries(s.reason_counts||{}).map(([k,v])=>
-    `<div class="posrow"><span class="k">${btReasonLabel(k)}</span><span class="v mono">${v}x</span></div>`).join('');
+    `<div class="posrow"><span class="k">${btReasonLabel(k)}</span><span class="v mono">${fmt(v,0)}x</span></div>`).join('');
+  const exitRows = p.USE_ATR_EXIT
+    ? `<div class="posrow"><span class="k">Mode exit</span><span class="v mono">ATR adaptif</span></div>
+       <div class="posrow"><span class="k">ATR period</span><span class="v mono">${fmt(p.ATR_PERIOD,0)}</span></div>
+       <div class="posrow"><span class="k">ATR multiplier SL / TP</span><span class="v mono">${esc(p.ATR_MULT_SL)} / ${esc(p.ATR_MULT_TP)}</span></div>
+       <div class="posrow"><span class="k">ATR multiplier BE (trig,lock)</span><span class="v mono">${esc(p.ATR_MULT_BE_TRIGGER)},${esc(p.ATR_MULT_BE_LOCK)}</span></div>
+       <div class="posrow"><span class="k">ATR multiplier Trail (start,step)</span><span class="v mono">${esc(p.ATR_MULT_TRAIL_START)},${esc(p.ATR_MULT_TRAIL)}</span></div>`
+    : `<div class="posrow"><span class="k">Mode exit</span><span class="v mono">Persentase tetap</span></div>
+       <div class="posrow"><span class="k">SL / TP / BE (trig,lock) / Trail (start,step)</span><span class="v mono" style="font-size:11.5px">${esc(p.SL_PCT)}% / ${esc(p.TP_PCT)}% / ${esc(p.BE_TRIGGER_PCT)}%,${esc(p.BE_LOCK_PCT)}% / ${esc(p.TRAILING_START_PCT)}%,${esc(p.TRAILING_STEP_PCT)}%</span></div>`;
   document.getElementById('btInfoBox').innerHTML = `
-    <div class="posrow"><span class="k">Semesta simbol</span><span class="v mono">${res.universe_with_data} berhasil / ${res.universe_requested} diminta${res.symbols_failed_count? ' ('+res.symbols_failed_count+' gagal)':''}</span></div>
-    <div class="posrow"><span class="k">Rentang data</span><span class="v mono" style="font-size:11.5px">${res.start_time||'—'} &rarr; ${res.end_time||'—'}</span></div>
-    <div class="posrow"><span class="k">Titik waktu diproses</span><span class="v mono">${fmt(res.bars_total,0)} bar ${res.interval}</span></div>
-    <div class="posrow"><span class="k">SL / TP / BE (trig,lock) / Trail (start,step)</span><span class="v mono" style="font-size:11.5px">${p.SL_PCT}% / ${p.TP_PCT}% / ${p.BE_TRIGGER_PCT}%,${p.BE_LOCK_PCT}% / ${p.TRAILING_START_PCT}%,${p.TRAILING_STEP_PCT}%</span></div>
+    <div class="posrow"><span class="k">Semesta simbol</span><span class="v mono">${fmt(res.universe_with_data,0)} berhasil / ${fmt(res.universe_requested,0)} diminta${res.symbols_failed_count? ' ('+fmt(res.symbols_failed_count,0)+' gagal)':''}</span></div>
+    <div class="posrow"><span class="k">Rentang data</span><span class="v mono" style="font-size:11.5px">${esc(res.start_time||'—')} &rarr; ${esc(res.end_time||'—')}</span></div>
+    <div class="posrow"><span class="k">Titik waktu diproses</span><span class="v mono">${fmt(res.bars_total,0)} bar ${esc(res.interval)}</span></div>
+    ${exitRows}
     <div style="border-top:1px solid var(--border);margin:4px 0"></div>
     ${reasonRows || '<div class="posrow"><span class="k mut">Tidak ada trade terjadi pada rentang & parameter ini.</span></div>'}
-    ${(res.warnings&&res.warnings.length)? '<div style="border-top:1px solid var(--border);margin:4px 0"></div>'+res.warnings.map(w=>`<div class="posrow"><span class="k" style="color:var(--amber)">⚠ ${w}</span></div>`).join('') : ''}
+    ${(res.warnings&&res.warnings.length)? '<div style="border-top:1px solid var(--border);margin:4px 0"></div>'+res.warnings.map(w=>`<div class="posrow"><span class="k" style="color:var(--amber)">⚠ ${esc(w)}</span></div>`).join('') : ''}
   `;
 
 
-  document.getElementById('btLimitList').innerHTML = (res.limitations||[]).map(l=>`<li>${l}</li>`).join('');
+  document.getElementById('btLimitList').innerHTML = (res.limitations||[]).map(l=>`<li>${esc(l)}</li>`).join('');
 
   // trades table
   document.getElementById('btTradeCount').textContent = res.trades.length? '('+res.trades.length+' trade)':'';
@@ -1863,12 +1951,12 @@ function renderBacktestResult(res){
   } else {
     tb.innerHTML = res.trades.map(t=>`
       <tr>
-        <td><b>${t.symbol}</b></td>
-        <td class="mono mut">${t.entry_time}</td>
-        <td class="mono mut">${t.exit_time}</td>
+        <td><b>${esc(t.symbol)}</b></td>
+        <td class="mono mut">${esc(t.entry_time)}</td>
+        <td class="mono mut">${esc(t.exit_time)}</td>
         <td class="mono">${fmtP(t.entry_price)}</td>
         <td class="mono">${fmtP(t.exit_price)}</td>
-        <td class="mono mut">#${t.rank_at_entry} <span style="opacity:.7">(${sign(t.pct24h_at_entry)}${fmt(t.pct24h_at_entry,1)}%)</span></td>
+        <td class="mono mut">#${fmt(t.rank_at_entry,0)} <span style="opacity:.7">(${sign(t.pct24h_at_entry)}${fmt(t.pct24h_at_entry,1)}%)</span></td>
         <td class="mono">${Math.round(t.hold_minutes)} mnt</td>
         <td class="mono ${cls(t.pnl_pct)}">${sign(t.pnl_pct)}${fmt(t.pnl_pct)}%</td>
         <td><span class="tag ${btReasonTagClass(t.reason)}">${btReasonLabel(t.reason)}</span></td>

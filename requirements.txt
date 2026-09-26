@@ -1,16 +1,8 @@
-# Batas bawah dinaikkan pada audit 2026-09-24 (temuan S-06):
-# requests 2.32.4 menambal CVE-2024-47081 (kebocoran kredensial netrc),
-# Flask 3.1.1 menambal CVE-2025-47278, dan Werkzeug dipin eksplisit karena
-# beberapa advisory keamanan baru ditambal di 3.1.3-3.1.5.
-# Dinaikkan lagi pada audit 2026-09-25 (temuan Q-06, dicek ke PyPI dan GitHub
-# Advisory Database):
-#   requests>=2.33.0 menambal CVE-2026-25645 / GHSA-gc5v-m9x4-r6x2
-#     (pemakaian ulang file sementara pada requests.utils.extract_zipped_paths;
-#     fungsi itu tidak dipakai repo ini, pin dinaikkan sebagai pertahanan
-#     berlapis).
-#   flask>=3.1.3 menambal CVE-2026-27205 / GHSA-68rp-wp8r-4726
-#     (session tanpa header Vary: Cookie, tingkat LOW; dashboard tidak memakai
-#     Flask session, pin dinaikkan sebagai pertahanan berlapis).
+# Security floor diverifikasi pada 2026-09-26 melalui advisory upstream.
+# requests>=2.33.0 memuat perbaikan CVE-2026-25645 pada
+# requests.utils.extract_zipped_paths. Flask>=3.1.3 memuat perbaikan
+# GHSA-68rp-wp8r-4726/CVE-2026-27205. Werkzeug>=3.1.5 mengikuti security-fix
+# release upstream. Versi final dan hash transitive dikunci di requirements.lock.
 requests>=2.33.0
 flask>=3.1.3
 werkzeug>=3.1.5

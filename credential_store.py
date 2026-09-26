@@ -9,7 +9,7 @@ import stat
 import subprocess
 from pathlib import Path
 
-from atomic_io import atomic_write_text
+from atomic_io import atomic_write_text, interprocess_lock
 
 
 ROOT = Path(__file__).resolve().parent
@@ -41,8 +41,8 @@ def _dominant_newline(text: str) -> str:
     return "\r\n" if crlf > lf else "\n"
 
 
-def update_env(*, api_key: str | None = None, api_secret: str | None = None,
-               path: os.PathLike | str = ENV_PATH) -> dict:
+def _update_env_unlocked(*, api_key: str | None = None, api_secret: str | None = None,
+                         path: os.PathLike | str = ENV_PATH) -> dict:
     """Perbarui dua kunci dan pertahankan semua baris lain serta newline.
 
     None berarti tidak diubah. String kosong adalah nilai sah untuk operasi
@@ -91,6 +91,13 @@ def update_env(*, api_key: str | None = None, api_secret: str | None = None,
 
     atomic_write_text(target, "".join(output), mode=0o600 if os.name == "posix" else None)
     return secure_permissions(target)
+
+
+def update_env(*, api_key: str | None = None, api_secret: str | None = None,
+               path: os.PathLike | str = ENV_PATH) -> dict:
+    """Perbarui kredensial dengan serialisasi thread dan lintas proses."""
+    with interprocess_lock(path):
+        return _update_env_unlocked(api_key=api_key, api_secret=api_secret, path=path)
 
 
 def read_credentials(path: os.PathLike | str = ENV_PATH) -> tuple[str, str]:

@@ -110,6 +110,33 @@ def test_wait_dead_treats_reused_pid_as_old_process_gone(monkeypatch):
     assert calls == ["old-process-identity"]
 
 
+def test_ws_backoff_resets_after_healthy_connection():
+    from market_ws import MarketWebSocket
+
+    assert MarketWebSocket._next_backoff(60.0, True) == 1.0
+    assert MarketWebSocket._next_backoff(4.0, False) == 8.0
+
+
+def test_supervisor_restart_budget_is_bounded(monkeypatch):
+    import config as cfgmod
+
+    monkeypatch.setitem(cfgmod.PUMP_CONFIG, "SUPERVISOR_AUTO_RESTART", True)
+    monkeypatch.setitem(cfgmod.PUMP_CONFIG, "SUPERVISOR_MAX_RESTARTS", 2)
+    monkeypatch.setitem(cfgmod.PUMP_CONFIG, "SUPERVISOR_RESTART_WINDOW_SECONDS", 300)
+    monkeypatch.setitem(cfgmod.PUMP_CONFIG, "SUPERVISOR_RESTART_BACKOFF_SECONDS", 1)
+    manager = rc.BotProcessManager()
+    try:
+        with manager._lock:
+            manager._schedule_auto_restart_locked("PAPER")
+            manager._schedule_auto_restart_locked("PAPER")
+            manager._schedule_auto_restart_locked("PAPER")
+        assert manager._restart_attempts == 2
+        assert manager._auto_restart_mode is None
+        assert "dihentikan" in (manager._last_job_warning or "").lower()
+    finally:
+        manager._watchdog_stop.set()
+
+
 def test_signal_handler_wakes_interruptible_shutdown_wait():
     pump_bot._shutdown_event.clear()
     pump_bot._shutdown_requested = False

@@ -38,7 +38,7 @@ def test_paper_reset_archives_files_and_saves_positive_balances(client, tmp_path
     current = deepcopy(defaults)
     monkeypatch.setattr(dashboard, "_config_pair", lambda mode: (defaults, current, []))
     saved = {}
-    monkeypatch.setattr(dashboard, "save_mode_override", lambda mode, values: saved.update(mode=mode, values=values))
+    monkeypatch.setattr(dashboard, "save_mode_override", lambda mode, values, **kwargs: saved.update(mode=mode, values=values))
     monkeypatch.setattr(dashboard.config_mod, "reload_config", lambda: dashboard.PUMP_CONFIG)
     monkeypatch.setattr(dashboard, "_refresh_runtime_globals", lambda: None)
     monkeypatch.setattr(dashboard, "audit_change", lambda event: None)
@@ -67,7 +67,7 @@ def test_paper_reset_restores_archives_if_settings_write_fails(client, tmp_path,
     monkeypatch.setattr(dashboard._process_manager, "status", lambda mode=None: {"status": "STOPPED"})
     defaults = deepcopy(dashboard.config_mod.default_config_for_mode("PAPER"))
     monkeypatch.setattr(dashboard, "_config_pair", lambda mode: (defaults, deepcopy(defaults), []))
-    monkeypatch.setattr(dashboard, "save_mode_override", lambda mode, values: (_ for _ in ()).throw(OSError("disk penuh")))
+    monkeypatch.setattr(dashboard, "save_mode_override", lambda mode, values, **kwargs: (_ for _ in ()).throw(OSError("disk penuh")))
 
     prepared = client.post("/api/paper/reset/prepare", json={"balances": {"USDT": 5}}, headers=headers())
     confirmation = prepared.get_json()["confirmation_id"]

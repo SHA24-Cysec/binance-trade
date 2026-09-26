@@ -28,6 +28,8 @@ from typing import Any, Optional
 
 import requests
 
+from rate_limiter import RateLimitBlockedError, SharedRequestWeightLimiter
+
 logger = logging.getLogger("binance_client")
 
 
@@ -101,7 +103,8 @@ def _fmt_num(value) -> str:
 
 class BinanceSpotClient:
     def __init__(self, api_key: str, api_secret: str, base_url: str, timeout: float = 10.0,
-                 allow_signed: bool = True):
+                 allow_signed: bool = True, rate_limit_state_file: str | None = None,
+                 rate_limit_limit: int = 6000, rate_limit_safety_margin: int = 100):
         """allow_signed=False membuat klien ini MENOLAK setiap request
         bertanda tangan (melempar SignedEndpointBlockedError). Dipakai lapisan
         data pasar mode PAPER agar tidak mungkin menyentuh endpoint order/akun.
@@ -116,6 +119,11 @@ class BinanceSpotClient:
         if allow_signed and self.api_key:
             self.session.headers.update({"X-MBX-APIKEY": self.api_key})
         self._time_offset_ms = 0
+        self._rate_limiter = SharedRequestWeightLimiter(
+            rate_limit_state_file,
+            limit=rate_limit_limit,
+            safety_margin=rate_limit_safety_margin,
+        )
 
         # Pelacakan kuota rate limit. Diisi dari header respons Binance.
         self.used_weight_1m = 0      # weight terpakai pada menit berjalan
@@ -135,6 +143,25 @@ class BinanceSpotClient:
 
     def _timestamp(self) -> int:
         return int(time.time() * 1000) + self._time_offset_ms
+
+    @staticmethod
+    def _estimate_request_weight(path: str, params: dict | None = None) -> int:
+        """Perkiraan konservatif REQUEST_WEIGHT sebelum request dikirim."""
+        params = params or {}
+        if path == "/api/v3/ticker/24hr" and not params.get("symbol"):
+            return 80
+        if path == "/api/v3/exchangeInfo":
+            return 20 if not params.get("symbol") else 1
+        if path == "/api/v3/klines":
+            return 2
+        if path == "/api/v3/depth":
+            limit = int(params.get("limit", 100) or 100)
+            return 5 if limit <= 100 else 25 if limit <= 500 else 50 if limit <= 1000 else 250
+        if path == "/api/v3/ticker/bookTicker":
+            return 4 if not params.get("symbol") else 2
+        if path in ("/api/v3/ticker/price", "/api/v3/time"):
+            return 2
+        return 1
 
     def _request(
         self,
@@ -174,9 +201,26 @@ class BinanceSpotClient:
             u = f"{self.base_url}{path}"
             return f"{u}?{q}" if q else u
 
+        request_weight = self._estimate_request_weight(path, base_params)
         last_exc = None
+        skip_shared_block = False
         for attempt in range(1, max_retries + 1):
             try:
+                try:
+                    if skip_shared_block:
+                        # Retry internal sudah menunggu Retry-After. Tetap
+                        # reservasi bobot request kedua, tetapi abaikan blok
+                        # yang dibuat oleh respons 429 yang baru saja ditunggu.
+                        self._rate_limiter.record_retry_after_server_wait(request_weight)
+                    else:
+                        self._rate_limiter.reserve(request_weight)
+                    skip_shared_block = False
+                except RateLimitBlockedError as exc:
+                    raise BinanceRateLimitError(
+                        429, None,
+                        "shared rate limiter masih memblokir request sebelum dikirim",
+                        retry_after=int(exc.retry_after),
+                    ) from exc
                 url = build_url()
                 resp = self.session.request(method, url, timeout=self.timeout)
 
@@ -248,6 +292,10 @@ class BinanceSpotClient:
                     # yang mengatur jadwal coba-ulang berikutnya.
                     if attempt < max_retries:
                         time.sleep(wait)
+                        # Percobaan berikutnya mengikuti Retry-After response
+                        # ini. Ia tetap masuk ledger shared, tetapi block yang
+                        # baru saja ditunggu tidak boleh mencegah retry itu.
+                        skip_shared_block = True
                         continue
                     raise
 
@@ -278,6 +326,7 @@ class BinanceSpotClient:
             if raw is not None:
                 self.used_weight_1m = int(raw)
                 self.used_weight_ts = time.time()
+                self._rate_limiter.observe_server_weight(self.used_weight_1m)
         except (TypeError, ValueError):
             pass
 
@@ -295,6 +344,7 @@ class BinanceSpotClient:
         """Catat kapan IP boleh dipakai lagi, supaya pemanggil lain ikut diam."""
         wait = retry_after if retry_after else (300 if status_code == 418 else 60)
         self.blocked_until = max(getattr(self, "blocked_until", 0.0), time.time() + wait)
+        self._rate_limiter.block(wait)
 
     def is_rate_limited(self) -> bool:
         """True kalau IP sedang dalam masa tunggu akibat 429/418."""
@@ -342,8 +392,9 @@ class BinanceSpotClient:
             params["endTime"] = end_time_ms
         return self._request("GET", "/api/v3/klines", params)
 
-    def get_book_ticker(self, symbol: str) -> dict:
-        return self._request("GET", "/api/v3/ticker/bookTicker", {"symbol": symbol})
+    def get_book_ticker(self, symbol: str, max_retries: int = 3) -> dict:
+        return self._request("GET", "/api/v3/ticker/bookTicker", {"symbol": symbol},
+                             max_retries=max_retries)
 
     def get_depth(self, symbol: str, limit: int = 100, max_retries: int = 3) -> dict:
         """Order book (kedalaman) satu simbol -- GET /api/v3/depth.
@@ -402,7 +453,83 @@ class BinanceSpotClient:
             params["quoteOrderQty"] = _fmt_num(quote_order_qty)
         if new_client_order_id:
             params["newClientOrderId"] = str(new_client_order_id)
-        return self._request("POST", "/api/v3/order", params, signed=True)
+        # POST order bersifat non-idempotent dari sudut matching engine.
+        # Setelah timeout/HTTP 5xx, status eksekusi bisa UNKNOWN: retry buta
+        # dapat membuat order kedua jika order pertama sudah FILLED. Pemanggil
+        # wajib melakukan query berdasarkan clientOrderId, jadi hanya satu
+        # percobaan dikirim dari lapisan REST ini.
+        return self._request("POST", "/api/v3/order", params, signed=True,
+                             max_retries=1)
+
+    def new_stop_loss_order(self, symbol: str, quantity: float,
+                            stop_price: float,
+                            new_client_order_id: str | None = None) -> dict:
+        """Pasang STOP_LOSS market SELL native Binance.
+
+        Endpoint ini adalah lapisan proteksi independen dari loop Python.
+        POST tidak diulang otomatis karena status jaringan dapat UNKNOWN.
+        """
+        params = {
+            "symbol": symbol,
+            "side": "SELL",
+            "type": "STOP_LOSS",
+            "quantity": _fmt_num(quantity),
+            "stopPrice": _fmt_num(stop_price),
+        }
+        if new_client_order_id:
+            params["newClientOrderId"] = str(new_client_order_id)
+        return self._request("POST", "/api/v3/order", params, signed=True,
+                             max_retries=1)
+
+    def new_oco_sell_order(self, symbol: str, quantity: float,
+                           above_price: float, above_stop_price: float,
+                           below_price: float, below_stop_price: float,
+                           list_client_order_id: str,
+                           above_client_order_id: str,
+                           below_client_order_id: str) -> dict:
+        """Pasang OCO SELL TAKE_PROFIT_LIMIT + STOP_LOSS_LIMIT.
+
+        Endpoint order-list bersifat non-idempotent. Intent semua ID wajib
+        sudah disimpan oleh pemanggil sebelum method ini dipanggil.
+        """
+        params = {
+            "symbol": symbol,
+            "side": "SELL",
+            "quantity": _fmt_num(quantity),
+            "listClientOrderId": str(list_client_order_id),
+            "aboveType": "TAKE_PROFIT_LIMIT",
+            "aboveClientOrderId": str(above_client_order_id),
+            "abovePrice": _fmt_num(above_price),
+            "aboveStopPrice": _fmt_num(above_stop_price),
+            "aboveTimeInForce": "GTC",
+            "belowType": "STOP_LOSS_LIMIT",
+            "belowClientOrderId": str(below_client_order_id),
+            "belowPrice": _fmt_num(below_price),
+            "belowStopPrice": _fmt_num(below_stop_price),
+            "belowTimeInForce": "GTC",
+            "newOrderRespType": "FULL",
+        }
+        return self._request("POST", "/api/v3/orderList/oco", params,
+                             signed=True, max_retries=1)
+
+    def get_order_list(self, order_list_id: int | None = None,
+                       list_client_order_id: str | None = None) -> dict:
+        params = {}
+        if order_list_id is not None:
+            params["orderListId"] = order_list_id
+        if list_client_order_id is not None:
+            params["origClientOrderId"] = str(list_client_order_id)
+        return self._request("GET", "/api/v3/orderList", params, signed=True)
+
+    def cancel_order_list(self, symbol: str, order_list_id: int | None = None,
+                          list_client_order_id: str | None = None) -> dict:
+        params = {"symbol": symbol}
+        if order_list_id is not None:
+            params["orderListId"] = order_list_id
+        if list_client_order_id is not None:
+            params["listClientOrderId"] = str(list_client_order_id)
+        return self._request("DELETE", "/api/v3/orderList", params,
+                             signed=True, max_retries=1)
 
     def get_dust_convertible(self, account_type: str = "SPOT") -> dict:
         """POST /sapi/v1/asset/dust-btc -- daftar aset "dust" (saldo kecil)
@@ -412,7 +539,10 @@ class BinanceSpotClient:
         benar-benar memanggil convert_dust().
         Referensi resmi: developers.binance.com/docs/wallet/asset/assets-can-convert-bnb
         (dicek 2026-09-23)."""
-        return self._request("POST", "/sapi/v1/asset/dust-btc", {"accountType": account_type}, signed=True)
+        # Endpoint POST tidak diulang otomatis setelah status jaringan tidak pasti.
+        return self._request("POST", "/sapi/v1/asset/dust-btc",
+                             {"accountType": account_type}, signed=True,
+                             max_retries=1)
 
     def convert_dust(self, assets: list, account_type: str = "SPOT") -> dict:
         """POST /sapi/v1/asset/dust -- konversi aset "dust" (saldo kecil) ke
@@ -433,7 +563,10 @@ class BinanceSpotClient:
         Referensi resmi: developers.binance.com/docs/wallet/asset/dust-transfer
         (dicek 2026-09-23)."""
         params = {"asset": ",".join(assets), "accountType": account_type}
-        return self._request("POST", "/sapi/v1/asset/dust", params, signed=True)
+        # Konversi dapat mengubah saldo. Status unknown harus direkonsiliasi
+        # oleh pemanggil, bukan diulang dengan request POST baru.
+        return self._request("POST", "/sapi/v1/asset/dust", params, signed=True,
+                             max_retries=1)
 
 
 # ---------------------------------------------------------------------
@@ -441,11 +574,16 @@ class BinanceSpotClient:
 # ---------------------------------------------------------------------
 class SymbolFilters:
     def __init__(self, step_size: Decimal, min_qty: Decimal, min_notional: Decimal,
-                 tick_size: Decimal):
+                 tick_size: Decimal, max_qty: Decimal = Decimal("0"),
+                 max_notional: Decimal = Decimal("0"),
+                 quote_order_qty_market_allowed: bool = True):
         self.step_size = step_size
         self.min_qty = min_qty
         self.min_notional = min_notional
         self.tick_size = tick_size
+        self.max_qty = max_qty
+        self.max_notional = max_notional
+        self.quote_order_qty_market_allowed = quote_order_qty_market_allowed
 
     @classmethod
     def from_symbol_data(cls, sym_data: dict) -> "SymbolFilters":
@@ -466,7 +604,10 @@ class SymbolFilters:
         lot_min = Decimal("0")
         market_lot_step = Decimal("0")
         market_lot_min = Decimal("0")
-        min_notional = Decimal("0")
+        lot_max_values = []
+        market_lot_max_values = []
+        min_notional_values = []
+        max_notional_values = []
         tick_size = Decimal("0.01")
 
         for f in sym_data.get("filters", []):
@@ -474,11 +615,21 @@ class SymbolFilters:
             if ftype == "LOT_SIZE":
                 lot_step = Decimal(f["stepSize"])
                 lot_min = Decimal(f["minQty"])
+                if Decimal(f.get("maxQty", "0")) > 0:
+                    lot_max_values.append(Decimal(f["maxQty"]))
             elif ftype == "MARKET_LOT_SIZE":
                 market_lot_step = Decimal(f["stepSize"])
                 market_lot_min = Decimal(f["minQty"])
-            elif ftype in ("MIN_NOTIONAL", "NOTIONAL"):
-                min_notional = Decimal(f["minNotional"])
+                if Decimal(f.get("maxQty", "0")) > 0:
+                    market_lot_max_values.append(Decimal(f["maxQty"]))
+            elif ftype == "MIN_NOTIONAL":
+                if f.get("applyToMarket", True):
+                    min_notional_values.append(Decimal(f["minNotional"]))
+            elif ftype == "NOTIONAL":
+                if f.get("applyMinToMarket", True):
+                    min_notional_values.append(Decimal(f["minNotional"]))
+                if f.get("applyMaxToMarket", False) and Decimal(f.get("maxNotional", "0")) > 0:
+                    max_notional_values.append(Decimal(f["maxNotional"]))
             elif ftype == "PRICE_FILTER":
                 tick_size = Decimal(f["tickSize"])
 
@@ -491,6 +642,10 @@ class SymbolFilters:
         if lot_step > 0:
             step_size = max(step_size, lot_step)
         min_qty = max(min_qty, lot_min)
+        max_qty_values = lot_max_values + market_lot_max_values
+        max_qty = min(max_qty_values) if max_qty_values else Decimal("0")
+        min_notional = max(min_notional_values) if min_notional_values else Decimal("0")
+        max_notional = min(max_notional_values) if max_notional_values else Decimal("0")
 
         if step_size <= 0:
             # Jaga-jaga kalau suatu saat kedua filter sama-sama 0 -- jangan
@@ -502,8 +657,17 @@ class SymbolFilters:
                 symbol, step_size,
             )
 
-        return cls(step_size=step_size, min_qty=min_qty, min_notional=min_notional,
-                   tick_size=tick_size)
+        return cls(
+            step_size=step_size,
+            min_qty=min_qty,
+            min_notional=min_notional,
+            tick_size=tick_size,
+            max_qty=max_qty,
+            max_notional=max_notional,
+            quote_order_qty_market_allowed=bool(
+                sym_data.get("quoteOrderQtyMarketAllowed", True)
+            ),
+        )
 
     def round_qty(self, qty: float) -> float:
         q = Decimal(str(qty))
@@ -512,6 +676,13 @@ class SymbolFilters:
         steps = (q / self.step_size).to_integral_value(rounding=ROUND_DOWN)
         rounded = steps * self.step_size
         return float(rounded)
+
+    def round_price(self, price: float, *, rounding=ROUND_DOWN) -> float:
+        p = Decimal(str(price))
+        if self.tick_size <= 0:
+            return float(p)
+        steps = (p / self.tick_size).to_integral_value(rounding=rounding)
+        return float(steps * self.tick_size)
 
 
 def build_trading_symbols(exchange_info: dict) -> set:

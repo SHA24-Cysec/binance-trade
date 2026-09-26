@@ -258,6 +258,16 @@ class BotProcessManager:
         self._tree: procctl.ProcessTreeHandle | None = None
         self._managed_mode: str | None = None
         self._last_job_warning: str | None = None
+        self._intentional_stop = False
+        self._auto_restart_mode: str | None = None
+        self._restart_attempts = 0
+        self._restart_window_started = 0.0
+        self._restart_next_at = 0.0
+        self._watchdog_stop = threading.Event()
+        self._watchdog = threading.Thread(
+            target=self._watchdog_loop, name="bot-supervisor", daemon=True
+        )
+        self._watchdog.start()
 
     @staticmethod
     def _config():
@@ -271,6 +281,78 @@ class BotProcessManager:
         if self._proc is None:
             return None
         return self._proc.poll()
+
+    def _schedule_auto_restart_locked(self, mode: str) -> None:
+        cfgmod = self._config()
+        cfg = cfgmod.PUMP_CONFIG
+        if not bool(cfg.get("SUPERVISOR_AUTO_RESTART", False)):
+            return
+        now = time.monotonic()
+        window = max(60.0, float(cfg.get("SUPERVISOR_RESTART_WINDOW_SECONDS", 300) or 300))
+        if now - self._restart_window_started >= window:
+            self._restart_window_started = now
+            self._restart_attempts = 0
+        maximum = max(0, int(cfg.get("SUPERVISOR_MAX_RESTARTS", 5) or 5))
+        if self._restart_attempts >= maximum:
+            self._auto_restart_mode = None
+            self._last_job_warning = (
+                f"Auto-restart dihentikan setelah {maximum} percobaan dalam {window:.0f} detik."
+            )
+            return
+        base = max(1.0, float(cfg.get("SUPERVISOR_RESTART_BACKOFF_SECONDS", 5) or 5))
+        delay = min(base * (2 ** self._restart_attempts), window)
+        self._restart_attempts += 1
+        self._auto_restart_mode = mode
+        self._restart_next_at = now + delay
+        self._last_job_warning = (
+            f"Bot {mode} crash; auto-restart {self._restart_attempts}/{maximum} "
+            f"dalam {delay:.1f} detik."
+        )
+
+    def _handle_managed_exit_locked(self, mode: str, code: int) -> None:
+        intentional = self._intentional_stop
+        lifecycle = self._read_lifecycle(mode)
+        self._record_managed_exit(mode, int(code), lifecycle)
+        self._clear_managed_handles()
+        if not intentional:
+            self._schedule_auto_restart_locked(mode)
+
+    def _watchdog_loop(self) -> None:
+        """Pantau child tanpa menunggu request dashboard berikutnya.
+
+        Restart hanya untuk crash tidak terduga, memakai exponential backoff
+        dan budget per window agar exception deterministik tidak menjadi loop
+        restart tanpa akhir.
+        """
+        while not self._watchdog_stop.wait(0.25):
+            restart = False
+            with self._lock:
+                if self._proc is not None:
+                    code = self._proc.poll()
+                    if code is not None:
+                        mode = self._managed_mode
+                        if mode:
+                            self._handle_managed_exit_locked(mode, int(code))
+                mode = self._auto_restart_mode
+                if (
+                    mode
+                    and self._proc is None
+                    and not self._intentional_stop
+                    and time.monotonic() >= self._restart_next_at
+                ):
+                    cfgmod = self._config()
+                    if mode != cfgmod.get_mode(cfgmod.PUMP_CONFIG):
+                        self._auto_restart_mode = None
+                    else:
+                        self._auto_restart_mode = None
+                        restart = True
+            if restart:
+                try:
+                    self.start(_auto_restart=True)
+                except (BotControlError, ValueError) as exc:
+                    with self._lock:
+                        self._last_job_warning = f"Auto-restart gagal: {exc}"
+                        self._schedule_auto_restart_locked(mode)
 
     def status(self, mode: str | None = None) -> dict:
         cfgmod = self._config()
@@ -288,9 +370,8 @@ class BotProcessManager:
                     started = float(lifecycle.get("started_at") or time.time())
                     return self._status_payload(mode, status, pid, started, None,
                                                 lifecycle.get("reason"), True, lifecycle)
-                self._record_managed_exit(mode, int(code), lifecycle)
+                self._handle_managed_exit_locked(mode, int(code))
                 lifecycle = self._read_lifecycle(mode)
-                self._clear_managed_handles()
 
             owner = lock_owner(mode)
             if owner:
@@ -364,9 +445,14 @@ class BotProcessManager:
         self._proc = None
         self._managed_mode = None
 
-    def start(self) -> dict:
+    def start(self, *, _auto_restart: bool = False) -> dict:
         cfgmod = self._config()
         with self._lock:
+            self._intentional_stop = False
+            self._auto_restart_mode = None
+            if not _auto_restart:
+                self._restart_attempts = 0
+                self._restart_window_started = time.monotonic()
             if cfgmod.CONFIG_LOAD_ERRORS:
                 raise BotControlError("Konfigurasi runtime rusak: " + "; ".join(cfgmod.CONFIG_LOAD_ERRORS))
             mode = cfgmod.require_valid_mode(cfgmod.PUMP_CONFIG)
@@ -443,6 +529,8 @@ class BotProcessManager:
              graceful_timeout: float = 25.0, signal_timeout: float = 8.0) -> dict:
         cfgmod = self._config()
         with self._lock:
+            self._intentional_stop = True
+            self._auto_restart_mode = None
             mode = cfgmod.require_valid_mode(cfgmod.PUMP_CONFIG)
             cfg = cfgmod.PUMP_CONFIG
             status = self.status(mode)
@@ -537,7 +625,10 @@ class BotProcessManager:
 
     def shutdown_dashboard(self) -> None:
         """Hentikan child yang dikelola saat dashboard keluar normal."""
+        self._watchdog_stop.set()
         with self._lock:
+            self._intentional_stop = True
+            self._auto_restart_mode = None
             if self._proc is None or self._proc.poll() is not None:
                 self._clear_managed_handles()
                 return

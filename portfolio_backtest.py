@@ -388,6 +388,10 @@ def run_portfolio_backtest(
     except ImportError:
         fee_round_trip = float(config.get("TAKER_FEE_PCT", 0.1)) * 2.0
 
+    execution_spread_pct = max(0.0, float(config.get("BACKTEST_ENTRY_SPREAD_PCT", 0.10) or 0.0))
+    execution_slippage_pct = max(0.0, float(config.get("BACKTEST_SLIPPAGE_PCT", 0.05) or 0.0))
+    entry_delay_bars = max(0, int(config.get("BACKTEST_ENTRY_DELAY_BARS", 0) or 0))
+
     trades: list = []
     skipped: list = []
     warnings: list = list(_pre_warnings)
@@ -451,6 +455,10 @@ def run_portfolio_backtest(
                 continue
 
             candle = data[holding][hi]
+            # Sinyal dan entry berada pada bar berbeda saat latency aktif;
+            # jangan mengevaluasi exit pada bar yang baru dipakai untuk fill.
+            if candle.open_time <= entry_time:
+                continue
             pnl_high = (candle.high / entry_price - 1.0) * 100.0
             pnl_low = (candle.low / entry_price - 1.0) * 100.0
             hold_minutes = (candle.close_time - entry_time) / 60000.0
@@ -503,6 +511,8 @@ def run_portfolio_backtest(
                 )
 
             if exit_reason:
+                exit_price = strategy.backtest_sell_execution_price(
+                    exit_price, execution_spread_pct, execution_slippage_pct)
                 gross = (exit_price / entry_price - 1.0) * 100.0
                 pnl_pct = gross - fee_round_trip
                 pnl_quote = position_notional * pnl_pct / 100.0
@@ -580,12 +590,23 @@ def run_portfolio_backtest(
                     break
 
         kl = data[sym]
-        candle = kl[i]
+        entry_idx = i + entry_delay_bars
+        if entry_idx >= len(kl):
+            warnings.append(f"Sinyal {sym} terakhir tidak memiliki bar eksekusi setelah latency entry; trade dilewati.")
+            continue
+        if entry_delay_bars == 0:
+            raw_entry_price = kl[i].close
+            entry_time_value = kl[i].close_time
+        else:
+            entry_candle = kl[entry_idx]
+            raw_entry_price = entry_candle.open
+            entry_time_value = entry_candle.open_time
         holding = sym
         position_notional = sizing["notional"]
         equity_before_entry = equity
-        entry_price = candle.close
-        entry_time = candle.close_time
+        entry_price = strategy.backtest_buy_execution_price(
+            raw_entry_price, execution_spread_pct, execution_slippage_pct)
+        entry_time = entry_time_value
         be_active = False
         trailing_active = False
         be_stop = 0.0

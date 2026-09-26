@@ -32,6 +32,13 @@ def test_btc_filter_menolak_penurunan_tajam():
     ok, _ = scanner.evaluate_pump_gate(10, 1000, 1000, c, btc_drop_pct=-2.9)
     assert ok
 
+def test_btc_filter_fail_closed_bila_data_hilang():
+    c = dict(PUMP_CONFIG, PUMP_MIN_24H_CHANGE_PCT=0, PUMP_VOLUME_SURGE_MULT=1,
+             BTC_FILTER_ENABLED=True, _btc_filter_fail_closed=True)
+    ok, reason = scanner.evaluate_pump_gate(10, 1000, 1000, c)
+    assert not ok and "fail closed" in reason
+
+
 def test_fail_closed_dan_nan():
     c = dict(PUMP_CONFIG, PUMP_MIN_24H_CHANGE_PCT=0, PUMP_VOLUME_SURGE_MULT=1)
     assert not scanner.filter_and_rank_candidates([{"symbol":"SOLUSDT","priceChangePercent":"10",

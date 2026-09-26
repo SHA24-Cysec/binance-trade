@@ -13,7 +13,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from atomic_io import archive_corrupt, atomic_write_json
+from atomic_io import archive_corrupt, atomic_write_json, interprocess_lock
 
 logger = logging.getLogger("state")
 
@@ -39,7 +39,7 @@ DEFAULT_STATE = {
 }
 
 
-def load_state(path: str) -> dict:
+def _load_state_unlocked(path: str) -> dict:
     if not os.path.exists(path):
         logger.info("File state %s tidak ditemukan, mulai dari state kosong.", path)
         return dict(DEFAULT_STATE)
@@ -63,9 +63,15 @@ def load_state(path: str) -> dict:
         return dict(DEFAULT_STATE)
 
 
+def load_state(path: str) -> dict:
+    with interprocess_lock(path):
+        return _load_state_unlocked(path)
+
+
 def save_state(path: str, state: dict) -> None:
     """Tulis JSON atomik dengan retry sharing violation Windows."""
-    atomic_write_json(path, state)
+    with interprocess_lock(path):
+        atomic_write_json(path, state)
 
 
 def today_str() -> str:
@@ -85,7 +91,7 @@ def now_ms() -> int:
 # ini, bot yang membaca & memprosesnya, lalu menghapusnya.
 # ---------------------------------------------------------------------
 
-def load_control(path: str) -> dict:
+def _load_control_unlocked(path: str) -> dict:
     if not os.path.exists(path):
         return {}
     try:
@@ -103,17 +109,28 @@ def load_control(path: str) -> dict:
         return {}
 
 
+def load_control(path: str) -> dict:
+    with interprocess_lock(path):
+        return _load_control_unlocked(path)
+
+
 def save_control(path: str, data: dict) -> None:
     """Tulis kontrol atomik dengan temporary unik dan retry Windows."""
-    atomic_write_json(path, data)
+    with interprocess_lock(path):
+        atomic_write_json(path, data)
 
 
-def clear_control(path: str) -> None:
+def _clear_control_unlocked(path: str) -> None:
     try:
         if os.path.exists(path):
             os.remove(path)
     except OSError:
         pass
+
+
+def clear_control(path: str) -> None:
+    with interprocess_lock(path):
+        _clear_control_unlocked(path)
 
 
 def get_stop_control_file(control_path: str) -> str:
@@ -128,11 +145,12 @@ def get_stop_control_file(control_path: str) -> str:
 
 def request_stop(control_path: str, *, requested_by: str = "dashboard") -> str:
     stop_path = get_stop_control_file(control_path)
-    atomic_write_json(stop_path, {
-        "action": "STOP_BOT",
-        "requested_at": now_ms(),
-        "requested_by": str(requested_by)[:80],
-    })
+    with interprocess_lock(stop_path):
+        atomic_write_json(stop_path, {
+            "action": "STOP_BOT",
+            "requested_at": now_ms(),
+            "requested_by": str(requested_by)[:80],
+        })
     return stop_path
 
 
@@ -147,20 +165,21 @@ def consume_stop_request(control_path: str, max_age_seconds: int = 300) -> bool:
     tidak langsung berhenti karena file lama.
     """
     stop_path = get_stop_control_file(control_path)
-    cmd = load_control(stop_path)
-    if not cmd:
-        return False
-    clear_control(stop_path)
-    if cmd.get("action") != "STOP_BOT":
-        logger.warning("Perintah stop tidak dikenal di %s: %s", stop_path, cmd)
-        return False
-    try:
-        requested_at = int(cmd.get("requested_at", 0) or 0)
-    except (TypeError, ValueError):
-        return False
-    age = (now_ms() - requested_at) / 1000.0
-    if requested_at <= 0 or age < -30 or age > max_age_seconds:
-        logger.warning("Perintah stop diabaikan karena stale/tidak valid (umur %.1f detik).", age)
-        return False
-    return True
+    with interprocess_lock(stop_path):
+        cmd = _load_control_unlocked(stop_path)
+        if not cmd:
+            return False
+        _clear_control_unlocked(stop_path)
+        if cmd.get("action") != "STOP_BOT":
+            logger.warning("Perintah stop tidak dikenal di %s: %s", stop_path, cmd)
+            return False
+        try:
+            requested_at = int(cmd.get("requested_at", 0) or 0)
+        except (TypeError, ValueError):
+            return False
+        age = (now_ms() - requested_at) / 1000.0
+        if requested_at <= 0 or age < -30 or age > max_age_seconds:
+            logger.warning("Perintah stop diabaikan karena stale/tidak valid (umur %.1f detik).", age)
+            return False
+        return True
 

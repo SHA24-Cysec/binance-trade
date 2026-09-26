@@ -10,13 +10,57 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
+
+try:
+    import fcntl  # type: ignore
+except ImportError:  # pragma: no cover, Windows
+    fcntl = None
+
+try:
+    import msvcrt  # type: ignore
+except ImportError:  # pragma: no cover, POSIX
+    msvcrt = None
 
 
 _REPLACE_DELAYS = (0.02, 0.04, 0.08, 0.16, 0.32, 0.50)
+_INTERPROCESS_THREAD_LOCK = threading.RLock()
+
+
+@contextmanager
+def interprocess_lock(path: os.PathLike | str) -> Iterator[None]:
+    """Lock advisory lintas proses untuk satu file runtime.
+
+    Atomic replace mencegah pembacaan setengah file, tetapi tidak mencegah dua
+    proses melakukan read-modify-write yang saling menimpa. Lock ini dipakai
+    state/settings/control yang memiliki lebih dari satu pembaca atau penulis.
+    """
+    target = os.fspath(path)
+    lock_path = f"{target}.lock"
+    parent = os.path.dirname(lock_path) or "."
+    Path(parent).mkdir(parents=True, exist_ok=True)
+    with _INTERPROCESS_THREAD_LOCK:
+        with open(lock_path, "a+", encoding="utf-8") as handle:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            elif msvcrt is not None:  # pragma: no cover, Windows
+                handle.seek(0)
+                handle.write("0")
+                handle.flush()
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                elif msvcrt is not None:  # pragma: no cover, Windows
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def timestamp_tag() -> str:

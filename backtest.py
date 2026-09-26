@@ -261,6 +261,10 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
     except ImportError:
         fee_round_trip_pct = float(config.get("TAKER_FEE_PCT", 0.1)) * 2.0
 
+    execution_spread_pct = max(0.0, float(config.get("BACKTEST_ENTRY_SPREAD_PCT", 0.10) or 0.0))
+    execution_slippage_pct = max(0.0, float(config.get("BACKTEST_SLIPPAGE_PCT", 0.05) or 0.0))
+    entry_delay_bars = max(0, int(config.get("BACKTEST_ENTRY_DELAY_BARS", 0) or 0))
+
     cur_sl = abs(float(config.get("SL_PCT", 1.8)))
     cur_tp = abs(float(config.get("TP_PCT", 4.0)))
     cur_be_trig = abs(float(config.get("BE_TRIGGER_PCT", 1.0)))
@@ -295,23 +299,39 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
                 window_klines = klines[max(0, i - lookback + 1): i + 1]
                 setup = scanner.detect_pullback_retest(window_klines, config)
                 if setup.ok:
+                    entry_idx = i + entry_delay_bars
+                    if entry_idx >= n:
+                        warnings.append("Sinyal terakhir tidak memiliki bar eksekusi setelah latency entry; trade dilewati.")
+                        i += 1
+                        continue
                     sizing = strategy.resolve_position_notional(config, equity)
                     # Sama seperti live: posisi fixed yang lebih besar dari
                     # saldo tidak boleh "terisi" secara ajaib di backtest.
                     if sizing["notional"] <= 0 or sizing["notional"] > equity:
                         i += 1
                         continue
+                    if entry_delay_bars == 0:
+                        raw_entry_price = candle.close
+                        entry_time_value = candle.close_time
+                        next_index = i + 1
+                    else:
+                        entry_candle = klines[entry_idx]
+                        raw_entry_price = entry_candle.open
+                        entry_time_value = entry_candle.open_time
+                        next_index = entry_idx + 1
                     in_position = True
                     position_notional = sizing["notional"]
                     equity_before_entry = equity
-                    entry_price = candle.close
-                    entry_time = candle.close_time
+                    entry_price = strategy.backtest_buy_execution_price(
+                        raw_entry_price, execution_spread_pct, execution_slippage_pct)
+                    entry_time = entry_time_value
                     be_active = False
                     trailing_active = False
                     be_stop = 0.0
                     trailing_stop = 0.0
-                    # Level exit dikunci saat entry memakai fungsi yang sama
-                    # dengan bot live supaya hasil backtest mewakili perilaku bot.
+                    # Level exit dikunci saat sinyal entry memakai fungsi yang
+                    # sama dengan bot live. Eksekusi baru terjadi setelah
+                    # latency bar, pada ask adverse bar berikutnya.
                     level_cfg = dict(config)
                     level_cfg["_atr_value"] = strategy.atr(klines[:i + 1], int(config.get("ATR_PERIOD", 14) or 14))
                     lv = strategy.resolve_exit_levels(level_cfg)
@@ -322,6 +342,8 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
                     cur_tr_start = lv["trail_start_pct"]
                     cur_tr_step = lv["trail_step_pct"]
                     cur_src = lv["source"]
+                    i = next_index
+                    continue
             i += 1
             continue
 
@@ -386,7 +408,10 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
             )
 
         if exit_reason:
-            # PnL KOTOR (belum dipotong biaya)
+            raw_exit_price = exit_price
+            exit_price = strategy.backtest_sell_execution_price(
+                raw_exit_price, execution_spread_pct, execution_slippage_pct)
+            # PnL KOTOR (belum dipotong biaya), setelah adverse spread/slippage.
             gross_pct = (exit_price / entry_price - 1.0) * 100.0
             # PnL BERSIH: fee taker dibayar DUA KALI (saat beli dan saat jual).
             # Ini bukan detail kosmetik -- pada strategi dengan TP 4% dan
@@ -516,6 +541,14 @@ def apply_overrides(base_config: dict, overrides: dict) -> dict:
         raise ValueError(f"bukan boolean: {v!r}")
 
     ALLOWED = {
+        "USE_ATR_EXIT": _as_bool,
+        "ATR_PERIOD": int,
+        "ATR_MULT_SL": float,
+        "ATR_MULT_TP": float,
+        "ATR_MULT_BE_TRIGGER": float,
+        "ATR_MULT_BE_LOCK": float,
+        "ATR_MULT_TRAIL_START": float,
+        "ATR_MULT_TRAIL": float,
         "SL_PCT": float,
         "TP_PCT": float,
         "BE_TRIGGER_PCT": float,
@@ -536,15 +569,26 @@ def apply_overrides(base_config: dict, overrides: dict) -> dict:
 
 
 def validate_params(cfg: dict) -> None:
-    checks = [
-        ("SL_PCT", 0.01, 1000),
-        ("TP_PCT", 0.01, 1000),
-        ("BE_TRIGGER_PCT", 0.01, 1000),
-        ("BE_LOCK_PCT", -100, 1000),
-        ("TRAILING_START_PCT", 0.01, 1000),
-        ("TRAILING_STEP_PCT", 0.01, 1000),
-        ("MAX_BARS_BREAKOUT_TO_RETEST", 1, 500),
-    ]
+    if bool(cfg.get("USE_ATR_EXIT", False)):
+        checks = [
+            ("ATR_PERIOD", 1, 1000),
+            ("ATR_MULT_SL", 0.0001, 1000),
+            ("ATR_MULT_TP", 0.0001, 1000),
+            ("ATR_MULT_BE_TRIGGER", 0.0001, 1000),
+            ("ATR_MULT_BE_LOCK", 0.0, 1000),
+            ("ATR_MULT_TRAIL_START", 0.0001, 1000),
+            ("ATR_MULT_TRAIL", 0.0001, 1000),
+        ]
+    else:
+        checks = [
+            ("SL_PCT", 0.01, 1000),
+            ("TP_PCT", 0.01, 1000),
+            ("BE_TRIGGER_PCT", 0.01, 1000),
+            ("BE_LOCK_PCT", -100, 1000),
+            ("TRAILING_START_PCT", 0.01, 1000),
+            ("TRAILING_STEP_PCT", 0.01, 1000),
+        ]
+    checks.append(("MAX_BARS_BREAKOUT_TO_RETEST", 1, 500))
     for key, lo, hi in checks:
         val = cfg.get(key)
         if val is None or not (lo <= val <= hi):
@@ -595,6 +639,11 @@ def selftest():
     )
     cfg = cfg_gerbang_pump_nonaktif(PUMP_CONFIG)
     cfg["MIN_QUOTE_VOLUME_USDT_24H"] = 1_000_000
+    # Selftest menguji logika setup dengan data sintetis yang berakhir tepat
+    # pada sinyal, bukan model latency historis.
+    cfg["BACKTEST_ENTRY_DELAY_BARS"] = 0
+    cfg["BACKTEST_ENTRY_SPREAD_PCT"] = 0.0
+    cfg["BACKTEST_SLIPPAGE_PCT"] = 0.0
     cfg["TP_PCT"] = 6.0
     cfg["USE_BREAKEVEN"] = True
     cfg["BE_TRIGGER_PCT"] = 3.0
@@ -657,6 +706,7 @@ def selftest():
         t2 += 300_000
 
     sl_cfg = dict(cfg)
+    sl_cfg["USE_ATR_EXIT"] = False
     sl_cfg["TP_PCT"] = 999.0
     sl_cfg["USE_STOP_LOSS"] = True
     sl_cfg["SL_PCT"] = 3.0
@@ -671,11 +721,11 @@ def selftest():
     print(f"  -> OK (gross {sl_trade.gross_pnl_pct:.2f}%, fee {sl_trade.fee_pct:.2f}%)")
 
     print("\n=== SELFTEST backtest.py: apply_overrides, validate_params, dan exit tetap ===")
-    merged = apply_overrides(dict(PUMP_CONFIG), {"TP_PCT": "8.5", "SL_PCT": "4.5"})
+    merged = apply_overrides(dict(PUMP_CONFIG), {"USE_ATR_EXIT": "false", "TP_PCT": "8.5", "SL_PCT": "4.5"})
     assert merged["TP_PCT"] == 8.5 and merged["SL_PCT"] == 4.5
     validate_params(merged)
     try:
-        validate_params(apply_overrides(dict(PUMP_CONFIG), {"TP_PCT": "-5"}))
+        validate_params(apply_overrides(dict(PUMP_CONFIG), {"USE_ATR_EXIT": "false", "TP_PCT": "-5"}))
         raise AssertionError("Harusnya menolak TP_PCT negatif")
     except BacktestError:
         pass
@@ -740,7 +790,12 @@ def main():
 
     print(f"Mengambil {total_bars} candle {interval} untuk {args.symbol} "
           f"({args.days} hari + warmup 1 hari)...")
-    client = BinanceSpotClient("", "", cfg["LIVE_BASE_URL"], allow_signed=False)
+    client = BinanceSpotClient(
+        "", "", cfg["LIVE_BASE_URL"], allow_signed=False,
+        rate_limit_state_file=cfg.get("RATE_LIMIT_STATE_FILE"),
+        rate_limit_limit=int(cfg.get("RATE_LIMIT_WEIGHT_LIMIT", 6000) or 6000),
+        rate_limit_safety_margin=int(cfg.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100),
+    )
     end_ms = int(time.time() * 1000)
     start_ms = end_ms - (args.days + 1) * MS_PER_DAY
     klines = fetch_full_klines(client, args.symbol, interval, start_ms, end_ms)
