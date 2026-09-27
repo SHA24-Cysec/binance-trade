@@ -44,6 +44,7 @@ from config import (
 )
 import state as state_mod
 import strategy
+import market_scanner as scanner
 from atomic_io import replace_with_retry, timestamp_tag
 from credential_store import (
     ENV_PATH, credential_status, update_env,
@@ -93,6 +94,18 @@ class _PaperDashboardClient:
 
     def get_ticker_24hr_all(self):
         return self._market.get_ticker_24hr_all()
+
+    def get_klines(self, symbol, interval, limit=500, start_time_ms=None, end_time_ms=None):
+        """Ambil candle publik untuk skor panel tanpa endpoint signed."""
+        return self._market.get_klines(symbol, interval, limit=limit,
+                                       start_time_ms=start_time_ms,
+                                       end_time_ms=end_time_ms)
+
+    def is_rate_limited(self):
+        return self._market.is_rate_limited()
+
+    def weight_headroom(self, limit=None):
+        return self._market.weight_headroom(limit)
 
     def get_account(self):
         from paper_store import load_account_snapshot
@@ -281,6 +294,8 @@ _client = None
 _price_cache: dict = {}          # {symbol: (price, ts)}
 _balance_cache: dict = {"data": None, "ts": 0}
 _watchlist_cache: dict = {"data": None, "ts": 0, "error": None}
+_watchlist_entry_cache: dict = {}  # simbol -> {score: EntrySignalScore, ts: epoch}
+
 _auto_refresher = None           # diisi start_auto_refresher() saat dashboard start
 PRICE_TTL = 5.0                  # detik
 BALANCE_TTL = 30.0              # detik
@@ -1081,33 +1096,13 @@ def build_watchlist() -> dict:
     if not watchlist_enabled(PUMP_CONFIG):
         return {"enabled": False, "items": [], "summary": {}, "error": None}
 
-    # Sumber daftar: hasil penyegaran otomatis kalau ada dan aktif,
-    # kalau tidak jatuh ke daftar manual di config.py. Daftar manual
-    # selalu jadi cadangan, jadi panel tidak pernah kosong hanya karena
-    # penyegaran belum sempat berjalan atau gagal.
     source = "config"
-    auto_meta = None
-    entries = None
-    if watchlist_auto_enabled(PUMP_CONFIG) and wl_auto is not None:
-        prev = wl_auto.load_result(PUMP_CONFIG)
-        if prev and prev.get("items"):
-            entries = get_watchlist({"WATCHLIST": prev["items"]})
-            source = "auto"
-            auto_meta = {
-                "generated_at": prev.get("generated_at"),
-                "days": prev.get("days"),
-                "symbols_examined": prev.get("symbols_examined"),
-                "weight_spent": prev.get("weight_spent"),
-                "duration_seconds": prev.get("duration_seconds"),
-                "stopped_reason": prev.get("stopped_reason"),
-            }
-    if not entries:
-        entries = get_watchlist(PUMP_CONFIG)
+    entries = get_watchlist(PUMP_CONFIG)
 
     if not entries:
         return {"enabled": True, "items": [], "summary": {}, "error": None,
                 "config": _watchlist_config(), "source": source,
-                "auto": _auto_status(auto_meta)}
+                "auto": {"enabled": False}}
 
     now = time.time()
     tickers = None
@@ -1141,13 +1136,47 @@ def build_watchlist() -> dict:
                     _watchlist_cache["error"] = error
 
     min_vol = float(PUMP_CONFIG.get("MIN_QUOTE_VOLUME_USDT_24H", 0))
+    score_ttl = float(PUMP_CONFIG.get("WATCHLIST_ENTRY_SCORE_TTL_SECONDS", 60))
+    live_client = get_client()
+    # Skor live hanya diperbarui saat cache candle kedaluwarsa dan kuota aman.
+    for e in entries:
+        sym = e["symbol"]
+        ticker = (tickers or {}).get(sym)
+        if not ticker or float(ticker.get("quoteVolume", 0) or 0) < min_vol:
+            continue
+        with _cache_lock:
+            cached = _watchlist_entry_cache.get(sym)
+        if cached and now - cached["ts"] < score_ttl:
+            continue
+        if live_client is None or getattr(live_client, "is_rate_limited", lambda: False)():
+            continue
+        if getattr(live_client, "weight_headroom", lambda limit=None: 1.0)(6000) < float(PUMP_CONFIG.get("WATCHLIST_ENTRY_MIN_HEADROOM", .5)):
+            continue
+        try:
+            limit = min(1000, strategy.required_lookback_bars(PUMP_CONFIG) + 10)
+            raw = live_client.get_klines(sym, str(PUMP_CONFIG.get("CONFIRM_INTERVAL", "5m")), limit=limit)
+            klines = wl_auto.to_klines(raw) if wl_auto is not None else []
+            meta = {"symbol": sym, "spread_pct": e.get("spread_pct"), "weekend_pct": e.get("weekend_pct")}
+            scored = scanner.score_entry_signal(klines, PUMP_CONFIG, meta)
+            with _cache_lock:
+                _watchlist_entry_cache[sym] = {"score": scored, "ts": time.time()}
+        except Exception as exc:  # panel tetap hidup bila satu simbol gagal
+            logger.debug("gagal menghitung skor entry %s: %s", sym, exc)
 
     items = []
     for e in entries:
         sym = e["symbol"]
         t = (tickers or {}).get(sym)
+        with _cache_lock:
+            entry_cached = _watchlist_entry_cache.get(sym)
+        entry_score = entry_cached["score"] if entry_cached else None
         row = {
-            "symbol": sym, "tier": e["tier"], "score": e["score"], "note": e["note"],
+            "symbol": sym, "tier": entry_score.status if entry_score else e["tier"],
+            "score": entry_score.score if entry_score else e.get("score"), "note": e["note"],
+            "entry_status": entry_score.status if entry_score else "BELUM DIHITUNG",
+            "entry_components": entry_score.components if entry_score else {},
+            "entry_stale": bool(entry_cached and now - entry_cached["ts"] >= score_ttl),
+            "entry_scored_at": entry_cached["ts"] if entry_cached else None,
             "price": None, "change_24h": None, "quote_volume_24h": None,
             "high_24h": None, "low_24h": None, "trades_24h": None,
             "pass_volume": None, "status": "TIDAK ADA DATA",
@@ -1193,6 +1222,7 @@ def build_watchlist() -> dict:
     # dengan urutan kandidat yang dipakai bot saat mengambil candle.
     order = {"LIKUID": 0, "TIPIS": 1, "TIDAK ADA DATA": 2}
     items.sort(key=lambda r: (order.get(r["status"], 9),
+                              -(r.get("score") if r.get("score") is not None else -1.0),
                               -(r["quote_volume_24h"] if r["quote_volume_24h"] is not None else -1.0)))
 
     counts = {}
@@ -1209,23 +1239,20 @@ def build_watchlist() -> dict:
         },
         "config": _watchlist_config(),
         "source": source,
-        "auto": _auto_status(auto_meta),
+        "auto": {"enabled": False},
         "error": error,
     }
 
 
-def _auto_status(meta: Optional[dict]) -> dict:
-    """Status penyegar otomatis untuk ditampilkan di panel."""
-    out = {
-        "enabled": watchlist_auto_enabled(PUMP_CONFIG),
-        "interval_hours": PUMP_CONFIG.get("WATCHLIST_AUTO_INTERVAL_HOURS"),
-        "meta": meta,
+def _auto_status(meta: Optional[dict] = None) -> dict:
+    """Status penyegar otomatis (nonaktif penuh)."""
+    return {
+        "enabled": False,
+        "interval_hours": None,
+        "meta": None,
         "state": "off", "message": "", "progress": 0.0,
         "last_run": None, "next_run": None, "last_error": None,
     }
-    if _auto_refresher is not None:
-        out.update(_auto_refresher.get_status())
-    return out
 
 
 def _watchlist_config() -> dict:
@@ -1267,22 +1294,8 @@ def _bot_has_open_position() -> bool:
 
 
 def start_auto_refresher() -> None:
-    """Nyalakan penjadwal penyegaran daftar di thread latar.
-
-    Aman dipanggil berkali-kali; kalau sudah jalan, tidak membuat thread
-    kedua. Dipanggil sekali saat dashboard start.
-    """
-    global _auto_refresher
-    if wl_auto is None or not watchlist_auto_enabled(PUMP_CONFIG):
-        return
-    if _auto_refresher is not None:
-        return
-    _auto_refresher = wl_auto.AutoRefresher(
-        client_getter=get_client,
-        config=PUMP_CONFIG,
-        has_open_position=_bot_has_open_position,
-    )
-    _auto_refresher.start()
+    """No-op: fitur penyegar otomatis watchlist telah dihapus penuh."""
+    pass
 
 
 @app.route("/api/watchlist")

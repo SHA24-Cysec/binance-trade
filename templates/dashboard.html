@@ -444,7 +444,7 @@
     <div class="wl-scroll">
       <table class="wl" id="wlTable">
         <thead><tr>
-          <th>Simbol</th><th>Tier</th><th>Harga</th><th>24 Jam</th>
+          <th>Simbol</th><th>Skor Entry</th><th>Harga</th><th>24 Jam</th>
           <th>Menuju Ambang Volume</th><th>Volume 24J</th><th>Posisi Range</th><th>Status</th>
         </tr></thead>
         <tbody id="wlBody"><tr><td colspan="8" class="empty">Memuat watchlist…</td></tr></tbody>
@@ -1168,11 +1168,137 @@ function wlVol(v){
   return fmt(v,0);
 }
 
+let _wlWsSocket = null;
+let _wlWsConnected = false;
+let _currentWlData = null;
+
+function updateWsBadge(connected){
+  const el = document.getElementById('wlWsChip');
+  if(!el) return;
+  if(connected){
+    el.className = 'wl-chip siap';
+    el.innerHTML = '● <b>WebSocket Live (Real-Time)</b>';
+  }else{
+    el.className = 'wl-chip';
+    el.innerHTML = 'Menghubungkan WebSocket…';
+  }
+}
+
+function initWatchlistWebSocket(){
+  if(_wlWsSocket && (_wlWsSocket.readyState === WebSocket.OPEN || _wlWsSocket.readyState === WebSocket.CONNECTING)){
+    return;
+  }
+  try{
+    const wsUrl = 'wss://stream.binance.com:9443/ws/!ticker@arr';
+    _wlWsSocket = new WebSocket(wsUrl);
+
+    _wlWsSocket.onopen = () => {
+      _wlWsConnected = true;
+      updateWsBadge(true);
+    };
+
+    _wlWsSocket.onmessage = (event) => {
+      try{
+        const data = JSON.parse(event.data);
+        if(!Array.isArray(data) || !_currentWlData || !_currentWlData.items) return;
+        const tickMap = {};
+        for(let i=0; i<data.length; i++){
+          const t = data[i];
+          if(t && t.s){
+            tickMap[t.s] = t;
+          }
+        }
+        updateWatchlistTicks(tickMap);
+      }catch(e){}
+    };
+
+    _wlWsSocket.onerror = () => {
+      _wlWsConnected = false;
+      updateWsBadge(false);
+    };
+
+    _wlWsSocket.onclose = () => {
+      _wlWsConnected = false;
+      updateWsBadge(false);
+      setTimeout(initWatchlistWebSocket, 5000);
+    };
+  }catch(err){
+    _wlWsConnected = false;
+    updateWsBadge(false);
+  }
+}
+
+function updateWatchlistTicks(tickMap){
+  if(!_currentWlData || !_currentWlData.items) return;
+  const cfg = _currentWlData.config || {};
+  const minVol = cfg.min_quote_volume_24h || 0;
+
+  for(let i=0; i<_currentWlData.items.length; i++){
+    const r = _currentWlData.items[i];
+    const t = tickMap[r.symbol];
+    if(!t) continue;
+
+    const price = parseFloat(t.c || 0);
+    const chg = parseFloat(t.P || 0);
+    const qv = parseFloat(t.q || 0);
+    const hi = parseFloat(t.h || 0);
+    const lo = parseFloat(t.l || 0);
+
+    if(price > 0){
+      r.price = price;
+      r.change_24h = chg;
+      r.quote_volume_24h = qv;
+      r.pass_volume = qv >= minVol;
+      r.status = r.pass_volume ? 'LIKUID' : 'TIPIS';
+      const rng = hi - lo;
+      r.range_position = rng > 0 ? ((price - lo) / rng) : null;
+
+      const rowEl = document.getElementById('wl-row-' + r.symbol);
+      if(rowEl){
+        const priceEl = rowEl.querySelector('.wl-p');
+        const chgEl = rowEl.querySelector('.wl-c');
+        const volEl = rowEl.querySelector('.wl-v');
+        const barEl = rowEl.querySelector('.wl-b');
+        const rpEl = rowEl.querySelector('.wl-r');
+        const stEl = rowEl.querySelector('.wl-s');
+
+        if(priceEl) priceEl.textContent = fmtP(price);
+        if(chgEl){
+          chgEl.className = 'mono wl-c ' + cls(chg);
+          chgEl.textContent = sign(chg) + fmt(chg, 2) + '%';
+        }
+        if(volEl) volEl.textContent = wlVol(qv);
+        if(rpEl){
+          rpEl.innerHTML = (r.range_position === null || r.range_position === undefined)
+            ? '<span class="mut">—</span>'
+            : `<span class="mono">${fmt(r.range_position*100,0)}%</span>`;
+        }
+        if(barEl && minVol > 0){
+          const ratio = Math.max(0, Math.min(1, qv / minVol));
+          const full = r.pass_volume ? ' full' : '';
+          const gap = r.pass_volume
+            ? `<span class="pos">lolos ${wlVol(qv - minVol)} di atas ambang</span>`
+            : `kurang ${wlVol(minVol - qv)}`;
+          barEl.innerHTML = `<div class="wl-bar${full}"><span style="width:${(ratio*100).toFixed(1)}%"></span></div>` +
+                            `<div class="wl-gap">${gap}</div>`;
+        }
+        if(stEl){
+          const stCls = {'LIKUID':'st-siap','TIPIS':'st-tipis','TIDAK ADA DATA':'st-nodata'};
+          stEl.className = 'tag ' + (stCls[r.status] || 'st-nodata');
+          stEl.textContent = r.status;
+        }
+        rowEl.className = (r.status === 'LIKUID') ? 'siap' : '';
+      }
+    }
+  }
+}
+
 function renderWatchlist(w){
   const panel=document.getElementById('watchlistPanel');
   if(!panel) return;
   if(!w||!w.enabled){ panel.style.display='none'; return; }
   panel.style.display='';
+  _currentWlData = w;
 
   const items=w.items||[];
   const cfg=w.config||{};
@@ -1188,55 +1314,19 @@ function renderWatchlist(w){
   let chips=chipOrder.filter(([k])=>counts[k])
     .map(([k,c])=>`<span class="wl-chip ${c}">${k} <b>${fmt(counts[k],0)}</b></span>`).join('');
   chips+=`<span class="wl-chip">ambang volume <b>${wlVol(cfg.min_quote_volume_24h)}</b></span>`;
+  chips+=`<span class="wl-chip${_wlWsConnected?' siap':''}" id="wlWsChip">${_wlWsConnected?'● <b>WebSocket Live (Real-Time)</b>':'Menghubungkan WebSocket…'}</span>`;
   document.getElementById('wlChips').innerHTML=chips;
 
-  // Status penyegar daftar otomatis. Dibedakan dari data harga: harga
-  // SELALU live, sedangkan DAFTAR simbolnya yang disegarkan berkala.
-  const a=w.auto||{};
-  if(a.enabled){
-    let st='';
-    if(a.state==='running'){
-      st=`<span class="wl-chip siap">menyegarkan daftar… ${fmt((a.progress||0)*100,0)}%</span>`;
-    }else if(a.last_run){
-      const jam=(Date.now()/1000-a.last_run)/3600;
-      st=`<span class="wl-chip">daftar disegarkan <b>${jam<1?'<1':fmt(jam,1)} jam lalu</b></span>`;
-    }else{
-      st=`<span class="wl-chip">penyegaran otomatis menunggu jadwal</span>`;
-    }
-    if(a.next_run&&a.state!=='running'){
-      const sisa=(a.next_run-Date.now()/1000)/3600;
-      if(sisa>0) st+=`<span class="wl-chip">berikutnya <b>${sisa<1?'<1':fmt(sisa,1)} jam</b></span>`;
-    }
-    document.getElementById('wlChips').insertAdjacentHTML('beforeend',st);
-  }
-
   const note=document.getElementById('wlNote');
-  const sumberTxt = (w.source==='auto')
-    ? `Daftar ini <b>disusun otomatis</b> dari data Binance terbaru`
-    : `Daftar ini diambil dari <b>config.py</b>`;
-  let extra='';
-  if(a.enabled&&a.meta){
-    extra=` Penilaian terakhir memeriksa ${fmt(a.meta.symbols_examined||0,0)} simbol `+
-      `memakai riwayat ${fmt(a.meta.days||0,0)} hari (${fmt(a.meta.weight_spent||0,0)} weight, `+
-      `${fmt(a.meta.duration_seconds||0,0)} detik).`;
-    if(a.meta.stopped_reason) extra+=` Catatan: ${esc(a.meta.stopped_reason)}.`;
-  }else if(a.enabled&&!a.last_run){
-    extra=` Penyegaran otomatis aktif tapi belum pernah selesai, `+
-      `jadi yang tampil masih daftar cadangan dari config.py.`;
-  }
-  if(a.enabled&&a.last_error){
-    extra+=` <b style="color:var(--amber)">Penyegaran terakhir gagal: ${esc(a.last_error)}</b>`;
-  }
-
   if(w.error){
     note.innerHTML=`<b style="color:var(--amber)">⚠️ ${esc(w.error)}</b><br>`+
       `Daftar tetap ditampilkan memakai data terakhir yang berhasil diambil.`;
   }else{
-    note.innerHTML=`${sumberTxt} dan <b>hanya untuk dipantau</b>, tidak mengubah perilaku bot. `+
+    note.innerHTML=`Daftar ini diambil dari <b>config.py</b> dan <b>hanya untuk dipantau</b>, tidak mengubah perilaku bot. `+
       `Bot tetap memindai seluruh pair ${esc(cfg.quote_asset||'USDT')}. `+
-      `Status <b>LIKUID</b> berarti volume 24 jam koin ≥ ${wlVol(cfg.min_quote_volume_24h)}, `+
-      `<b>bukan</b> berarti bot pasti membeli. Deteksi setup pullback retest pada candle `+
-      `tidak dihitung di panel ini.${extra}`;
+      `Kolom <b>Skor Entry</b> menampilkan skor kedekatan sinyal masuk real-time `+
+      `berdasarkan candle tertutup (EMA cross, RSI, MACD histogram, Higher-Low). `+
+      `Status <b>LIKUID</b> menandakan volume 24 jam koin ≥ ${wlVol(cfg.min_quote_volume_24h)}.`;
   }
 
   const tb=document.getElementById('wlBody');
@@ -1248,7 +1338,6 @@ function renderWatchlist(w){
   const stCls={'LIKUID':'st-siap','TIPIS':'st-tipis','TIDAK ADA DATA':'st-nodata'};
 
   tb.innerHTML=items.map(r=>{
-    const tierCls=safeTierClass(r.tier);
     const st=r.status||'TIDAK ADA DATA';
     const rowCls=(st==='LIKUID')?' class="siap"':'';
 
@@ -1272,20 +1361,30 @@ function renderWatchlist(w){
     const volCls=r.pass_volume===false?' class="mut"':'';
     const rawTitle=String(r.note||'');
     const title=esc(rawTitle);
-    const scoreTxt=(r.score===null||r.score===undefined)?'':` · skor ${fmt(r.score,1)}`;
+    const scoreTxt=(r.score===null||r.score===undefined)?'':` · skor entry ${fmt(r.score,1)}`;
+    const entryStatus=r.entry_status||'BELUM DIHITUNG';
+    const tierCls=safeTierClass(r.tier);
+    const comp=r.entry_components||{};
+    const stale=r.entry_stale?' · data lama, menunggu kuota':'';
+    const entryTitle=`${entryStatus}${scoreTxt} · EMA ${fmt(comp.ema||0,1)}, RSI ${fmt(comp.rsi||0,1)}, MACD ${fmt(comp.macd||0,1)}, HL ${fmt(comp.higher_low||0,1)}${stale}`;
+    const scoreNumHtml=(r.score!==null&&r.score!==undefined&&entryStatus!=='BELUM DIHITUNG')
+      ? `<span class="mono" style="margin-left:6px;font-weight:700;font-size:11.5px">${fmt(r.score,1)}</span>`
+      : '';
 
-    return `<tr${rowCls}>
+    return `<tr id="wl-row-${esc(r.symbol)}"${rowCls}>
       <td><span class="wl-sym">${esc(r.symbol)}</span>
           <div class="wl-gap" title="${title}">${title.slice(0,58)}${rawTitle.length>58?'…':''}</div></td>
-      <td><span class="tag ${tierCls}" title="tier${scoreTxt}">${esc(r.tier)}</span></td>
-      <td class="mono">${fmtP(r.price)}</td>
-      <td class="mono ${cls(r.change_24h)}">${r.change_24h===null?'—':sign(r.change_24h)+fmt(r.change_24h,2)+'%'}</td>
-      <td>${bar}</td>
-      <td${volCls}><span class="mono">${wlVol(r.quote_volume_24h)}</span></td>
-      <td>${rp}</td>
-      <td><span class="tag ${stCls[st]||'st-nodata'}">${esc(st)}</span></td>
+      <td><span class="tag ${tierCls}" title="${esc(entryTitle)}">${esc(entryStatus)}</span>${scoreNumHtml}</td>
+      <td class="mono wl-p">${fmtP(r.price)}</td>
+      <td class="mono wl-c ${cls(r.change_24h)}">${r.change_24h===null?'—':sign(r.change_24h)+fmt(r.change_24h,2)+'%'}</td>
+      <td class="wl-b">${bar}</td>
+      <td${volCls}><span class="mono wl-v">${wlVol(r.quote_volume_24h)}</span></td>
+      <td class="wl-r">${rp}</td>
+      <td><span class="tag wl-s ${stCls[st]||'st-nodata'}">${esc(st)}</span></td>
     </tr>`;
   }).join('');
+
+  initWatchlistWebSocket();
 }
 
 async function refresh(){
@@ -1312,12 +1411,12 @@ async function refresh(){
     document.getElementById('lastUpdate').textContent='error, mencoba lagi...';
     if(!_connWasDown){
       _connWasDown = true;
-      toast('err','Koneksi terputus','Tidak bisa menghubungi server dashboard. Percobaan ulang tiap 5 detik.',7000);
+      toast('err','Koneksi terputus','Tidak bisa menghubungi server dashboard. Percobaan ulang tiap 1 detik.',7000);
     }
   }
 }
 refresh();
-setInterval(refresh, 5000);
+setInterval(refresh, 1000);
 
 // ============================ KONTROL BOT ============================
 const esc = v => String(v===null||v===undefined?'':v).replace(/[&<>"']/g, c=>({
@@ -1325,7 +1424,7 @@ const esc = v => String(v===null||v===undefined?'':v).replace(/[&<>"']/g, c=>({
 }[c]));
 const safeTierClass = v => {
   const k=String(v===null||v===undefined?'':v).toUpperCase();
-  return ({INTI:'ti-inti',AKTIF:'ti-aktif',SPEKULATIF:'ti-spekulatif'})[k] || 'ti-lainnya';
+  return ({INTI:'ti-inti',AKTIF:'ti-aktif',SPEKULATIF:'ti-spekulatif',SIAP:'ti-inti',MENDEKAT:'ti-aktif',AWAL:'ti-spekulatif',JAUH:'ti-lainnya','TIDAK LOLOS':'st-tipis','BELUM DIHITUNG':'ti-lainnya'})[k] || 'ti-lainnya';
 };
 const safeLogClass = v => {
   const k=String(v===null||v===undefined?'':v).toUpperCase();

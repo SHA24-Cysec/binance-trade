@@ -211,3 +211,15 @@ python portfolio_backtest.py --selftest
 ## Catatan risiko
 
 Trading crypto berisiko tinggi. Gunakan mode PAPER lebih dulu, pakai plafon nominal di LIVE, aktifkan equity stop dan daily stop, serta uji setelan pada rentang data yang cukup panjang sebelum memakai uang sungguhan.
+
+### Skor Entry Watchlist
+
+Kolom **Skor Entry** pada dashboard merupakan skor kedekatan sinyal
+entry real-time berdasarkan candle yang sudah ditutup: EMA, RSI, MACD histogram,
+dan higher-low. Daftar koin pantauan bersifat statis dari `config.py` (atau menu
+Settings), dan seluruh pergerakan harga serta volume diperbarui secara live per
+detik melalui streaming WebSocket resmi Binance.
+
+Perhitungan candle live dilakukan secara mandiri dengan cache TTL terpisah untuk
+menjaga efisiensi kuota request. Sistem panel watchlist bersifat read-only dan
+tidak mengubah keputusan trading bot.

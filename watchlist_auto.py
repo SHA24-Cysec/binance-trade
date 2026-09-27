@@ -1,9 +1,10 @@
 """Penyegar watchlist otomatis (READ-ONLY terhadap keputusan trading).
 
-Modul ini menyusun ulang DAFTAR simbol watchlist secara berkala dari data
-Binance terbaru, memakai metodologi yang sama dengan daftar bawaan di
-config.py, tapi dengan ruang lingkup yang dikecilkan supaya aman dijalankan
-berdampingan dengan bot yang sedang live.
+Modul ini menyusun ulang KEANGGOTAAN daftar watchlist secara berkala dari data
+Binance terbaru. Keanggotaan diperbarui tiap beberapa jam untuk menghemat weight,
+sedangkan skor yang tampil adalah skor sinyal entry live dari candle tertutup
+yang dihitung ulang oleh dashboard dengan cache TTL terpisah. Keduanya read-only
+dan tidak memengaruhi keputusan trading bot.
 
 ================================================================
 YANG PALING PENTING DIPAHAMI
@@ -252,8 +253,14 @@ def score_symbol(sym: str, kl: list, meta: dict, config: dict) -> Optional[dict]
         if tot > 0:
             weekend_pct = (dow[5] + dow[6]) / tot * 100.0
 
-    return _compose_score(sym, meta, config, signals, days, uptime, vol_median,
+    hasil = _compose_score(sym, meta, config, signals, days, uptime, vol_median,
                           weekend_pct, gate_bars, n)
+    live = scanner.score_entry_signal(kl[-strategy.required_lookback_bars(config):], config,
+                                      {"symbol": sym, **meta, "weekend_pct": weekend_pct})
+    hasil.update({"score": live.score, "entry_status": live.status,
+                  "entry_components": live.components, "entry_reason": live.reason,
+                  "disqualified": live.disqualified})
+    return hasil
 
 
 def _compose_score(sym, meta, config, signals, days, uptime, vol_median,
@@ -533,7 +540,17 @@ def load_result(config: dict) -> Optional[dict]:
             data = json.load(f)
         if not (isinstance(data, dict) and data.get("items")):
             return None
-        return migrate_tiers(data)
+        data = migrate_tiers(data)
+        # File lama hanya berisi skor historis. Pertahankan metadata tersebut,
+        # tetapi jangan menganggapnya sebagai skor entry live.
+        for row in data.get("items", []):
+            if isinstance(row, dict):
+                row.setdefault("entry_status", "BELUM DIHITUNG")
+                row.setdefault("entry_components", {})
+                row.setdefault("entry_reason", "belum dihitung dari candle live")
+                row.setdefault("entry_scored_at", None)
+                row.setdefault("entry_stale", True)
+        return data
     except (json.JSONDecodeError, OSError):
         return None
 

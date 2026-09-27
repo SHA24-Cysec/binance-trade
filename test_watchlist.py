@@ -631,23 +631,8 @@ class TestAutoRefreshKeamanan(unittest.TestCase):
         self.assertIn("anggaran weight", b.stopped_reason)
 
     def test_anggaran_default_jauh_di_bawah_batas_binance(self):
-        """Verifikasi angka config benar-benar aman, bukan sekadar diklaim."""
-        c = cfg_mod.PUMP_CONFIG
-        plafon = c["WATCHLIST_AUTO_MAX_WEIGHT"]
-        pace = c["WATCHLIST_AUTO_PACE_SECONDS"]
-        n = c["WATCHLIST_AUTO_MAX_SYMBOLS"]
-        hari = c["WATCHLIST_AUTO_DAYS"]
-
-        per_simbol = -(-(hari * 288) // 1000)
-        perkiraan = 80 + 4 + n * per_simbol * 2
-        self.assertLessEqual(perkiraan, plafon,
-                             "plafon weight lebih kecil dari kebutuhan nyata")
-
-        # Dengan jeda antar panggilan, laju per menit harus jauh di bawah 6000
-        panggilan = n * per_simbol
-        durasi_menit = max(1.0, panggilan * pace / 60.0)
-        laju = perkiraan / durasi_menit
-        self.assertLess(laju, 600, f"laju {laju:.0f} weight/menit terlalu tinggi")
+        """Fitur penyegar otomatis dihapus, config tidak lagi memuat kuota auto."""
+        self.assertNotIn("WATCHLIST_AUTO_MAX_WEIGHT", cfg_mod.PUMP_CONFIG)
 
     def test_file_hasil_terpisah_per_mode(self):
         t = dict(cfg_mod.PUMP_CONFIG); t["MODE"] = "PAPER"
@@ -701,14 +686,8 @@ class TestAutoRefreshKeamanan(unittest.TestCase):
         self.assertNotIn("WATCHLIST", src)
 
     def test_helper_config_auto(self):
-        on = dict(cfg_mod.PUMP_CONFIG)
-        on["WATCHLIST_ENABLED"] = True
-        on["WATCHLIST_AUTO_REFRESH"] = True
-        self.assertTrue(cfg_mod.watchlist_auto_enabled(on))
-        # panel mati -> auto ikut mati, apa pun isinya
-        off = dict(on); off["WATCHLIST_ENABLED"] = False
-        self.assertFalse(cfg_mod.watchlist_auto_enabled(off))
-
+        """Penyegar otomatis sudah dinonaktifkan penuh."""
+        self.assertFalse(cfg_mod.watchlist_auto_enabled())
 
 @_BUTUH_FLASK
 class TestDashboardAutoIntegrasi(unittest.TestCase):
@@ -770,16 +749,10 @@ class TestDashboardAutoIntegrasi(unittest.TestCase):
                 return []
 
         base = dict(self.dash.PUMP_CONFIG)
-        base["WATCHLIST_AUTO_REFRESH"] = True
-        palsu = {"items": [{"symbol": "XXXUSDT", "tier": "INTI", "score": 88.0,
-                            "note": "dari auto"}],
-                 "generated_at": 1700000000, "days": 14}
         with mock.patch.multiple(self.dash, PUMP_CONFIG=base,
-                                 get_client=lambda: FakeClient()), \
-                mock.patch.object(self.dash.wl_auto, "load_result", lambda c: palsu):
+                                 get_client=lambda: FakeClient()):
             w = self.dash.build_watchlist()
-        self.assertEqual(w["source"], "auto")
-        self.assertEqual([r["symbol"] for r in w["items"]], ["XXXUSDT"])
+        self.assertEqual(w["source"], "config")
 
     def test_auto_mati_tetap_pakai_config(self):
         class FakeClient:

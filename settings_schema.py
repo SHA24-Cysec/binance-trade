@@ -162,15 +162,14 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "MIN_LISTING_AGE_DAYS": _field("Scan", "Usia listing minimum", "Pasangan lebih muda akan ditolak.", "int", minimum=0, maximum=36500, unit="hari"),
 
     "WATCHLIST_ENABLED": _field("Watchlist", "Aktifkan watchlist", "Menampilkan panel pemantauan watchlist.", "bool"),
-    "WATCHLIST_AUTO_REFRESH": _field("Watchlist", "Penyegaran otomatis", "Susun ulang daftar dari data terbaru.", "bool"),
-    "WATCHLIST_AUTO_INTERVAL_HOURS": _field("Watchlist", "Interval penyegaran", "Jarak penyegaran otomatis.", "int", minimum=1, maximum=720, unit="jam"),
-    "WATCHLIST_AUTO_MAX_SYMBOLS": _field("Watchlist", "Maksimum simbol dinilai", "Batas kandidat yang diunduh saat refresh.", "int", minimum=1, maximum=600),
-    "WATCHLIST_AUTO_DAYS": _field("Watchlist", "Riwayat penilaian", "Jumlah hari candle untuk penilaian.", "int", minimum=1, maximum=365, unit="hari"),
-    "WATCHLIST_AUTO_KEEP": _field("Watchlist", "Jumlah simbol disimpan", "Jumlah hasil akhir watchlist.", "int", minimum=1, maximum=600),
-    "WATCHLIST_AUTO_MAX_WEIGHT": _field("Watchlist", "Anggaran request weight", "Plafon weight setiap refresh.", "int", minimum=1, maximum=6000),
-    "WATCHLIST_AUTO_PACE_SECONDS": _field("Watchlist", "Jeda request", "Jeda antarpanggilan saat refresh.", "float", minimum=0, maximum=60, unit="detik"),
-    "WATCHLIST_AUTO_MIN_HEADROOM": _field("Watchlist", "Sisa kuota minimum", "Refresh berhenti bila headroom kurang.", "float", minimum=0, maximum=1),
-    "WATCHLIST_AUTO_STARTUP_DELAY_SECONDS": _field("Watchlist", "Jeda awal", "Tunda refresh setelah dashboard start.", "int", minimum=0, maximum=86400, unit="detik"),
+    "WATCHLIST_ENTRY_WEIGHT_EMA": _field("Watchlist", "Bobot EMA", "Bobot skor entry.", "float", minimum=0, maximum=100),
+    "WATCHLIST_ENTRY_WEIGHT_RSI": _field("Watchlist", "Bobot RSI", "Bobot skor entry.", "float", minimum=0, maximum=100),
+    "WATCHLIST_ENTRY_WEIGHT_MACD": _field("Watchlist", "Bobot MACD", "Bobot skor entry.", "float", minimum=0, maximum=100),
+    "WATCHLIST_ENTRY_WEIGHT_HL": _field("Watchlist", "Bobot higher low", "Bobot skor entry.", "float", minimum=0, maximum=100),
+    "WATCHLIST_ENTRY_EMA_GAP_PCT": _field("Watchlist", "Jarak EMA", "Ambang EMA dekat.", "float", minimum=0.01, maximum=100),
+    "WATCHLIST_ENTRY_RSI_DECAY_PTS": _field("Watchlist", "Decay RSI", "Lebar decay RSI.", "float", minimum=1, maximum=100),
+    "WATCHLIST_ENTRY_SCORE_TTL_SECONDS": _field("Watchlist", "TTL skor entry", "Cache skor candle.", "int", minimum=1, maximum=86400, unit="detik"),
+    "WATCHLIST_ENTRY_MIN_HEADROOM": _field("Watchlist", "Headroom skor", "Sisa kuota minimum.", "float", minimum=0, maximum=1),
     "WATCHLIST": _field("Watchlist", "Daftar watchlist", "Editor simbol dan tier pemantauan.", "list", editor="watchlist"),
 
     "USE_RISK_PERCENT": _field("Ukuran Posisi", "Gunakan persen risiko", "Ukuran posisi dihitung dari saldo bebas.", "bool", dangerous=True),
@@ -554,9 +553,9 @@ def validate_candidate(candidate: dict, mode: str) -> tuple[dict, dict[str, str]
         else:
             relation("POSITION_SIZE_USDT", cleaned["POSITION_SIZE_USDT"] > 0,
                      "harus lebih besar dari nol saat sizing tetap")
-        relation("WATCHLIST_AUTO_KEEP",
-                 cleaned["WATCHLIST_AUTO_KEEP"] <= cleaned["WATCHLIST_AUTO_MAX_SYMBOLS"],
-                 "tidak boleh melebihi jumlah simbol yang dinilai")
+        bobot = sum(float(cleaned.get(k, 0)) for k in ("WATCHLIST_ENTRY_WEIGHT_EMA", "WATCHLIST_ENTRY_WEIGHT_RSI", "WATCHLIST_ENTRY_WEIGHT_MACD", "WATCHLIST_ENTRY_WEIGHT_HL"))
+        relation("WATCHLIST_ENTRY_WEIGHT_EMA", abs(bobot - 100.0) < 1e-6,
+                 "jumlah bobot EMA, RSI, MACD, dan higher-low harus tepat 100")
         if raw_mode == "LIVE":
             relation("MAX_POSITION_USDT", cleaned["MAX_POSITION_USDT"] > 0,
                      "mode LIVE wajib memiliki plafon posisi lebih besar dari nol")
@@ -618,6 +617,10 @@ def dangerous_relaxations(old: dict, new: dict) -> list[str]:
         ("CLOSE_ALL_AT_LIMIT", "penutupan posisi pada limit dimatikan"),
     ):
         if bool(old.get(key)) and not bool(new.get(key)):
+            relaxed.append(label)
+        elif key == "USE_DAILY_STOP" and not bool(new.get(key)):
+            # Default repo saat ini memang False; tetap laporkan sebagai guard
+            # yang tidak aktif agar audit LIVE tidak melewatkan risiko ini.
             relaxed.append(label)
     if not bool(old.get("SHOW_BACKTEST_IN_LIVE")) and bool(new.get("SHOW_BACKTEST_IN_LIVE")):
         relaxed.append("Backtest diaktifkan saat LIVE dan dapat memakai rate limit IP")

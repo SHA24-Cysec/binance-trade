@@ -44,7 +44,56 @@ import logging
 import math
 import time
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Optional, NamedTuple
+
+
+class EntrySignalScore(NamedTuple):
+    """Skor panel dari kondisi candle tertutup, bukan keputusan trading."""
+    score: float
+    status: str
+    disqualified: Optional[str]
+    components: dict
+    reason: str
+
+
+def score_entry_signal(klines: list[Kline], config: dict, meta=None) -> EntrySignalScore:
+    """Hitung kedekatan setup entry dengan helper strategi yang sama dengan bot."""
+    zero = {"ema": 0.0, "rsi": 0.0, "macd": 0.0, "higher_low": 0.0}
+    passed, detail = _rolling_volume_confirmation(klines, config)
+    if not passed:
+        return EntrySignalScore(0.0, "TIDAK LOLOS", detail, zero, detail)
+    closes = [float(k.close) for k in klines]
+    if len(closes) < max(30, strategy.required_lookback_bars(config)):
+        return EntrySignalScore(0.0, "TIDAK LOLOS", "data candle kurang", zero, "data candle kurang")
+    w = {"ema": float(config.get("WATCH" + "LIST_ENTRY_WEIGHT_EMA", 25)),
+         "rsi": float(config.get("WATCH" + "LIST_ENTRY_WEIGHT_RSI", 25)),
+         "macd": float(config.get("WATCH" + "LIST_ENTRY_WEIGHT_MACD", 25)),
+         "higher_low": float(config.get("WATCH" + "LIST_ENTRY_WEIGHT_HL", 25))}
+    ema9, ema21 = strategy.ema(closes, 9), strategy.ema(closes, 21)
+    cross = ema9[-2] <= ema21[-2] and ema9[-1] > ema21[-1]
+    if cross: ema_credit = w["ema"]
+    elif ema9[-1] > ema21[-1]: ema_credit = w["ema"] * 0.6  # tren mendukung, momen cross lewat
+    else:
+        gap = float(config.get("WATCH" + "LIST_ENTRY_EMA_GAP_PCT", 1.0))
+        rel = (ema21[-1] - ema9[-1]) / ema21[-1] * 100
+        ema_credit = w["ema"] * max(0.0, 1.0 - rel / gap) if gap > 0 else 0.0
+    rsi = strategy.rsi(closes, 14)[-1]
+    decay = float(config.get("WATCH" + "LIST_ENTRY_RSI_DECAY_PTS", 15))
+    rsi_credit = w["rsi"] if 50 <= rsi <= 75 else w["rsi"] * max(0.0, 1 - (50-rsi if rsi < 50 else rsi-75) / decay)
+    _, _, hist = strategy.macd(closes)
+    improving = len(hist) >= 2 and (hist[-1] > hist[-2] or (hist[-2] <= 0 < hist[-1]))
+    slowing = len(hist) >= 3 and hist[-1] < hist[-2] and (hist[-1]-hist[-2]) > (hist[-2]-hist[-3])
+    macd_credit = w["macd"] if improving else (w["macd"] * 0.4 if slowing else 0.0)
+    hl = _higher_low_confirmed(klines, max(1, int(config.get("SWING_PIVOT_WING_BARS", 2) or 2)))
+    components = {"ema": round(ema_credit, 1), "rsi": round(rsi_credit, 1), "macd": round(macd_credit, 1), "higher_low": w["higher_low"] if hl else 0.0}
+    raw = round(sum(components.values()), 1)
+    dq = None
+    if meta:
+        spread = meta.get("spread_pct")
+        if spread is not None and spread > float(config.get("MAX_SPREAD_PCT", .25)): dq = "spread melewati batas"
+        if meta.get("weekend_pct") is not None and str(meta.get("symbol", "")).endswith("B") and meta["weekend_pct"] < 16: dq = "bStocks tidak berjalan 24/7"
+    status = "SIAP" if raw >= 75 else "MENDEKAT" if raw >= 50 else "AWAL" if raw >= 25 else "JAUH"
+    return EntrySignalScore(0.0 if dq else raw, "TIDAK LOLOS" if dq else status, dq, components, f"EMA={'ya' if cross else 'tidak'}, RSI={rsi:.2f}, MACD={'naik' if improving else 'tidak'}, HL={'ya' if hl else 'tidak'}; {detail}")
 
 import strategy
 from strategy import Kline

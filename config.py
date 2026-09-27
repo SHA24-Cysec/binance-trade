@@ -417,21 +417,10 @@ PUMP_CONFIG = {
     # dicek 2026-09-24). Jadi dashboard dan bot berbagi jatah yang sama.
     # Anggaran default di bawah menghabiskan sekitar 684 weight per siklus,
     # disebar ~15 menit = 0,76% anggaran. Sisanya tetap milik bot.
-    #
-    # Tiga rem keamanan TIDAK bisa dimatikan lewat config karena menyangkut
-    # keselamatan posisi Anda:
-    #   1. penyegaran dilewati selama bot memegang posisi terbuka
-    #   2. berhenti sendiri kalau sisa kuota weight menipis
-    #   3. berhenti total kalau kena 429/418, tidak mencoba ulang
-    "WATCHLIST_AUTO_REFRESH": True,          # False = daftar statis, hanya dari WATCHLIST di bawah
-    "WATCHLIST_AUTO_INTERVAL_HOURS": 6,      # jarak antar penyegaran
-    "WATCHLIST_AUTO_MAX_SYMBOLS": 60,        # kandidat teratas (by likuiditas) yang dinilai
-    "WATCHLIST_AUTO_DAYS": 14,               # panjang riwayat candle 5m untuk menilai
-    "WATCHLIST_AUTO_KEEP": 26,               # berapa simbol dipertahankan di daftar akhir
-    "WATCHLIST_AUTO_MAX_WEIGHT": 900,        # plafon keras weight per siklus
-    "WATCHLIST_AUTO_PACE_SECONDS": 2.0,      # jeda antar panggilan (menyebar beban)
-    "WATCHLIST_AUTO_MIN_HEADROOM": 0.5,      # berhenti kalau sisa kuota menit ini < 50%
-    "WATCHLIST_AUTO_STARTUP_DELAY_SECONDS": 60,  # jangan menyegarkan tepat saat start
+    "WATCHLIST_ENTRY_WEIGHT_EMA": 25, "WATCHLIST_ENTRY_WEIGHT_RSI": 25,
+    "WATCHLIST_ENTRY_WEIGHT_MACD": 25, "WATCHLIST_ENTRY_WEIGHT_HL": 25,
+    "WATCHLIST_ENTRY_EMA_GAP_PCT": 1.0, "WATCHLIST_ENTRY_RSI_DECAY_PTS": 15,
+    "WATCHLIST_ENTRY_SCORE_TTL_SECONDS": 60, "WATCHLIST_ENTRY_MIN_HEADROOM": 0.5,
     "WATCHLIST": [
         # --- INTI: likuiditas di atas ambang bot >= 90% waktu ---
         # Sinyal di sini paling mungkin benar-benar bisa dieksekusi karena
@@ -1080,18 +1069,8 @@ def get_watchlist(config: dict = None) -> list:
 
 
 def watchlist_auto_enabled(config: dict = None) -> bool:
-    """Apakah penyegaran daftar otomatis aktif.
-
-    Hanya berlaku kalau panel watchlist sendiri aktif. Dibaca longgar
-    dengan sikap default aman, sama seperti helper lain di file ini.
-    """
-    if not watchlist_enabled(config):
-        return False
-    cfg = PUMP_CONFIG if config is None else config
-    raw = cfg.get("WATCHLIST_AUTO_REFRESH", False)
-    if isinstance(raw, bool):
-        return raw
-    return str(raw).strip().lower() in ("true", "1", "yes", "ya", "on")
+    """Apakah penyegaran daftar otomatis aktif (selalu False karena dihapus)."""
+    return False
 
 
 def get_taker_fee_pct(config: dict = None) -> float:
