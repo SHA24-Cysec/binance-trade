@@ -635,7 +635,7 @@ def selftest():
     print("\n=== SELFTEST backtest.py: entry setup pullback retest + TP ===")
     from config import PUMP_CONFIG
     from synthetic_data import (
-        cfg_gerbang_pump_nonaktif, riwayat_harian, seri_dengan_setup,
+        cfg_gerbang_pump_nonaktif, riwayat_harian,
     )
     cfg = cfg_gerbang_pump_nonaktif(PUMP_CONFIG)
     cfg["MIN_QUOTE_VOLUME_USDT_24H"] = 1_000_000

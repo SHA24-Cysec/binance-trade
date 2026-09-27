@@ -213,8 +213,7 @@ def average_prior_daily_quote_volume(
     di backtest sekaligus bebas look-ahead: di live ``reference_ms`` adalah
     waktu sekarang sehingga candle hari ini yang belum tertutup terbuang, di
     backtest ``reference_ms`` adalah waktu bar yang sedang diuji sehingga
-    volume hari-hari SESUDAHNYA tidak pernah ikut terhitung. Pola ini sama
-    dengan penjagaan sayap kanan pivot di _breakout_level_for().
+    volume hari-hari SESUDAHNYA tidak pernah ikut terhitung.
 
     Return (rata_rata, alasan). rata_rata None berarti data tidak memenuhi
     syarat, dan ``alasan`` menjelaskan kenapa.
@@ -502,47 +501,6 @@ def filter_and_rank_candidates(tickers: list, config: dict,
 # ======================================================================
 # Deteksi setup: momentum pump dan konfirmasi volume rolling
 # ======================================================================
-
-def _pivot_high_indexes(klines: list[Kline], wing: int) -> list[int]:
-    """Indeks candle yang menjadi pivot high dengan ``wing`` candle di kiri dan kanan.
-
-    Sebuah pivot high di indeks p berarti high[p] lebih tinggi daripada high
-    semua candle pada p-wing..p-1 dan p+1..p+wing. Perbandingan sengaja KETAT
-    (>) di kedua sisi supaya deretan high yang sama persis (data datar, koin
-    dengan tick size besar) tidak menghasilkan banyak pivot palsu.
-
-    Semua candle sayap kanan harus sudah ada di dalam jendela, jadi pivot
-    tidak pernah dihitung dari candle yang belum tertutup.
-    """
-    out: list[int] = []
-    n = len(klines)
-    if wing < 1 or n < 2 * wing + 1:
-        return out
-    for p in range(wing, n - wing):
-        h = klines[p].high
-        kiri = all(h > klines[j].high for j in range(p - wing, p))
-        kanan = all(h > klines[j].high for j in range(p + 1, p + wing + 1))
-        if kiri and kanan:
-            out.append(p)
-    return out
-
-
-def _breakout_level_for(klines: list[Kline], pivots: list[int], b: int,
-                        swing_lookback: int, wing: int) -> Optional[float]:
-    """Swing high valid yang menjadi level breakout untuk candle indeks ``b``.
-
-    Pivot yang boleh dipakai hanya yang SELURUH sayap kanannya sudah tertutup
-    sebelum candle b (p + wing <= b - 1), dan yang berada dalam
-    ``swing_lookback`` candle sebelum b. Syarat sayap kanan itu yang mencegah
-    look-ahead: level tidak pernah memakai informasi dari candle b atau
-    sesudahnya.
-    """
-    batas_bawah = max(0, b - swing_lookback)
-    kandidat = [klines[p].high for p in pivots if batas_bawah <= p <= b - 1 - wing]
-    if not kandidat:
-        return None
-    return max(kandidat)
-
 
 def _pivot_low_indexes(klines: list[Kline], wing: int) -> list[int]:
     """Cari pivot low dengan sayap kanan yang sudah tertutup."""

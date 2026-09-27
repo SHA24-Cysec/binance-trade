@@ -2370,7 +2370,6 @@ def selftest() -> None:
     # Data sintetis mengisi volume dan quote_volume agar gerbang rolling
     # volume dapat diuji tanpa jaringan. Dua candle terakhir dibuat melonjak
     # sehingga candle keputusan memiliki volume minimal 2x rata-rata.
-    from synthetic_data import skenario_pullback_retest
 
     # Seri sintetis momentum: EMA9 baru menembus EMA21, RSI tetap sehat,
     # histogram MACD naik, dan dua pivot low terakhir membentuk higher low.

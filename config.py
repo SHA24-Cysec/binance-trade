@@ -196,7 +196,7 @@ PUMP_CONFIG = {
     # --- Scan & seleksi kandidat ---
     "MARKET_SCAN_INTERVAL_SECONDS": 300,     # scan seluruh pasar tiap 5 menit
     "LOOP_INTERVAL_SECONDS": 15,             # cek TP/BE/trailing tiap 15 detik
-    "MIN_QUOTE_VOLUME_USDT_24H": 10000000,  # kandidat walk-forward; dibatasi untuk pair yang lebih likuid
+    "MIN_QUOTE_VOLUME_USDT_24H": 3099455.404470322,  # kandidat walk-forward; dibatasi untuk pair yang lebih likuid
     # Berapa simbol teratas (urut volume kuotasi 24 jam) yang candle-nya
     # diunduh tiap siklus scan. Angka ini yang menjaga rate limit: satu
     # panggilan klines berbobot IP 2 sedangkan plafon REQUEST_WEIGHT adalah
@@ -629,11 +629,11 @@ PUMP_CONFIG = {
     # Yang ingin trading tanpa rem harus mematikannya secara sadar lewat
     # panel setelan, yang di mode LIVE memaksa konfirmasi frasa risiko
     # (settings_schema.dangerous_relaxations mendeteksi transisi True->False).
-    "USE_EQUITY_STOP": False,                # matikan (False) utk nonaktifkan DD Stop
+    "USE_EQUITY_STOP": True,                 # matikan (False) utk nonaktifkan DD Stop
     # OPTIMASI MANUAL: 15 -> 12. Jaring DD diperketat agar penurunan dari peak
     # equity berhenti lebih awal = DD lebih stabil (inti permintaan Anda).
     "MAX_DRAWDOWN_PERCENT": 12.0,
-    "USE_DAILY_STOP": False,                 # matikan (False) utk nonaktifkan Daily Stop
+    "USE_DAILY_STOP": True,                  # matikan (False) utk nonaktifkan Daily Stop
     # OPTIMASI MANUAL: 3 -> 5. Sedikit lebih lega agar mesin return punya ruang
     # dalam satu hari (dengan ~0,54% risiko/trade, ini ~9 trade rugi baru
     # menghentikan hari), tetap terbatas untuk menjaga DD.

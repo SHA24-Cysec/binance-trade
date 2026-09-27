@@ -491,15 +491,6 @@ class _PumpGateAverages:
         self.memo_for(symbol)[int(key)] = rata
         return rata
 
-    def average_at(self, symbol: str, series: SymbolSeries,
-                   reference_ms: int) -> Optional[float]:
-        """Rata-rata volume harian penuh sebelum ``reference_ms`` untuk simbol."""
-        key = series.closed_daily_count(reference_ms)
-        memo = self.memo_for(symbol)
-        if key in memo:
-            return memo[key]
-        return self.compute(symbol, reference_ms, key)
-
 
 def _resolve_symbol_cache_size(config: dict, top_n: int) -> int:
     """Berapa simbol yang boleh utuh (list[Kline]) di RAM bersamaan.

@@ -35,7 +35,7 @@ def test_restart_persists_balances_and_open_orders(tmp_path):
     assert s2.state["schema_version"] == 1
 
 
-def test_corrupt_state_backed_up_not_overwritten(tmp_path, caplog):
+def test_corrupt_state_backed_up_not_overwritten(tmp_path):
     """File korup -> dibuatkan cadangan *.corrupt-*, TIDAK ditimpa diam-diam,
     state direset ke saldo awal."""
     path = str(tmp_path / "acct.json")

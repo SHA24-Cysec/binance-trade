@@ -277,11 +277,6 @@ class BotProcessManager:
     def _read_lifecycle(self, mode: str) -> dict:
         return _read_dict(process_file(mode))
 
-    def _managed_poll(self) -> int | None:
-        if self._proc is None:
-            return None
-        return self._proc.poll()
-
     def _schedule_auto_restart_locked(self, mode: str) -> None:
         cfgmod = self._config()
         cfg = cfgmod.PUMP_CONFIG
