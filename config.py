@@ -196,7 +196,7 @@ PUMP_CONFIG = {
     # --- Scan & seleksi kandidat ---
     "MARKET_SCAN_INTERVAL_SECONDS": 300,     # scan seluruh pasar tiap 5 menit
     "LOOP_INTERVAL_SECONDS": 15,             # cek TP/BE/trailing tiap 15 detik
-    "MIN_QUOTE_VOLUME_USDT_24H": 3099455.404470322,  # kandidat walk-forward; dibatasi untuk pair yang lebih likuid
+    "MIN_QUOTE_VOLUME_USDT_24H": 10000000,  # kandidat walk-forward; dibatasi untuk pair yang lebih likuid
     # Berapa simbol teratas (urut volume kuotasi 24 jam) yang candle-nya
     # diunduh tiap siklus scan. Angka ini yang menjaga rate limit: satu
     # panggilan klines berbobot IP 2 sedangkan plafon REQUEST_WEIGHT adalah
@@ -316,7 +316,7 @@ PUMP_CONFIG = {
 
     # Exit adaptif untuk volatilitas scalping. False mempertahankan perilaku
     # persen lama agar state dan konfigurasi lama tetap kompatibel.
-    "USE_ATR_EXIT": False,
+    "USE_ATR_EXIT": True,
     "ATR_PERIOD": 14,
     "ATR_MULT_SL": 12.0,
     "ATR_MULT_TP": 24.0,
