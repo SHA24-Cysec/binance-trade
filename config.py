@@ -629,11 +629,11 @@ PUMP_CONFIG = {
     # Yang ingin trading tanpa rem harus mematikannya secara sadar lewat
     # panel setelan, yang di mode LIVE memaksa konfirmasi frasa risiko
     # (settings_schema.dangerous_relaxations mendeteksi transisi True->False).
-    "USE_EQUITY_STOP": True,                 # matikan (False) utk nonaktifkan DD Stop
+    "USE_EQUITY_STOP": False,                 # matikan (False) utk nonaktifkan DD Stop
     # OPTIMASI MANUAL: 15 -> 12. Jaring DD diperketat agar penurunan dari peak
     # equity berhenti lebih awal = DD lebih stabil (inti permintaan Anda).
     "MAX_DRAWDOWN_PERCENT": 12.0,
-    "USE_DAILY_STOP": True,                  # matikan (False) utk nonaktifkan Daily Stop
+    "USE_DAILY_STOP": False,                  # matikan (False) utk nonaktifkan Daily Stop
     # OPTIMASI MANUAL: 3 -> 5. Sedikit lebih lega agar mesin return punya ruang
     # dalam satu hari (dengan ~0,54% risiko/trade, ini ~9 trade rugi baru
     # menghentikan hari), tetap terbatas untuk menjaga DD.
