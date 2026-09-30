@@ -169,8 +169,8 @@ Alur aman proteksi:
   aktif sehingga entry baru fail-closed.
 
 Implementasi ini tidak mengirim order ke LIVE selama selftest dan test suite.
-Pengujian integrasi order hanya boleh memakai fake client atau kredensial
-Binance Spot Testnet yang terpisah.
+Pengujian integrasi order hanya boleh memakai fake client atau mode PAPER
+(simulasi eksekusi lokal, tanpa order sungguhan ke exchange).
 
 ## Backtest
 
