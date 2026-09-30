@@ -6,8 +6,7 @@ Mengunci lima perilaku:
 2. Fallback config pada mode ATR sadar-unit: persen dikonversi ke jarak
    harga, bukan dipakai mentah sebagai jarak absolut.
 3. Setelah proteksi native FILLED dan rekonsiliasi bersih, flag
-   reconciliation_required DIBERSIHKAN dan cooldown diset (bot tidak lagi
-   berhenti entry permanen setelah setiap exit exchange-side).
+   reconciliation_required dibersihkan.
 4. -1116/-1020 diklasifikasi sebagai reject deterministik.
 5. CLOSE_ALL_AT_LIMIT tidak menutup paksa posisi pada episode daily stop
    bersumber PROFIT target; episode LOSS tetap menutup.
@@ -30,7 +29,6 @@ def _config(tmp_path) -> dict:
         "CONTROL_FILE": str(tmp_path / "control.json"),
         "QUOTE_ASSET": "USDT",
         "USE_DUST_SWEEP": False,
-        "COOLDOWN_MINUTES_AFTER_CLOSE": 1,
         "MODE": "PAPER",
     })
     return cfg
@@ -41,38 +39,6 @@ def _filters() -> dict:
         step_size=Decimal("0.01"), min_qty=Decimal("0.01"),
         min_notional=Decimal("5"), tick_size=Decimal("0.0001"),
     )}
-
-
-# ---------------------------------------------------------------------
-# 1. Guard entry ATR tanpa nilai ATR
-# ---------------------------------------------------------------------
-def test_open_position_rejects_atr_exit_without_atr_value(tmp_path) -> None:
-    class Client:
-        def __init__(self):
-            self.orders = []
-
-        def get_account(self):
-            return {"balances": [{"asset": "USDT", "free": "1000", "locked": "0"}]}
-
-        def new_market_order(self, *a, **k):
-            self.orders.append((a, k))
-            return {"status": "FILLED", "executedQty": "1", "cummulativeQuoteQty": "100"}
-
-    cfg = _config(tmp_path)
-    cfg.update({"USE_ATR_EXIT": True, "USE_RISK_PERCENT": False,
-                "POSITION_SIZE_USDT": 25.0, "MAX_POSITION_USDT": 100.0})
-    state = dict(bot.DEFAULT_STATE)
-    candidate = scanner.Candidate(
-        symbol="TESTUSDT", base_asset="TEST", price_change_pct=20.0,
-        quote_volume=1_000_000, last_price=100.0, confirmed=True,
-        confirm_reason="test",  # setup=None -> atr_value tidak tersedia
-    )
-    client = Client()
-    bot.open_position(client, cfg, _filters(), state, candidate, reference_price=100.0)
-
-    assert client.orders == [], "BUY tidak boleh terkirim tanpa nilai ATR di mode ATR"
-    assert state["current_symbol"] is None
-    assert state["pending_order"] is None
 
 
 # ---------------------------------------------------------------------
@@ -102,7 +68,7 @@ def test_native_stop_price_pct_fallback_stays_positive_for_cheap_coin() -> None:
 # ---------------------------------------------------------------------
 # 3. Settle pasca-fill proteksi native
 # ---------------------------------------------------------------------
-def test_settle_native_fill_clears_flag_and_sets_cooldown(tmp_path) -> None:
+def test_settle_native_fill_clears_flag(tmp_path) -> None:
     class Client:
         def get_account(self):
             # Leg proteksi sudah menjual habis base asset.
@@ -119,11 +85,8 @@ def test_settle_native_fill_clears_flag_and_sets_cooldown(tmp_path) -> None:
 
     assert state["current_symbol"] is None, "posisi hantu wajib direset"
     assert state["reconciliation_required"] is False, (
-        "flag wajib bersih setelah rekonsiliasi sukses; tanpa ini bot berhenti "
-        "entry permanen setelah SETIAP exit native (bug audit 2026-09-27)"
+        "flag wajib bersih setelah rekonsiliasi sukses"
     )
-    assert state["cooldown_until"] > 0
-    assert state["last_trade_time"] > 0
     assert state["_native_stop_exit_blocked"] is False
 
 
@@ -144,7 +107,6 @@ def test_settle_native_fill_stays_fail_closed_when_account_unavailable(tmp_path)
     # Saldo tidak terverifikasi -> tetap fail-closed, posisi tidak disentuh.
     assert state["reconciliation_required"] is True
     assert state["current_symbol"] == "TESTUSDT"
-    assert state["cooldown_until"] == 0
 
 
 # ---------------------------------------------------------------------

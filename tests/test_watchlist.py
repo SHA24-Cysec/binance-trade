@@ -73,17 +73,6 @@ def K(o, h, l, c, v=1000.0, qv=None, t=0):
                  close_time=t + 299_999, quote_volume=qv if qv is not None else v * c)
 
 
-def _synthetic_strategy_config():
-    """Fixture pendek untuk audit deteksi setup tanpa mengubah produksi."""
-    c = dict(cfg_mod.PUMP_CONFIG)
-    c.update({
-        "CONFIRM_LOOKBACK_BARS": 48,
-        "SWING_LOOKBACK_BARS": 12,
-        "SWING_PIVOT_WING_BARS": 2,
-        "VWAP_MIN_BARS_AFTER_ANCHOR": 2,
-        "MAX_BARS_BREAKOUT_TO_RETEST": 12,
-    })
-    return c
 
 
 class TestConfigHelper(unittest.TestCase):
@@ -330,7 +319,7 @@ class TestBuildWatchlist(unittest.TestCase):
             w = self.dash.build_watchlist()
         # TIPISUSDT tersingkir walau naik 30%: volume 100 < ambang 2 juta
         # (gerbang volume tetap berlaku). Sisanya urut KENAIKAN 24 jam
-        # terbesar (SEDANG +2% di atas BESAR +1%), karena skor sinyal belum
+        # terbesar (SEDANG +2% di atas BESAR +1%), karena perubahan pasar belum
         # terhitung (klien palsu tidak punya get_klines).
         self.assertEqual([r["symbol"] for r in w["items"]],
                          ["SEDANGUSDT", "BESARUSDT"])
@@ -453,7 +442,7 @@ class TestTemplate(unittest.TestCase):
         import re
         blok = self.html.split('<table class="wl" id="wlTable">')[1].split("</table>")[0]
         n_th = len(re.findall(r"<th>", blok))
-        self.assertEqual(n_th, 8, f"header watchlist punya {n_th} kolom, diharapkan 8")
+        self.assertEqual(n_th, 7, f"header watchlist punya {n_th} kolom, diharapkan 7")
         for m in re.findall(r'colspan="(\d+)"', blok):
             self.assertEqual(int(m), n_th, "colspan tidak cocok jumlah kolom")
 
@@ -676,7 +665,7 @@ class TestAutoRefreshKeamanan(unittest.TestCase):
         try:
             os.chdir(d)
             c = dict(cfg_mod.PUMP_CONFIG)
-            data = {"items": [{"symbol": "ARBUSDT", "tier": "INTI", "score": 90.0}],
+            data = {"items": [{"symbol": "ARBUSDT", "tier": "INTI", "monitoring_score": 90.0}],
                     "generated_at": 123}
             self.wa.save_result(data, c)
             got = self.wa.load_result(c)
@@ -767,79 +756,6 @@ class TestDashboardAutoIntegrasi(unittest.TestCase):
         with mock.patch.multiple(self.dash, PUMP_CONFIG=base, _auto_refresher=None):
             self.dash.start_auto_refresher()
             self.assertIsNone(self.dash._auto_refresher)
-
-
-class TestMigrasiTier(unittest.TestCase):
-    """Nama tier lama harus tetap terbaca setelah MOMENTUM diganti AKTIF."""
-
-    def test_migrate_tiers_mengubah_items_dan_detail(self):
-        from automation import watchlist_auto as wa
-        data = {"items": [{"symbol": "AAAUSDT", "tier": "MOMENTUM"},
-                          {"symbol": "BBBUSDT", "tier": "INTI"}],
-                "detail": [{"symbol": "AAAUSDT", "tier": "MOMENTUM"}]}
-        hasil = wa.migrate_tiers(data)
-        self.assertEqual([r["tier"] for r in hasil["items"]], ["AKTIF", "INTI"])
-        self.assertEqual(hasil["detail"][0]["tier"], "AKTIF")
-
-    def test_migrate_tiers_aman_untuk_bentuk_data_aneh(self):
-        from automation import watchlist_auto as wa
-        self.assertEqual(wa.migrate_tiers({}), {})
-        self.assertEqual(wa.migrate_tiers({"items": "bukan list"}), {"items": "bukan list"})
-        self.assertIsNone(wa.migrate_tiers(None))
-
-    def test_file_watchlist_lama_dibaca_dengan_tier_baru(self):
-        import json
-        import tempfile
-        from automation import watchlist_auto as wa
-        with tempfile.TemporaryDirectory() as d:
-            cfg = dict(cfg_mod.PUMP_CONFIG)
-            path = os.path.join(d, "watchlist_auto_paper.json")
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump({"items": [{"symbol": "AAAUSDT", "tier": "MOMENTUM",
-                                      "score": 80.0, "note": "lama"}]}, f)
-            with mock.patch.object(wa, "_auto_file", lambda _c: path):
-                hasil = wa.load_result(cfg)
-        self.assertEqual(hasil["items"][0]["tier"], "AKTIF")
-
-    def test_config_menolak_tier_yang_tidak_dikenal(self):
-        self.assertEqual(cfg_mod.migrate_watchlist_tier("MOMENTUM"), "AKTIF")
-        self.assertIn("AKTIF", cfg_mod.VALID_WATCHLIST_TIERS)
-        self.assertNotIn("MOMENTUM", cfg_mod.VALID_WATCHLIST_TIERS)
-
-
-class TestEntryTetapUtuh(unittest.TestCase):
-    """Pastikan tidak ada logika entry yang ikut berubah saat mengedit file."""
-
-    def _momentum(self):
-        from strategy.indicators import Kline
-        vals = [100.0] * 30 + [100.2,100.4,99.4,98.4,97.4,97.6,98.6,98.1,98.3,97.8,98.8,99.8,98.8,99.8,99.3,99.5,98.5,99.5,98.5,100.0]
-        return [Kline(i*300000, v, v+1, v-1, v, i*300000+299999,
-                      3000 if i == len(vals)-1 else 1000,
-                      v * (3000 if i == len(vals)-1 else 1000))
-                for i, v in enumerate(vals)]
-
-    def test_deteksi_setup_masih_bekerja(self):
-        hasil = scanner.detect_pullback_retest(self._momentum(), _synthetic_strategy_config())
-        self.assertTrue(hasil.ok, hasil.reason)
-        self.assertGreater(hasil.breakout_level, 0)
-
-    def test_setup_gagal_menyebut_alasan(self):
-        hasil = scanner.detect_pullback_retest([K(100, 100, 100, 100, 100)] * 50,
-                                               _synthetic_strategy_config())
-        self.assertFalse(hasil.ok)
-        self.assertTrue("konfirmasi" in hasil.reason or "rolling volume" in hasil.reason)
-
-    def test_data_kurang_ditolak(self):
-        hasil = scanner.detect_pullback_retest([K(1, 1, 1, 1)] * 3, cfg_mod.PUMP_CONFIG)
-        self.assertFalse(hasil.ok)
-        self.assertIn("minimum", hasil.reason)
-
-    def test_confirm_entry_tetap_mengembalikan_pasangan_bool_dan_alasan(self):
-        """Kontrak confirm_entry() tetap (bool, str)."""
-        ok, alasan = scanner.confirm_entry(self._momentum(), _synthetic_strategy_config())
-        self.assertIsInstance(ok, bool)
-        self.assertIsInstance(alasan, str)
-        self.assertTrue(ok, alasan)
 
 
 if __name__ == "__main__":

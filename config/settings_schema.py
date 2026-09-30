@@ -30,32 +30,6 @@ RUNTIME_FILE = ROOT / "pump_bot_runtime.json"
 RUNTIME_ERROR_FILE = ROOT / "pump_bot_runtime.error.json"
 AUDIT_FILE = ROOT / "pump_bot_settings_audit.log"
 VALID_MODES = ("PAPER", "LIVE")
-# CATATAN AUDIT 2026-09-27: VALID_WATCHLIST_TIERS dan LEGACY_WATCHLIST_TIER_MAP
-# dihapus dari modul ini bersama _validate_watchlist(); padanannya untuk file
-# analisis lama masih hidup di config.py (dipakai watchlist_auto.py).
-
-# Kunci config yang SUDAH DIHAPUS bersama strategi lama. Kalau masih ada di
-# file override milik pengguna, kunci itu dibuang saat dimuat, bukan dianggap
-# file rusak. Tanpa daftar ini, load_mode_override() akan mengarsipkan seluruh
-# file override sebagai korup dan pengguna kehilangan semua setelannya.
-REMOVED_CONFIG_KEYS = {
-    # Gerbang kenaikan 24 jam versi lama. Fungsinya kini digantikan
-    # PUMP_MIN_24H_CHANGE_PCT (bersama PUMP_VOLUME_SURGE_MULT), tetapi nama
-    # kunci lamanya tetap dibuang dari file override supaya nilainya tidak
-    # diam-diam dianggap masih berlaku.
-    "MIN_PUMP_PCT_24H",
-    "MOMENTUM_FADE_EXIT",
-    "MOMENTUM_FADE_RANK_THRESHOLD",
-    "SETUP_INVALIDATION_EXIT",
-    # Batas waktu hold. Dihapus total karena memaksa exit berdasarkan jam
-    # dinding, bukan harga atau struktur. Tidak ada penggantinya.
-    "MAX_HOLD_MINUTES",
-    # Daftar watchlist manual (tier + skor + note statis). Dihapus
-    # 2026-09-27: panel dashboard kini menyusun daftarnya otomatis dari
-    # semesta scanner (WATCHLIST_TOP_N). File override lama yang masih
-    # menyimpannya tidak boleh dianggap korup.
-    "WATCHLIST",
-}
 _WRITE_LOCK = threading.RLock()
 
 
@@ -65,18 +39,6 @@ class ConcurrentSettingsError(RuntimeError):
 
 _SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,40}$")
 _ASSET_RE = re.compile(r"^[A-Z0-9]{2,12}$")
-
-
-def _required_lookback_bars(candidate: dict) -> int:
-    """Bungkus strategy.required_lookback_bars() dengan import lokal.
-
-    Import dilakukan di dalam fungsi supaya modul ini tetap bisa diimpor oleh
-    config.py tanpa menyeret dependensi lain saat proses import awal.
-    strategy.py sendiri tidak mengimpor modul repo mana pun, jadi tidak ada
-    risiko import melingkar.
-    """
-    from strategy.indicators import required_lookback_bars
-    return required_lookback_bars(candidate)
 
 
 def settings_file(mode: str) -> Path:
@@ -130,30 +92,13 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "MARKET_SCAN_INTERVAL_SECONDS": _field("Scan", "Interval scan pasar", "Jarak waktu pemindaian seluruh pasar.", "int", minimum=10, maximum=86400, unit="detik"),
     "LOOP_INTERVAL_SECONDS": _field("Scan", "Interval loop", "Jarak evaluasi posisi dan kontrol.", "int", minimum=1, maximum=300, unit="detik"),
     "MIN_QUOTE_VOLUME_USDT_24H": _field("Scan", "Minimum volume kuotasi", "Volume 24 jam minimum.", "float", minimum=0, maximum=1e15, unit="USDT"),
-    "TOP_N_CANDIDATES_TO_CONFIRM": _field("Scan", "Jumlah kandidat konfirmasi", "Berapa kandidat teratas yang diperiksa.", "int", minimum=1, maximum=1000),
-    "CONFIRM_INTERVAL": _field("Scan", "Interval konfirmasi", "Interval candle konfirmasi setup.", "str", editor="select", options=["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"]),
-    "CONFIRM_LOOKBACK_BARS": _field("Scan", "Jumlah candle konfirmasi", "Jumlah candle tertutup untuk deteksi setup. Limit endpoint klines 1000 per panggilan.", "int", minimum=3, maximum=1000, unit="candle"),
-    "MIN_CLOSE_POSITION_IN_RANGE": _field("Scan", "Minimum posisi close", "Posisi close candle retest di dalam rentang high-low.", "float", minimum=0, maximum=1),
-
-    # Parameter strategi pullback dan retest. Semua default di config.py masih
-    # harus divalidasi lewat backtest repo ini.
-    "SWING_LOOKBACK_BARS": _field("Setup Pullback", "Lookback swing high", "Berapa candle ke belakang dipindai untuk mencari level breakout.", "int", minimum=3, maximum=500, unit="candle"),
-    "SWING_PIVOT_WING_BARS": _field("Setup Pullback", "Sayap pivot", "Candle di kiri dan kanan yang harus lebih rendah agar sebuah candle menjadi pivot high.", "int", minimum=1, maximum=50, unit="candle"),
-    "VWAP_MIN_BARS_AFTER_ANCHOR": _field("Legacy", "Parameter setup lama", "Disimpan untuk membaca konfigurasi lama. Tidak dipakai oleh strategi momentum baru.", "int", minimum=1, maximum=200, unit="candle", read_only=True),
-    "MAX_BARS_BREAKOUT_TO_RETEST": _field("Setup Pullback", "Umur maksimum setup", "Batas jarak candle dari breakout ke retest.", "int", minimum=1, maximum=500, unit="candle"),
-    "MAX_RETEST_TOUCHES": _field("Setup Pullback", "Maksimum kunjungan zona", "Berapa kali harga boleh kembali ke zona sebelum setup dianggap lemah.", "int", minimum=1, maximum=20),
-    # Gerbang pump: saringan semesta WAJIB yang dijalankan sebelum deteksi
-    # setup. Didaftarkan di grup yang sama dengan parameter pullback retest
-    # supaya muncul berdampingan di tab Setelan dashboard.
-    "PUMP_MIN_24H_CHANGE_PCT": _field("Setup Pullback", "Minimum kenaikan 24 jam", "Kenaikan harga 24 jam minimum (priceChangePercent) agar sebuah simbol boleh menjadi kandidat.", "float", minimum=0, maximum=1000, unit="%"),
-    "PUMP_VOLUME_SURGE_MULT": _field("Setup Pullback", "Pengali lonjakan volume", "Volume kuotasi 24 jam berjalan minimal sekian kali rata-rata volume kuotasi 7 hari penuh sebelumnya.", "float", minimum=1, maximum=100, unit="x"),
-    "BTC_FILTER_ENABLED": _field("Setup Pullback", "Filter korelasi BTC", "Tolak entry altcoin bila BTC turun tajam pada jendela candle tertutup.", "bool"),
-    "BTC_MAX_DROP_PCT": _field("Setup Pullback", "Penurunan BTC maksimum", "Batas penurunan BTC sebelum entry ditolak.", "float", minimum=0.1, maximum=50, unit="%"),
-    "BTC_LOOKBACK_BARS": _field("Setup Pullback", "Lookback BTC", "Jumlah candle tertutup untuk mengukur penurunan BTC.", "int", minimum=1, maximum=1000, unit="candle"),
-    "ROLLING_VOLUME_FILTER_ENABLED": _field("Setup Momentum", "Filter volume rolling", "Wajibkan volume candle konfirmasi melampaui rata-rata candle sebelumnya.", "bool"),
-    "ROLLING_VOLUME_LOOKBACK_BARS": _field("Setup Momentum", "Lookback volume rolling", "Jumlah candle sebelumnya untuk menghitung rata-rata volume.", "int", minimum=2, maximum=500, unit="candle"),
-    "ROLLING_VOLUME_SURGE_MULT": _field("Setup Momentum", "Pengali volume rolling", "Volume candle konfirmasi minimal sekian kali rata-rata sebelumnya.", "float", minimum=0.1, maximum=100, unit="x"),
-    "ROLLING_VOLUME_CONFIRMATION_BARS": _field("Setup Momentum", "Candle volume konfirmasi", "Jumlah candle terakhir yang wajib memenuhi lonjakan volume.", "int", minimum=1, maximum=20, unit="candle"),
+    "MARKET_DATA_INTERVAL": _field("Scan", "Interval data pasar", "Interval candle yang digunakan untuk monitoring pasar.", "str", editor="select", options=["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"]),
+    # Filter kondisi pasar untuk monitoring.
+    "PUMP_MIN_24H_CHANGE_PCT": _field("Monitoring Pasar", "Minimum perubahan 24 jam", "Filter monitoring perubahan harga 24 jam.", "float", minimum=0, maximum=1000, unit="%"),
+    "PUMP_VOLUME_SURGE_MULT": _field("Monitoring Pasar", "Pengali volume monitoring", "Filter monitoring volume kuotasi dibandingkan rata-rata 7 hari.", "float", minimum=1, maximum=100, unit="x"),
+    "BTC_FILTER_ENABLED": _field("Monitoring Pasar", "Filter kondisi BTC", "Filter monitoring kondisi BTC pada jendela candle tertutup.", "bool"),
+    "BTC_MAX_DROP_PCT": _field("Monitoring Pasar", "Penurunan BTC maksimum", "Batas penurunan BTC untuk filter monitoring.", "float", minimum=0.1, maximum=50, unit="%"),
+    "BTC_LOOKBACK_BARS": _field("Monitoring Pasar", "Lookback BTC", "Jumlah candle tertutup untuk mengukur penurunan BTC.", "int", minimum=1, maximum=1000, unit="candle"),
     "USE_ATR_EXIT": _field("SL dan TP", "Gunakan exit ATR", "Gunakan jarak exit adaptif berdasarkan ATR; jika mati, gunakan persen lama.", "bool", dangerous=True),
     "ATR_PERIOD": _field("SL dan TP", "Periode ATR", "Periode ATR Wilder.", "int", minimum=2, maximum=200, unit="candle"),
     "ATR_MULT_SL": _field("SL dan TP", "Pengali ATR Stop Loss", "Jarak Stop Loss dalam ATR.", "float", minimum=0.1, maximum=20, unit="x", dangerous=True),
@@ -163,37 +108,19 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "ATR_MULT_BE_LOCK": _field("Breakeven dan Trailing", "Pengali ATR lock BE", "Profit ATR yang dikunci.", "float", minimum=0, maximum=20, unit="x"),
     "ATR_MULT_TRAIL_START": _field("Breakeven dan Trailing", "Pengali ATR mulai trailing", "Profit ATR untuk mengaktifkan trailing.", "float", minimum=0, maximum=50, unit="x"),
     "EXTRA_EXCLUDE_SYMBOLS": _field("Scan", "Blacklist simbol", "Simbol tambahan yang tidak boleh dipilih.", "list", editor="symbols"),
-    "MIN_LISTING_AGE_DAYS": _field("Scan", "Usia listing minimum", "Pasangan lebih muda akan ditolak.", "int", minimum=0, maximum=36500, unit="hari"),
 
     "WATCHLIST_ENABLED": _field("Watchlist", "Aktifkan watchlist", "Menampilkan panel pemantauan watchlist.", "bool"),
-    "WATCHLIST_TOP_N": _field("Watchlist", "Jumlah pair dipantau", "Berapa pair dengan kenaikan 24 jam terbesar (yang lolos gerbang volume scanner) yang ditampilkan dan diberi skor sinyal.", "int", minimum=1, maximum=50),
-    "WATCHLIST_ENTRY_WEIGHT_EMA": _field("Watchlist", "Bobot EMA", "Bobot skor entry.", "float", minimum=0, maximum=100),
-    "WATCHLIST_ENTRY_WEIGHT_RSI": _field("Watchlist", "Bobot RSI", "Bobot skor entry.", "float", minimum=0, maximum=100),
-    "WATCHLIST_ENTRY_WEIGHT_MACD": _field("Watchlist", "Bobot MACD", "Bobot skor entry.", "float", minimum=0, maximum=100),
-    "WATCHLIST_ENTRY_WEIGHT_HL": _field("Watchlist", "Bobot higher low", "Bobot skor entry.", "float", minimum=0, maximum=100),
-    "WATCHLIST_ENTRY_EMA_GAP_PCT": _field("Watchlist", "Jarak EMA", "Ambang EMA dekat.", "float", minimum=0.01, maximum=100),
-    "WATCHLIST_ENTRY_RSI_DECAY_PTS": _field("Watchlist", "Decay RSI", "Lebar decay RSI.", "float", minimum=1, maximum=100),
-    "WATCHLIST_ENTRY_SCORE_TTL_SECONDS": _field("Watchlist", "TTL skor entry", "Cache skor candle.", "int", minimum=1, maximum=86400, unit="detik"),
-    "WATCHLIST_ENTRY_MIN_HEADROOM": _field("Watchlist", "Headroom skor", "Sisa kuota minimum.", "float", minimum=0, maximum=1),
-
-    "USE_RISK_PERCENT": _field("Ukuran Posisi", "Gunakan persen risiko", "Ukuran posisi dihitung dari saldo bebas.", "bool", dangerous=True),
-    "RISK_PERCENT": _field("Ukuran Posisi", "Persen saldo per entry", "Persentase saldo bebas yang digunakan.", "float", minimum=0.01, maximum=100, unit="%", dangerous=True),
-    "POSITION_SIZE_USDT": _field("Ukuran Posisi", "Ukuran posisi tetap", "Nominal saat mode persen dimatikan.", "float", minimum=0.01, maximum=1e9, unit="USDT", dangerous=True),
-    "BACKTEST_INITIAL_EQUITY_USDT": _field("Ukuran Posisi", "Modal awal backtest", "Saldo USDT awal yang dipakai model sizing pada backtest.", "float", minimum=0.01, maximum=1e12, unit="USDT"),
-    "BACKTEST_ENTRY_SPREAD_PCT": _field("Ukuran Posisi", "Spread entry backtest", "Total spread bid-ask yang dibebankan pada simulasi entry.", "float", minimum=0, maximum=10, unit="%"),
-    "BACKTEST_SLIPPAGE_PCT": _field("Ukuran Posisi", "Slippage backtest", "Slippage adverse per eksekusi backtest.", "float", minimum=0, maximum=10, unit="%"),
-    "BACKTEST_ENTRY_DELAY_BARS": _field("Ukuran Posisi", "Latency entry backtest", "Jumlah bar tunggu setelah sinyal sebelum simulasi entry.", "int", minimum=0, maximum=10, unit="bar"),
+    "WATCHLIST_TOP_N": _field("Watchlist", "Jumlah pair dipantau", "Berapa pair dengan kenaikan 24 jam terbesar yang ditampilkan sebagai data monitoring.", "int", minimum=1, maximum=50),
+    "BACKTEST_INITIAL_EQUITY_USDT": _field("Data Backtest", "Modal awal backtest", "Saldo USDT awal yang dipakai model sizing pada backtest.", "float", minimum=0.01, maximum=1e12, unit="USDT"),
     "BACKTEST_CACHE_ENABLED": _field("Sistem", "Cache candle backtest", "Pakai ulang candle yang sudah pernah diunduh supaya backtest ulang tidak mengunduh dari nol.", "bool"),
     "BACKTEST_CACHE_FILE": _field("Sistem", "File cache backtest", "Path runtime internal cache candle backtest.", "str", read_only=True),
     "BACKTEST_CACHE_FRESH_HOURS": _field("Sistem", "Jendela segar cache", "Rentang jam terakhir yang selalu diunduh ulang karena candle belum tertutup.", "int", minimum=0, maximum=168, unit="jam"),
     "BACKTEST_CACHE_TTL_DAYS": _field("Sistem", "Umur cache backtest", "Data simbol yang tidak dipakai selama sekian hari dibuang. Nol berarti tidak pernah dipangkas.", "int", minimum=0, maximum=3650, unit="hari"),
-    "MAX_POSITION_USDT": _field("Ukuran Posisi", "Plafon posisi", "Nol berarti tanpa plafon di PAPER, tetapi dilarang di LIVE.", "float", minimum=0, maximum=1e9, unit="USDT", dangerous=True),
-    "BALANCE_BUFFER_PCT": _field("Ukuran Posisi", "Bantalan saldo", "Saldo yang tidak dibelanjakan untuk fee dan pergerakan harga.", "float", minimum=0, maximum=50, unit="%"),
 
     "USE_TP": _field("SL dan TP", "Aktifkan Take Profit", "Menutup posisi saat target tercapai.", "bool", dangerous=True),
     "TP_PCT": _field("SL dan TP", "Take Profit", "Target profit tetap.", "float", minimum=0.01, maximum=1000, unit="%"),
     "USE_STOP_LOSS": _field("SL dan TP", "Aktifkan Stop Loss", "Jaring pengaman kerugian per trade.", "bool", dangerous=True),
-    "USE_NATIVE_OCO": _field("SL dan TP", "OCO exchange-side LIVE", "Pasang OCO SELL native berisi TP limit dan SL limit setelah BUY LIVE terisi.", "bool", dangerous=True),
+    "USE_NATIVE_OCO": _field("SL dan TP", "OCO exchange-side LIVE", "Pasang OCO SELL native berisi TP limit dan SL limit pada posisi yang terdeteksi.", "bool", dangerous=True),
     "USE_NATIVE_STOP_LOSS": _field("SL dan TP", "Stop Loss exchange-side fallback", "Fallback STOP_LOSS market native bila pemasangan OCO tidak didukung.", "bool", dangerous=True),
     "NATIVE_OCO_LIMIT_BUFFER_PCT": _field("SL dan TP", "Buffer limit OCO", "Jarak limit order dari trigger OCO agar ada peluang fill setelah trigger.", "float", minimum=0.01, maximum=5, unit="%", dangerous=True),
     "SL_PCT": _field("SL dan TP", "Stop Loss", "Batas rugi tetap.", "float", minimum=0.01, maximum=100, unit="%", dangerous=True),
@@ -204,20 +131,15 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "USE_TRAILING": _field("Breakeven dan Trailing", "Aktifkan trailing", "Mengikuti kenaikan harga dengan stop dinamis.", "bool"),
     "TRAILING_START_PCT": _field("Breakeven dan Trailing", "Mulai trailing", "Profit untuk mengaktifkan trailing tetap.", "float", minimum=0, maximum=1000, unit="%"),
     "TRAILING_STEP_PCT": _field("Breakeven dan Trailing", "Jarak trailing", "Jarak stop dari harga tertinggi.", "float", minimum=0.01, maximum=100, unit="%"),
-
-    "MAX_SPREAD_PCT": _field("Fee dan Filter", "Spread maksimum", "Spread bid-ask maksimum untuk entry.", "float", minimum=0, maximum=100, unit="%", dangerous=True),
-    "MAX_CHASE_PCT": _field("Fee dan Filter", "Batas chase entry", "Entry dilewati bila ask sudah melebihi close candle sinyal sebesar persen ini. 0 = nonaktif.", "float", minimum=0, maximum=100, unit="%", dangerous=True),
     "TAKER_FEE_PCT": _field("Fee dan Filter", "Fee taker", "Asumsi fee order market.", "float", minimum=0, maximum=10, unit="%"),
     "MAKER_FEE_PCT": _field("Fee dan Filter", "Fee maker", "Asumsi fee order limit maker.", "float", minimum=0, maximum=10, unit="%"),
     "USE_BNB_FEE_DISCOUNT": _field("Fee dan Filter", "Diskon fee BNB", "Gunakan asumsi diskon pembayaran fee dengan BNB.", "bool"),
-    "COOLDOWN_MINUTES_AFTER_CLOSE": _field("Fee dan Filter", "Cooldown setelah close", "Jeda entry setelah posisi ditutup.", "int", minimum=0, maximum=525600, unit="menit"),
-    "MIN_SECONDS_BETWEEN_TRADES": _field("Fee dan Filter", "Jarak minimum trade", "Jeda keras antartrade.", "int", minimum=0, maximum=31536000, unit="detik"),
 
-    "USE_EQUITY_STOP": _field("Drawdown dan Daily Stop", "Aktifkan equity stop", "Menghentikan entry setelah drawdown maksimum.", "bool", dangerous=True),
+    "USE_EQUITY_STOP": _field("Drawdown dan Daily Stop", "Aktifkan equity stop", "Menghentikan operasi ketika drawdown maksimum tercapai.", "bool", dangerous=True),
     "MAX_DRAWDOWN_PERCENT": _field("Drawdown dan Daily Stop", "Drawdown maksimum", "Penurunan dari peak equity sebelum stop.", "float", minimum=0.01, maximum=100, unit="%", dangerous=True),
-    "USE_DAILY_STOP": _field("Drawdown dan Daily Stop", "Aktifkan daily stop", "Menghentikan entry pada limit harian.", "bool", dangerous=True),
+    "USE_DAILY_STOP": _field("Drawdown dan Daily Stop", "Aktifkan daily stop", "Menghentikan operasi pada limit harian.", "bool", dangerous=True),
     "MAX_DAILY_LOSS_PERCENT": _field("Drawdown dan Daily Stop", "Rugi harian maksimum", "Kerugian harian sebelum stop.", "float", minimum=0.01, maximum=100, unit="%", dangerous=True),
-    "DAILY_PROFIT_TARGET_PERCENT": _field("Drawdown dan Daily Stop", "Target profit harian", "Profit harian sebelum entry dihentikan.", "float", minimum=0.01, maximum=10000, unit="%"),
+    "DAILY_PROFIT_TARGET_PERCENT": _field("Drawdown dan Daily Stop", "Target profit harian", "Profit harian sebelum operasi baru dihentikan.", "float", minimum=0.01, maximum=10000, unit="%"),
     "CLOSE_ALL_AT_LIMIT": _field("Drawdown dan Daily Stop", "Tutup posisi saat limit", "Tutup posisi saat kill switch aktif.", "bool", dangerous=True),
     "DD_COOLDOWN_HOURS": _field("Drawdown dan Daily Stop", "Cooldown drawdown", "Durasi jeda setelah drawdown stop.", "int", minimum=1, maximum=87600, unit="jam"),
     "MAX_CONSECUTIVE_ERRORS": _field("Sistem", "Maksimum error beruntun", "Bot berhenti setelah error API beruntun.", "int", minimum=1, maximum=100000),
@@ -298,14 +220,6 @@ def _load_mode_override_unlocked(mode: str) -> tuple[dict, list[str]]:
             data = json.load(handle)
         if not isinstance(data, dict):
             raise ValueError("root override harus object JSON")
-        # MIGRASI: kunci strategi lama dibuang, bukan dianggap file rusak.
-        dibuang = sorted(set(data) & REMOVED_CONFIG_KEYS)
-        for key in dibuang:
-            data.pop(key, None)
-        if dibuang:
-            errors.append(
-                f"Override {raw_mode} memuat kunci strategi lama yang sudah dihapus dan "
-                "diabaikan: " + ", ".join(dibuang))
         unknown = sorted(set(data) - set(PARAMETER_SCHEMA))
         if unknown:
             raise ValueError("kunci override tidak dikenal: " + ", ".join(unknown))
@@ -396,7 +310,6 @@ def _validate_symbol_list(value: Any, quote: str) -> list[str]:
 
 
 # CATATAN AUDIT 2026-09-27: _validate_watchlist() dihapus bersama field
-# "WATCHLIST" (daftar manual diganti panel otomatis WATCHLIST_TOP_N).
 
 def validate_balances(value: Any) -> dict[str, float]:
     if not isinstance(value, dict) or not value:
@@ -482,25 +395,10 @@ def validate_candidate(candidate: dict, mode: str) -> tuple[dict, dict[str, str]
             errors[key] = message
 
     if not errors:
-        # Relasi jendela konfirmasi terhadap struktur setup. Dihitung lewat
-        # satu fungsi bersama supaya angka minimum tidak pernah berbeda antara
-        # validasi, bot live, dan backtest.
-        butuh_bars = _required_lookback_bars(cleaned)
-        relation("CONFIRM_LOOKBACK_BARS",
-                 cleaned["CONFIRM_LOOKBACK_BARS"] >= butuh_bars,
-                 f"harus minimal {butuh_bars} candle untuk struktur setup "
-                 "(SWING_LOOKBACK_BARS + 2 x SWING_PIVOT_WING_BARS + MAX_BARS_BREAKOUT_TO_RETEST)")
-        # Gerbang pump. Ambang yang terlalu longgar membuat gerbang ini tidak
-        # menyaring apa pun, ambang yang terlalu ketat membuat bot praktis
-        # tidak pernah punya kandidat. Keduanya tetap diizinkan, tapi diberi
-        # peringatan supaya perubahan itu disadari.
+        # Filter monitoring. Ambang ekstrem tetap diberi peringatan agar perubahan
+        # konfigurasi mudah diaudit.
         relation("PUMP_VOLUME_SURGE_MULT", cleaned["PUMP_VOLUME_SURGE_MULT"] >= 1.0,
                  "harus minimal 1 kali rata-rata 7 hari, di bawah itu berarti volume justru turun")
-        relation("ROLLING_VOLUME_SURGE_MULT", cleaned["ROLLING_VOLUME_SURGE_MULT"] > 0,
-                 "harus lebih besar dari nol")
-        relation("ROLLING_VOLUME_CONFIRMATION_BARS",
-                 cleaned["ROLLING_VOLUME_CONFIRMATION_BARS"] <= cleaned["ROLLING_VOLUME_LOOKBACK_BARS"],
-                 "tidak boleh melebihi lookback volume rolling")
         relation("ATR_MULT_TRAIL", cleaned["ATR_MULT_TRAIL"] <= cleaned["ATR_MULT_SL"],
                  "tidak boleh melebihi ATR_MULT_SL agar invariant trailing <= SL terjaga")
         relation("ATR_MULT_BE_TRIGGER", cleaned["ATR_MULT_BE_TRIGGER"] <= cleaned["ATR_MULT_TRAIL_START"],
@@ -528,19 +426,6 @@ def validate_candidate(candidate: dict, mode: str) -> tuple[dict, dict[str, str]
             relation("SL_PCT", cleaned["SL_PCT"] > 0, "harus lebih besar dari nol saat Stop Loss aktif")
         if cleaned["USE_TP"]:
             relation("TP_PCT", cleaned["TP_PCT"] > 0, "harus lebih besar dari nol saat Take Profit aktif")
-        if cleaned["USE_RISK_PERCENT"]:
-            relation("RISK_PERCENT", cleaned["RISK_PERCENT"] > 0, "harus lebih besar dari nol")
-        else:
-            relation("POSITION_SIZE_USDT", cleaned["POSITION_SIZE_USDT"] > 0,
-                     "harus lebih besar dari nol saat sizing tetap")
-        bobot = sum(float(cleaned.get(k, 0)) for k in ("WATCHLIST_ENTRY_WEIGHT_EMA", "WATCHLIST_ENTRY_WEIGHT_RSI", "WATCHLIST_ENTRY_WEIGHT_MACD", "WATCHLIST_ENTRY_WEIGHT_HL"))
-        relation("WATCHLIST_ENTRY_WEIGHT_EMA", abs(bobot - 100.0) < 1e-6,
-                 "jumlah bobot EMA, RSI, MACD, dan higher-low harus tepat 100")
-        if raw_mode == "LIVE":
-            relation("MAX_POSITION_USDT", cleaned["MAX_POSITION_USDT"] > 0,
-                     "mode LIVE wajib memiliki plafon posisi lebih besar dari nol")
-        elif cleaned["MAX_POSITION_USDT"] == 0:
-            warnings.append("PAPER berjalan tanpa plafon posisi nominal.")
 
     return cleaned, errors, warnings
 
@@ -577,16 +462,6 @@ def diff_values(old: dict, new: dict) -> list[dict]:
 def dangerous_relaxations(old: dict, new: dict) -> list[str]:
     """Kembalikan perubahan LIVE yang menambah eksposur atau melepas guard."""
     relaxed: list[str] = []
-    if float(new.get("RISK_PERCENT", 0)) > float(old.get("RISK_PERCENT", 0)):
-        relaxed.append("RISK_PERCENT dinaikkan")
-    if (not bool(new.get("USE_RISK_PERCENT")) and
-            (bool(old.get("USE_RISK_PERCENT")) or
-             float(new.get("POSITION_SIZE_USDT", 0)) > float(old.get("POSITION_SIZE_USDT", 0)))):
-        relaxed.append("sizing tetap diaktifkan atau POSITION_SIZE_USDT dinaikkan")
-    old_max = float(old.get("MAX_POSITION_USDT", 0) or 0)
-    new_max = float(new.get("MAX_POSITION_USDT", 0) or 0)
-    if new_max == 0 or (old_max > 0 and new_max > old_max):
-        relaxed.append("MAX_POSITION_USDT dilonggarkan")
     for key, label in (
         ("USE_TP", "Take Profit dimatikan"),
         ("USE_STOP_LOSS", "Stop Loss dimatikan"),
@@ -608,16 +483,9 @@ def dangerous_relaxations(old: dict, new: dict) -> list[str]:
         ("MAX_DRAWDOWN_PERCENT", "MAX_DRAWDOWN_PERCENT dinaikkan"),
         ("MAX_DAILY_LOSS_PERCENT", "MAX_DAILY_LOSS_PERCENT dinaikkan"),
         ("SL_PCT", "jarak Stop Loss diperlebar"),
-        ("MAX_SPREAD_PCT", "batas spread entry diperlebar"),
     ):
         if float(new.get(key, 0)) > float(old.get(key, 0)):
             relaxed.append(label)
-    # MAX_CHASE_PCT longgar = boleh membeli makin jauh di atas harga sinyal;
-    # 0 berarti pagar dimatikan total, jadi transisi ke 0 juga dianggap relaksasi.
-    old_chase = float(old.get("MAX_CHASE_PCT", 0) or 0)
-    new_chase = float(new.get("MAX_CHASE_PCT", 0) or 0)
-    if (old_chase > 0 and new_chase == 0) or (old_chase > 0 and new_chase > old_chase):
-        relaxed.append("batas chase entry dilonggarkan")
     return relaxed
 
 

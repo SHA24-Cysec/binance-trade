@@ -1,259 +1,73 @@
-# binance-trade
+# Binance Trade
 
-Bot rotasi Binance Spot untuk mode PAPER dan LIVE. Bot memindai pair dengan quote asset yang sama, menyaring kandidat pump yang likuid, lalu mencari momentum scalping pada candle yang sudah tertutup.
+Bot Binance Spot dengan mode PAPER dan LIVE, monitoring pasar, pengelolaan posisi terbuka, kontrol manual, proteksi exit, serta riwayat transaksi.
 
-## Status utama
+## Status operasi
 
-- Satu entry long per rotasi, tanpa martingale dan tanpa averaging down.
-- Entry membutuhkan minimal 3 dari 4 konfirmasi: EMA9 cross EMA21, RSI sehat, MACD histogram menguat, dan higher low.
-- Volume harian dan rolling volume candle menjadi gerbang pump berlapis.
-- Exit default memakai ATR untuk menyesuaikan volatilitas, dengan fallback ke persentase lama.
-- Ukuran posisi memakai mode persen saldo atau nominal tetap, dengan plafon nominal opsional.
-- Dashboard menyediakan kontrol mode, kredensial, setelan, backtest portofolio, watchlist, riwayat, dan reset akun PAPER.
+Repository ini tidak memiliki jalur pembukaan posisi baru. Bot hanya:
 
-## Cara jalan cepat
+- memantau pasar dan watchlist secara read-only,
+- merekonsiliasi posisi yang sudah ada,
+- mengelola Stop Loss, Take Profit, breakeven, trailing, serta proteksi native exchange,
+- menjalankan penjualan manual melalui dashboard,
+- menyimpan state, log, dan riwayat secara terpisah per mode.
 
-Instalasi memakai versi yang dipin persis di requirements.txt (perbaikan
-audit 2026-09-27: file requirements.lock yang dulu dirujuk di sini tidak
-pernah ada di repo, sehingga perintah instalasinya selalu gagal):
+Backtest hanya memuat dan memvalidasi data historis. Backtest tidak membuat order atau trade baru.
 
-```bash
-python -m pip install -r requirements.txt
-python pump_scanner_bot.py --selftest
-python dashboard.py
-```
+## Struktur utama
 
-Mode default adalah PAPER. Mode LIVE wajib memakai API key dan secret produksi yang valid.
+- `config/`: konfigurasi aktif dan validasi settings.
+- `market/`: filter semesta pasar, likuiditas, volume, spread, dan kondisi BTC untuk monitoring.
+- `strategy/indicators.py`: parser candle, interval, ATR, serta perhitungan level exit.
+- `trading/`: bot, client Binance, paper engine, rekonsiliasi, dan pengelolaan exit.
+- `automation/`: penyegaran watchlist read-only.
+- `backtesting/`: pengambilan data historis, cache, penyimpanan SQLite temporary, dan ringkasan tanpa trade.
+- `web/` dan `templates/`: dashboard monitoring dan kontrol manual.
+- `tests/`: pengujian filter pasar, konfigurasi, penyimpanan, paper engine, exit, dan kontrol bot.
 
-## Struktur folder berdasarkan domain
+## Konfigurasi penting
 
-Kode produksi dikelompokkan langsung di folder domain pada root repository.
-Root menyimpan entry point, dokumentasi, konfigurasi proyek, template, dan test.
-Tidak ada folder pembungkus `binance_trade/` dan tidak ada shim modul produksi
-lama seperti `config.py`, `strategy.py`, atau `market_scanner.py`.
+Nilai default berada di `config/config.py`. Override per mode disimpan oleh dashboard pada file settings masing-masing mode.
 
-| Folder | Domain dan fungsi |
-| --- | --- |
-| `config/` | Konfigurasi mode PAPER atau LIVE, schema, dan validasi setelan |
-| `market/` | REST market data, WebSocket, scanner pasar, filter pump, dan sinyal pasar |
-| `strategy/` | Candle, parser klines, indikator momentum, sizing, dan level exit |
-| `trading/` | Bot utama dan alur trading |
-| `trading/clients/` | Abstraksi exchange, client Binance, client LIVE, dan client PAPER |
-| `trading/paper/` | Paper matching engine dan penyimpanan akun PAPER |
-| `backtesting/` | Backtest satu simbol, portfolio, cache, storage SQLite, dan data sintetis |
-| `web/` | Dashboard Flask dan API internal |
-| `automation/` | Penyegar watchlist read-only |
-| `infrastructure/storage/` | I/O atomik dan persistensi state |
-| `infrastructure/paths.py` | Resolusi root repository untuk file runtime dan template |
-| `infrastructure/process/` | Kontrol proses, lifecycle, lock, dan subprocess |
-| `infrastructure/security/` | Penyimpanan kredensial secara aman |
-| `infrastructure/network/` | Rate limiter request ke exchange |
-| `templates/` | Template dashboard |
-| `tests/` | Test suite regresi, keamanan, PAPER, LIVE guard, dan backtest |
+| Kelompok | Parameter |
+|---|---|
+| Sistem | `MODE`, `QUOTE_ASSET`, `LIVE_BASE_URL`, `USE_WEBSOCKET`, `MARKET_DATA_INTERVAL` |
+| Monitoring pasar | `MIN_QUOTE_VOLUME_USDT_24H`, `PUMP_MIN_24H_CHANGE_PCT`, `PUMP_VOLUME_SURGE_MULT`, `BTC_FILTER_ENABLED`, `BTC_MAX_DROP_PCT`, `BTC_LOOKBACK_BARS`, `EXTRA_EXCLUDE_SYMBOLS` |
+| Watchlist | `WATCHLIST_ENABLED`, `WATCHLIST_TOP_N` |
+| Exit posisi | `USE_TP`, `TP_PCT`, `USE_STOP_LOSS`, `SL_PCT`, `USE_ATR_EXIT`, `ATR_PERIOD`, `ATR_MULT_SL`, `ATR_MULT_TP`, `USE_BREAKEVEN`, `BE_TRIGGER_PCT`, `BE_LOCK_PCT`, `USE_TRAILING`, `TRAILING_START_PCT`, `TRAILING_STEP_PCT` |
+| Proteksi akun | `USE_EQUITY_STOP`, `MAX_DRAWDOWN_PERCENT`, `USE_DAILY_STOP`, `MAX_DAILY_LOSS_PERCENT`, `CLOSE_ALL_AT_LIMIT`, `DD_COOLDOWN_HOURS` |
+| Backtest data | `BACKTEST_INITIAL_EQUITY_USDT`, `BACKTEST_CACHE_ENABLED`, `BACKTEST_CACHE_FILE`, `BACKTEST_CACHE_FRESH_HOURS`, `BACKTEST_CACHE_TTL_DAYS` |
 
-Root entry point yang tetap didukung:
+API key dan secret tidak ditulis ke repository. Gunakan pengelolaan kredensial pada dashboard atau environment yang sesuai.
 
-- `python dashboard.py` untuk dashboard.
-- `python pump_scanner_bot.py --selftest` untuk selftest bot.
-- `python backtest.py --selftest` untuk selftest backtest satu simbol.
-- `python portfolio_backtest.py --selftest` untuk selftest backtest portofolio.
-- `python run.py` untuk membuka dashboard melalui launcher.
-
-## File penting
-
-| File aktif | Fungsi |
-| --- | --- |
-| `config/config.py` | Default config dan helper mode runtime |
-| `config/settings_schema.py` | Schema dan validasi setelan dashboard |
-| `strategy/indicators.py` | Struktur candle, parser klines, indikator momentum, sizing, dan level exit ATR |
-| `market/market_scanner.py` | Filter pasar, gerbang pump, rolling volume, dan deteksi sinyal momentum |
-| `trading/pump_scanner_bot.py` | Loop bot live atau paper |
-| `backtesting/backtest.py` | Backtest satu simbol dan selftest lokal |
-| `backtesting/portfolio_backtest.py` | Backtest portofolio lintas simbol |
-| `web/dashboard.py` | Server dashboard Flask dan API internal |
-| `templates/dashboard.html` | Tampilan dashboard |
-| `automation/watchlist_auto.py` | Penyegar watchlist read-only |
-
-## Sinyal momentum pump
-
-Sinyal entry hanya dievaluasi dari candle yang sudah close dan kronologis. Bot membutuhkan minimal 3 dari 4 konfirmasi berikut:
-
-1. EMA9 baru cross ke atas EMA21.
-2. RSI(14) berada pada zona 50 sampai 75.
-3. MACD histogram naik atau baru cross ke area positif.
-4. Higher low terbentuk setelah momentum awal.
-
-Sebelum konfirmasi indikator, volume candle konfirmasi harus memenuhi gerbang rolling:
-
-- `ROLLING_VOLUME_LOOKBACK_BARS` candle sebelumnya menjadi rata-rata pembanding.
-- Volume candle konfirmasi minimal `ROLLING_VOLUME_SURGE_MULT` kali rata-rata tersebut.
-- Jumlah candle yang wajib memenuhi syarat diatur oleh `ROLLING_VOLUME_CONFIRMATION_BARS`.
-- Candle yang sedang berjalan tidak boleh masuk ke perhitungan.
-
-Parameter utama:
-
-| Key | Makna |
-| --- | --- |
-| `CONFIRM_INTERVAL` | Interval candle konfirmasi |
-| `CONFIRM_LOOKBACK_BARS` | Jumlah candle tertutup yang diambil |
-| `SWING_PIVOT_WING_BARS` | Sayap kiri dan kanan untuk pivot low |
-| `ROLLING_VOLUME_FILTER_ENABLED` | Mengaktifkan filter volume rolling |
-| `ROLLING_VOLUME_LOOKBACK_BARS` | Jumlah candle pembanding volume |
-| `ROLLING_VOLUME_SURGE_MULT` | Pengali minimum volume konfirmasi |
-| `ROLLING_VOLUME_CONFIRMATION_BARS` | Jumlah candle terakhir yang wajib lolos |
-
-## Gerbang pump dan filter pasar
-
-Sebelum setup dievaluasi, kandidat harus lolos:
-
-- Quote asset sesuai `QUOTE_ASSET`.
-- Bukan stablecoin, bukan leveraged token, bukan blacklist manual.
-- Status simbol dapat diperdagangkan jika metadata tersedia.
-- Volume 24 jam minimal `MIN_QUOTE_VOLUME_USDT_24H`.
-- Kenaikan 24 jam minimal `PUMP_MIN_24H_CHANGE_PCT`.
-- Volume 24 jam minimal `PUMP_VOLUME_SURGE_MULT` kali rata-rata volume harian tertutup sebelumnya.
-- Volume candle konfirmasi memenuhi filter rolling sesuai parameter di atas.
-- Filter korelasi BTC menolak entry jika penurunan BTC melewati `BTC_MAX_DROP_PCT` dalam `BTC_LOOKBACK_BARS`.
-- Usia listing minimal `MIN_LISTING_AGE_DAYS` bila filter usia aktif.
-- Spread order book maksimal `MAX_SPREAD_PCT` sebelum entry.
-
-## Exit dan sizing
-
-Exit default memakai ATR:
-
-| Key | Makna |
-| --- | --- |
-| `USE_ATR_EXIT` | Mengaktifkan exit adaptif ATR |
-| `ATR_PERIOD` | Periode ATR |
-| `ATR_MULT_SL` | Jarak Stop Loss dalam ATR |
-| `ATR_MULT_TP` | Jarak Take Profit dalam ATR |
-| `ATR_MULT_TRAIL` | Jarak trailing dalam ATR |
-| `ATR_MULT_BE_TRIGGER` | Pemicu breakeven dalam ATR |
-| `ATR_MULT_BE_LOCK` | Jarak lock breakeven dalam ATR |
-| `ATR_MULT_TRAIL_START` | Pemicu trailing dalam ATR |
-| `SL_PCT`, `TP_PCT` | Fallback exit persen ketika ATR dimatikan |
-
-Sizing yang tersedia:
-
-| Key | Makna |
-| --- | --- |
-| `USE_RISK_PERCENT` | True memakai persentase saldo bebas |
-| `RISK_PERCENT` | Persentase saldo bebas yang dipakai saat mode persen aktif |
-| `POSITION_SIZE_USDT` | Nominal tetap saat mode persen mati |
-| `MAX_POSITION_USDT` | Plafon nominal per posisi |
-| `BALANCE_BUFFER_PCT` | Saldo yang sengaja tidak dibelanjakan |
-
-### Proteksi exchange-side LIVE
-
-Saat `MODE=LIVE`, `USE_STOP_LOSS=True`, `USE_TP=True`, dan `USE_NATIVE_OCO=True`,
-bot memasang satu OCO SELL Binance setelah BUY benar-benar terisi. Leg atas
-adalah `TAKE_PROFIT_LIMIT`, leg bawah adalah `STOP_LOSS_LIMIT`. Harga kedua leg
-dibulatkan ke `tickSize` dan divalidasi terhadap bid terbaru. Buffer limit OCO
-dapat diatur lewat `NATIVE_OCO_LIMIT_BUFFER_PCT`.
-
-Alur aman proteksi:
-
-- list client ID dan client ID kedua leg disimpan ke file state sebelum request POST;
-- bila POST timeout atau statusnya tidak pasti, bot tidak mengulang POST dan tidak
-  memasang proteksi kedua secara buta. Status dicari dengan query order-list;
-- sebelum exit manual atau exit lokal, OCO direkonsiliasi lalu dibatalkan. SELL
-  market ditahan bila cancel tidak dapat diverifikasi;
-- bila salah satu leg OCO berstatus FILLED, saldo direkonsiliasi dan bot tidak
-  mengirim SELL kedua;
-- bila client jelas tidak mendukung OCO atau validasi lokal gagal, bot dapat
-  memakai `STOP_LOSS` market native sebagai fallback. Error POST Binance yang
-  statusnya UNKNOWN tidak memicu fallback;
-- Take Profit, breakeven, dan trailing lokal tetap tersedia sebagai logika
-  exit, tetapi OCO menjadi proteksi exchange-side utama saat konfigurasi aktif;
-- kegagalan pemasangan tidak menghapus local SL. `reconciliation_required` tetap
-  aktif sehingga entry baru fail-closed.
-
-Implementasi ini tidak mengirim order ke LIVE selama selftest dan test suite.
-Pengujian integrasi order hanya boleh memakai fake client atau mode PAPER
-(simulasi eksekusi lokal, tanpa order sungguhan ke exchange).
-
-## Backtest
-
-Selftest lokal tanpa jaringan:
+## Menjalankan
 
 ```bash
-python backtest.py --selftest
+python run.py
 ```
 
-Backtest satu simbol memakai data publik Binance:
+Untuk selftest lokal tanpa jaringan:
 
 ```bash
-python backtest.py --symbol SOLUSDT --days 30
+python -m trading.pump_scanner_bot --selftest
+python -m backtesting.backtest --selftest
+python -m backtesting.portfolio_backtest --selftest
 ```
 
-Dashboard menjalankan backtest portofolio lintas simbol melalui API internal, dengan satu job berjalan pada satu waktu agar tidak membebani rate limit.
-
-Asumsi dan keterbatasan penting: model memakai OHLC candle, bukan order book atau
-antrian matching. Entry dan exit simulasi dianggap terisi penuh pada satu harga
-adverse, sehingga partial fill, depth yang habis, rejection filter, dan urutan
-tick di dalam candle belum dapat direkonstruksi. Gap pada open ditangani dengan
-harga open saat level exit sudah ditembus, dan bila SL serta TP tersentuh pada
-candle yang sama SL diprioritaskan secara konservatif.
-
-## Dashboard
-
-Jalankan:
-
-```bash
-python dashboard.py
-```
-
-Panel utama:
-
-- Kontrol mode PAPER atau LIVE.
-- Kredensial API.
-- Status proses bot.
-- Posisi aktif dan ringkasan akun.
-- Setelan runtime per mode.
-- Backtest portofolio.
-- Watchlist read-only.
-- Riwayat trade dan audit perubahan.
-
-## File runtime
-
-Nama file runtime dipisah per mode agar PAPER dan LIVE tidak tercampur, misalnya:
-
-- `pump_bot_state_paper.json`
-- `pump_bot_state_live.json`
-- `pump_bot_runtime.json`
-- `pump_bot_settings_paper.json`
-- `pump_bot_settings_live.json`
-- `watchlist_auto_paper.json`
-- `watchlist_auto_live.json`
-
-## Tes
-
-Jalankan seluruh suite:
+Untuk pengujian repository:
 
 ```bash
 pytest -q
 ```
 
-Selftest modul utama:
+## Keamanan operasi
 
-```bash
-python pump_scanner_bot.py --selftest
-python backtest.py --selftest
-python portfolio_backtest.py --selftest
-```
+- Jalur order bot hanya menerima `SELL` untuk pengelolaan posisi yang sudah ada.
+- Rekonsiliasi yang ambigu bersifat fail-closed dan meminta pemeriksaan manual.
+- Watchlist tidak mengirim order dan berhenti ketika posisi terbuka sedang dikelola.
+- Data PAPER dan LIVE menggunakan state, log, kontrol, dan settings yang terpisah.
+- File cache dan database backtest bersifat lokal dan tidak digunakan oleh jalur trading live.
 
-## Catatan risiko
+## Catatan pengembangan
 
-Trading crypto berisiko tinggi. Gunakan mode PAPER lebih dulu, pakai plafon nominal di LIVE, aktifkan equity stop dan daily stop, serta uji setelan pada rentang data yang cukup panjang sebelum memakai uang sungguhan.
-
-### Skor Entry Watchlist
-
-Kolom **Skor Entry** pada dashboard merupakan skor kedekatan sinyal
-entry real-time berdasarkan candle yang sudah ditutup: EMA, RSI, MACD histogram,
-dan higher-low. Daftar koin pantauan bersifat statis dari
-`config/config.py` (atau menu Settings), dan seluruh pergerakan harga serta volume diperbarui secara live per
-detik melalui streaming WebSocket resmi Binance.
-
-Perhitungan candle live dilakukan secara mandiri dengan cache TTL terpisah untuk
-menjaga efisiensi kuota request. Sistem panel watchlist bersifat read-only dan
-tidak mengubah keputusan trading bot.
+Perubahan konfigurasi harus didaftarkan di `config/settings_schema.py`. Perubahan yang menyentuh order, state, rekonsiliasi, atau proteksi exit wajib disertai pengujian regresi. ZIP distribusi dibuat menggunakan nama repository `binance-trade.zip` setelah audit dan pengujian selesai.

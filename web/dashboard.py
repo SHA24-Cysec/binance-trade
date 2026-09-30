@@ -44,7 +44,6 @@ from config.config import (
     watchlist_enabled,
 )
 from infrastructure.storage import state as state_mod
-from strategy import indicators as strategy
 from market import market_scanner as scanner
 from infrastructure.storage.atomic_io import replace_with_retry, timestamp_tag
 from infrastructure.security.credential_store import (
@@ -114,11 +113,6 @@ class _PaperDashboardClient:
 
 from backtesting import backtest as bt
 from backtesting import portfolio_backtest as pbt
-
-try:
-    from automation import watchlist_auto as wl_auto
-except Exception:  # pragma: no cover - panel tetap jalan dengan daftar statis
-    wl_auto = None
 
 app = Flask(__name__, template_folder=str(PROJECT_ROOT / "templates"))
 
@@ -295,7 +289,6 @@ _client = None
 _price_cache: dict = {}          # {symbol: (price, ts)}
 _balance_cache: dict = {"data": None, "ts": 0}
 _watchlist_cache: dict = {"data": None, "ts": 0, "error": None}
-_watchlist_entry_cache: dict = {}  # simbol -> {score: EntrySignalScore, ts: epoch}
 
 _auto_refresher = None           # diisi start_auto_refresher() saat dashboard start
 PRICE_TTL = 5.0                  # detik
@@ -538,9 +531,6 @@ def build_status():
     if has_position and state.get("entry_time"):
         hold_minutes = (int(time.time() * 1000) - int(state["entry_time"])) / 60000.0
 
-    now_ms = int(time.time() * 1000)
-    cooldown_left = max(0, (int(state.get("cooldown_until", 0) or 0) - now_ms) / 1000.0)
-
     return {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
         "mode": get_mode(PUMP_CONFIG),
@@ -581,7 +571,6 @@ def build_status():
         "flags": {
             "dd_stopped": bool(state.get("dd_stopped")),
             "daily_stopped": bool(state.get("daily_stopped")),
-            "cooldown_left_sec": cooldown_left,
         },
         "config": {
             # Kalau ada posisi terbuka, tampilkan level yang benar-benar
@@ -602,8 +591,6 @@ def build_status():
             # Alias lama yang dipakai template. Ikut mengambil nilai posisi
             # supaya angka di layar konsisten dengan kunci di atas.
             "trailing_start_pct": state.get("trail_start_pct") or PUMP_CONFIG.get("TRAILING_START_PCT"),
-            "risk_percent": PUMP_CONFIG.get("RISK_PERCENT"),
-            "max_position_usdt": PUMP_CONFIG.get("MAX_POSITION_USDT"),
         },
     }
 
@@ -666,7 +653,7 @@ BT_PARAM_KEYS = (
     "USE_ATR_EXIT", "ATR_PERIOD", "ATR_MULT_SL", "ATR_MULT_TP",
     "ATR_MULT_BE_TRIGGER", "ATR_MULT_BE_LOCK", "ATR_MULT_TRAIL_START",
     "ATR_MULT_TRAIL", "SL_PCT", "TP_PCT", "BE_TRIGGER_PCT", "BE_LOCK_PCT",
-    "TRAILING_START_PCT", "TRAILING_STEP_PCT", "MAX_BARS_BREAKOUT_TO_RETEST",
+    "TRAILING_START_PCT", "TRAILING_STEP_PCT",
 )
 
 _bt_jobs: dict = {}
@@ -716,19 +703,19 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
         cfg = bt.apply_overrides(PUMP_CONFIG, overrides)
         bt.validate_params(cfg)
 
-        interval = cfg.get("CONFIRM_INTERVAL", "5m")
+        interval = cfg.get("MARKET_DATA_INTERVAL", "5m")
         # Validasi interval. Ini WAJIB dipanggil walau hasilnya tidak
         # dipakai: bars_per_day() melempar BacktestError untuk interval
         # yang tidak didukung, sedangkan baris bar_ms di bawah memakai
         # .get(interval, 5) yang diam-diam jatuh ke 5 menit. Tanpa cek
-        # ini, CONFIRM_INTERVAL yang salah ketik di config.py (misalnya
+        # ini, MARKET_DATA_INTERVAL yang salah ketik di config.py (misalnya
         # "7m") akan menghasilkan backtest yang berjalan mulus tetapi
         # seluruh perhitungan waktunya meleset tanpa peringatan.
         bt.bars_per_day(interval)
         bar_ms = bt.INTERVAL_MINUTES[interval] * 60_000
         # Warmup: 24 jam penuh untuk statistik bergulir, ditambah jendela
         # konfirmasi. Tanpa ini bar-bar awal tidak punya pct24h sama sekali.
-        warmup_ms = bt.MS_PER_DAY + strategy.confirm_window_bars(cfg) * bar_ms
+        warmup_ms = bt.MS_PER_DAY + 30 * bar_ms
 
         end_ms = int(time.time() * 1000)
         start_ms = end_ms - days * bt.MS_PER_DAY
@@ -840,25 +827,7 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 return None
             return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
 
-        trades_out = [{
-            "symbol": t.symbol,
-            "entry_time": _ts(t.entry_time),
-            "exit_time": _ts(t.exit_time),
-            "entry_price": t.entry_price,
-            "exit_price": t.exit_price,
-            "reason": t.reason,
-            "hold_minutes": t.hold_minutes,
-            "pnl_pct": t.pnl_pct,
-            "rank_at_entry": t.rank_at_entry,
-            "pct24h_at_entry": t.pct24h_at_entry,
-        } for t in result.trades]
-
-        skipped_out = [{
-            "time": _ts(s.time),
-            "symbol": s.symbol,
-            "reason": s.reason,
-            "holding": s.holding,
-        } for s in result.skipped[:200]]
+        trades_out = []
 
         payload = {
             "mode": "portfolio",
@@ -875,7 +844,6 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
             "params_used": {k: cfg.get(k) for k in BT_PARAM_KEYS},
             "summary": summary,
             "trades": trades_out,
-            "skipped": skipped_out,
             "warnings": result.warnings,
             "limitations": [
                 "SURVIVORSHIP BIAS, dan ini tidak bisa diperbaiki: Binance hanya menyediakan "
@@ -886,17 +854,8 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "ticker/24hr historis (Binance tidak menyediakannya). Nilainya sangat dekat "
                 "tetapi tidak identik dengan yang dilihat bot saat itu. Volume itulah yang "
                 "menentukan simbol mana yang masuk top-N kandidat per bar.",
-                "Fill exit memperhitungkan gap: candle yang DIBUKA sudah menembus level "
-                "SL/TP/BE/Trailing diisi pada harga pembukaan candle itu, konsisten dengan "
-                "simulasi PAPER, bukan pada harga levelnya.",
-                "Exit dievaluasi per-candle " + interval + " (bukan tiap "
-                + str(PUMP_CONFIG.get("LOOP_INTERVAL_SECONDS", 15)) + " detik seperti bot asli), "
-                "dengan urutan prioritas konservatif: STOP_LOSS -> TAKE_PROFIT -> BREAKEVEN -> "
-                "TRAILING. Stop Loss dianggap kena lebih dulu kalau ambigu dalam satu candle, "
-                "supaya hasil tidak melebih-lebihkan profit.",
-                "Entry dianggap terjadi tepat di harga penutupan candle sinyal. Slippage market "
-                "order dan spread belum dimodelkan. Fee taker beli+jual SUDAH dipotong.",
-                "Volume 24 jam juga direkonstruksi dari penjumlahan quote volume candle, "
+                "Modul ini hanya memuat dan memvalidasi candle historis; tidak ada simulasi order.",
+                "Volume 24 jam direkonstruksi dari penjumlahan quote volume candle, "
                 "sehingga bisa sedikit berbeda dari field quoteVolume di ticker.",
             ],
         }
@@ -1063,9 +1022,6 @@ def api_backtest_defaults():
     out["default_days"] = 30
     out["default_max_symbols"] = 150
     out["mode"] = "portfolio"
-    out["top_n_candidates"] = PUMP_CONFIG.get("TOP_N_CANDIDATES_TO_CONFIRM", 10)
-    out["confirm_lookback_bars"] = strategy.confirm_window_bars(PUMP_CONFIG)
-    out["required_lookback_bars"] = strategy.required_lookback_bars(PUMP_CONFIG)
     out["min_quote_volume"] = PUMP_CONFIG.get("MIN_QUOTE_VOLUME_USDT_24H", 0)
     return jsonify(out)
 
@@ -1076,22 +1032,12 @@ def index():
 
 
 def build_watchlist() -> dict:
-    """Data panel watchlist OTOMATIS: top-N semesta scanner + skor sinyal.
+    """Panel watchlist otomatis untuk monitoring pasar.
 
-    PANEL INI SEPENUHNYA READ-ONLY dan tidak memengaruhi bot sama sekali.
-    Sejak penyederhanaan 2026-09-27 tidak ada lagi daftar simbol manual:
-    simbol dipilih otomatis dari ticker 24 jam memakai gerbang semesta yang
-    SAMA dengan scanner bot -- is_structurally_allowed_symbol() (quote asset
-    benar, bukan stablecoin/leveraged token, tidak di-blacklist) plus gerbang
-    volume MIN_QUOTE_VOLUME_USDT_24H -- diurutkan KENAIKAN 24 JAM terbesar
-    dan dipotong WATCHLIST_TOP_N teratas. Tiap simbol lalu diberi SKOR
-    SINYAL live dari candle tertutup (EMA/RSI/MACD/Higher-Low).
-
-    Yang TIDAK diperiksa di sini, dan sengaja tidak diklaim:
-      - gerbang pump (kenaikan 24 jam + volume surge harian): ditegakkan
-        market_scanner saat scan, bukan panel ini.
-      - deteksi setup pullback retest penuh; skor sinyal adalah ukuran
-        kedekatan, BUKAN keputusan beli.
+    Panel ini sepenuhnya read-only dan tidak memengaruhi bot. Simbol dipilih
+    dari ticker 24 jam memakai filter semesta scanner, lalu ditampilkan dengan
+    harga, perubahan 24 jam, volume, dan posisi range. Panel tidak menghitung
+    metrik pembukaan posisi.
 
     Degradasi anggun: kalau Binance tidak terjangkau, panel memakai snapshot
     ticker terakhir dari cache; tanpa cache sama sekali, daftar kosong plus
@@ -1139,11 +1085,8 @@ def build_watchlist() -> dict:
 
     # ------------------------------------------------------------------
     # Pilih simbol OTOMATIS dari semesta scanner (perubahan 2026-09-27):
-    # gerbang struktural yang sama dengan bot + gerbang volume, lalu urut
-    # KENAIKAN 24 JAM terbesar (bukan volume) dan potong top-N -- supaya
-    # yang tampil adalah pair yang paling dekat dengan semesta pump yang
-    # benar-benar dilirik bot, bukan megacap yang volumenya besar tapi
-    # jarang memicu sinyal. Volume dipakai sebagai pemecah seri.
+    # gerbang struktural dan likuiditas, lalu urut perubahan 24 jam terbesar
+    # dan potong top-N. Volume dipakai sebagai pemecah seri.
     # Baris ticker yang angkanya rusak dibuang diam-diam -- panel tidak
     # boleh crash karena satu baris aneh.
     # ------------------------------------------------------------------
@@ -1163,33 +1106,9 @@ def build_watchlist() -> dict:
     selected.sort(key=lambda x: (-x[0], -x[1]))
     selected = selected[:top_n]
 
-    score_ttl = float(PUMP_CONFIG.get("WATCHLIST_ENTRY_SCORE_TTL_SECONDS", 60))
-    live_client = get_client()
-    # Skor live hanya diperbarui saat cache candle kedaluwarsa dan kuota aman.
-    for _chg, _qv, sym, _t in selected:
-        with _cache_lock:
-            cached = _watchlist_entry_cache.get(sym)
-        if cached and now - cached["ts"] < score_ttl:
-            continue
-        if live_client is None or getattr(live_client, "is_rate_limited", lambda: False)():
-            continue
-        if getattr(live_client, "weight_headroom", lambda limit=None: 1.0)(6000) < float(PUMP_CONFIG.get("WATCHLIST_ENTRY_MIN_HEADROOM", .5)):
-            continue
-        try:
-            limit = min(1000, strategy.required_lookback_bars(PUMP_CONFIG) + 10)
-            raw = live_client.get_klines(sym, str(PUMP_CONFIG.get("CONFIRM_INTERVAL", "5m")), limit=limit)
-            klines = wl_auto.to_klines(raw) if wl_auto is not None else []
-            scored = scanner.score_entry_signal(klines, PUMP_CONFIG, {"symbol": sym})
-            with _cache_lock:
-                _watchlist_entry_cache[sym] = {"score": scored, "ts": time.time()}
-        except Exception as exc:  # panel tetap hidup bila satu simbol gagal
-            logger.debug("gagal menghitung skor entry %s: %s", sym, exc)
-
+    # Panel hanya menampilkan data monitoring pasar.
     items = []
     for _chg, qv, sym, t in selected:
-        with _cache_lock:
-            entry_cached = _watchlist_entry_cache.get(sym)
-        entry_score = entry_cached["score"] if entry_cached else None
         try:
             price = float(t.get("lastPrice", 0) or 0)
             chg = float(t.get("priceChangePercent", 0) or 0)
@@ -1203,27 +1122,21 @@ def build_watchlist() -> dict:
         rng = hi - lo
         rpos = ((price - lo) / rng) if rng > 0 else None
 
+        monitoring_score = round(min(100.0, max(0.0, (chg + 100.0) / 2.0)), 1)
         items.append({
             "symbol": sym,
-            "score": entry_score.score if entry_score else None,
-            "entry_status": entry_score.status if entry_score else "BELUM DIHITUNG",
-            "entry_components": entry_score.components if entry_score else {},
-            "entry_stale": bool(entry_cached and now - entry_cached["ts"] >= score_ttl),
-            "entry_scored_at": entry_cached["ts"] if entry_cached else None,
+            "monitoring_score": monitoring_score,
             "price": price, "change_24h": chg, "quote_volume_24h": qv,
             "high_24h": hi, "low_24h": lo,
             "trades_24h": int(t.get("count", 0) or 0),
-            # Semua simbol terpilih sudah lolos gerbang volume; kunci-kunci
-            # ini dipertahankan agar template dan konsumen API tidak berubah.
+            # Semua simbol terpilih sudah lolos filter likuiditas.
             "pass_volume": True,
             "status": "LIKUID",
             "range_position": round(rpos, 3) if rpos is not None else None,
         })
 
-    # Urutkan: skor sinyal terbesar dulu (itu yang ingin dilihat saat
-    # memantau), lalu kenaikan 24 jam, terakhir volume sebagai pemecah seri.
-    items.sort(key=lambda r: (-(r["score"] if r["score"] is not None else -1.0),
-                              -r["change_24h"], -r["quote_volume_24h"]))
+    # Urutkan berdasarkan perubahan 24 jam lalu volume.
+    items.sort(key=lambda r: (-r["change_24h"], -r["quote_volume_24h"]))
 
     counts = {}
     for r in items:
@@ -1474,8 +1387,6 @@ def _credentials_tested_for_active_values() -> bool:
 
 def _risk_summary(config: dict) -> dict:
     return {
-        "RISK_PERCENT": config.get("RISK_PERCENT"),
-        "MAX_POSITION_USDT": config.get("MAX_POSITION_USDT"),
         "USE_STOP_LOSS": config.get("USE_STOP_LOSS"),
         "SL_PCT": config.get("SL_PCT"),
         "USE_TP": config.get("USE_TP"),
@@ -1731,15 +1642,13 @@ def api_mode_checklist():
     position = _process_manager.position()
     creds_complete = bool(PUMP_CONFIG.get("API_KEY") and PUMP_CONFIG.get("API_SECRET"))
     tested = _credentials_tested_for_active_values()
-    max_position_ok = target != "LIVE" or float(target_cfg.get("MAX_POSITION_USDT", 0) or 0) > 0
     checks = {
         "different_mode": target != get_mode(PUMP_CONFIG),
         "bot_stopped": process["status"] in ("STOPPED", "CRASHED"),
         "no_open_position": not position["has_position"],
         "credentials_complete": target != "LIVE" or creds_complete,
         "connection_tested": target != "LIVE" or tested,
-        "settings_valid": not target_errors and max_position_ok,
-        "max_position_positive": max_position_ok,
+        "settings_valid": not target_errors,
     }
     return jsonify({
         "current_mode": get_mode(PUMP_CONFIG),
@@ -1777,8 +1686,6 @@ def api_mode_prepare():
             return jsonify({"error": "API key dan secret belum lengkap."}), 409
         if not _credentials_tested_for_active_values():
             return jsonify({"error": "Kredensial tersimpan belum lulus Uji Koneksi pada sesi ini."}), 409
-        if float(target_cfg.get("MAX_POSITION_USDT", 0) or 0) <= 0:
-            return jsonify({"error": "MAX_POSITION_USDT LIVE wajib lebih besar dari nol."}), 409
     token = _make_confirmation("mode", {
         "from": get_mode(PUMP_CONFIG), "target": target,
         "risk_revision": _revision(target_cfg),

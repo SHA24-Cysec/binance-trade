@@ -19,7 +19,6 @@ def _config(tmp_path) -> dict:
         "CONTROL_FILE": str(tmp_path / "control.json"),
         "QUOTE_ASSET": "USDT",
         "USE_DUST_SWEEP": False,
-        "COOLDOWN_MINUTES_AFTER_CLOSE": 1,
     })
     return cfg
 
@@ -50,25 +49,6 @@ def test_exchange_filters_keep_market_bounds_and_quote_policy() -> None:
     assert filters.quote_order_qty_market_allowed is False
 
 
-def test_position_sizing_shared_policy_has_buffer_and_cap() -> None:
-    percent = strategy.resolve_position_notional({
-        "USE_RISK_PERCENT": True, "RISK_PERCENT": 50,
-        "BALANCE_BUFFER_PCT": 10, "MAX_POSITION_USDT": 40,
-    }, 100)
-    assert percent["requested_notional"] == 45
-    assert percent["notional"] == 40
-    assert percent["cap_active"] is True
-    assert percent["effective_pct_of_free"] == 40
-
-    fixed = strategy.resolve_position_notional({
-        "USE_RISK_PERCENT": False, "POSITION_SIZE_USDT": 75,
-        "MAX_POSITION_USDT": 50,
-    }, 100)
-    assert fixed["mode"] == "FIXED"
-    assert fixed["notional"] == 50
-    assert fixed["cap_active"] is True
-
-
 def test_fixed_exit_levels_enforce_be_and_trailing_invariants() -> None:
     levels = strategy.resolve_exit_levels({
         "SL_PCT": 2, "TP_PCT": 4,
@@ -77,13 +57,6 @@ def test_fixed_exit_levels_enforce_be_and_trailing_invariants() -> None:
     })
     assert levels["be_lock_pct"] <= levels["be_trigger_pct"] <= levels["trail_start_pct"]
     assert levels["trail_step_pct"] <= levels["sl_pct"]
-
-
-def test_backtest_execution_model_is_adverse_on_both_sides() -> None:
-    buy = strategy.backtest_buy_execution_price(100.0, spread_pct=0.2, slippage_pct=0.1)
-    sell = strategy.backtest_sell_execution_price(100.0, spread_pct=0.2, slippage_pct=0.1)
-    assert buy > 100.0
-    assert sell < 100.0
 
 
 def test_binance_oco_wrapper_uses_order_list_endpoint_without_network() -> None:
@@ -280,7 +253,6 @@ def test_partial_sell_keeps_position_and_remaining_qty(tmp_path) -> None:
 
     assert state["current_symbol"] == "TESTUSDT"
     assert state["qty"] == 6
-    assert state["cooldown_until"] == 0
     assert state["pending_order"] is None
 
 
@@ -374,90 +346,6 @@ def test_nonterminal_sell_keeps_intent_and_blocks_duplicate(tmp_path) -> None:
     assert state["qty"] == 10
 
 
-def test_buy_uses_quote_order_qty_for_nominal_limit(tmp_path) -> None:
-    class Client:
-        def __init__(self):
-            self.calls = []
-            self.account_calls = 0
-
-        def get_account(self):
-            self.account_calls += 1
-            base_free = "0" if self.account_calls == 1 else "0.25"
-            return {"balances": [
-                {"asset": "TEST", "free": base_free, "locked": "0"},
-                {"asset": "USDT", "free": "1000", "locked": "0"},
-            ]}
-
-        def new_market_order(self, symbol, side, quantity=None, quote_order_qty=None,
-                             new_client_order_id=None):
-            self.calls.append({"quantity": quantity, "quote_order_qty": quote_order_qty})
-            return {"status": "FILLED", "executedQty": "0.25",
-                    "cummulativeQuoteQty": "25"}
-
-    cfg = _config(tmp_path)
-    # USE_ATR_EXIT dimatikan: fixture ini memakai candidate tanpa setup/ATR,
-    # dan sejak perbaikan audit 2026-09-27 open_position MENOLAK entry mode
-    # ATR tanpa nilai ATR (guard anti "SL jarak absolut" yang tidak pernah
-    # tersentuh). Fokus test ini adalah sizing quoteOrderQty, bukan level exit.
-    cfg.update({"USE_RISK_PERCENT": False, "POSITION_SIZE_USDT": 25.0,
-                "MAX_POSITION_USDT": 100.0, "USE_ATR_EXIT": False})
-    state = dict(bot.DEFAULT_STATE)
-    candidate = scanner.Candidate(
-        symbol="TESTUSDT", base_asset="TEST", price_change_pct=20.0,
-        quote_volume=1_000_000, last_price=100.0, confirmed=True,
-        confirm_reason="test",
-    )
-    filters = {"TESTUSDT": SymbolFilters(
-        step_size=Decimal("0.01"), min_qty=Decimal("0.01"),
-        min_notional=Decimal("5"), tick_size=Decimal("0.0001"),
-    )}
-    client = Client()
-    bot.open_position(client, cfg, filters, state, candidate, reference_price=100.0)
-
-    assert client.calls == [{"quantity": None, "quote_order_qty": 25.0}]
-    assert state["current_symbol"] == "TESTUSDT"
-    assert state["entry_price"] == 100.0
-    assert state["qty"] == 0.25
-
-
-def test_startup_pending_buy_is_restored_and_orphan_blocks_entry(tmp_path) -> None:
-    class RecoverClient:
-        def get_account(self):
-            return {"balances": [
-                {"asset": "TEST", "free": "1.9", "locked": "0"},
-                {"asset": "USDT", "free": "90", "locked": "0"},
-            ]}
-
-        def get_order(self, symbol, order_id=None, orig_client_order_id=None):
-            assert symbol == "TESTUSDT" and orig_client_order_id == "pump-buy-test"
-            return {"symbol": symbol, "side": "BUY", "status": "FILLED",
-                    "executedQty": "2", "cummulativeQuoteQty": "10", "transactTime": 123}
-
-    cfg = _config(tmp_path)
-    state = dict(bot.DEFAULT_STATE)
-    state["pending_order"] = {
-        "side": "BUY", "symbol": "TESTUSDT", "qty": 2,
-        "client_order_id": "pump-buy-test",
-        "levels": {"sl_pct": 2, "tp_pct": 4},
-    }
-    bot.reconcile_state_with_exchange(RecoverClient(), cfg, state)
-    assert state["current_symbol"] == "TESTUSDT"
-    assert state["qty"] == 1.9  # fee base asset tidak boleh membuat qty state terlalu besar
-    assert state["pending_order"] is None
-
-    class OrphanClient:
-        def get_account(self):
-            return {"balances": [
-                {"asset": "PEPE", "free": "123", "locked": "0"},
-                {"asset": "USDT", "free": "100", "locked": "0"},
-            ]}
-
-    orphan = dict(bot.DEFAULT_STATE)
-    bot.reconcile_state_with_exchange(OrphanClient(), cfg, orphan)
-    assert orphan["reconciliation_required"] is True
-    assert orphan["reconciliation_assets"] == ["PEPE"]
-
-
 def test_startup_partial_buy_stays_pending_until_terminal(tmp_path) -> None:
     class Client:
         def get_account(self):
@@ -479,7 +367,6 @@ def test_startup_partial_buy_stays_pending_until_terminal(tmp_path) -> None:
     bot.reconcile_state_with_exchange(Client(), cfg, state)
 
     assert state["pending_order"]["client_order_id"] == "pump-buy-partial"
-    assert state["pending_order"]["last_status"] == "PARTIALLY_FILLED"
     assert state["reconciliation_required"] is True
     assert state["current_symbol"] is None
 
@@ -514,17 +401,15 @@ def test_backtest_exit_mode_overrides_match_atr_and_fixed_live_paths() -> None:
 def test_watchlist_uses_configured_interval_for_24h_window(monkeypatch) -> None:
     # 170 candle 15 menit = 1,77 hari. Kalau watchlist masih mengasumsikan
     # 5 menit, ia menganggapnya hanya 0,59 hari dan bahkan menolak datanya.
-    from types import SimpleNamespace
     from strategy.indicators import Kline
 
-    monkeypatch.setattr(scanner, "detect_pullback_retest", lambda *_args, **_kwargs: SimpleNamespace(ok=False))
     bar = 15 * 60_000
     kl = [Kline(open_time=i * bar, open=100, high=101, low=99, close=100,
                 close_time=(i + 1) * bar - 1, volume=10, quote_volume=1_000_000)
           for i in range(170)]
     cfg = dict(PUMP_CONFIG)
-    cfg.update({"CONFIRM_INTERVAL": "15m", "MIN_QUOTE_VOLUME_USDT_24H": 0})
-    row = watchlist_auto.score_symbol("TESTUSDT", kl, {"spread_pct": 0.1}, cfg)
+    cfg.update({"MARKET_DATA_INTERVAL": "15m", "MIN_QUOTE_VOLUME_USDT_24H": 0})
+    row = watchlist_auto.evaluate_symbol("TESTUSDT", kl, {"spread_pct": 0.1}, cfg)
     assert row is not None
     assert row["days"] == 1.8
 

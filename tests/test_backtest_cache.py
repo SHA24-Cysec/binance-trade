@@ -258,36 +258,6 @@ def test_simbol_gagal_tetap_masuk_daftar_gagal_walau_cache_aktif(cache):
 # 4. Hasil simulasi tidak berubah karena cache
 # ======================================================================
 
-def test_hasil_simulasi_sama_dengan_dan_tanpa_cache(tmp_path):
-    from tests.test_portfolio_backtest import (config_uji, data_dua_simbol,
-                                               harian_dari)
-    data = data_dua_simbol()
-    harian = harian_dari(data)
-    klien = KlienPencatat(data)
-    awal = min(k.open_time for kl in data.values() for k in kl)
-    akhir = max(k.open_time for kl in data.values() for k in kl)
-
-    def jalankan(cache_obj):
-        with KlineStore.create_temp() as store:
-            berhasil, _gagal = pbt.fetch_universe_klines(
-                klien, list(data), "5m", awal, akhir, store, cache=cache_obj)
-            for sym in berhasil:
-                store.write_daily(sym, harian[sym])
-            store.finish_writing()
-            return pbt.run_portfolio_backtest(store, config_uji(), "5m")
-
-    tanpa = jalankan(None)
-    with KlineCache(str(tmp_path / "c.sqlite3")) as c:
-        dengan_dingin = jalankan(c)
-        dengan_hangat = jalankan(c)
-
-    for lain in (dengan_dingin, dengan_hangat):
-        assert [(t.symbol, t.entry_time, t.exit_time, t.reason, t.pnl_pct)
-                for t in lain.trades] == [
-            (t.symbol, t.entry_time, t.exit_time, t.reason, t.pnl_pct)
-            for t in tanpa.trades]
-        assert lain.final_equity == tanpa.final_equity
-
 
 # ======================================================================
 # 5. Perawatan cache

@@ -443,10 +443,10 @@
     <div class="wl-scroll">
       <table class="wl" id="wlTable">
         <thead><tr>
-          <th>Simbol</th><th>Skor Entry</th><th>Harga</th><th>24 Jam</th>
+          <th>Simbol</th><th>Harga</th><th>24 Jam</th>
           <th>Menuju Ambang Volume</th><th>Volume 24J</th><th>Posisi Range</th><th>Status</th>
         </tr></thead>
-        <tbody id="wlBody"><tr><td colspan="8" class="empty">Memuat watchlist…</td></tr></tbody>
+        <tbody id="wlBody"><tr><td colspan="7" class="empty">Memuat watchlist…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -693,45 +693,23 @@
       <div class="grid cards" style="margin-bottom:14px" id="btCards"></div>
       <div class="grid cols" style="margin-bottom:14px">
         <div class="panel" style="background:var(--panel2)">
-          <h2 style="font-size:13px">📈 Kurva Return Kumulatif (Backtest)</h2>
+          <h2 style="font-size:13px">📈 Status Data Historis</h2>
           <div id="btChartWrap" class="chart-wrap"></div>
         </div>
         <div class="panel" style="background:var(--panel2)">
-          <h2 style="font-size:13px">ℹ️ Info & Parameter Dipakai</h2>
+          <h2 style="font-size:13px">ℹ️ Info Data</h2>
           <div class="posbox" id="btInfoBox"></div>
         </div>
       </div>
-      <div class="grid cols" style="margin-bottom:14px">
-        <div class="panel" style="background:var(--panel2)">
-          <h2 style="font-size:13px">🏆 Kontribusi per Simbol</h2>
-          <div id="btSymbolBox"></div>
-        </div>
-        <div class="panel" style="background:var(--panel2)">
-          <h2 style="font-size:13px">🚫 Sinyal Terlewat <span class="mut" style="font-weight:400;font-size:11.5px" id="btSkipCount"></span></h2>
-          <p class="mut" style="font-size:11.5px;margin-bottom:10px;line-height:1.6">
-            Peluang yang lolos semua filter tetapi TIDAK bisa diambil karena bot hanya
-            boleh memegang satu posisi. Inilah yang dihitung sebagai trade oleh backtest
-            satu simbol, sehingga hasilnya terlihat jauh lebih bagus dari kenyataan.
-          </p>
-          <div id="btSkipBox"></div>
-        </div>
-      </div>
       <div class="panel" style="background:var(--panel2);margin-bottom:14px">
-        <h2 style="font-size:13px">⚠️ Keterbatasan Backtest Ini</h2>
+        <h2 style="font-size:13px">⚠️ Batasan Backtest</h2>
         <ul id="btLimitList" style="padding-left:18px;font-size:12px;color:var(--muted);line-height:1.9"></ul>
       </div>
       <div class="panel" style="background:var(--panel2)">
-        <h2 style="font-size:13px">🧾 Riwayat Trade Hasil Simulasi <span class="mut" style="font-weight:400" id="btTradeCount"></span></h2>
-        <div style="overflow-x:auto">
-          <table>
-            <thead><tr><th>Simbol</th><th>Masuk</th><th>Keluar</th><th>Entry</th><th>Exit</th><th>Peringkat</th><th>Hold</th><th>PnL %</th><th>Alasan</th></tr></thead>
-            <tbody id="btTradeBody"></tbody>
-          </table>
-        </div>
+        <h2 style="font-size:13px">🧾 Status Simulasi</h2>
+        <div class="posbox" id="btTradeBody"><div class="empty">Backtest tidak membuat trade atau order baru.</div></div>
       </div>
     </div>
-  </div>
-
   </div><!-- /paneBacktest -->
 
   <!-- MODAL KONFIRMASI START / STOP / RESTART -->
@@ -896,9 +874,6 @@ function reasonTag(r){
     if(k.includes('TAKE_PROFIT')) return '<span class="tag tp">TP</span>';
     if(k.includes('BREAKEVEN')) return '<span class="tag be">BE</span>';
     if(k.includes('TRAILING')) return '<span class="tag tr">TRAIL</span>';
-    // Riwayat lama masih bisa menyimpan MOMENTUM_FADE. Ditandai "(lama)" supaya
-    // jelas itu berasal dari strategi yang sudah tidak dipakai lagi.
-    if(k.includes('MOMENTUM')) return '<span class="tag fade">FADE (lama)</span>';
     if(k.includes('MANUAL_CLOSE')) return '<span class="tag manual">MANUAL</span>';
     return '<span class="tag dry">'+esc(k)+'</span>';
   });
@@ -942,7 +917,6 @@ function renderStatus(s){
   let flags=[];
   if(s.flags.dd_stopped) flags.push('🛑 DD-STOP aktif');
   if(s.flags.daily_stopped) flags.push('🛑 DAILY-STOP aktif');
-  if(s.flags.cooldown_left_sec>1) flags.push('⏳ cooldown '+Math.round(s.flags.cooldown_left_sec)+'s');
   document.getElementById('footer').innerHTML='Dashboard kontrol lokal · settings PAPER dan LIVE disimpan terpisah.'+(flags.length?' &nbsp;|&nbsp; '+flags.join(' · '):'');
 
   // position box
@@ -989,8 +963,7 @@ function renderStatus(s){
     <div class="posrow"><span class="k">Take Profit</span><span class="v mono">${esc(c.tp_pct)}${c.exit_source==='ATR'?' harga':'%'}</span></div>
     <div class="posrow"><span class="k">Trigger Breakeven</span><span class="v mono">${esc(c.be_trigger_pct)}%</span></div>
     <div class="posrow"><span class="k">Mulai Trailing</span><span class="v mono">${esc(c.trailing_start_pct)}%</span></div>
-    <div class="posrow"><span class="k">Risk per entry</span><span class="v mono">${esc(c.risk_percent)}%</span></div>
-    <div class="posrow"><span class="k">Maks posisi</span><span class="v mono">${fmt(c.max_position_usdt)} ${esc(s.quote)}</span></div>`;
+    `;
 }
 
 // ======================= JUAL SEKARANG (MANUAL) =======================
@@ -1153,10 +1126,7 @@ function renderChart(trades){
 }
 
 // ======================= WATCHLIST (READ-ONLY) =======================
-// Panel ini MURNI MEMANTAU. Tidak ada satu pun elemen di sini yang
-// mengirim perintah ke bot, dan status "LIKUID" hanya berarti koin itu
-// lolos gerbang volume scanner, BUKAN jaminan bot akan membeli: deteksi
-// setup pullback retest dan cek operasional lain tidak dihitung di sini.
+// Panel ini MURNI MEMANTAU dan tidak mengirim perintah ke bot.
 
 // Volume ditulis ringkas supaya kolomnya tidak melebar: 1,2 jt / 340 rb.
 function wlVol(v){
@@ -1324,13 +1294,12 @@ function renderWatchlist(w){
     note.innerHTML=`Daftar ini disusun <b>otomatis</b>: ${fmt(cfg.top_n||15,0)} pair ${esc(cfg.quote_asset||'USDT')} `+
       `dengan <b>kenaikan 24 jam terbesar</b> yang lolos semesta scanner bot (bukan stablecoin/leveraged token, volume 24 jam ≥ ${wlVol(cfg.min_quote_volume_24h)}). `+
       `<b>Hanya untuk dipantau</b>, tidak mengubah perilaku bot. `+
-      `Kolom <b>Skor Entry</b> menampilkan skor kedekatan sinyal masuk real-time `+
-      `berdasarkan candle tertutup (EMA cross, RSI, MACD histogram, Higher-Low).`;
+      `Panel ini hanya menampilkan data monitoring pasar.`;
   }
 
   const tb=document.getElementById('wlBody');
   if(!items.length){
-    tb.innerHTML='<tr><td colspan="8" class="empty">Belum ada pair yang lolos gerbang volume scanner (atau data pasar belum terambil).</td></tr>';
+    tb.innerHTML='<tr><td colspan="7" class="empty">Belum ada pair yang lolos gerbang volume scanner (atau data pasar belum terambil).</td></tr>';
     return;
   }
 
@@ -1358,19 +1327,8 @@ function renderWatchlist(w){
       : `<span class="mono">${fmt(r.range_position*100,0)}%</span>`;
 
     const volCls=r.pass_volume===false?' class="mut"':'';
-    const scoreTxt=(r.score===null||r.score===undefined)?'':` · skor entry ${fmt(r.score,1)}`;
-    const entryStatus=r.entry_status||'BELUM DIHITUNG';
-    const entryCls=safeEntryClass(entryStatus);
-    const comp=r.entry_components||{};
-    const stale=r.entry_stale?' · data lama, menunggu kuota':'';
-    const entryTitle=`${entryStatus}${scoreTxt} · EMA ${fmt(comp.ema||0,1)}, RSI ${fmt(comp.rsi||0,1)}, MACD ${fmt(comp.macd||0,1)}, HL ${fmt(comp.higher_low||0,1)}${stale}`;
-    const scoreNumHtml=(r.score!==null&&r.score!==undefined&&entryStatus!=='BELUM DIHITUNG')
-      ? `<span class="mono" style="margin-left:6px;font-weight:700;font-size:11.5px">${fmt(r.score,1)}</span>`
-      : '';
-
     return `<tr id="wl-row-${esc(r.symbol)}"${rowCls}>
       <td><span class="wl-sym">${esc(r.symbol)}</span></td>
-      <td><span class="tag ${entryCls}" title="${esc(entryTitle)}">${esc(entryStatus)}</span>${scoreNumHtml}</td>
       <td class="mono wl-p">${fmtP(r.price)}</td>
       <td class="mono wl-c ${cls(r.change_24h)}">${r.change_24h===null?'-':sign(r.change_24h)+fmt(r.change_24h,2)+'%'}</td>
       <td class="wl-b">${bar}</td>
@@ -1418,12 +1376,6 @@ setInterval(refresh, 1000);
 const esc = v => String(v===null||v===undefined?'':v).replace(/[&<>"']/g, c=>({
   '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
 }[c]));
-/* Kelas warna badge status skor sinyal (tier manual sudah dihapus;
-   kelas CSS ti-* dipakai ulang murni sebagai palet warna). */
-const safeEntryClass = v => {
-  const k=String(v===null||v===undefined?'':v).toUpperCase();
-  return ({SIAP:'ti-inti',MENDEKAT:'ti-aktif',AWAL:'ti-spekulatif',JAUH:'ti-lainnya','TIDAK LOLOS':'st-tipis','BELUM DIHITUNG':'ti-lainnya'})[k] || 'ti-lainnya';
-};
 const safeLogClass = v => {
   const k=String(v===null||v===undefined?'':v).toUpperCase();
   return ({INFO:'INFO',WARNING:'WARNING',WARN:'WARNING',ERROR:'ERROR',DEBUG:'DEBUG'})[k] || 'INFO';
@@ -1502,7 +1454,7 @@ async function loadModeChecklist(){
   try{
     const r=await fetch('/api/mode/checklist?target='+encodeURIComponent(target),{cache:'no-store'}),d=await r.json();
     if(!r.ok)throw new Error(d.error||'Checklist gagal.');
-    const labels={different_mode:'Target berbeda dari mode aktif',bot_stopped:'Bot sudah STOPPED',no_open_position:'Posisi mode aktif kosong',credentials_complete:'API key dan secret terisi',connection_tested:'Kredensial lulus Uji Koneksi sesi ini',settings_valid:'Settings target valid',max_position_positive:'Plafon posisi LIVE positif'};
+    const labels={different_mode:'Target berbeda dari mode aktif',bot_stopped:'Bot sudah STOPPED',no_open_position:'Posisi mode aktif kosong',credentials_complete:'API key dan secret terisi',connection_tested:'Kredensial lulus Uji Koneksi sesi ini',settings_valid:'Settings target valid'};
     let html=Object.entries(d.checks).map(([k,v])=>`<div>${v?'✅':'❌'} ${esc(labels[k]||k)}</div>`).join('');
     html+=`<div style="margin-top:8px"><b>Ringkasan risiko target</b><br>${Object.entries(d.risk||{}).map(([k,v])=>esc(k)+'='+esc(v)).join(' · ')}</div>`;
     html+=`<div class="mut" style="margin-top:7px">${esc(d.state_separation_note)}</div>`;
@@ -1849,8 +1801,8 @@ function btStageSub(stage){
   if(s.includes('daftar pasar')) return 'Mengambil statistik 24 jam seluruh pair untuk menentukan semesta simbol…';
   if(s.includes('mengunduh')) return 'Mengunduh candle historis tiap simbol dari Binance. Ini bagian paling lama…';
   if(s.includes('mengambil')) return 'Mengunduh candle historis dari Binance secara bertahap (paging)…';
-  if(s.includes('portofolio')) return 'Memutar ulang pasar bar demi bar: ranking, konfirmasi, entry, kelola exit…';
-  if(s.includes('simulasi')) return 'Memutar ulang data historis candle demi candle, menerapkan aturan entry & exit…';
+  if(s.includes('portofolio')) return 'Memuat candle historis pasar secara bertahap…';
+  if(s.includes('simulasi')) return 'Memvalidasi data historis tanpa membuat order…';
   if(s.includes('selesai')) return 'Selesai, menyusun hasil…';
   return 'Menyiapkan permintaan backtest…';
 }
@@ -1909,96 +1861,43 @@ function finishBacktestUI(){
 function btReasonTagClass(r){
   const key=String(r===null||r===undefined?'':r).toUpperCase();
   const map={STOP_LOSS:'stop_loss',TAKE_PROFIT:'take_profit',BREAKEVEN:'breakeven',
-             TRAILING_STOP:'trailing_stop',MOMENTUM_FADE:'fade',END_OF_DATA:'end_of_data'};
+             TRAILING_STOP:'trailing_stop',END_OF_DATA:'end_of_data'};
   return map[key] || 'dry';
 }
 function btReasonLabel(r){
   const key=String(r===null||r===undefined?'':r).toUpperCase();
   const map = {STOP_LOSS:'SL', TAKE_PROFIT:'TP', BREAKEVEN:'BE', TRAILING_STOP:'TRAIL',
-               MOMENTUM_FADE:'FADE (lama)', END_OF_DATA:'DATA HABIS'};
+               END_OF_DATA:'DATA HABIS'};
   return esc(map[key] || key);
 }
 
 // Kontribusi PnL per simbol, diurutkan dari penyumbang terbesar.
-function renderSymbolBreakdown(s){
-  const box = document.getElementById('btSymbolBox');
-  const top = s.top_symbols || [];
-  if(!top.length){ box.innerHTML = '<div class="empty">Belum ada trade.</div>'; return; }
-  const max = Math.max(...top.map(x=>Math.abs(Number(x.pnl_pct))), 1);
-  box.innerHTML = top.map(x=>{
-    const pnl = Number(x.pnl_pct);
-    const w = Math.max(2, Math.abs(pnl)/max*100);
-    const col = pnl>=0 ? 'var(--green)' : 'var(--red)';
-    return `<div style="margin-bottom:9px">
-      <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px">
-        <span><b>${esc(x.symbol)}</b> <span class="mut">${fmt(x.trades,0)}x</span></span>
-        <span class="mono ${cls(x.pnl_pct)}">${sign(x.pnl_pct)}${fmt(x.pnl_pct)}%</span>
-      </div>
-      <div style="height:5px;border-radius:99px;background:var(--inset,rgba(148,163,184,.12))">
-        <i style="display:block;height:100%;border-radius:99px;width:${w}%;background:${col}"></i>
-      </div>
-    </div>`;
-  }).join('');
-}
-
-function renderSkipped(res){
-  const box = document.getElementById('btSkipBox');
-  const cnt = document.getElementById('btSkipCount');
-  const sk = res.skipped || [];
-  cnt.textContent = (res.summary && res.summary.skipped_signals)
-    ? '(' + fmt(res.summary.skipped_signals,0) + ' total)' : '';
-  if(!sk.length){
-    box.innerHTML = '<div class="empty">Tidak ada sinyal yang terlewat pada rentang ini.</div>';
-    return;
-  }
-  box.innerHTML = '<div class="logbox" style="max-height:220px">' + sk.map(x=>
-    `<div class="logline INFO"><b>${esc(x.symbol)}</b> terlewat pada ${esc(x.time)}, bot sedang memegang ${esc(x.holding)}</div>`
-  ).join('') + '</div>';
-}
-
 function renderBacktestResult(res){
   const s = res.summary;
   document.getElementById('btResult').style.display = 'block';
 
   const cardsHtml = `
-    <div class="card ${s.total_return_pct>=0?'good':'bad'}"><div class="accent-bar"></div>
-      <div class="label">Return Total (compounding)</div>
-      <div class="value mono ${cls(s.total_return_pct)}">${sign(s.total_return_pct)}${fmt(s.total_return_pct)}%</div>
-      <div class="sub">${fmt(s.total_trades,0)} trade diambil bot</div></div>
+    <div class="card good"><div class="accent-bar"></div>
+      <div class="label">Trade dibuat</div>
+      <div class="value mono">0</div>
+      <div class="sub">backtest hanya memuat data</div></div>
     <div class="card"><div class="accent-bar"></div>
-      <div class="label">Win Rate</div>
-      <div class="value mono">${s.total_trades? fmt(s.win_rate,1)+'%':'-'}</div>
-      <div class="sub"><span class="pos">${fmt(s.wins,0)}W</span> / <span class="neg">${fmt(s.losses,0)}L</span></div></div>
+      <div class="label">Candle diproses</div>
+      <div class="value mono">${fmt(res.bars_total,0)}</div>
+      <div class="sub">interval ${esc(res.interval)}</div></div>
     <div class="card"><div class="accent-bar"></div>
-      <div class="label">Max Drawdown</div>
-      <div class="value mono neg">-${fmt(s.max_drawdown_pct)}%</div>
-      <div class="sub">penurunan terdalam dari puncak</div></div>
+      <div class="label">Simbol berhasil</div>
+      <div class="value mono">${fmt(res.universe_with_data,0)}</div>
+      <div class="sub">dari ${fmt(res.universe_requested,0)} diminta</div></div>
     <div class="card"><div class="accent-bar"></div>
-      <div class="label">Profit Factor</div>
-      <div class="value mono">${isFinite(s.profit_factor)? fmt(s.profit_factor,2) : '∞'}</div>
-      <div class="sub">rata2 hold ${fmt(s.avg_hold_minutes,0)} mnt</div></div>
-    <div class="card warn"><div class="accent-bar"></div>
-      <div class="label">Sinyal Terlewat</div>
-      <div class="value mono">${fmt(s.skipped_signals,0)}</div>
-      <div class="sub">peluang valid yang tidak bisa diambil karena slot penuh</div></div>
-    <div class="card"><div class="accent-bar"></div>
-      <div class="label">Simbol Ditradingkan</div>
-      <div class="value mono">${fmt(s.unique_symbols,0)}<small style="font-size:13px;color:var(--muted)"> / ${fmt(s.symbols_in_universe,0)}</small></div>
-      <div class="sub">dari semesta yang dipindai</div></div>
-    <div class="card"><div class="accent-bar"></div>
-      <div class="label">Eksposur Pasar</div>
-      <div class="value mono">${fmt(s.exposure_pct,1)}%</div>
-      <div class="sub">${fmt(s.trades_per_day,2)} trade per hari</div></div>
-    <div class="card"><div class="accent-bar"></div>
-      <div class="label">Rata-rata Peringkat Entry</div>
-      <div class="value mono">#${fmt(s.avg_rank_at_entry,2)}</div>
-      <div class="sub">posisi di papan kandidat (urut volume) saat dibeli</div></div>`;
+      <div class="label">Perubahan equity</div>
+      <div class="value mono">0.00%</div>
+      <div class="sub">tidak ada simulasi order</div></div>`;
   document.getElementById('btCards').innerHTML = cardsHtml;
 
   // info box
   const p = res.params_used;
-  let reasonRows = Object.entries(s.reason_counts||{}).map(([k,v])=>
-    `<div class="posrow"><span class="k">${btReasonLabel(k)}</span><span class="v mono">${fmt(v,0)}x</span></div>`).join('');
+  const reasonRows = '';
   const exitRows = p.USE_ATR_EXIT
     ? `<div class="posrow"><span class="k">Mode exit</span><span class="v mono">ATR adaptif</span></div>
        <div class="posrow"><span class="k">ATR period</span><span class="v mono">${fmt(p.ATR_PERIOD,0)}</span></div>
@@ -2020,34 +1919,16 @@ function renderBacktestResult(res){
 
   document.getElementById('btLimitList').innerHTML = (res.limitations||[]).map(l=>`<li>${esc(l)}</li>`).join('');
 
-  // trades table
-  document.getElementById('btTradeCount').textContent = res.trades.length? '('+res.trades.length+' trade)':'';
-  const tb = document.getElementById('btTradeBody');
-  if(!res.trades.length){
-    tb.innerHTML = '<tr><td colspan="9" class="empty">Tidak ada setup pullback retest yang sah pada rentang ini. Coba longgarkan parameter setup, perbanyak simbol, atau perpanjang rentang hari.</td></tr>';
-  } else {
-    tb.innerHTML = res.trades.map(t=>`
-      <tr>
-        <td><b>${esc(t.symbol)}</b></td>
-        <td class="mono mut">${esc(t.entry_time)}</td>
-        <td class="mono mut">${esc(t.exit_time)}</td>
-        <td class="mono">${fmtP(t.entry_price)}</td>
-        <td class="mono">${fmtP(t.exit_price)}</td>
-        <td class="mono mut">#${fmt(t.rank_at_entry,0)} <span style="opacity:.7">(${sign(t.pct24h_at_entry)}${fmt(t.pct24h_at_entry,1)}%)</span></td>
-        <td class="mono">${Math.round(t.hold_minutes)} mnt</td>
-        <td class="mono ${cls(t.pnl_pct)}">${sign(t.pnl_pct)}${fmt(t.pnl_pct)}%</td>
-        <td><span class="tag ${btReasonTagClass(t.reason)}">${btReasonLabel(t.reason)}</span></td>
-      </tr>`).join('');
-  }
+  document.getElementById('btTradeCount').textContent = '';
+  document.getElementById('btTradeBody').innerHTML =
+    '<tr><td colspan="1" class="empty">Tidak ada trade. Backtest ini hanya memuat dan memvalidasi data historis.</td></tr>';
 
-  renderSymbolBreakdown(s);
-  renderSkipped(res);
 
   // chart return kumulatif
   const wrap = document.getElementById('btChartWrap');
   const pts = s.equity_curve || [0];
   if(pts.length < 2){
-    wrap.innerHTML = '<div class="empty"><div class="big">📊</div>Belum ada trade untuk digambar.</div>';
+    wrap.innerHTML = '<div class="empty"><div class="big">📊</div>Tidak ada trade untuk digambar karena backtest bersifat data-only.</div>';
   } else {
     const W=560,H=220,pad=32;
     const min=Math.min(...pts,0), max=Math.max(...pts,0);

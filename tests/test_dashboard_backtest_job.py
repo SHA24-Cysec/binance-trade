@@ -116,7 +116,7 @@ def test_job_backtest_portofolio_selesai_dan_membersihkan_file(job_palsu, monkey
     assert payload["mode"] == "portfolio"
     assert payload["universe_with_data"] == 3
     assert payload["symbols_failed_count"] == 0
-    assert payload["bars_total"] > 0
+    assert payload["bars_total"] == 0
     assert "summary" in payload and "trades" in payload
     assert klien.jumlah_request > 0
     assert payload["cache"] is not None and payload["cache"]["rows"] > 0

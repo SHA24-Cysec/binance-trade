@@ -2,9 +2,9 @@
 
 Modul ini menyusun ulang KEANGGOTAAN daftar watchlist secara berkala dari data
 Binance terbaru. Keanggotaan diperbarui tiap beberapa jam untuk menghemat weight,
-sedangkan skor yang tampil adalah skor sinyal entry live dari candle tertutup
-yang dihitung ulang oleh dashboard dengan cache TTL terpisah. Keduanya read-only
-dan tidak memengaruhi keputusan trading bot.
+sedangkan panel hanya menampilkan data monitoring likuiditas dan harga.
+Semua perhitungan di modul ini bersifat read-only dan tidak memengaruhi
+operasi bot.
 
 ================================================================
 YANG PALING PENTING DIPAHAMI
@@ -92,7 +92,7 @@ def to_klines(raw: list, now_ms: Optional[int] = None) -> list:
     """Parse hanya candle yang sudah tertutup, seperti scanner live.
 
     Candle berjalan berubah setiap detik. Memasukkannya ke statistik 24 jam
-    atau deteksi retest membuat watchlist tidak stabil dan berbeda dari bot.
+    atau data candle berjalan membuat watchlist tidak stabil.
     """
     now_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
     out = []
@@ -184,139 +184,92 @@ def fetch_klines_paged(client, symbol: str, interval: str, bars: int,
 
 
 # ======================================================================
-# Penilaian
+# Penilaian monitoring
 # ======================================================================
-def score_symbol(sym: str, kl: list, meta: dict, config: dict) -> Optional[dict]:
-    """Nilai satu simbol memakai logika keputusan bot yang asli.
+MONITORING_SPREAD_LIMIT_PCT = 0.25
+MONITORING_LOOKBACK_BARS = 30
 
-    detect_pullback_retest() yang dipanggil di sini adalah fungsi yang sama
-    dengan yang dipakai bot live, jadi angka jumlah sinyal bukan perkiraan.
-    """
-    lookback = strategy.confirm_window_bars(config)
-    min_vol = float(config.get("MIN_QUOTE_VOLUME_USDT_24H", 2_000_000))
-    interval = str(config.get("CONFIRM_INTERVAL", "5m"))
+
+def evaluate_symbol(sym: str, kl: list, meta: dict, config: dict) -> Optional[dict]:
+    """Hitung metrik monitoring likuiditas tanpa indikator pembukaan posisi."""
+    interval = str(config.get("MARKET_DATA_INTERVAL", "5m"))
     interval_ms = strategy.interval_to_ms(interval)
     bars_per_day = max(1, round(24 * 60 * 60 * 1000 / interval_ms))
-    need = max(lookback, strategy.required_lookback_bars(config))
-
+    need = MONITORING_LOOKBACK_BARS
     if len(kl) < bars_per_day + need + 10:
         return None
 
+    min_vol = float(config.get("MIN_QUOTE_VOLUME_USDT_24H", 2_000_000))
     qv = [k.quote_volume for k in kl]
     n = len(kl)
-
     pre = [0.0]
-    for v in qv:
-        pre.append(pre[-1] + v)
+    for value in qv:
+        pre.append(pre[-1] + value)
 
-    signals = 0
+    roll_vols = []
     gate_bars = 0
-    roll_vols: list = []
-    last_sig = -10 ** 9
-    # Bot hanya memegang satu posisi dan tidak boleh langsung masuk lagi
-    # setelah keluar, jadi dua setup yang terlalu berdekatan tidak mungkin
-    # keduanya dieksekusi. Jaraknya memakai COOLDOWN_MINUTES_AFTER_CLOSE.
-    min_gap = max(1, int(float(config.get("COOLDOWN_MINUTES_AFTER_CLOSE", 15))
-                         * 60_000 / interval_ms))
-
     for j in range(bars_per_day + need, n):
         vol24 = pre[j + 1] - pre[j + 1 - bars_per_day]
         roll_vols.append(vol24)
-        # Skor watchlist sengaja hanya memakai gerbang likuiditas supaya
-        # hasilnya menjadi superset kandidat. Gerbang pump lengkap tetap
-        # dievaluasi scanner bot live terhadap data paling mutakhir.
-        if vol24 < min_vol:
-            continue
-        gate_bars += 1
-
-        setup = scanner.detect_pullback_retest(kl[j - lookback + 1: j + 1], config)
-        if not setup.ok or (j - last_sig) < min_gap:
-            continue
-        last_sig = j
-        signals += 1
-
+        if vol24 >= min_vol:
+            gate_bars += 1
     if not roll_vols:
         return None
 
     days = n * interval_ms / 86_400_000
-    uptime = sum(1 for v in roll_vols if v >= min_vol) / len(roll_vols) * 100.0
+    uptime = sum(1 for value in roll_vols if value >= min_vol) / len(roll_vols) * 100.0
     vol_median = statistics.median(roll_vols)
 
-    # Deteksi instrumen yang bukan crypto 24/7 (saham tokenisasi bStocks).
     weekend_pct = None
     if days >= 10:
         import datetime as dt
         dow = [0.0] * 7
-        for k in kl:
-            dow[dt.datetime.fromtimestamp(k.open_time / 1000, dt.UTC).weekday()] += k.quote_volume
-        tot = sum(dow)
-        if tot > 0:
-            weekend_pct = (dow[5] + dow[6]) / tot * 100.0
-
-    hasil = _compose_score(sym, meta, config, signals, days, uptime, vol_median,
-                          weekend_pct, gate_bars, n)
-    live = scanner.score_entry_signal(kl[-strategy.required_lookback_bars(config):], config,
-                                      {"symbol": sym, **meta, "weekend_pct": weekend_pct})
-    hasil.update({"score": live.score, "entry_status": live.status,
-                  "entry_components": live.components, "entry_reason": live.reason,
-                  "disqualified": live.disqualified})
-    return hasil
-
-
-def _compose_score(sym, meta, config, signals, days, uptime, vol_median,
-                   weekend_pct, gate_bars, n) -> dict:
-    """Gabungkan komponen skor dari sinyal, likuiditas, dan spread."""
-    max_spread = float(config.get("MAX_SPREAD_PCT", 0.25))
-    min_vol = float(config.get("MIN_QUOTE_VOLUME_USDT_24H", 2_000_000))
+        for candle in kl:
+            dow[dt.datetime.fromtimestamp(candle.open_time / 1000, dt.UTC).weekday()] += candle.quote_volume
+        total = sum(dow)
+        if total > 0:
+            weekend_pct = (dow[5] + dow[6]) / total * 100.0
 
     spread = meta.get("spread_pct")
-    sig30 = (signals / days * 30.0) if days > 0 else 0.0
+    ratio = vol_median / min_vol if min_vol else 0.0
+    liquidity_part = uptime / 100.0 * 15.0 + min(10.0, (ratio ** 0.5) * 3.5)
+    spread_part = 0.0 if spread is None else max(
+        0.0, (1.0 - spread / MONITORING_SPREAD_LIMIT_PCT) * 20.0
+    )
+    monitoring_score = round(liquidity_part + spread_part, 1)
 
-    s_sig = min(35.0, sig30 / 25.0 * 35.0)
-    ratio = vol_median / min_vol if min_vol else 0
-    s_liq = uptime / 100.0 * 15.0 + min(10.0, (ratio ** 0.5) * 3.5)
-    s_spread = 0.0 if spread is None else max(0.0, (1.0 - spread / max_spread) * 20.0)
     notes = []
-
     if uptime < 60:
-        notes.append(f"likuiditas di atas ambang bot hanya {uptime:.0f}% waktu")
+        notes.append(f"likuiditas di atas ambang hanya {uptime:.0f}% waktu")
 
-    dq = None
+    disqualified = None
     quote = str(config.get("QUOTE_ASSET", "USDT"))
     base = sym[:-len(quote)] if quote and sym.endswith(quote) else sym
     if base.endswith("B") and weekend_pct is not None and weekend_pct < 16.0:
-        dq = "saham tokenisasi (bStocks), tidak berjalan 24/7"
-    elif spread is not None and spread > max_spread:
-        dq = f"spread {spread:.3f}% melewati MAX_SPREAD_PCT {max_spread}%"
-    elif signals < 1:
-        dq = f"tidak ada sinyal dalam {days:.0f} hari"
+        disqualified = "saham tokenisasi (bStocks), tidak berjalan 24/7"
+    elif spread is not None and spread > MONITORING_SPREAD_LIMIT_PCT:
+        disqualified = f"spread {spread:.3f}% melewati batas monitoring {MONITORING_SPREAD_LIMIT_PCT}%"
 
     tier = "INTI" if uptime >= 90 else ("AKTIF" if uptime >= 60 else "SPEKULATIF")
-
+    note_parts = [f"spread {spread:.3f}%" if spread is not None else "spread tidak tersedia",
+                  f"likuiditas {uptime:.0f}% waktu"]
+    note_parts.extend(notes)
     return {
-        "symbol": sym, "tier": tier,
-        "score": round(s_sig + s_liq + s_spread, 1),
-        "signals": signals, "signals_per_30d": round(sig30, 2),
-        "days": round(days, 1), "uptime": round(uptime, 1),
+        "symbol": sym,
+        "tier": tier,
+        "monitoring_score": monitoring_score,
+        "days": round(days, 1),
+        "uptime": round(uptime, 1),
         "vol_median": vol_median,
-        "spread_pct": spread, "weekend_pct": round(weekend_pct, 1) if weekend_pct else None,
-        "gate_pct": round(gate_bars / n * 100, 2) if n else 0,
-        "disqualified": dq, "notes": notes,
-        "note": _build_note(signals, days, uptime, spread, notes),
+        "spread_pct": spread,
+        "weekend_pct": round(weekend_pct, 1) if weekend_pct is not None else None,
+        "gate_pct": round(gate_bars / len(roll_vols) * 100, 2),
+        "disqualified": disqualified,
+        "notes": notes,
+        "note": ", ".join(note_parts),
     }
 
 
-def _build_note(signals, days, uptime, spread, notes) -> str:
-    bits = [f"{signals} sinyal/{days:.0f}h"]
-    if spread is not None:
-        bits.append(f"spread {spread:.3f}%")
-    bits.append(f"likuiditas {uptime:.0f}% waktu")
-    if notes:
-        bits.append(notes[0])
-    return ", ".join(bits)
-
-
-# ======================================================================
 # Siklus penyegaran
 # ======================================================================
 def refresh_once(client, config: dict,
@@ -392,14 +345,8 @@ def refresh_once(client, config: dict,
         logger.warning("bookTicker gagal, spread diabaikan: %s", exc)
 
     # --- Tahap 2: pilih kandidat paling likuid ---
-    # Saringan semesta memakai fungsi yang SAMA dengan bot live, termasuk
-    # gerbang pump yang wajib itu. Watchlist harus mencerminkan semesta yang
-    # benar-benar bisa dimasuki bot: kalau di sini gerbangnya dilewati,
-    # watchlist akan penuh simbol yang tidak akan pernah lolos saat scan live.
-    #
-    # Candle harian hanya diminta untuk simbol yang sudah lolos syarat
-    # kenaikan 24 jam, dan biayanya (bobot IP 2 per simbol) dibebankan ke
-    # anggaran yang sama dengan pengambilan candle lain.
+    # Saringan semesta memakai filter struktural dan kondisi pasar monitoring.
+    # Data candle harian dibebankan ke anggaran request yang sama.
     _daily_cache: dict = {}
     _daily_raw = scanner.make_daily_klines_fetcher(client, cache=_daily_cache)
 
@@ -422,15 +369,14 @@ def refresh_once(client, config: dict,
                          "(naik 24 jam dan volume naik)"}
 
     # --- Tahap 3: unduh candle & nilai ---
-    interval = str(config.get("CONFIRM_INTERVAL", "5m"))
+    interval = str(config.get("MARKET_DATA_INTERVAL", "5m"))
     if interval not in strategy.INTERVAL_MINUTES:
         return {"ok": False, "error": f"interval watchlist tidak didukung: {interval}"}
     interval_ms = strategy.interval_to_ms(interval)
     bars_per_day = max(1, round(86_400_000 / interval_ms))
-    # Tambah sedikit ruang agar filter 24 jam dan indikator tidak kehilangan
-    # satu candle tertutup yang sedang berjalan saat respons diterima.
-    bars = days * bars_per_day + strategy.required_lookback_bars(config) + 2
-    scored: list = []
+    # Tambah ruang untuk metrik monitoring dan satu candle yang sedang berjalan.
+    bars = days * bars_per_day + MONITORING_LOOKBACK_BARS + 2
+    evaluated: list = []
     failed = 0
 
     for i, cand in enumerate(shortlist):
@@ -449,9 +395,9 @@ def refresh_once(client, config: dict,
             raw = fetch_klines_paged(client, cand.symbol, interval, bars, budget)
             kl = to_klines(raw)
             meta = {"spread_pct": spreads.get(cand.symbol)}
-            row = score_symbol(cand.symbol, kl, meta, config)
+            row = evaluate_symbol(cand.symbol, kl, meta, config)
             if row:
-                scored.append(row)
+                evaluated.append(row)
         except Exception as exc:  # noqa: BLE001
             failed += 1
             logger.warning("gagal menilai %s: %s", cand.symbol, str(exc)[:120])
@@ -459,8 +405,8 @@ def refresh_once(client, config: dict,
                 budget.stopped_reason = "kena batas rate, siklus dihentikan"
                 break
 
-    ok_rows = [r for r in scored if not r["disqualified"]]
-    ok_rows.sort(key=lambda r: r["score"], reverse=True)
+    ok_rows = [r for r in evaluated if not r["disqualified"]]
+    ok_rows.sort(key=lambda r: r.get("monitoring_score", 0.0), reverse=True)
 
     # Jaga komposisi tier supaya panel tidak didominasi satu jenis koin.
     inti = [r for r in ok_rows if r["tier"] == "INTI"][:12]
@@ -474,12 +420,13 @@ def refresh_once(client, config: dict,
         "duration_seconds": round(time.time() - started, 1),
         "weight_spent": budget.spent,
         "weight_budget": max_weight,
-        "symbols_examined": len(scored),
+        "symbols_examined": len(evaluated),
         "symbols_requested": len(shortlist),
         "symbols_failed": failed,
         "days": days,
         "stopped_reason": budget.stopped_reason,
-        "items": [{"symbol": r["symbol"], "tier": r["tier"], "score": r["score"],
+        "items": [{"symbol": r["symbol"], "tier": r["tier"],
+                   "monitoring_score": r.get("monitoring_score", 0.0),
                    "note": r["note"]} for r in final],
         "detail": final,
     }
@@ -502,30 +449,6 @@ def save_result(result: dict, config: dict) -> Optional[str]:
         return None
 
 
-def migrate_tiers(data: dict) -> dict:
-    """Ganti nama tier lama pada hasil watchlist yang dibaca dari file.
-
-    Tier "MOMENTUM" dipakai versi lama sebelum strategi pindah ke pullback
-    retest. File lama tidak dibuang, hanya namanya diterjemahkan saat dibaca,
-    memakai peta yang SAMA dengan config.migrate_watchlist_tier() supaya tidak
-    ada dua daftar nama tier yang bisa berbeda.
-
-    Dipakai load_result() dan bisa dipanggil langsung oleh tes. Objeknya
-    diubah di tempat lalu dikembalikan.
-    """
-    if not isinstance(data, dict):
-        return data
-    from config.config import migrate_watchlist_tier
-    for kunci in ("items", "detail"):
-        baris = data.get(kunci)
-        if not isinstance(baris, list):
-            continue
-        for row in baris:
-            if isinstance(row, dict) and row.get("tier"):
-                row["tier"] = migrate_watchlist_tier(row["tier"])
-    return data
-
-
 def load_result(config: dict) -> Optional[dict]:
     """Baca hasil terakhir. Return None kalau belum ada atau rusak.
 
@@ -540,16 +463,13 @@ def load_result(config: dict) -> Optional[dict]:
             data = json.load(f)
         if not (isinstance(data, dict) and data.get("items")):
             return None
-        data = migrate_tiers(data)
-        # File lama hanya berisi skor historis. Pertahankan metadata tersebut,
-        # tetapi jangan menganggapnya sebagai skor entry live.
-        for row in data.get("items", []):
+        # Hasil lama dapat memuat skor dan field generator posisi. Jangan
+        # tampilkan atau teruskan field tersebut ke dashboard.
+        for row in data.get("items", []) + data.get("detail", []):
             if isinstance(row, dict):
-                row.setdefault("entry_status", "BELUM DIHITUNG")
-                row.setdefault("entry_components", {})
-                row.setdefault("entry_reason", "belum dihitung dari candle live")
-                row.setdefault("entry_scored_at", None)
-                row.setdefault("entry_stale", True)
+                row.pop("score", None)
+                row.pop("signals", None)
+                row.pop("signals_per_30d", None)
         return data
     except (json.JSONDecodeError, OSError):
         return None

@@ -173,59 +173,32 @@ def test_host_with_wrong_port_is_rejected(client):
 
 
 def test_dashboard_backtest_text_is_escaped_before_inner_html() -> None:
-    """Guard against reintroducing DOM XSS in API-backed backtest renderers."""
+    """Data historis ditampilkan tanpa interpolasi mentah dari API."""
     source = (Path(__file__).resolve().parents[1] / "templates" / "dashboard.html").read_text(
         encoding="utf-8"
     )
-
-    unsafe_interpolations = (
-        "<b>${x.symbol}</b>",
-        "<b>${x.symbol}</b> terlewat pada ${x.time}",
-        "<span class=\"k\" style=\"color:var(--amber)\">⚠ ${w}</span>",
-        "<li>${l}</li>",
-        "<td><b>${t.symbol}</b></td>",
-        "<td class=\"mono mut\">${t.entry_time}</td>",
-        "<td class=\"mono mut\">${t.exit_time}</td>",
-    )
-    for fragment in unsafe_interpolations:
-        assert fragment not in source
-
-    assert '<b>${esc(x.symbol)}</b>' in source
-    assert "${esc(x.time)}" in source
-    assert "${esc(x.holding)}" in source
-    assert "${esc(w)}" in source
-    assert "${esc(l)}" in source
-    assert "${esc(t.symbol)}" in source
-    assert "${esc(t.entry_time)}" in source
-    assert "${esc(t.exit_time)}" in source
+    assert "Backtest tidak membuat trade atau order baru" in source
+    assert "${w}" not in source
+    assert "${l}" not in source
+    assert "${t.symbol}" not in source
 
 
 def test_dashboard_dynamic_css_classes_are_whitelisted() -> None:
     source = (Path(__file__).resolve().parents[1] / "templates" / "dashboard.html").read_text(
         encoding="utf-8"
     )
-
     assert 'class="logline ${safeLogClass(e.level)}"' in source
-    # 2026-09-27: kolom tier watchlist manual dihapus; badge skor sinyal tetap
-    # WAJIB lewat whitelist (safeEntryClass = peta tetap + fallback aman).
-    assert "const entryCls=safeEntryClass(entryStatus);" in source
-    assert "return map[key] || 'dry';" in source
-    assert 'class="tag ${btReasonTagClass(t.reason)}"' in source
-    assert "const safeEntryClass" in source
     assert "const safeLogClass" in source
-    # Pola lama tidak boleh kembali tanpa sengaja.
-    assert "safeTierClass" not in source
+    assert "const safeEntryClass" not in source
 
 
-def test_backtest_ui_exposes_atr_and_fixed_exit_modes() -> None:
+def test_backtest_ui_exposes_exit_modes_only() -> None:
     source = (Path(__file__).resolve().parents[1] / "templates" / "dashboard.html").read_text(
         encoding="utf-8"
     )
-
     assert 'id="btExitMode"' in source
     assert 'value="atr"' in source
     assert 'value="fixed"' in source
     assert 'id="btAtrSl"' in source
     assert 'id="btAtrTp"' in source
-    assert 'USE_ATR_EXIT: exitMode === \'atr\'' in source
-    assert 'ATR_MULT_TRAIL: document.getElementById(\'btAtrTrStep\').value' in source
+    assert 'Backtest tidak membuat trade atau order baru' in source
