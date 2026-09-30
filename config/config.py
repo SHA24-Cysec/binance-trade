@@ -121,7 +121,7 @@ PUMP_CONFIG = {
     # --- Scan & seleksi kandidat ---
     "MARKET_SCAN_INTERVAL_SECONDS": 300,     # scan seluruh pasar tiap 5 menit
     "LOOP_INTERVAL_SECONDS": 15,             # cek TP/BE/trailing tiap 15 detik
-    "MIN_QUOTE_VOLUME_USDT_24H": 3099455.404470322,  # kandidat walk-forward; dibatasi untuk pair yang lebih likuid
+    "MIN_QUOTE_VOLUME_USDT_24H": 10000000,  # kandidat walk-forward; dibatasi untuk pair yang lebih likuid
     "MARKET_DATA_INTERVAL": "5m",
 
     # ------------------------------------------------------------------
@@ -245,11 +245,11 @@ PUMP_CONFIG = {
     # --- Kontrol risiko ---
     #
     # Proteksi akun menutup posisi terbuka ketika batas kerugian tercapai.
-    "USE_EQUITY_STOP": True,                  # matikan (False) utk nonaktifkan DD Stop
+    "USE_EQUITY_STOP": False,                  # matikan (False) utk nonaktifkan DD Stop
     # OPTIMASI MANUAL: 15 -> 12. Jaring DD diperketat agar penurunan dari peak
     # equity berhenti lebih awal = DD lebih stabil (inti permintaan Anda).
     "MAX_DRAWDOWN_PERCENT": 12.0,
-    "USE_DAILY_STOP": True,                   # matikan (False) utk nonaktifkan Daily Stop
+    "USE_DAILY_STOP": False,                   # matikan (False) utk nonaktifkan Daily Stop
     "MAX_DAILY_LOSS_PERCENT": 5.0,
     "DAILY_PROFIT_TARGET_PERCENT": 15.0,
     "CLOSE_ALL_AT_LIMIT": True,
