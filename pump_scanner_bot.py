@@ -94,6 +94,11 @@ DEFAULT_STATE = {
     "dd_stopped": False,
     "dd_stop_until": 0,
     "daily_stopped": False,
+    # Sumber daily stop: "LOSS" (rugi harian) atau "PROFIT" (target profit
+    # tercapai). CLOSE_ALL_AT_LIMIT hanya boleh menutup paksa pada episode
+    # LOSS; menutup posisi yang sedang untung karena target harian tercapai
+    # bukan aksi darurat risiko (perbaikan audit 2026-09-27).
+    "daily_stop_source": None,
     # Penanda episode CLOSE_ALL_AT_LIMIT: True = posisi sudah ditutup paksa
     # oleh kill switch pada episode stop yang sedang berjalan, supaya tidak
     # ditutup berulang kali. Direset saat episode stop berakhir.
@@ -210,6 +215,7 @@ def update_equity_controls(state: dict, equity: float, config: dict) -> bool:
         state["day_start_date"] = today
         state["day_start_equity"] = equity
         state["daily_stopped"] = False
+        state["daily_stop_source"] = None
         logger.info("Hari baru (UTC): %s. Equity awal hari = %.2f %s", today, equity, config["QUOTE_ASSET"])
 
     if state.get("peak_equity") is None or equity > state["peak_equity"]:
@@ -232,9 +238,11 @@ def update_equity_controls(state: dict, equity: float, config: dict) -> bool:
         change_pct = (equity - state["day_start_equity"]) / state["day_start_equity"] * 100.0
         if change_pct <= -config["MAX_DAILY_LOSS_PERCENT"]:
             state["daily_stopped"] = True
+            state["daily_stop_source"] = "LOSS"
             logger.warning("STOP HARIAN: rugi harian %.2f%%. Tidak ada entry baru sampai hari berikutnya (UTC).", change_pct)
         elif change_pct >= config["DAILY_PROFIT_TARGET_PERCENT"]:
             state["daily_stopped"] = True
+            state["daily_stop_source"] = "PROFIT"
             logger.info("TARGET HARIAN TERCAPAI: profit harian %.2f%%. Tidak ada entry baru sampai hari berikutnya (UTC).", change_pct)
 
     return bool(state.get("dd_stopped") or state.get("daily_stopped"))
@@ -255,7 +263,17 @@ def maybe_force_close_at_risk_limit(client: ExchangeClient, config: dict,
     Dipisah jadi fungsi kecil supaya bisa diuji di selftest tanpa menjalankan
     loop utama.
     """
-    limit_now = bool(state.get("dd_stopped") or state.get("daily_stopped"))
+    # Hanya episode KERUGIAN yang memicu penutupan paksa. daily_stopped yang
+    # bersumber dari DAILY_PROFIT_TARGET_PERCENT cukup menjeda entry baru;
+    # posisi yang sedang untung tidak boleh ditutup paksa sebagai "risk limit"
+    # (perbaikan audit 2026-09-27). State lama tanpa daily_stop_source
+    # diperlakukan konservatif sebagai LOSS agar perilaku darurat tetap ada.
+    profit_stop_only = (
+        bool(state.get("daily_stopped"))
+        and not state.get("dd_stopped")
+        and str(state.get("daily_stop_source") or "LOSS").upper() == "PROFIT"
+    )
+    limit_now = bool(state.get("dd_stopped") or state.get("daily_stopped")) and not profit_stop_only
     if (
         config.get("CLOSE_ALL_AT_LIMIT")
         and entries_paused
@@ -643,12 +661,29 @@ def _native_protection_enabled(config: dict) -> bool:
     return _native_oco_enabled(config) or _native_stop_enabled(config)
 
 
+def _exit_distance(state: dict, config: dict, state_key: str, cfg_key: str,
+                   atr_mode: bool, entry: float) -> float:
+    """Jarak exit dengan satuan yang KONSISTEN (perbaikan audit 2026-09-27).
+
+    Pada mode ATR, nilai state adalah JARAK HARGA ABSOLUT. Fallback config
+    (SL_PCT/TP_PCT dkk) SELALU berdenominasi persen, jadi saat dipakai pada
+    mode ATR ia wajib dikonversi ke jarak harga (entry * pct / 100). Versi
+    lama memakai persen mentah sebagai jarak absolut, sehingga untuk koin
+    berharga < SL_PCT USDT level stop praktis tidak pernah tersentuh.
+    """
+    locked = abs(float(state.get(state_key) or 0.0))
+    if locked > 0:
+        return locked
+    pct = abs(float(config.get(cfg_key, 0.0) or 0.0))
+    return entry * pct / 100.0 if atr_mode else pct
+
+
 def _native_oco_levels(state: dict, filters: SymbolFilters | None,
                        config: dict) -> dict:
     entry = float(state.get("entry_price") or 0.0)
     atr_mode = str(state.get("exit_source", "")).upper() == "ATR"
-    sl = abs(float(state.get("sl_pct") or config.get("SL_PCT", 0.0) or 0.0))
-    tp = abs(float(state.get("tp_pct") or config.get("TP_PCT", 0.0) or 0.0))
+    sl = _exit_distance(state, config, "sl_pct", "SL_PCT", atr_mode, entry)
+    tp = _exit_distance(state, config, "tp_pct", "TP_PCT", atr_mode, entry)
     raw_sl = entry - sl if atr_mode else entry * (1.0 - sl / 100.0)
     raw_tp = entry + tp if atr_mode else entry * (1.0 + tp / 100.0)
     buffer_pct = max(0.01, float(config.get("NATIVE_OCO_LIMIT_BUFFER_PCT", 0.10) or 0.10))
@@ -672,9 +707,11 @@ def _native_oco_levels(state: dict, filters: SymbolFilters | None,
 def _native_stop_price(state: dict, filters: SymbolFilters | None,
                        config: dict | None = None) -> float:
     entry = float(state.get("entry_price") or 0.0)
-    configured_sl = config.get("SL_PCT", 0.0) if config else 0.0
-    sl = abs(float(state.get("sl_pct") or configured_sl or 0.0))
-    if str(state.get("exit_source", "")).upper() == "ATR":
+    atr_mode = str(state.get("exit_source", "")).upper() == "ATR"
+    # Fallback config sadar-unit (perbaikan audit 2026-09-27): SL_PCT persen
+    # dikonversi ke jarak harga bila state mode ATR (lihat _exit_distance).
+    sl = _exit_distance(state, config or {}, "sl_pct", "SL_PCT", atr_mode, entry)
+    if atr_mode:
         raw = entry - sl
     else:
         raw = entry * (1.0 - sl / 100.0)
@@ -704,6 +741,11 @@ _DEFINITIVE_REJECT_CODES = {
     -1111,  # presisi qty/price salah
     -1121,  # simbol tidak valid
     -2010,  # NEW_ORDER_REJECTED (saldo kurang, dsb)
+    # Perbaikan audit 2026-09-27: dua kode deterministik yang sebelumnya
+    # terklasifikasi UNKNOWN dan membuat loop arm->reconcile->arm berulang
+    # tiap iterasi tanpa hasil.
+    -1116,  # INVALID_ORDERTYPE: simbol tidak mengizinkan tipe order ini
+    -1020,  # UNSUPPORTED_OPERATION: operasi tidak didukung endpoint/akun
 }
 _NOT_FOUND_CODES = {-2013}  # "Order does not exist." / "Order list does not exist."
 # GET pada intent yang belum pernah dikonfirmasi tercipta baru boleh
@@ -991,12 +1033,21 @@ def _ensure_native_protection(client: ExchangeClient, config: dict,
     if isinstance(state.get("native_oco"), dict) or isinstance(state.get("native_stop"), dict):
         return True
     if _native_oco_enabled(config):
+        # Perbaikan audit 2026-09-27: jendela backoff OCO dihormati DI SINI.
+        # Sebelumnya _arm_native_oco return False tanpa intent saat backoff,
+        # lalu cabang fallback di bawah salah mengiranya "OCO tidak didukung"
+        # dan memasang STOP polos -- proteksi terdegradasi permanen ke
+        # stop-only (tanpa TP exchange-side) hanya karena satu kali hiccup.
+        if state_mod.now_ms() < int(state.get("native_protection_retry_at", 0) or 0):
+            return False
         if _arm_native_oco(client, config, filters, state):
             return True
         oco_status = (state.get("native_oco") or {}).get("status")
-        # Fallback hanya untuk client yang jelas tidak mendukung OCO atau
-        # validasi lokal yang gagal. Status POST Binance yang UNKNOWN tidak
-        # boleh diberi proteksi kedua karena OCO pertama mungkin sudah aktif.
+        # Fallback hanya untuk client yang jelas tidak mendukung OCO,
+        # penolakan deterministik (FAILED), atau validasi level lokal yang
+        # gagal pada panggilan INI (status None tanpa backoff). Status POST
+        # Binance yang UNKNOWN tidak boleh diberi proteksi kedua karena OCO
+        # pertama mungkin sudah aktif.
         if oco_status in (None, "FAILED") and _native_stop_enabled(config):
             state["native_oco"] = None
             return _arm_native_stop(client, config, filters, state)
@@ -1011,6 +1062,45 @@ def _oco_response_has_fill(response: dict) -> bool:
         or float(report.get("executedQty", 0.0) or 0.0) > 0
         for report in reports if isinstance(report, dict)
     )
+
+
+def _settle_native_protective_fill(client: ExchangeClient, config: dict,
+                                   state: dict, symbol: str, reason: str) -> None:
+    """Rekonsiliasi pasca-fill proteksi native + pembersihan flag fail-closed.
+
+    Perbaikan audit 2026-09-27 (temuan TINGGI): sebelumnya
+    ``reconciliation_required`` disetel True sebelum reconcile dan TIDAK ADA
+    jalur yang membersihkannya setelah exit native normal, sehingga SETIAP
+    exit lewat OCO/stop native menghentikan entry baru secara PERMANEN sampai
+    file state diedit manual. Sekarang flag dibersihkan tepat sebelum
+    reconcile sehingga reconcile menjadi satu-satunya penentu status; bila
+    posisi terbukti bersih, administrasi close (cooldown, penanda waktu
+    trade, dust sweep) diselesaikan seperti exit lokal. Bila reconcile TIDAK
+    berhasil membuktikan posisi bersih (mis. get_account gagal, ada saldo
+    locked, atau fill baru parsial), state kembali fail-closed seperti dulu.
+    """
+    entry_price = float(state.get("entry_price") or 0.0)
+    base = symbol[: -len(config["QUOTE_ASSET"])]
+    state["reconciliation_required"] = False
+    state["reconciliation_assets"] = []
+    reconcile_state_with_exchange(client, config, state)
+    if state.get("current_symbol") or state.get("pending_order"):
+        # Saldo belum terverifikasi bersih. Kembali fail-closed; iterasi
+        # atau restart berikutnya mengulang rekonsiliasi.
+        state["reconciliation_required"] = True
+        state["reconciliation_assets"] = [base]
+        state_mod.save_state(config["STATE_FILE"], state)
+        return
+    state["sell_fail_count"] = 0
+    state["cooldown_until"] = state_mod.now_ms() + config["COOLDOWN_MINUTES_AFTER_CLOSE"] * 60 * 1000
+    state["last_trade_time"] = state_mod.now_ms()
+    state_mod.save_state(config["STATE_FILE"], state)
+    logger.info(
+        "EXIT NATIVE %s (%s): posisi ditutup oleh order proteksi exchange-side "
+        "(entry=%.6f). Rekonsiliasi bersih; bot lanjut scan setelah cooldown.",
+        symbol, reason, entry_price,
+    )
+    try_dust_sweep(client, config, symbol)
 
 
 def _reconcile_native_oco(client: ExchangeClient, config: dict,
@@ -1123,7 +1213,7 @@ def _reconcile_native_oco(client: ExchangeClient, config: dict,
         state["reconciliation_assets"] = [base]
         state_mod.save_state(config["STATE_FILE"], state)
         logger.critical("OCO %s salah satu leg FILLED; tidak mengirim SELL kedua. Rekonsiliasi saldo dijalankan.", symbol)
-        reconcile_state_with_exchange(client, config, state)
+        _settle_native_protective_fill(client, config, state, symbol, "NATIVE_OCO_FILLED")
         return False
     if status in ("ALL_DONE", "REJECT"):
         state["native_oco"] = None
@@ -1222,7 +1312,7 @@ def _reconcile_native_stop(client: ExchangeClient, config: dict,
         state["reconciliation_assets"] = [base]
         state_mod.save_state(config["STATE_FILE"], state)
         logger.critical("Proteksi native %s FILLED; tidak mengirim SELL kedua. Rekonsiliasi saldo dijalankan.", symbol)
-        reconcile_state_with_exchange(client, config, state)
+        _settle_native_protective_fill(client, config, state, symbol, "NATIVE_STOP_FILLED")
         return False
     if status in ("CANCELED", "EXPIRED", "REJECTED"):
         state["native_stop"] = None
@@ -1282,7 +1372,7 @@ def _cancel_native_oco_before_exit(client: ExchangeClient, config: dict,
         state["reconciliation_assets"] = [symbol]
         state_mod.save_state(config["STATE_FILE"], state)
         logger.critical("OCO %s terisi saat cancel. SELL manual ditahan untuk rekonsiliasi.", symbol)
-        reconcile_state_with_exchange(client, config, state)
+        _settle_native_protective_fill(client, config, state, symbol, "NATIVE_OCO_FILLED_ON_CANCEL")
         return False
     final_status = str(response.get("listOrderStatus") or "").upper()
     if final_status != "ALL_DONE":
@@ -1689,7 +1779,31 @@ def open_position(client: ExchangeClient, config: dict, filters_cache: dict,
     level_cfg = dict(config)
     if candidate.setup is not None and candidate.setup.atr_value is not None:
         level_cfg["_atr_value"] = candidate.setup.atr_value
+    elif bool(config.get("USE_ATR_EXIT", False)):
+        # Perbaikan audit 2026-09-27 (temuan KRITIS): tanpa _atr_value,
+        # resolve_exit_levels mengembalikan multiplier mentah sebagai JARAK
+        # HARGA ABSOLUT (mis. "SL = entry - 12 USDT"). Untuk koin berharga
+        # rendah level itu tidak pernah tersentuh DAN OCO/stop native gagal
+        # validasi, sehingga posisi hidup tanpa exit efektif. Entry ditolak;
+        # kandidat lain/scan berikutnya akan menyediakan ATR yang valid.
+        logger.warning(
+            "Entry %s dilewati: USE_ATR_EXIT aktif tetapi nilai ATR kandidat "
+            "tidak tersedia, level exit tidak dapat dikunci dengan aman.",
+            candidate.symbol,
+        )
+        return
     preview = strategy.resolve_exit_levels(level_cfg)
+    if str(preview.get("source", "")).upper() == "ATR" and not (
+        0.0 < float(preview.get("sl_pct") or 0.0) < price_ref
+    ):
+        # Sabuk pengaman kedua: jarak SL absolut wajib positif dan lebih
+        # kecil dari harga acuan, kalau tidak stop berada di harga <= 0.
+        logger.critical(
+            "Entry %s dilewati: jarak SL ATR %.10g tidak masuk akal terhadap "
+            "harga acuan %.10g. Cek ATR_MULT_SL/ATR kandidat.",
+            candidate.symbol, float(preview.get("sl_pct") or 0.0), price_ref,
+        )
+        return
     client_order_id = _new_client_order_id("buy")
     state["pending_order"] = {
         "side": "BUY", "symbol": candidate.symbol, "qty": qty,
@@ -1879,19 +1993,33 @@ def manage_exit(client: ExchangeClient, config: dict, filters_cache: dict,
             if not _reconcile_native_stop(client, config, state):
                 if not state.get("current_symbol") or state.get("_native_stop_exit_blocked"):
                     return
-        if state.get("current_symbol") and not state.get("native_oco") and not state.get("native_stop"):
+        if (
+            state.get("current_symbol")
+            and not state.get("native_oco")
+            and not state.get("native_stop")
+            # Jangan memasang proteksi BARU selama exit masih diblokir oleh
+            # fill native yang belum terverifikasi bersih: qty state bisa
+            # sudah tidak dimiliki lagi, dan POST hanya akan ditolak berulang
+            # (perbaikan audit 2026-09-27, pendamping _settle_native_protective_fill).
+            and not state.get("_native_stop_exit_blocked")
+        ):
             filters = filters_cache.get(state["current_symbol"])
             if not _ensure_native_protection(client, config, filters, state):
                 if state.get("_native_stop_exit_blocked"):
                     return
 
     atr_mode = str(state.get("exit_source", "")).upper() == "ATR"
-    sl = abs(float(state.get("sl_pct") or 0.0)) or abs(float(config["SL_PCT"]))
-    tp = abs(float(state.get("tp_pct") or 0.0)) or abs(float(config["TP_PCT"]))
-    be_trigger = abs(float(state.get("be_trigger_pct") or 0.0)) or abs(float(config["BE_TRIGGER_PCT"]))
-    be_lock = abs(float(state.get("be_lock_pct") or 0.0)) or abs(float(config["BE_LOCK_PCT"]))
-    trail_start = abs(float(state.get("trail_start_pct") or 0.0)) or abs(float(config["TRAILING_START_PCT"]))
-    trail_step = abs(float(state.get("trail_step_pct") or 0.0)) or abs(float(config["TRAILING_STEP_PCT"]))
+    # Fallback config sadar-unit (perbaikan audit 2026-09-27): pada mode ATR
+    # nilai state adalah jarak harga absolut, sedangkan config berdenominasi
+    # persen. _exit_distance mengonversi persen -> jarak harga bila perlu,
+    # supaya SL tidak pernah "mati" hanya karena satuan tercampur.
+    entry = float(state["entry_price"])
+    sl = _exit_distance(state, config, "sl_pct", "SL_PCT", atr_mode, entry)
+    tp = _exit_distance(state, config, "tp_pct", "TP_PCT", atr_mode, entry)
+    be_trigger = _exit_distance(state, config, "be_trigger_pct", "BE_TRIGGER_PCT", atr_mode, entry)
+    be_lock = _exit_distance(state, config, "be_lock_pct", "BE_LOCK_PCT", atr_mode, entry)
+    trail_start = _exit_distance(state, config, "trail_start_pct", "TRAILING_START_PCT", atr_mode, entry)
+    trail_step = _exit_distance(state, config, "trail_step_pct", "TRAILING_STEP_PCT", atr_mode, entry)
     if atr_mode:
         pnl_unit = current_price - state["entry_price"]
         sl_hit = current_price <= state["entry_price"] - sl
@@ -2191,7 +2319,30 @@ def run(config: dict, lifecycle=None) -> int:
                         book = client.get_book_ticker(best.symbol)
                         bid, ask = float(book["bidPrice"]), float(book["askPrice"])
                         spread_pct = scanner.spread_pct_from_book(bid, ask)
-                        if spread_pct <= config["MAX_SPREAD_PCT"]:
+                        # Pagar chase (perbaikan audit 2026-09-27): antara
+                        # close candle konfirmasi dan detik ini bisa berlalu
+                        # sampai MARKET_SCAN_INTERVAL_SECONDS. Kalau ask
+                        # sudah lari terlalu jauh di atas harga sinyal
+                        # (setup.breakout_level = close candle konfirmasi),
+                        # entry dilewati; SL/TP dihitung dari fill sehingga
+                        # membeli puncak lokal merusak seluruh geometri exit.
+                        max_chase = float(config.get("MAX_CHASE_PCT", 0) or 0)
+                        signal_close = float(best.setup.breakout_level or 0.0) if (
+                            best.setup is not None and best.setup.breakout_level
+                        ) else 0.0
+                        chase_ok = True
+                        if max_chase > 0 and signal_close > 0 and ask > signal_close * (
+                            1.0 + max_chase / 100.0
+                        ):
+                            chase_ok = False
+                            logger.info(
+                                "Kandidat %s dilewati: ask %.8f sudah %+.2f%% di atas "
+                                "close candle sinyal %.8f (batas MAX_CHASE_PCT %.2f%%).",
+                                best.symbol, ask,
+                                (ask / signal_close - 1.0) * 100.0,
+                                signal_close, max_chase,
+                            )
+                        if spread_pct <= config["MAX_SPREAD_PCT"] and chase_ok:
                             logger.info(
                                 "Kandidat terpilih: %s (vol24h=%.0f, 24h=%.2f%%, spread=%.3f%%) | %s",
                                 best.symbol, best.quote_volume, best.price_change_pct,
@@ -2523,8 +2674,12 @@ def selftest() -> None:
         return float(cl.orders[-1][2])
 
     cfg_size = dict(cfg)
+    # USE_ATR_EXIT dimatikan untuk sub-test sizing: kandidat selftest tidak
+    # membawa setup/ATR, dan sejak perbaikan audit 2026-09-27 open_position
+    # MENOLAK entry mode ATR tanpa nilai ATR. Fokus di sini murni sizing.
     cfg_size.update({"USE_RISK_PERCENT": True, "RISK_PERCENT": 95.0,
-                      "BALANCE_BUFFER_PCT": 0.5, "MAX_POSITION_USDT": 0})
+                      "BALANCE_BUFFER_PCT": 0.5, "MAX_POSITION_USDT": 0,
+                      "USE_ATR_EXIT": False})
 
     # Tanpa plafon: persentase harus BENAR-BENAR terpakai dan ikut tumbuh
     # bersama saldo. Inilah yang dulu tidak terjadi karena plafon 10 USDT.

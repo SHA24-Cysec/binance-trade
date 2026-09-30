@@ -58,14 +58,11 @@ def test_relasi_lookback_minimum_mengikuti_struktur_setup():
 
 
 def test_tier_watchlist_lama_dimigrasikan():
+    # Helper migrasi tier dipertahankan untuk file analisis watchlist_auto
+    # lama, meskipun daftar manual "WATCHLIST" sudah dihapus (2026-09-27).
     assert config.migrate_watchlist_tier("MOMENTUM") == "AKTIF"
     assert config.migrate_watchlist_tier("momentum") == "AKTIF"
     assert config.migrate_watchlist_tier("INTI") == "INTI"
-    kandidat = dict(config.PUMP_CONFIG)
-    kandidat["WATCHLIST"] = [{"symbol": "BTCUSDT", "tier": "MOMENTUM", "score": 80.0}]
-    cleaned, errors, _warn = ss.validate_candidate(kandidat, "PAPER")
-    assert not errors, errors
-    assert cleaned["WATCHLIST"][0]["tier"] == "AKTIF"
 
 
 def test_override_is_merged_per_mode(tmp_path, monkeypatch):
@@ -100,16 +97,22 @@ def test_relation_validation_and_live_position_cap():
     assert "MAX_POSITION_USDT" in errors
 
 
-def test_watchlist_symbol_and_tier_validation():
+def test_watchlist_manual_dihapus_dari_schema_dan_config():
+    """Daftar manual WATCHLIST dihapus 2026-09-27; panel kini otomatis."""
+    assert "WATCHLIST" not in config.PUMP_CONFIG
+    assert "WATCHLIST" not in ss.PARAMETER_SCHEMA
+    # Override lama yang masih menyimpan kunci WATCHLIST harus DIBUANG
+    # diam-diam (REMOVED_CONFIG_KEYS), bukan dianggap file korup.
+    assert "WATCHLIST" in ss.REMOVED_CONFIG_KEYS
+    # Kenop pengganti: berapa pair teratas yang dipantau panel otomatis.
     candidate = config.default_config_for_mode("PAPER")
-    candidate["WATCHLIST"] = [{"symbol": " arbusdt ", "tier": "inti"}]
+    candidate["WATCHLIST_TOP_N"] = 10
     cleaned, errors, _ = ss.validate_candidate(candidate, "PAPER")
     assert not errors
-    assert cleaned["WATCHLIST"] == [{"symbol": "ARBUSDT", "tier": "INTI"}]
-
-    candidate["WATCHLIST"] = [{"symbol": "../XUSDT", "tier": "INTI"}]
+    assert cleaned["WATCHLIST_TOP_N"] == 10
+    candidate["WATCHLIST_TOP_N"] = 0  # di bawah minimum 1
     _, errors, _ = ss.validate_candidate(candidate, "PAPER")
-    assert "WATCHLIST" in errors
+    assert "WATCHLIST_TOP_N" in errors
 
 
 def test_schema_public_payload_never_contains_credentials():

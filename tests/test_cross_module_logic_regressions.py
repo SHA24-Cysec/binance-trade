@@ -395,8 +395,12 @@ def test_buy_uses_quote_order_qty_for_nominal_limit(tmp_path) -> None:
                     "cummulativeQuoteQty": "25"}
 
     cfg = _config(tmp_path)
+    # USE_ATR_EXIT dimatikan: fixture ini memakai candidate tanpa setup/ATR,
+    # dan sejak perbaikan audit 2026-09-27 open_position MENOLAK entry mode
+    # ATR tanpa nilai ATR (guard anti "SL jarak absolut" yang tidak pernah
+    # tersentuh). Fokus test ini adalah sizing quoteOrderQty, bukan level exit.
     cfg.update({"USE_RISK_PERCENT": False, "POSITION_SIZE_USDT": 25.0,
-                "MAX_POSITION_USDT": 100.0})
+                "MAX_POSITION_USDT": 100.0, "USE_ATR_EXIT": False})
     state = dict(bot.DEFAULT_STATE)
     candidate = scanner.Candidate(
         symbol="TESTUSDT", base_asset="TEST", price_change_pct=20.0,

@@ -90,7 +90,8 @@ class PaperMatchingEngine:
         # Tarif fee dihitung sebagai Decimal EKSAK dari nilai mentah config
         # (bukan lewat helper float get_taker_fee_pct) agar tidak menyerap galat
         # pembulatan float, mis. 0.1*0.75 -> 0.07500000000000001. Nilai persen
-        # tetap konsisten dengan get_taker_fee_pct()/get_maker_fee_pct().
+        # tetap konsisten dengan config.get_taker_fee_pct() (helper maker sudah
+        # dihapus sebagai dead code pada audit 2026-09-27).
         taker_base = Decimal(str(config.get("TAKER_FEE_PCT", 0.1)))
         maker_base = Decimal(str(config.get("MAKER_FEE_PCT", config.get("TAKER_FEE_PCT", 0.1))))
         if config.get("USE_BNB_FEE_DISCOUNT"):

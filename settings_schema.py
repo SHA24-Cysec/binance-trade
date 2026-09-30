@@ -29,11 +29,9 @@ RUNTIME_FILE = ROOT / "pump_bot_runtime.json"
 RUNTIME_ERROR_FILE = ROOT / "pump_bot_runtime.error.json"
 AUDIT_FILE = ROOT / "pump_bot_settings_audit.log"
 VALID_MODES = ("PAPER", "LIVE")
-VALID_WATCHLIST_TIERS = ("INTI", "AKTIF", "SPEKULATIF")
-# Tier lama yang masih mungkin ada di file watchlist atau settings override
-# yang sudah tersimpan. Dipetakan diam-diam ke nama baru supaya file lama
-# tidak ditolak validasi dan datanya tidak hilang.
-LEGACY_WATCHLIST_TIER_MAP = {"MOMENTUM": "AKTIF"}
+# CATATAN AUDIT 2026-09-27: VALID_WATCHLIST_TIERS dan LEGACY_WATCHLIST_TIER_MAP
+# dihapus dari modul ini bersama _validate_watchlist(); padanannya untuk file
+# analisis lama masih hidup di config.py (dipakai watchlist_auto.py).
 
 # Kunci config yang SUDAH DIHAPUS bersama strategi lama. Kalau masih ada di
 # file override milik pengguna, kunci itu dibuang saat dimuat, bukan dianggap
@@ -51,6 +49,11 @@ REMOVED_CONFIG_KEYS = {
     # Batas waktu hold. Dihapus total karena memaksa exit berdasarkan jam
     # dinding, bukan harga atau struktur. Tidak ada penggantinya.
     "MAX_HOLD_MINUTES",
+    # Daftar watchlist manual (tier + skor + note statis). Dihapus
+    # 2026-09-27: panel dashboard kini menyusun daftarnya otomatis dari
+    # semesta scanner (WATCHLIST_TOP_N). File override lama yang masih
+    # menyimpannya tidak boleh dianggap korup.
+    "WATCHLIST",
 }
 _WRITE_LOCK = threading.RLock()
 
@@ -162,6 +165,7 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "MIN_LISTING_AGE_DAYS": _field("Scan", "Usia listing minimum", "Pasangan lebih muda akan ditolak.", "int", minimum=0, maximum=36500, unit="hari"),
 
     "WATCHLIST_ENABLED": _field("Watchlist", "Aktifkan watchlist", "Menampilkan panel pemantauan watchlist.", "bool"),
+    "WATCHLIST_TOP_N": _field("Watchlist", "Jumlah pair dipantau", "Berapa pair dengan kenaikan 24 jam terbesar (yang lolos gerbang volume scanner) yang ditampilkan dan diberi skor sinyal.", "int", minimum=1, maximum=50),
     "WATCHLIST_ENTRY_WEIGHT_EMA": _field("Watchlist", "Bobot EMA", "Bobot skor entry.", "float", minimum=0, maximum=100),
     "WATCHLIST_ENTRY_WEIGHT_RSI": _field("Watchlist", "Bobot RSI", "Bobot skor entry.", "float", minimum=0, maximum=100),
     "WATCHLIST_ENTRY_WEIGHT_MACD": _field("Watchlist", "Bobot MACD", "Bobot skor entry.", "float", minimum=0, maximum=100),
@@ -170,7 +174,6 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "WATCHLIST_ENTRY_RSI_DECAY_PTS": _field("Watchlist", "Decay RSI", "Lebar decay RSI.", "float", minimum=1, maximum=100),
     "WATCHLIST_ENTRY_SCORE_TTL_SECONDS": _field("Watchlist", "TTL skor entry", "Cache skor candle.", "int", minimum=1, maximum=86400, unit="detik"),
     "WATCHLIST_ENTRY_MIN_HEADROOM": _field("Watchlist", "Headroom skor", "Sisa kuota minimum.", "float", minimum=0, maximum=1),
-    "WATCHLIST": _field("Watchlist", "Daftar watchlist", "Editor simbol dan tier pemantauan.", "list", editor="watchlist"),
 
     "USE_RISK_PERCENT": _field("Ukuran Posisi", "Gunakan persen risiko", "Ukuran posisi dihitung dari saldo bebas.", "bool", dangerous=True),
     "RISK_PERCENT": _field("Ukuran Posisi", "Persen saldo per entry", "Persentase saldo bebas yang digunakan.", "float", minimum=0.01, maximum=100, unit="%", dangerous=True),
@@ -202,6 +205,7 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "TRAILING_STEP_PCT": _field("Breakeven dan Trailing", "Jarak trailing", "Jarak stop dari harga tertinggi.", "float", minimum=0.01, maximum=100, unit="%"),
 
     "MAX_SPREAD_PCT": _field("Fee dan Filter", "Spread maksimum", "Spread bid-ask maksimum untuk entry.", "float", minimum=0, maximum=100, unit="%", dangerous=True),
+    "MAX_CHASE_PCT": _field("Fee dan Filter", "Batas chase entry", "Entry dilewati bila ask sudah melebihi close candle sinyal sebesar persen ini. 0 = nonaktif.", "float", minimum=0, maximum=100, unit="%", dangerous=True),
     "TAKER_FEE_PCT": _field("Fee dan Filter", "Fee taker", "Asumsi fee order market.", "float", minimum=0, maximum=10, unit="%"),
     "MAKER_FEE_PCT": _field("Fee dan Filter", "Fee maker", "Asumsi fee order limit maker.", "float", minimum=0, maximum=10, unit="%"),
     "USE_BNB_FEE_DISCOUNT": _field("Fee dan Filter", "Diskon fee BNB", "Gunakan asumsi diskon pembayaran fee dengan BNB.", "bool"),
@@ -390,39 +394,8 @@ def _validate_symbol_list(value: Any, quote: str) -> list[str]:
     return result
 
 
-def _validate_watchlist(value: Any, quote: str) -> list[dict]:
-    if not isinstance(value, list):
-        raise ValueError("watchlist harus berupa daftar")
-    result: list[dict] = []
-    seen: set[str] = set()
-    for index, item in enumerate(value):
-        if not isinstance(item, dict):
-            raise ValueError(f"baris watchlist {index + 1} harus object")
-        symbol = str(item.get("symbol", "")).strip().upper()
-        tier = LEGACY_WATCHLIST_TIER_MAP.get(
-            str(item.get("tier", "")).strip().upper(),
-            str(item.get("tier", "")).strip().upper())
-        if not _SYMBOL_RE.fullmatch(symbol) or not symbol.endswith(quote):
-            raise ValueError(f"simbol watchlist tidak valid: {symbol!r}")
-        if tier not in VALID_WATCHLIST_TIERS:
-            raise ValueError(f"tier {symbol} tidak valid")
-        if symbol in seen:
-            raise ValueError(f"simbol watchlist duplikat: {symbol}")
-        seen.add(symbol)
-        row = {"symbol": symbol, "tier": tier}
-        if item.get("score") not in (None, ""):
-            score = _coerce_number(item.get("score"), False)
-            if score < 0 or score > 100:
-                raise ValueError(f"score {symbol} harus 0 sampai 100")
-            row["score"] = score
-        if item.get("note") not in (None, ""):
-            note = str(item.get("note", "")).strip()
-            if len(note) > 300:
-                raise ValueError(f"catatan {symbol} maksimal 300 karakter")
-            row["note"] = note
-        result.append(row)
-    return result
-
+# CATATAN AUDIT 2026-09-27: _validate_watchlist() dihapus bersama field
+# "WATCHLIST" (daftar manual diganti panel otomatis WATCHLIST_TOP_N).
 
 def validate_balances(value: Any) -> dict[str, float]:
     if not isinstance(value, dict) or not value:
@@ -465,8 +438,6 @@ def coerce_field(key: str, value: Any, candidate: dict) -> Any:
         options = spec.get("options")
         if options and result not in options:
             raise ValueError("nilai tidak termasuk pilihan yang diizinkan")
-    elif key == "WATCHLIST":
-        result = _validate_watchlist(value, str(candidate.get("QUOTE_ASSET", "USDT")).upper())
     elif key == "EXTRA_EXCLUDE_SYMBOLS":
         result = _validate_symbol_list(value, str(candidate.get("QUOTE_ASSET", "USDT")).upper())
     elif key == "PAPER_INITIAL_BALANCES":
@@ -535,6 +506,14 @@ def validate_candidate(candidate: dict, mode: str) -> tuple[dict, dict[str, str]
                  "tidak boleh melebihi trigger trailing")
         relation("ATR_MULT_BE_LOCK", cleaned["ATR_MULT_BE_LOCK"] <= cleaned["ATR_MULT_BE_TRIGGER"],
                  "tidak boleh melebihi trigger breakeven")
+        # Relasi R:R (perbaikan audit 2026-09-27): TP harus lebih jauh dari SL.
+        # Konfigurasi terbalik (SL >= TP) membuat rasio risk-reward negatif
+        # secara struktural dan hampir pasti merupakan salah ketik.
+        relation("ATR_MULT_TP", cleaned["ATR_MULT_TP"] > cleaned["ATR_MULT_SL"],
+                 "harus lebih besar dari ATR_MULT_SL agar rasio risk-reward tidak terbalik")
+        if cleaned["USE_TP"] and cleaned["USE_STOP_LOSS"]:
+            relation("TP_PCT", cleaned["TP_PCT"] > cleaned["SL_PCT"],
+                     "harus lebih besar dari SL_PCT agar rasio risk-reward tidak terbalik")
         if cleaned["PUMP_MIN_24H_CHANGE_PCT"] <= 0:
             warnings.append("PUMP_MIN_24H_CHANGE_PCT nol atau kurang: gerbang kenaikan 24 jam "
                             "praktis mati dan koin yang turun ikut menjadi kandidat.")
@@ -632,6 +611,12 @@ def dangerous_relaxations(old: dict, new: dict) -> list[str]:
     ):
         if float(new.get(key, 0)) > float(old.get(key, 0)):
             relaxed.append(label)
+    # MAX_CHASE_PCT longgar = boleh membeli makin jauh di atas harga sinyal;
+    # 0 berarti pagar dimatikan total, jadi transisi ke 0 juga dianggap relaksasi.
+    old_chase = float(old.get("MAX_CHASE_PCT", 0) or 0)
+    new_chase = float(new.get("MAX_CHASE_PCT", 0) or 0)
+    if (old_chase > 0 and new_chase == 0) or (old_chase > 0 and new_chase > old_chase):
+        relaxed.append("batas chase entry dilonggarkan")
     return relaxed
 
 

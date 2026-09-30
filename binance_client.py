@@ -303,12 +303,22 @@ class BinanceSpotClient:
                 if isinstance(exc, BinanceAPIError) and exc.code == -1021:
                     logger.warning("Timestamp meleset, sinkronisasi ulang jam server...")
                     self.sync_time()
-                wait = min(2 ** attempt, 10)
-                logger.warning(
-                    "Request %s %s gagal (percobaan %d/%d): %s. Tunggu %ds.",
-                    method, path, attempt, max_retries, exc, wait,
-                )
-                time.sleep(wait)
+                # Tidur hanya DI ANTARA percobaan (perbaikan audit 2026-09-27):
+                # pada percobaan terakhir (mis. POST order max_retries=1) tidak
+                # ada retry berikutnya, jadi sleep hanya menambah latensi mati
+                # di jalur kritis sebelum pemulihan/rekonsiliasi dimulai.
+                if attempt < max_retries:
+                    wait = min(2 ** attempt, 10)
+                    logger.warning(
+                        "Request %s %s gagal (percobaan %d/%d): %s. Tunggu %ds.",
+                        method, path, attempt, max_retries, exc, wait,
+                    )
+                    time.sleep(wait)
+                else:
+                    logger.warning(
+                        "Request %s %s gagal (percobaan terakhir %d/%d): %s.",
+                        method, path, attempt, max_retries, exc,
+                    )
         raise last_exc
 
     # ---------------------------------------------------------------

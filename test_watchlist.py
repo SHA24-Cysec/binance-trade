@@ -83,51 +83,17 @@ def _synthetic_strategy_config():
 
 
 class TestConfigHelper(unittest.TestCase):
-    """Helper harus tahan input berantakan tanpa pernah melempar exception."""
+    """Helper config panel watchlist (daftar manual sudah dihapus 2026-09-27)."""
 
-    def test_daftar_bawaan_valid(self):
-        wl = cfg_mod.get_watchlist()
-        self.assertGreater(len(wl), 0, "watchlist bawaan tidak boleh kosong")
-        for r in wl:
-            self.assertTrue(r["symbol"].endswith("USDT"), f"{r['symbol']} bukan pair USDT")
-            self.assertEqual(r["symbol"], r["symbol"].upper())
-            self.assertIn(r["tier"], cfg_mod.VALID_WATCHLIST_TIERS)
-            self.assertIsInstance(r["score"], float)
-            self.assertTrue(0 <= r["score"] <= 100, f"skor {r['symbol']} di luar 0-100")
-            self.assertTrue(r["note"], f"{r['symbol']} tidak punya catatan")
+    def test_daftar_manual_benar_benar_hilang(self):
+        """Kunci WATCHLIST dan get_watchlist() tidak boleh hidup lagi diam-diam."""
+        self.assertNotIn("WATCHLIST", cfg_mod.PUMP_CONFIG)
+        self.assertFalse(hasattr(cfg_mod, "get_watchlist"))
 
-    def test_tidak_ada_simbol_duplikat(self):
-        syms = [r["symbol"] for r in cfg_mod.get_watchlist()]
-        self.assertEqual(len(syms), len(set(syms)), "ada simbol duplikat di watchlist")
-
-    def test_terima_entry_berupa_string(self):
-        c = {"WATCHLIST": ["arbusdt", " ZECUSDT "]}
-        wl = cfg_mod.get_watchlist(c)
-        self.assertEqual([r["symbol"] for r in wl], ["ARBUSDT", "ZECUSDT"])
-        self.assertEqual(wl[0]["tier"], "LAINNYA")
-        self.assertIsNone(wl[0]["score"])
-
-    def test_buang_duplikat_dan_kosong(self):
-        c = {"WATCHLIST": ["ARBUSDT", "ARBUSDT", "", "   ", None, 42, [], {"symbol": ""}]}
-        wl = cfg_mod.get_watchlist(c)
-        self.assertEqual([r["symbol"] for r in wl], ["ARBUSDT"])
-
-    def test_tier_dan_skor_rusak_tidak_bikin_crash(self):
-        c = {"WATCHLIST": [
-            {"symbol": "AUSDT", "tier": "NGAWUR", "score": "bukan angka"},
-            {"symbol": "BUSDT", "tier": None, "score": None},
-            {"symbol": "CUSDT", "score": "77.5"},   # string angka tetap terbaca
-        ]}
-        wl = cfg_mod.get_watchlist(c)
-        self.assertEqual(wl[0]["tier"], "LAINNYA")
-        self.assertIsNone(wl[0]["score"])
-        self.assertIsNone(wl[1]["score"])
-        self.assertEqual(wl[2]["score"], 77.5)
-
-    def test_watchlist_bukan_list(self):
-        for bad in ({"WATCHLIST": "ARBUSDT"}, {"WATCHLIST": None},
-                    {"WATCHLIST": 123}, {}):
-            self.assertEqual(cfg_mod.get_watchlist(bad), [])
+    def test_top_n_ada_dan_wajar(self):
+        n = cfg_mod.PUMP_CONFIG.get("WATCHLIST_TOP_N")
+        self.assertIsInstance(n, int)
+        self.assertTrue(1 <= n <= 50, f"WATCHLIST_TOP_N tidak wajar: {n}")
 
     def test_enabled_dibaca_longgar_tapi_aman(self):
         for val in (True, "true", "1", "ya", "YES", "on"):
@@ -162,10 +128,11 @@ class TestTidakMenyentuhTrading(unittest.TestCase):
              "quoteVolume": "5000000", "lastPrice": "3.0"},
         ]
         base = dict(cfg_mod.PUMP_CONFIG)
-        tanpa = dict(base); tanpa["WATCHLIST"] = []; tanpa["WATCHLIST_ENABLED"] = False
-        dengan = dict(base)
-        dengan["WATCHLIST"] = [{"symbol": "AAAUSDT", "tier": "INTI", "score": 99.0}]
-        dengan["WATCHLIST_ENABLED"] = True
+        # Panel kini otomatis; satu-satunya kenop yang tersisa adalah
+        # WATCHLIST_ENABLED, dan menyalakan/mematikannya TIDAK boleh
+        # mengubah ranking kandidat scanner sedikit pun.
+        tanpa = dict(base); tanpa["WATCHLIST_ENABLED"] = False
+        dengan = dict(base); dengan["WATCHLIST_ENABLED"] = True
 
         r1 = [c.symbol for c in scanner.filter_and_rank_candidates(
             tickers, tanpa, get_daily_klines_fn=_harian_pump, reference_ms=_ref_ms())]
@@ -219,13 +186,11 @@ class TestBuildWatchlist(unittest.TestCase):
         self.dash = dashboard
         dashboard._watchlist_cache.update({"data": None, "ts": 0, "error": None})
 
-    def _patch(self, tickers, cfg_over=None, client_raises=False, client_none=False):
+    def _patch(self, tickers, top_n=15, client_raises=False, client_none=False):
         base = dict(self.dash.PUMP_CONFIG)
         base["WATCHLIST_ENABLED"] = True
         base["MIN_QUOTE_VOLUME_USDT_24H"] = 2_000_000
-        base["WATCHLIST"] = cfg_over if cfg_over is not None else [
-            {"symbol": "AAAUSDT", "tier": "INTI", "score": 90.0, "note": "uji"},
-        ]
+        base["WATCHLIST_TOP_N"] = top_n
 
         class FakeClient:
             def get_ticker_24hr_all(self):
@@ -264,23 +229,25 @@ class TestBuildWatchlist(unittest.TestCase):
             w = self.dash.build_watchlist()
         self.assertEqual(w["items"][0]["status"], "LIKUID")
 
-    def test_status_tipis_saat_volume_kurang(self):
+    def test_volume_di_bawah_ambang_tidak_masuk_panel(self):
+        """Panel otomatis HANYA memuat pair yang lolos gerbang volume scanner."""
         cases = [
-            ("5", "5000000", "LIKUID"),     # likuid meski naiknya kecil
-            ("20", "500000", "TIPIS"),      # volume kurang
-            ("2", "500000", "TIPIS"),       # volume kurang
+            ("5", "5000000", 1),     # likuid meski naiknya kecil -> tampil
+            ("20", "500000", 0),     # volume kurang -> tidak masuk daftar
+            ("2", "500000", 0),      # volume kurang -> tidak masuk daftar
         ]
-        for chg, vol, expect in cases:
+        for chg, vol, expect_n in cases:
             # Cache menyimpan SATU snapshot seluruh pasar dan berlaku 20 detik.
-            # Itu perilaku yang benar di produksi, tapi di dalam loop uji ini
-            # membuat kasus kedua membaca data kasus pertama. Jadi cache
-            # dikosongkan tiap iterasi agar yang diuji memang logika status.
+            # Di dalam loop uji ini cache dikosongkan tiap iterasi agar yang
+            # diuji memang logika seleksi, bukan snapshot kasus sebelumnya.
             self.dash._watchlist_cache.update({"data": None, "ts": 0, "error": None})
             t = [{"symbol": "AAAUSDT", "lastPrice": "10", "priceChangePercent": chg,
                   "quoteVolume": vol, "highPrice": "11", "lowPrice": "9", "count": 5}]
             with self._patch(t):
                 w = self.dash.build_watchlist()
-            self.assertEqual(w["items"][0]["status"], expect, f"chg={chg} vol={vol}")
+            self.assertEqual(len(w["items"]), expect_n, f"chg={chg} vol={vol}")
+            if expect_n:
+                self.assertEqual(w["items"][0]["status"], "LIKUID")
 
     def test_ambang_tepat_di_batas_dihitung_lolos(self):
         """Scanner memakai >=, panel harus memakai perbandingan yang sama."""
@@ -290,19 +257,20 @@ class TestBuildWatchlist(unittest.TestCase):
             w = self.dash.build_watchlist()
         self.assertEqual(w["items"][0]["status"], "LIKUID")
 
-    def test_simbol_tanpa_data_tidak_hilang(self):
+    def test_pasar_kosong_menghasilkan_panel_kosong(self):
         with self._patch([]):
             w = self.dash.build_watchlist()
-        self.assertEqual(len(w["items"]), 1)
-        self.assertEqual(w["items"][0]["status"], "TIDAK ADA DATA")
-        self.assertIsNone(w["items"][0]["price"])
+        self.assertEqual(w["items"], [])
+        self.assertTrue(w["enabled"])
 
     def test_harga_nol_tidak_bikin_bagi_nol(self):
+        # Ticker dengan lastPrice 0 dibuang dari seleksi otomatis, bukan
+        # dipaksa tampil dengan pembagian nol.
         t = [{"symbol": "AAAUSDT", "lastPrice": "0", "priceChangePercent": "50",
               "quoteVolume": "9000000", "highPrice": "0", "lowPrice": "0", "count": 0}]
         with self._patch(t):
             w = self.dash.build_watchlist()
-        self.assertEqual(w["items"][0]["status"], "TIDAK ADA DATA")
+        self.assertEqual(w["items"], [])
 
     def test_high_sama_dengan_low_tidak_bikin_bagi_nol(self):
         t = [{"symbol": "AAAUSDT", "lastPrice": "10", "priceChangePercent": "20",
@@ -316,20 +284,20 @@ class TestBuildWatchlist(unittest.TestCase):
               "quoteVolume": {}, "highPrice": "x", "lowPrice": "y"}]
         with self._patch(t):
             w = self.dash.build_watchlist()
-        self.assertEqual(w["items"][0]["status"], "TIDAK ADA DATA")
+        self.assertEqual(w["items"], [], "baris rusak harus dibuang diam-diam")
 
     def test_jaringan_gagal_ditangani_anggun(self):
         with self._patch([], client_raises=True):
             w = self.dash.build_watchlist()
         self.assertTrue(w["enabled"])
         self.assertIsNotNone(w["error"])
-        self.assertEqual(len(w["items"]), 1)
+        self.assertEqual(w["items"], [])
 
     def test_klien_tidak_tersedia(self):
         with self._patch([], client_none=True):
             w = self.dash.build_watchlist()
         self.assertIsNotNone(w["error"])
-        self.assertEqual(w["items"][0]["status"], "TIDAK ADA DATA")
+        self.assertEqual(w["items"], [])
 
     def test_cache_dipakai_saat_request_kedua_gagal(self):
         """Data lama harus bertahan supaya panel tidak berkedip kosong."""
@@ -345,9 +313,7 @@ class TestBuildWatchlist(unittest.TestCase):
         self.assertIsNotNone(w2["error"])
         self.assertEqual(w2["items"][0]["status"], "LIKUID", "data cache hilang")
 
-    def test_urutan_likuid_paling_atas_lalu_volume_terbesar(self):
-        wl = [{"symbol": s, "tier": "INTI", "score": 50.0} for s in
-              ("TIPISUSDT", "BESARUSDT", "SEDANGUSDT")]
+    def test_urutan_kenaikan_24jam_dan_yang_tipis_tersingkir(self):
         t = [
             {"symbol": "TIPISUSDT", "lastPrice": "1", "priceChangePercent": "30",
              "quoteVolume": "100", "highPrice": "1", "lowPrice": "1", "count": 1},
@@ -356,10 +322,52 @@ class TestBuildWatchlist(unittest.TestCase):
             {"symbol": "SEDANGUSDT", "lastPrice": "1", "priceChangePercent": "2",
              "quoteVolume": "3000000", "highPrice": "1", "lowPrice": "1", "count": 1},
         ]
-        with self._patch(t, cfg_over=wl):
+        with self._patch(t):
             w = self.dash.build_watchlist()
+        # TIPISUSDT tersingkir walau naik 30%: volume 100 < ambang 2 juta
+        # (gerbang volume tetap berlaku). Sisanya urut KENAIKAN 24 jam
+        # terbesar (SEDANG +2% di atas BESAR +1%), karena skor sinyal belum
+        # terhitung (klien palsu tidak punya get_klines).
         self.assertEqual([r["symbol"] for r in w["items"]],
-                         ["BESARUSDT", "SEDANGUSDT", "TIPISUSDT"])
+                         ["SEDANGUSDT", "BESARUSDT"])
+
+    def test_top_n_membatasi_jumlah_baris(self):
+        t = [{"symbol": f"S{i:02d}USDT", "lastPrice": "1",
+              "priceChangePercent": str(i), "quoteVolume": "3000000",
+              "highPrice": "1", "lowPrice": "1", "count": 1} for i in range(30)]
+        with self._patch(t, top_n=5):
+            w = self.dash.build_watchlist()
+        self.assertEqual(len(w["items"]), 5)
+        # Yang terpilih harus 5 dengan KENAIKAN 24 jam terbesar.
+        self.assertEqual([r["symbol"] for r in w["items"]],
+                         [f"S{i:02d}USDT" for i in (29, 28, 27, 26, 25)])
+
+    def test_volume_jadi_pemecah_seri_saat_kenaikan_sama(self):
+        t = [
+            {"symbol": "KECILUSDT", "lastPrice": "1", "priceChangePercent": "5",
+             "quoteVolume": "3000000", "highPrice": "1", "lowPrice": "1", "count": 1},
+            {"symbol": "BESARUSDT", "lastPrice": "1", "priceChangePercent": "5",
+             "quoteVolume": "9000000", "highPrice": "1", "lowPrice": "1", "count": 1},
+        ]
+        with self._patch(t, top_n=1):
+            w = self.dash.build_watchlist()
+        self.assertEqual([r["symbol"] for r in w["items"]], ["BESARUSDT"])
+
+    def test_stablecoin_dan_leveraged_tidak_ikut_panel(self):
+        """Semesta panel = semesta scanner: saringan struktural yang sama."""
+        t = [
+            {"symbol": "USDCUSDT", "lastPrice": "1", "priceChangePercent": "0",
+             "quoteVolume": "900000000", "highPrice": "1", "lowPrice": "1", "count": 1},
+            {"symbol": "BTCUPUSDT", "lastPrice": "1", "priceChangePercent": "9",
+             "quoteVolume": "90000000", "highPrice": "1", "lowPrice": "1", "count": 1},
+            {"symbol": "AAAUSDT", "lastPrice": "1", "priceChangePercent": "1",
+             "quoteVolume": "5000000", "highPrice": "1", "lowPrice": "1", "count": 1},
+            {"symbol": "BBBBTC", "lastPrice": "1", "priceChangePercent": "1",
+             "quoteVolume": "5000000", "highPrice": "1", "lowPrice": "1", "count": 1},
+        ]
+        with self._patch(t):
+            w = self.dash.build_watchlist()
+        self.assertEqual([r["symbol"] for r in w["items"]], ["AAAUSDT"])
 
     def test_nonaktif_mengembalikan_daftar_kosong(self):
         base = dict(self.dash.PUMP_CONFIG)
@@ -376,23 +384,25 @@ class TestBuildWatchlist(unittest.TestCase):
             w = self.dash.build_watchlist()
         json.dumps(w)  # harus tidak melempar
 
-    def test_satu_panggilan_api_untuk_semua_simbol(self):
-        """Panel tidak boleh memanggil Binance sekali per simbol."""
-        wl = [{"symbol": f"S{i}USDT", "tier": "INTI", "score": 1.0} for i in range(30)]
+    def test_satu_panggilan_api_untuk_seluruh_seleksi(self):
+        """Seleksi simbol memakai SATU snapshot ticker, bukan satu call per pair."""
         calls = []
 
         class Counting:
             def get_ticker_24hr_all(self):
                 calls.append(1)
-                return []
+                return [{"symbol": f"S{i}USDT", "lastPrice": "1",
+                         "priceChangePercent": "1", "quoteVolume": "5000000",
+                         "highPrice": "1", "lowPrice": "1", "count": 1}
+                        for i in range(30)]
 
         base = dict(self.dash.PUMP_CONFIG)
         base["WATCHLIST_ENABLED"] = True
-        base["WATCHLIST"] = wl
+        base["MIN_QUOTE_VOLUME_USDT_24H"] = 2_000_000
         with mock.patch.multiple(self.dash, PUMP_CONFIG=base,
                                  get_client=lambda: Counting()):
             self.dash.build_watchlist()
-        self.assertEqual(len(calls), 1, f"30 simbol memicu {len(calls)} panggilan API")
+        self.assertEqual(len(calls), 1, f"30 simbol memicu {len(calls)} panggilan ticker")
 
 
 @_BUTUH_FLASK
@@ -726,7 +736,8 @@ class TestDashboardAutoIntegrasi(unittest.TestCase):
         with mock.patch.object(self.dash, "load_state", lambda: "bukan dict"):
             self.assertTrue(self.dash._bot_has_open_position())
 
-    def test_daftar_manual_jadi_cadangan_saat_auto_belum_ada(self):
+    def test_panel_terisi_otomatis_tanpa_daftar_manual(self):
+        """Bukti inti penyederhanaan: simbol muncul TANPA konfigurasi apa pun."""
         t = [{"symbol": "ZECUSDT", "lastPrice": "10", "priceChangePercent": "1",
               "quoteVolume": "9000000", "highPrice": "11", "lowPrice": "9", "count": 1}]
 
@@ -735,36 +746,16 @@ class TestDashboardAutoIntegrasi(unittest.TestCase):
                 return t
 
         base = dict(self.dash.PUMP_CONFIG)
-        base["WATCHLIST_AUTO_REFRESH"] = True
-        with mock.patch.multiple(self.dash, PUMP_CONFIG=base,
-                                 get_client=lambda: FakeClient()), \
-                mock.patch.object(self.dash.wl_auto, "load_result", lambda c: None):
-            w = self.dash.build_watchlist()
-        self.assertEqual(w["source"], "config")
-        self.assertGreater(len(w["items"]), 0, "panel kosong padahal ada cadangan")
-
-    def test_pakai_hasil_auto_kalau_tersedia(self):
-        class FakeClient:
-            def get_ticker_24hr_all(self):
-                return []
-
-        base = dict(self.dash.PUMP_CONFIG)
+        base["WATCHLIST_ENABLED"] = True
         with mock.patch.multiple(self.dash, PUMP_CONFIG=base,
                                  get_client=lambda: FakeClient()):
             w = self.dash.build_watchlist()
-        self.assertEqual(w["source"], "config")
-
-    def test_auto_mati_tetap_pakai_config(self):
-        class FakeClient:
-            def get_ticker_24hr_all(self):
-                return []
-
-        base = dict(self.dash.PUMP_CONFIG)
-        base["WATCHLIST_AUTO_REFRESH"] = False
-        with mock.patch.multiple(self.dash, PUMP_CONFIG=base,
-                                 get_client=lambda: FakeClient()):
-            w = self.dash.build_watchlist()
-        self.assertEqual(w["source"], "config")
+        self.assertEqual([r["symbol"] for r in w["items"]], ["ZECUSDT"])
+        # Payload lama fitur auto-refresh/daftar manual tidak boleh muncul lagi.
+        self.assertNotIn("source", w)
+        self.assertNotIn("auto", w)
+        for kunci_lama in ("tier", "note"):
+            self.assertNotIn(kunci_lama, w["items"][0])
 
     def test_start_refresher_tidak_jalan_saat_dimatikan(self):
         base = dict(self.dash.PUMP_CONFIG)

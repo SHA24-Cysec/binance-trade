@@ -31,7 +31,6 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from hmac import compare_digest
 from pathlib import Path
-from typing import Optional
 from urllib.parse import urlsplit
 
 from flask import Flask, jsonify, render_template, request
@@ -40,7 +39,7 @@ import config as config_mod
 from config import (
     PUMP_CONFIG, CONFIG_LOAD_ERRORS, get_mode, get_base_url, is_paper,
     backtest_enabled, get_state_file, get_log_file, get_control_file,
-    get_watchlist, watchlist_enabled, watchlist_auto_enabled,
+    watchlist_enabled,
 )
 import state as state_mod
 import strategy
@@ -1075,34 +1074,29 @@ def index():
 
 
 def build_watchlist() -> dict:
-    """Data panel watchlist: harga, perubahan 24 jam, volume, status filter.
+    """Data panel watchlist OTOMATIS: top-N semesta scanner + skor sinyal.
 
     PANEL INI SEPENUHNYA READ-ONLY dan tidak memengaruhi bot sama sekali.
-    Ia hanya membandingkan kondisi pasar tiap simbol di daftar dengan gerbang
-    likuiditas scanner (MIN_QUOTE_VOLUME_USDT_24H), satu-satunya gerbang
-    tingkat ticker yang tersisa setelah strategi pindah ke pullback retest.
+    Sejak penyederhanaan 2026-09-27 tidak ada lagi daftar simbol manual:
+    simbol dipilih otomatis dari ticker 24 jam memakai gerbang semesta yang
+    SAMA dengan scanner bot -- is_structurally_allowed_symbol() (quote asset
+    benar, bukan stablecoin/leveraged token, tidak di-blacklist) plus gerbang
+    volume MIN_QUOTE_VOLUME_USDT_24H -- diurutkan KENAIKAN 24 JAM terbesar
+    dan dipotong WATCHLIST_TOP_N teratas. Tiap simbol lalu diberi SKOR
+    SINYAL live dari candle tertutup (EMA/RSI/MACD/Higher-Low).
 
     Yang TIDAK diperiksa di sini, dan sengaja tidak diklaim:
-      - deteksi setup pullback retest (detect_pullback_retest): butuh unduhan
-        candle per simbol setiap refresh, yang justru memakan rate-limit yang
-        dipakai bot untuk mengirim order. Jadi status "LIKUID" di panel ini
-        berarti "lolos gerbang volume", BUKAN "bot pasti membeli".
-      - spread saat ini dan urutan kualitas setup terhadap seluruh pasar.
+      - gerbang pump (kenaikan 24 jam + volume surge harian): ditegakkan
+        market_scanner saat scan, bukan panel ini.
+      - deteksi setup pullback retest penuh; skor sinyal adalah ukuran
+        kedekatan, BUKAN keputusan beli.
 
-    Degradasi anggun: kalau Binance tidak terjangkau, panel tetap tampil
-    dengan daftar simbol dan tanda strip, bukan error yang mematikan
-    dashboard. Data lama dari cache dipakai kalau ada.
+    Degradasi anggun: kalau Binance tidak terjangkau, panel memakai snapshot
+    ticker terakhir dari cache; tanpa cache sama sekali, daftar kosong plus
+    pesan error, bukan exception yang mematikan dashboard.
     """
     if not watchlist_enabled(PUMP_CONFIG):
         return {"enabled": False, "items": [], "summary": {}, "error": None}
-
-    source = "config"
-    entries = get_watchlist(PUMP_CONFIG)
-
-    if not entries:
-        return {"enabled": True, "items": [], "summary": {}, "error": None,
-                "config": _watchlist_config(), "source": source,
-                "auto": {"enabled": False}}
 
     now = time.time()
     tickers = None
@@ -1136,14 +1130,41 @@ def build_watchlist() -> dict:
                     _watchlist_cache["error"] = error
 
     min_vol = float(PUMP_CONFIG.get("MIN_QUOTE_VOLUME_USDT_24H", 0))
+    try:
+        top_n = max(1, int(PUMP_CONFIG.get("WATCHLIST_TOP_N", 15) or 15))
+    except (TypeError, ValueError):
+        top_n = 15
+
+    # ------------------------------------------------------------------
+    # Pilih simbol OTOMATIS dari semesta scanner (perubahan 2026-09-27):
+    # gerbang struktural yang sama dengan bot + gerbang volume, lalu urut
+    # KENAIKAN 24 JAM terbesar (bukan volume) dan potong top-N -- supaya
+    # yang tampil adalah pair yang paling dekat dengan semesta pump yang
+    # benar-benar dilirik bot, bukan megacap yang volumenya besar tapi
+    # jarang memicu sinyal. Volume dipakai sebagai pemecah seri.
+    # Baris ticker yang angkanya rusak dibuang diam-diam -- panel tidak
+    # boleh crash karena satu baris aneh.
+    # ------------------------------------------------------------------
+    selected: list[tuple[float, float, str, dict]] = []
+    for sym, t in (tickers or {}).items():
+        if not scanner.is_structurally_allowed_symbol(str(sym), PUMP_CONFIG):
+            continue
+        try:
+            qv = float(t.get("quoteVolume", 0) or 0)
+            price = float(t.get("lastPrice", 0) or 0)
+            chg = float(t.get("priceChangePercent", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if price <= 0 or qv < min_vol:
+            continue
+        selected.append((chg, qv, sym, t))
+    selected.sort(key=lambda x: (-x[0], -x[1]))
+    selected = selected[:top_n]
+
     score_ttl = float(PUMP_CONFIG.get("WATCHLIST_ENTRY_SCORE_TTL_SECONDS", 60))
     live_client = get_client()
     # Skor live hanya diperbarui saat cache candle kedaluwarsa dan kuota aman.
-    for e in entries:
-        sym = e["symbol"]
-        ticker = (tickers or {}).get(sym)
-        if not ticker or float(ticker.get("quoteVolume", 0) or 0) < min_vol:
-            continue
+    for _chg, _qv, sym, _t in selected:
         with _cache_lock:
             cached = _watchlist_entry_cache.get(sym)
         if cached and now - cached["ts"] < score_ttl:
@@ -1156,74 +1177,51 @@ def build_watchlist() -> dict:
             limit = min(1000, strategy.required_lookback_bars(PUMP_CONFIG) + 10)
             raw = live_client.get_klines(sym, str(PUMP_CONFIG.get("CONFIRM_INTERVAL", "5m")), limit=limit)
             klines = wl_auto.to_klines(raw) if wl_auto is not None else []
-            meta = {"symbol": sym, "spread_pct": e.get("spread_pct"), "weekend_pct": e.get("weekend_pct")}
-            scored = scanner.score_entry_signal(klines, PUMP_CONFIG, meta)
+            scored = scanner.score_entry_signal(klines, PUMP_CONFIG, {"symbol": sym})
             with _cache_lock:
                 _watchlist_entry_cache[sym] = {"score": scored, "ts": time.time()}
         except Exception as exc:  # panel tetap hidup bila satu simbol gagal
             logger.debug("gagal menghitung skor entry %s: %s", sym, exc)
 
     items = []
-    for e in entries:
-        sym = e["symbol"]
-        t = (tickers or {}).get(sym)
+    for _chg, qv, sym, t in selected:
         with _cache_lock:
             entry_cached = _watchlist_entry_cache.get(sym)
         entry_score = entry_cached["score"] if entry_cached else None
-        row = {
-            "symbol": sym, "tier": entry_score.status if entry_score else e["tier"],
-            "score": entry_score.score if entry_score else e.get("score"), "note": e["note"],
+        try:
+            price = float(t.get("lastPrice", 0) or 0)
+            chg = float(t.get("priceChangePercent", 0) or 0)
+            hi = float(t.get("highPrice", 0) or 0)
+            lo = float(t.get("lowPrice", 0) or 0)
+        except (TypeError, ValueError):
+            price = chg = hi = lo = 0.0
+
+        # Posisi harga dalam rentang 24 jam: 1,0 berarti di puncak hari
+        # ini, 0,0 di dasar.
+        rng = hi - lo
+        rpos = ((price - lo) / rng) if rng > 0 else None
+
+        items.append({
+            "symbol": sym,
+            "score": entry_score.score if entry_score else None,
             "entry_status": entry_score.status if entry_score else "BELUM DIHITUNG",
             "entry_components": entry_score.components if entry_score else {},
             "entry_stale": bool(entry_cached and now - entry_cached["ts"] >= score_ttl),
             "entry_scored_at": entry_cached["ts"] if entry_cached else None,
-            "price": None, "change_24h": None, "quote_volume_24h": None,
-            "high_24h": None, "low_24h": None, "trades_24h": None,
-            "pass_volume": None, "status": "TIDAK ADA DATA",
-            "range_position": None,
-        }
-        if t:
-            try:
-                price = float(t.get("lastPrice", 0) or 0)
-                chg = float(t.get("priceChangePercent", 0) or 0)
-                qv = float(t.get("quoteVolume", 0) or 0)
-                hi = float(t.get("highPrice", 0) or 0)
-                lo = float(t.get("lowPrice", 0) or 0)
-            except (TypeError, ValueError):
-                price = chg = qv = hi = lo = 0.0
+            "price": price, "change_24h": chg, "quote_volume_24h": qv,
+            "high_24h": hi, "low_24h": lo,
+            "trades_24h": int(t.get("count", 0) or 0),
+            # Semua simbol terpilih sudah lolos gerbang volume; kunci-kunci
+            # ini dipertahankan agar template dan konsumen API tidak berubah.
+            "pass_volume": True,
+            "status": "LIKUID",
+            "range_position": round(rpos, 3) if rpos is not None else None,
+        })
 
-            if price > 0:
-                pass_vol = qv >= min_vol
-                # Hanya ada satu gerbang tingkat ticker sekarang. Sisanya
-                # ditentukan oleh struktur candle, yang tidak diperiksa di
-                # panel ini demi menghemat rate limit.
-                status = "LIKUID" if pass_vol else "TIPIS"
-
-                # Posisi harga dalam rentang 24 jam: 1,0 berarti di puncak
-                # hari ini, 0,0 di dasar. Berguna untuk melihat apakah harga
-                # sudah dekat puncak harian.
-                rng = hi - lo
-                rpos = ((price - lo) / rng) if rng > 0 else None
-
-                row.update({
-                    "price": price, "change_24h": chg, "quote_volume_24h": qv,
-                    "high_24h": hi, "low_24h": lo,
-                    "trades_24h": int(t.get("count", 0) or 0),
-                    "pass_volume": pass_vol,
-                    "status": status,
-                    "range_position": round(rpos, 3) if rpos is not None else None,
-                })
-        items.append(row)
-
-    # Urutkan: yang paling dekat kondisi masuk tampil di atas, karena itu
-    # yang benar-benar ingin dilihat saat memantau. Simbol tanpa data
-    # didorong ke bawah alih-alih dibuang, supaya Anda sadar datanya hilang.
-    # Yang likuid tampil di atas, lalu diurutkan dari volume terbesar, sama
-    # dengan urutan kandidat yang dipakai bot saat mengambil candle.
-    order = {"LIKUID": 0, "TIPIS": 1, "TIDAK ADA DATA": 2}
-    items.sort(key=lambda r: (order.get(r["status"], 9),
-                              -(r.get("score") if r.get("score") is not None else -1.0),
-                              -(r["quote_volume_24h"] if r["quote_volume_24h"] is not None else -1.0)))
+    # Urutkan: skor sinyal terbesar dulu (itu yang ingin dilihat saat
+    # memantau), lalu kenaikan 24 jam, terakhir volume sebagai pemecah seri.
+    items.sort(key=lambda r: (-(r["score"] if r["score"] is not None else -1.0),
+                              -r["change_24h"], -r["quote_volume_24h"]))
 
     counts = {}
     for r in items:
@@ -1235,23 +1233,10 @@ def build_watchlist() -> dict:
         "summary": {
             "total": len(items),
             "counts": counts,
-            "with_data": sum(1 for r in items if r["price"] is not None),
+            "with_data": len(items),
         },
         "config": _watchlist_config(),
-        "source": source,
-        "auto": {"enabled": False},
         "error": error,
-    }
-
-
-def _auto_status(meta: Optional[dict] = None) -> dict:
-    """Status penyegar otomatis (nonaktif penuh)."""
-    return {
-        "enabled": False,
-        "interval_hours": None,
-        "meta": None,
-        "state": "off", "message": "", "progress": 0.0,
-        "last_run": None, "next_run": None, "last_error": None,
     }
 
 
@@ -1260,6 +1245,7 @@ def _watchlist_config() -> dict:
     return {
         "min_quote_volume_24h": PUMP_CONFIG.get("MIN_QUOTE_VOLUME_USDT_24H"),
         "quote_asset": PUMP_CONFIG.get("QUOTE_ASSET", "USDT"),
+        "top_n": PUMP_CONFIG.get("WATCHLIST_TOP_N", 15),
     }
 
 
@@ -2060,10 +2046,6 @@ def main(*, auto_start_bot: bool = False) -> int:
     tetap dipaksa False bila DASHBOARD_HOST bukan loopback.
     """
     start_auto_refresher()
-    if watchlist_auto_enabled(PUMP_CONFIG):
-        print(f"Penyegaran watchlist otomatis aktif "
-              f"(tiap {PUMP_CONFIG.get('WATCHLIST_AUTO_INTERVAL_HOURS')} jam, "
-              f"dilewati saat ada posisi terbuka).")
 
     if not _bind_is_loopback():
         # Agar halaman peringatan read-only dapat dibuka pada bind yang

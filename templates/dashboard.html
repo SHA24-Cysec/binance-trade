@@ -342,7 +342,6 @@
   .readonly-warning{display:none;padding:11px 14px;margin-bottom:14px;border:1px solid rgba(244,63,94,.35);
     border-left:3px solid var(--red);border-radius:8px;background:rgba(244,63,94,.09);color:#fda4af;font-size:12.5px}
   .readonly-warning.show{display:block}
-  .wl-edit-row{display:grid;grid-template-columns:1fr 150px auto;gap:7px;margin-bottom:7px}
   .history-list{max-height:300px;overflow:auto;font-size:11.5px;font-family:var(--mono)}
   .history-item{padding:7px 8px;border-bottom:1px solid var(--grid);word-break:break-word}
   @media(max-width:1000px){.settings-fields{grid-template-columns:repeat(2,minmax(0,1fr))}}
@@ -1322,16 +1321,16 @@ function renderWatchlist(w){
     note.innerHTML=`<b style="color:var(--amber)">⚠️ ${esc(w.error)}</b><br>`+
       `Daftar tetap ditampilkan memakai data terakhir yang berhasil diambil.`;
   }else{
-    note.innerHTML=`Daftar ini diambil dari <b>config.py</b> dan <b>hanya untuk dipantau</b>, tidak mengubah perilaku bot. `+
-      `Bot tetap memindai seluruh pair ${esc(cfg.quote_asset||'USDT')}. `+
+    note.innerHTML=`Daftar ini disusun <b>otomatis</b>: ${fmt(cfg.top_n||15,0)} pair ${esc(cfg.quote_asset||'USDT')} `+
+      `dengan <b>kenaikan 24 jam terbesar</b> yang lolos semesta scanner bot (bukan stablecoin/leveraged token, volume 24 jam ≥ ${wlVol(cfg.min_quote_volume_24h)}). `+
+      `<b>Hanya untuk dipantau</b>, tidak mengubah perilaku bot. `+
       `Kolom <b>Skor Entry</b> menampilkan skor kedekatan sinyal masuk real-time `+
-      `berdasarkan candle tertutup (EMA cross, RSI, MACD histogram, Higher-Low). `+
-      `Status <b>LIKUID</b> menandakan volume 24 jam koin ≥ ${wlVol(cfg.min_quote_volume_24h)}.`;
+      `berdasarkan candle tertutup (EMA cross, RSI, MACD histogram, Higher-Low).`;
   }
 
   const tb=document.getElementById('wlBody');
   if(!items.length){
-    tb.innerHTML='<tr><td colspan="8" class="empty">Watchlist kosong. Isi <code>WATCHLIST</code> di config.py.</td></tr>';
+    tb.innerHTML='<tr><td colspan="8" class="empty">Belum ada pair yang lolos gerbang volume scanner (atau data pasar belum terambil).</td></tr>';
     return;
   }
 
@@ -1359,11 +1358,9 @@ function renderWatchlist(w){
       : `<span class="mono">${fmt(r.range_position*100,0)}%</span>`;
 
     const volCls=r.pass_volume===false?' class="mut"':'';
-    const rawTitle=String(r.note||'');
-    const title=esc(rawTitle);
     const scoreTxt=(r.score===null||r.score===undefined)?'':` · skor entry ${fmt(r.score,1)}`;
     const entryStatus=r.entry_status||'BELUM DIHITUNG';
-    const tierCls=safeTierClass(r.tier);
+    const entryCls=safeEntryClass(entryStatus);
     const comp=r.entry_components||{};
     const stale=r.entry_stale?' · data lama, menunggu kuota':'';
     const entryTitle=`${entryStatus}${scoreTxt} · EMA ${fmt(comp.ema||0,1)}, RSI ${fmt(comp.rsi||0,1)}, MACD ${fmt(comp.macd||0,1)}, HL ${fmt(comp.higher_low||0,1)}${stale}`;
@@ -1372,9 +1369,8 @@ function renderWatchlist(w){
       : '';
 
     return `<tr id="wl-row-${esc(r.symbol)}"${rowCls}>
-      <td><span class="wl-sym">${esc(r.symbol)}</span>
-          <div class="wl-gap" title="${title}">${title.slice(0,58)}${rawTitle.length>58?'…':''}</div></td>
-      <td><span class="tag ${tierCls}" title="${esc(entryTitle)}">${esc(entryStatus)}</span>${scoreNumHtml}</td>
+      <td><span class="wl-sym">${esc(r.symbol)}</span></td>
+      <td><span class="tag ${entryCls}" title="${esc(entryTitle)}">${esc(entryStatus)}</span>${scoreNumHtml}</td>
       <td class="mono wl-p">${fmtP(r.price)}</td>
       <td class="mono wl-c ${cls(r.change_24h)}">${r.change_24h===null?'—':sign(r.change_24h)+fmt(r.change_24h,2)+'%'}</td>
       <td class="wl-b">${bar}</td>
@@ -1422,9 +1418,11 @@ setInterval(refresh, 1000);
 const esc = v => String(v===null||v===undefined?'':v).replace(/[&<>"']/g, c=>({
   '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
 }[c]));
-const safeTierClass = v => {
+/* Kelas warna badge status skor sinyal (tier manual sudah dihapus;
+   kelas CSS ti-* dipakai ulang murni sebagai palet warna). */
+const safeEntryClass = v => {
   const k=String(v===null||v===undefined?'':v).toUpperCase();
-  return ({INTI:'ti-inti',AKTIF:'ti-aktif',SPEKULATIF:'ti-spekulatif',SIAP:'ti-inti',MENDEKAT:'ti-aktif',AWAL:'ti-spekulatif',JAUH:'ti-lainnya','TIDAK LOLOS':'st-tipis','BELUM DIHITUNG':'ti-lainnya'})[k] || 'ti-lainnya';
+  return ({SIAP:'ti-inti',MENDEKAT:'ti-aktif',AWAL:'ti-spekulatif',JAUH:'ti-lainnya','TIDAK LOLOS':'st-tipis','BELUM DIHITUNG':'ti-lainnya'})[k] || 'ti-lainnya';
 };
 const safeLogClass = v => {
   const k=String(v===null||v===undefined?'':v).toUpperCase();
@@ -1579,27 +1577,8 @@ function resetSettingsGroup(group){
   _settingsFields.filter(x=>x.group===group&&!x.read_only).forEach(f=>{_settingsValues[f.key]=JSON.parse(JSON.stringify(_settingsDefaults[f.key]));});
   renderSettingsFields();_settingsFields.filter(x=>x.group===group&&!x.read_only).forEach(f=>markSettingDirty(f.key,_settingsValues[f.key]));
 }
-function updateWatchValue(key,host){
-  const rows=[...host.querySelectorAll('.wl-edit-row')].map(row=>({symbol:row.querySelector('.wsym').value.trim().toUpperCase(),tier:row.querySelector('.wtier').value}));
-  markSettingDirty(key,rows,host);
-}
-function addWatchRow(key){
-  const list=Array.isArray(_settingsValues[key])?_settingsValues[key].slice():[];list.push({symbol:'',tier:'INTI'});_settingsValues[key]=list;renderSettingsFields();markSettingDirty(key,list);
-}
-function renderWatchEditor(field,wrap){
-  const host=document.createElement('div');host.dataset.watch=field.key;
-  const rows=Array.isArray(_settingsValues[field.key])?_settingsValues[field.key]:[];
-  rows.forEach((item,index)=>{
-    const row=document.createElement('div');row.className='wl-edit-row';
-    const sym=document.createElement('input');sym.className='wsym';sym.value=item.symbol||'';sym.placeholder='ARBUSDT';
-    const tier=document.createElement('select');tier.className='wtier';['INTI','AKTIF','SPEKULATIF'].forEach(t=>{const o=document.createElement('option');o.value=t;o.textContent=t;o.selected=t===item.tier;tier.appendChild(o);});
-    const del=document.createElement('button');del.className='btn danger';del.textContent='Hapus';del.type='button';
-    sym.oninput=tier.onchange=()=>updateWatchValue(field.key,host);
-    del.onclick=()=>{_settingsValues[field.key].splice(index,1);renderSettingsFields();markSettingDirty(field.key,_settingsValues[field.key]);};
-    row.append(sym,tier,del);host.appendChild(row);
-  });
-  const add=document.createElement('button');add.type='button';add.className='btn';add.textContent='+ Tambah simbol';add.onclick=()=>addWatchRow(field.key);host.appendChild(add);wrap.appendChild(host);
-}
+/* Editor watchlist manual dihapus 2026-09-27: field config "WATCHLIST"
+   tidak ada lagi; panel watchlist menyusun daftarnya otomatis. */
 function renderSettingsFields(){
   const container=document.getElementById('settingsContainer');container.textContent='';
   const groups=[...new Set(_settingsFields.map(f=>f.group))];
@@ -1615,8 +1594,7 @@ function renderSettingsFields(){
       const label=document.createElement('label');label.textContent=field.label+(field.dangerous?' ⚠':'');head.appendChild(label);
       if(!field.read_only){const rb=document.createElement('button');rb.type='button';rb.className='setting-reset';rb.textContent='default';rb.onclick=()=>resetSetting(field.key);head.appendChild(rb);}box.appendChild(head);
       const value=_settingsValues[field.key];
-      if(field.editor==='watchlist'&&!field.read_only){renderWatchEditor(field,box);}
-      else if(field.editor==='symbols'&&!field.read_only){const inp=document.createElement('textarea');inp.value=(value||[]).join(', ');inp.oninput=()=>markSettingDirty(field.key,inp.value.split(',').map(x=>x.trim().toUpperCase()).filter(Boolean),inp);box.appendChild(inp);}
+      if(field.editor==='symbols'&&!field.read_only){const inp=document.createElement('textarea');inp.value=(value||[]).join(', ');inp.oninput=()=>markSettingDirty(field.key,inp.value.split(',').map(x=>x.trim().toUpperCase()).filter(Boolean),inp);box.appendChild(inp);}
       else if(field.read_only){const div=document.createElement('div');div.className='ctl-status';div.style.margin='0';div.textContent=field.managed_by?`Dikelola melalui ${field.managed_by}.`:(value===null?'dirahasiakan':typeof value==='object'?JSON.stringify(value):String(value));box.appendChild(div);}
       else if(field.type==='bool'){const inp=document.createElement('input');inp.type='checkbox';inp.checked=!!value;inp.onchange=()=>markSettingDirty(field.key,inp.checked,inp);box.appendChild(inp);}
       else if(field.editor==='select'){const sel=document.createElement('select');(field.options||[]).forEach(v=>{const o=document.createElement('option');o.value=v;o.textContent=v;o.selected=v===value;sel.appendChild(o);});sel.onchange=()=>markSettingDirty(field.key,sel.value,sel);box.appendChild(sel);}

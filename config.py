@@ -318,6 +318,8 @@ PUMP_CONFIG = {
     # persen lama agar state dan konfigurasi lama tetap kompatibel.
     "USE_ATR_EXIT": True,
     "ATR_PERIOD": 14,
+    # NILAI SENGAJA (dikonfirmasi operator, audit 2026-09-27): multiplier
+    # ATR lebar (SL 12x, TP 24x) dipertahankan sebagai hasil optimasi.
     "ATR_MULT_SL": 12.0,
     "ATR_MULT_TP": 24.0,
     "ATR_MULT_TRAIL": 8.0,
@@ -336,133 +338,43 @@ PUMP_CONFIG = {
     "MIN_LISTING_AGE_DAYS": 7,
 
     # ==================================================================
-    # WATCHLIST PEMANTAUAN (READ-ONLY, TIDAK MEMENGARUHI KEPUTUSAN TRADE)
+    # PANEL WATCHLIST (READ-ONLY, TIDAK MEMENGARUHI KEPUTUSAN TRADE)
     # ==================================================================
     #
-    # PENTING, BACA DULU: daftar ini MURNI UNTUK DITAMPILKAN DI DASHBOARD.
-    # Bot TETAP memindai SELURUH pair USDT seperti sebelumnya. Tidak ada satu
-    # baris pun di market_scanner.py / pump_scanner_bot.py yang membaca
-    # daftar ini, jadi menambah atau menghapus simbol di sini TIDAK mengubah
-    # koin apa yang dibeli bot, tidak mengubah ranking kandidat, dan tidak
-    # mengubah hasil backtest. Kalau suatu hari Anda ingin watchlist ikut
-    # menyaring entry, itu perubahan terpisah yang harus dilakukan sadar.
+    # Penyederhanaan 2026-09-27: daftar simbol MANUAL (tier INTI/AKTIF/
+    # SPEKULATIF + skor/note statis hasil analisis offline) DIHAPUS.
+    # Panel kini menyusun daftarnya sendiri secara OTOMATIS dari semesta
+    # scanner yang sama dengan yang dipakai bot:
     #
-    # Gunanya: saat memantau dashboard Anda tidak perlu menebak koin mana
-    # yang sedang "dekat" dengan kondisi masuk bot. Panel watchlist
-    # menampilkan harga, perubahan 24 jam, volume, dan status tiap koin
-    # terhadap gerbang semesta scanner yang masih berlaku, yaitu
-    # MIN_QUOTE_VOLUME_USDT_24H dan MAX_SPREAD_PCT. Gerbang pump scanner
-    # yang memerlukan kenaikan 24 jam serta volume harian TIDAK ditampilkan
-    # sebagai status watchlist karena panel ini sengaja tidak mengunduh candle
-    # harian tambahan dan tidak memengaruhi keputusan entry.
+    #   - simbol diambil dari ticker 24 jam Binance,
+    #   - disaring dengan is_structurally_allowed_symbol() milik
+    #     market_scanner (quote asset benar, bukan stablecoin, bukan
+    #     leveraged token, tidak di-blacklist),
+    #   - wajib lolos gerbang volume MIN_QUOTE_VOLUME_USDT_24H,
+    #   - diurutkan KENAIKAN 24 JAM terbesar (volume sebagai pemecah seri),
+    #     dipotong WATCHLIST_TOP_N teratas,
+    #   - lalu tiap simbol diberi SKOR SINYAL live (EMA/RSI/MACD/HL dari
+    #     candle tertutup) persis seperti sebelumnya.
     #
-    # ------------------------------------------------------------------
-    # DARI MANA DAFTAR INI BERASAL (metodologi, bukan tebakan)
-    # ------------------------------------------------------------------
-    # Disusun 2026-09-24 dari data pasar Binance Spot yang sesungguhnya,
-    # bukan dari daftar "koin populer" atau opini. Datanya:
-    #
-    #   - 3.710 simbol exchangeInfo + ticker 24 jam + bookTicker, ditarik dari
-    #     endpoint data publik resmi Binance (data-api.binance.vision).
-    #   - 487 pair USDT lolos aturan struktural bot (status TRADING, spot
-    #     diizinkan, bukan stablecoin, bukan leveraged token).
-    #   - 182 pair lolos MIN_QUOTE_VOLUME_USDT_24H, ditarik candle 1 jam
-    #     selama 120 hari untuk mengukur frekuensi pump.
-    #   - 110 pair shortlist ditarik candle 5 menit selama 45 hari
-    #     (= CONFIRM_INTERVAL bot, 12.960 candle per simbol).
-    #   - Pada tiap candle 5 menit itu dijalankan confirm_entry() asli dari
-    #     market_scanner.py. Jadi angka "berapa kali koin ini memicu sinyal"
-    #     adalah hasil menjalankan logika keputusan bot itu sendiri, bukan
-    #     perkiraan.
-    #
-    # Skor 0-100 menimbang empat hal yang benar-benar menentukan apakah
-    # sebuah koin cocok dengan mesin ini:
-    #   35 poin  frekuensi sinyal entry nyata per 30 hari
-    #   25 poin  likuiditas: berapa persen waktu volume 24 jam koin itu
-    #            berada di atas MIN_QUOTE_VOLUME_USDT_24H, plus volume median
-    #   20 poin  spread bid-ask sekarang dibanding MAX_SPREAD_PCT
-    #   20 poin  kestabilan operasional dan kelengkapan riwayat pasar
-    #
-    # Yang SENGAJA dibuang dari daftar:
-    #   - 9 saham tokenisasi Binance (bStocks, mis. MSTRB, CRCLB, SOXLB).
-    #     Terdeteksi dari data: porsi volume akhir pekan hanya 4-14%,
-    #     sementara median crypto 24/7 adalah 25,6%. Harganya ditambatkan ke
-    #     bursa saham AS yang tutup akhir pekan, sehingga asumsi pasar
-    #     24/7 milik bot ini tidak berlaku untuk mereka.
-    #   - Pair dengan spread saat ini melewati MAX_SPREAD_PCT.
-    #   - Pair dengan riwayat kurang dari 90 hari (belum cukup bukti).
-    #   - Pair dengan kurang dari 3 sinyal dalam 45 hari (terlalu jarang).
-    #
-    # BATAS KEJUJURAN DATA INI: frekuensi sinyal TIDAK sama dengan
-    # profitabilitas. Yang diukur adalah seberapa sering koin memicu kondisi
-    # masuk bot, bukan seberapa sering trade-nya berakhir untung. Pasar juga
-    # berputar; koin yang aktif hari ini bisa sepi dalam dua bulan. Tinjau
-    # ulang daftar ini secara berkala.
+    # Panel tetap MURNI TAMPILAN: tidak ada satu baris pun di
+    # market_scanner.py / pump_scanner_bot.py yang membacanya, dan gerbang
+    # pump (kenaikan 24 jam + volume surge) tetap ditegakkan scanner saat
+    # scan, bukan oleh panel ini.
     "WATCHLIST_ENABLED": True,               # False = panel watchlist disembunyikan dari dashboard
+    # Berapa pair teratas (berdasarkan kenaikan 24 jam, di antara yang lolos
+    # gerbang volume) yang dipantau panel. Makin besar makin banyak unduhan
+    # candle untuk skor live, jadi jangan berlebihan; skor tetap dijaga
+    # TTL + rem kuota weight.
+    "WATCHLIST_TOP_N": 15,
 
-    # ------------------------------------------------------------------
-    # PENYEGARAN DAFTAR OTOMATIS (opsional)
-    # ------------------------------------------------------------------
-    # Kalau True, dashboard menyusun ULANG daftar di bawah secara berkala
-    # dari data Binance terbaru, memakai metodologi yang sama. Hasilnya
-    # ditulis ke file terpisah (watchlist_auto_<mode>.json) dan TIDAK
-    # PERNAH menimpa config.py -- daftar manual di bawah tetap utuh sebagai
-    # cadangan kalau penyegaran gagal atau dimatikan.
-    #
-    # Tetap tidak memengaruhi keputusan trading apa pun.
-    #
-    # SOAL BEBAN KE BINANCE (alasan angka-angka di bawah dipilih):
-    # Batas resmi 6000 request weight per menit, dihitung PER IP bukan per
-    # API key (developers.binance.com, General REST API Information/LIMITS,
-    # dicek 2026-09-24). Jadi dashboard dan bot berbagi jatah yang sama.
-    # Anggaran default di bawah menghabiskan sekitar 684 weight per siklus,
-    # disebar ~15 menit = 0,76% anggaran. Sisanya tetap milik bot.
+    # Bobot dan rem kuota untuk SKOR SINYAL live per simbol di panel.
+    # Batas resmi Binance 6000 request weight per menit PER IP; dashboard
+    # dan bot berbagi jatah yang sama, karena itu skor hanya dihitung saat
+    # cache kedaluwarsa DAN sisa kuota masih di atas MIN_HEADROOM.
     "WATCHLIST_ENTRY_WEIGHT_EMA": 25, "WATCHLIST_ENTRY_WEIGHT_RSI": 25,
     "WATCHLIST_ENTRY_WEIGHT_MACD": 25, "WATCHLIST_ENTRY_WEIGHT_HL": 25,
     "WATCHLIST_ENTRY_EMA_GAP_PCT": 1.0, "WATCHLIST_ENTRY_RSI_DECAY_PTS": 15,
     "WATCHLIST_ENTRY_SCORE_TTL_SECONDS": 60, "WATCHLIST_ENTRY_MIN_HEADROOM": 0.5,
-    "WATCHLIST": [
-        # --- INTI: likuiditas di atas ambang bot >= 90% waktu ---
-        # Sinyal di sini paling mungkin benar-benar bisa dieksekusi karena
-        # koinnya hampir selalu memenuhi filter volume bot.
-        {"symbol": "ZECUSDT",     "tier": "INTI",      "score": 93.0, "note": "33 sinyal/45h, spread 0,001% (tersempit), volume median 109 juta"},
-        {"symbol": "ENAUSDT",     "tier": "INTI",      "score": 92.5, "note": "34 sinyal/45h"},
-        {"symbol": "ARBUSDT",     "tier": "INTI",      "score": 89.6, "note": "44 sinyal/45h, terbanyak di tier ini"},
-        {"symbol": "NEARUSDT",    "tier": "INTI",      "score": 87.1, "note": "28 sinyal/45h, volume median 32 juta"},
-        {"symbol": "UNIUSDT",     "tier": "INTI",      "score": 86.5, "note": "27 sinyal/45h, spread 0,011%"},
-        {"symbol": "PENGUUSDT",   "tier": "INTI",      "score": 82.3, "note": "26 sinyal/45h, likuiditas 100% waktu"},
-        {"symbol": "DASHUSDT",    "tier": "INTI",      "score": 80.3, "note": "27 sinyal/45h"},
-        {"symbol": "PUMPUSDT",    "tier": "INTI",      "score": 79.1, "note": "21 sinyal/45h, volume median 11,5 juta"},
-        {"symbol": "FILUSDT",     "tier": "INTI",      "score": 78.5, "note": "22 sinyal/45h, spread 0,011%"},
-        {"symbol": "INJUSDT",     "tier": "INTI",      "score": 78.4, "note": "23 sinyal/45h"},
-        {"symbol": "AVAXUSDT",    "tier": "INTI",      "score": 76.9, "note": "17 sinyal/45h, likuiditas sangat stabil"},
-        {"symbol": "SUIUSDT",     "tier": "INTI",      "score": 74.5, "note": "13 sinyal/45h, volume median 25 juta"},
-
-        # --- AKTIF: likuiditas di atas ambang 60-90% waktu ---
-        # Aktif berkala. Sinyal cukup sering, tapi ada periode koin ini
-        # tidak memenuhi filter volume sehingga bot mengabaikannya.
-        {"symbol": "CHIPUSDT",    "tier": "AKTIF",  "score": 76.5, "note": "32 sinyal/45h, tapi likuiditas cukup hanya 61% waktu"},
-        {"symbol": "ZAMAUSDT",    "tier": "AKTIF",  "score": 71.7, "note": "18 sinyal/45h, pump tertinggi 51% dalam 120 hari"},
-        {"symbol": "CRVUSDT",     "tier": "AKTIF",  "score": 69.2, "note": "24 sinyal/45h"},
-        {"symbol": "TIAUSDT",     "tier": "AKTIF",  "score": 65.2, "note": "16 sinyal/45h, likuiditas cukup 72% waktu"},
-        {"symbol": "ETHFIUSDT",   "tier": "AKTIF",  "score": 64.4, "note": "16 sinyal/45h"},
-        {"symbol": "ZROUSDT",     "tier": "AKTIF",  "score": 60.8, "note": "19 sinyal/45h, spread 0,133% relatif lebar"},
-        {"symbol": "POLUSDT",     "tier": "AKTIF",  "score": 59.6, "note": "hanya 7 sinyal/45h, tapi spread 0,010% dan likuid"},
-        {"symbol": "SEIUSDT",     "tier": "AKTIF",  "score": 59.5, "note": "11 sinyal/45h, likuiditas cukup 64% waktu"},
-
-        # --- SPEKULATIF: likuiditas di atas ambang < 60% waktu ---
-        # PERHATIAN: koin di tier ini paling sering memicu sinyal, tapi
-        # justru karena volumenya naik-turun ekstrem. Volume median mereka
-        # ADA DI BAWAH MIN_QUOTE_VOLUME_USDT_24H, artinya di hari biasa bot
-        # memang tidak akan menyentuhnya; mereka hanya lolos saat sedang
-        # ramai. Risiko slippage pada order MARKET di sini nyata.
-        {"symbol": "MUBARAKUSDT", "tier": "SPEKULATIF", "score": 79.8, "note": "39 sinyal/45h tapi likuiditas cukup hanya 26% waktu"},
-        {"symbol": "NILUSDT",     "tier": "SPEKULATIF", "score": 77.6, "note": "35 sinyal/45h, likuiditas cukup 34% waktu"},
-        {"symbol": "WIFUSDT",     "tier": "SPEKULATIF", "score": 74.3, "note": "33 sinyal/45h, likuiditas cukup 42% waktu"},
-        {"symbol": "ARUSDT",      "tier": "SPEKULATIF", "score": 68.6, "note": "24 sinyal/45h, pump tertinggi 58%"},
-        {"symbol": "PROMUSDT",    "tier": "SPEKULATIF", "score": 66.8, "note": "26 sinyal/45h, volume median hanya 0,9 juta"},
-        {"symbol": "FFUSDT",      "tier": "SPEKULATIF", "score": 65.8, "note": "21 sinyal/45h, likuiditas cukup 45% waktu"},
-    ],
 
     # --- Ukuran posisi (tanpa martingale -- sekali entry per rotasi) ---
     #
@@ -473,10 +385,11 @@ PUMP_CONFIG = {
     # LIVE; naikkan bertahap HANYA dari data hasil nyata, bukan karena satu
     # backtest terlihat bagus.
     "USE_RISK_PERCENT": True,               # True = ukuran posisi % dari saldo USDT free
-    # OPTIMASI MANUAL: 25 -> 30. Karena hanya 1 posisi per rotasi, risiko
-    # konkuren = satu posisi. Dengan SL 1.8%, rugi per trade ~ 30% x 1.8% =
-    # 0,54% dari equity -- masih moderat dan jauh dari MAX_DRAWDOWN 12%.
-    # PENTING untuk LIVE: turunkan lagi & pasang MAX_POSITION_USDT nyata.
+    # KEPUTUSAN SADAR (dikonfirmasi operator, audit 2026-09-27): 100% saldo
+    # free per rotasi. Pengerem ukuran posisi yang sesungguhnya adalah
+    # MAX_POSITION_USDT (plafon nominal keras) + USE_EQUITY_STOP/USE_DAILY_STOP
+    # yang kini AKTIF. JANGAN menaikkan/menol-kan MAX_POSITION_USDT di LIVE
+    # selama nilai ini 100, karena satu Stop Loss = SL_PCT% dari seluruh akun.
     "RISK_PERCENT": 100.0,                      # dipakai jika USE_RISK_PERCENT = True
     "POSITION_SIZE_USDT": 5.0,              # dipakai jika USE_RISK_PERCENT = False
     # Modal awal simulasi backtest. Ini BUKAN saldo LIVE yang dibaca otomatis;
@@ -548,29 +461,30 @@ PUMP_CONFIG = {
 
     # --- Exit ---
     "USE_TP": True,
-    # OPTIMASI MANUAL: 4.0 -> 5.0. Karena trailing aktif, TP berfungsi sebagai
-    # plafon; menaikkannya memberi ruang bagi pemenang untuk lari lebih jauh.
-    # R:R jadi 5.0/1.8 ~ 2.8:1.
+    # NILAI SENGAJA (dikonfirmasi operator, audit 2026-09-27): TP 80% adalah
+    # plafon longgar; exit pemenang praktis dikerjakan trailing/BE, bukan TP.
+    # R:R nominal 80/28.8 ~ 2.8:1. Catatan: fallback persen ini hanya dipakai
+    # bila USE_ATR_EXIT=False atau level ATR tidak tersedia saat entry.
     "TP_PCT": 80.0,
     "USE_STOP_LOSS": True,                   # guard lokal, tetap dipakai sebagai fallback
     "USE_NATIVE_OCO": True,                  # LIVE: OCO SELL native, TP limit + SL limit
     "USE_NATIVE_STOP_LOSS": True,            # fallback LIVE bila client OCO tidak tersedia
     "NATIVE_OCO_LIMIT_BUFFER_PCT": 0.10,     # buffer limit dari trigger agar ada peluang fill
-    # SL dipertahankan 1.8: cukup ketat untuk DD stabil, tapi tidak terlalu
-    # sempit sehingga posisi ke-stop oleh noise sebelum setup sempat bekerja.
+    # NILAI SENGAJA (dikonfirmasi operator, audit 2026-09-27): SL fallback
+    # 28.8% per trade. PERINGATAN: dengan RISK_PERCENT=100, satu SL penuh =
+    # ~28.8% dari nominal posisi (dibatasi MAX_POSITION_USDT). Equity/daily
+    # stop yang kini aktif adalah jaring pengaman lapis berikutnya.
     "SL_PCT": 28.8,                            # keluar paksa kalau rugi >= nilai ini (%) dari entry (SEBELUM Breakeven/Trailing aktif)
 
     "USE_BREAKEVEN": True,
-    # OPTIMASI MANUAL: BE trigger 1.0 -> 1.2, lock 0.15 -> 0.2. BE aktif sedikit
-    # lebih lambat agar pullback normal tidak buru-buru menendang ke BE
-    # (memberi ruang pemenang berkembang), tapi mengunci profit lebih tegas.
+    # NILAI SENGAJA (dikonfirmasi operator, audit 2026-09-27): BE aktif pada
+    # +19.2% dan mengunci +3.2%. Hanya dipakai jalur fallback persen.
     "BE_TRIGGER_PCT": 19.2,
     "BE_LOCK_PCT": 3.2,
     "USE_TRAILING": True,
-    # OPTIMASI MANUAL: start 1.5 -> 1.8, step 0.6 -> 0.9. Trailing mulai setelah
-    # momentum terkonfirmasi, dan step lebih lebar memberi napas agar pemenang
-    # ikut tren lebih jauh (menangkap gerakan besar = return naik), bukan
-    # ke-trail keluar oleh pullback kecil. Invariant: step(0.9) <= SL(1.8).
+    # NILAI SENGAJA (dikonfirmasi operator, audit 2026-09-27): trailing mulai
+    # +28.8% dengan jarak 14.4%. Invariant step <= SL tetap dijaga kode
+    # (strategy.resolve_exit_levels). Hanya dipakai jalur fallback persen.
     "TRAILING_START_PCT": 28.8,
     "TRAILING_STEP_PCT": 14.4,
     # CATATAN: MAX_HOLD_MINUTES (paksa keluar setelah sekian menit) sudah
@@ -586,6 +500,14 @@ PUMP_CONFIG = {
     # sudah memakan 12,5% dari target profit, ditambah fee 0,2% pulang-pergi.
     # 0.25 lebih realistis untuk altcoin likuid yang lolos filter volume bot ini.
     "MAX_SPREAD_PCT": 0.25,
+
+    # Batas "chase" entry (perbaikan audit 2026-09-27, temuan SEDANG): antara
+    # close candle konfirmasi dan BUY bisa berlalu sampai
+    # MARKET_SCAN_INTERVAL_SECONDS + latensi konfirmasi. Tanpa pagar ini bot
+    # bisa membeli koin pump beberapa persen di atas harga sinyal. Entry
+    # dilewati bila ask sudah lebih tinggi dari close candle sinyal sebesar
+    # persen ini. 0 = nonaktif (perilaku lama).
+    "MAX_CHASE_PCT": 1.5,
 
     # --- Biaya trading (dipakai backtest agar hasilnya jujur) ---
     # Binance Spot VIP0 per 2026: 0,1% maker maupun taker; diskon 25% kalau
@@ -618,11 +540,13 @@ PUMP_CONFIG = {
     # Yang ingin trading tanpa rem harus mematikannya secara sadar lewat
     # panel setelan, yang di mode LIVE memaksa konfirmasi frasa risiko
     # (settings_schema.dangerous_relaxations mendeteksi transisi True->False).
-    "USE_EQUITY_STOP": False,                 # matikan (False) utk nonaktifkan DD Stop
+    # PERBAIKAN AUDIT 2026-09-27 (LIVE-readiness): kedua saklar sempat False
+    # lagi di kode padahal komentar di atas mengklaim ON. Dikembalikan ON.
+    "USE_EQUITY_STOP": True,                  # matikan (False) utk nonaktifkan DD Stop
     # OPTIMASI MANUAL: 15 -> 12. Jaring DD diperketat agar penurunan dari peak
     # equity berhenti lebih awal = DD lebih stabil (inti permintaan Anda).
     "MAX_DRAWDOWN_PERCENT": 12.0,
-    "USE_DAILY_STOP": False,                  # matikan (False) utk nonaktifkan Daily Stop
+    "USE_DAILY_STOP": True,                   # matikan (False) utk nonaktifkan Daily Stop
     # OPTIMASI MANUAL: 3 -> 5. Sedikit lebih lega agar mesin return punya ruang
     # dalam satu hari (dengan ~0,54% risiko/trade, ini ~9 trade rugi baru
     # menghentikan hari), tetap terbatas untuk menjaga DD.
@@ -982,21 +906,18 @@ PUMP_DEFAULTS["BASE_URL"] = PUMP_DEFAULTS["LIVE_BASE_URL"]
 # ---------------------------------------------------------------------
 # Helper watchlist pemantauan (READ-ONLY)
 # ---------------------------------------------------------------------
-# Tier watchlist berbasis UPTIME LIKUIDITAS, bukan strategi. "AKTIF" dulu
-# bernama "MOMENTUM", dan nama lama itu menyesatkan karena tidak ada
-# hubungannya dengan strategi entry. File watchlist atau settings override
-# lama yang masih menyimpan "MOMENTUM" otomatis dibaca sebagai "AKTIF"
-# lewat migrate_watchlist_tier() di bawah.
+# Penyederhanaan 2026-09-27: daftar simbol manual (kunci config "WATCHLIST"
+# berisi tier INTI/AKTIF/SPEKULATIF) DIHAPUS; panel dashboard kini menyusun
+# daftarnya otomatis dari semesta scanner (lihat komentar WATCHLIST_TOP_N).
+# Konstanta tier + migrate_watchlist_tier() DIPERTAHANKAN karena masih
+# dipakai watchlist_auto.py untuk membaca file hasil analisis lama
+# (watchlist_auto_<mode>.json) tanpa kehilangan data.
 VALID_WATCHLIST_TIERS = ("INTI", "AKTIF", "SPEKULATIF")
 LEGACY_WATCHLIST_TIER_MAP = {"MOMENTUM": "AKTIF"}
 
 
 def migrate_watchlist_tier(tier: str) -> str:
-    """Ubah nama tier lama menjadi nama baru.
-
-    Dipakai config.get_watchlist() dan settings_schema agar file lama tetap
-    terbaca tanpa error validasi dan tanpa kehilangan data.
-    """
+    """Ubah nama tier lama menjadi nama baru (untuk file analisis lama)."""
     raw = str(tier or "").strip().upper()
     return LEGACY_WATCHLIST_TIER_MAP.get(raw, raw)
 
@@ -1015,57 +936,9 @@ def watchlist_enabled(config: dict = None) -> bool:
     return str(raw).strip().lower() in ("true", "1", "yes", "ya", "on")
 
 
-def get_watchlist(config: dict = None) -> list:
-    """Kembalikan watchlist yang sudah dibersihkan dan divalidasi.
-
-    Fungsi ini TIDAK memengaruhi keputusan trading apa pun. Ia hanya
-    menyiapkan data untuk ditampilkan dashboard.
-
-    Toleran terhadap isi yang tidak rapi, karena daftar ini memang untuk
-    diedit manusia:
-      - entry boleh berupa string ("ARBUSDT") atau dict lengkap
-      - simbol dinormalisasi jadi huruf besar tanpa spasi
-      - entry kosong, duplikat, dan tipe yang salah dibuang diam-diam
-      - tier yang tidak dikenal jatuh ke "LAINNYA" (bukan bikin error)
-      - score yang tidak bisa dibaca jadi None (bukan bikin error)
-
-    Sikap ini disengaja: satu baris yang salah ketik tidak boleh membuat
-    dashboard gagal dimuat, apalagi mengganggu proses bot.
-    """
-    cfg = PUMP_CONFIG if config is None else config
-    raw = cfg.get("WATCHLIST", [])
-    if not isinstance(raw, (list, tuple)):
-        return []
-
-    out = []
-    seen = set()
-    for item in raw:
-        if isinstance(item, str):
-            item = {"symbol": item}
-        if not isinstance(item, dict):
-            continue
-
-        symbol = str(item.get("symbol", "")).strip().upper()
-        if not symbol or symbol in seen:
-            continue
-        seen.add(symbol)
-
-        tier = migrate_watchlist_tier(item.get("tier", ""))
-        if tier not in VALID_WATCHLIST_TIERS:
-            tier = "LAINNYA"
-
-        try:
-            score = float(item["score"]) if item.get("score") is not None else None
-        except (TypeError, ValueError):
-            score = None
-
-        out.append({
-            "symbol": symbol,
-            "tier": tier,
-            "score": score,
-            "note": str(item.get("note", "")).strip(),
-        })
-    return out
+# CATATAN AUDIT 2026-09-27: get_watchlist() dihapus bersama kunci config
+# "WATCHLIST". Panel dashboard kini memilih simbolnya sendiri dari semesta
+# scanner di dashboard.build_watchlist(); tidak ada lagi daftar manual.
 
 
 def watchlist_auto_enabled(config: dict = None) -> bool:
@@ -1086,16 +959,9 @@ def get_taker_fee_pct(config: dict = None) -> float:
     return fee
 
 
-def get_maker_fee_pct(config: dict = None) -> float:
-    """Fee maker efektif dalam persen (order limit yang mengendap), sudah
-    memperhitungkan diskon BNB. Spot VIP0 = 0,1%; diskon BNB 25% -> 0,075%
-    (dicek 2026-09-24). Bot pump SELALU market (taker), maker dipakai mesin
-    simulasi hanya untuk order limit yang terisi sebagai maker."""
-    cfg = PUMP_CONFIG if config is None else config
-    fee = float(cfg.get("MAKER_FEE_PCT", cfg.get("TAKER_FEE_PCT", 0.1)))
-    if cfg.get("USE_BNB_FEE_DISCOUNT"):
-        fee *= 0.75
-    return fee
+# CATATAN AUDIT 2026-09-27: get_maker_fee_pct() DIHAPUS (dead code, temuan
+# audit). Tidak ada satu pun pemanggil di seluruh repo; paper_engine
+# menghitung tarif maker sendiri secara eksak via Decimal dari MAKER_FEE_PCT.
 
 
 # ==== RINGKASAN AUDIT (config.py, bagian cache backtest) ==============

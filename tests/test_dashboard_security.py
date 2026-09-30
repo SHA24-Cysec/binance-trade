@@ -206,11 +206,15 @@ def test_dashboard_dynamic_css_classes_are_whitelisted() -> None:
     )
 
     assert 'class="logline ${safeLogClass(e.level)}"' in source
-    assert "const tierCls=safeTierClass(r.tier);" in source
+    # 2026-09-27: kolom tier watchlist manual dihapus; badge skor sinyal tetap
+    # WAJIB lewat whitelist (safeEntryClass = peta tetap + fallback aman).
+    assert "const entryCls=safeEntryClass(entryStatus);" in source
     assert "return map[key] || 'dry';" in source
     assert 'class="tag ${btReasonTagClass(t.reason)}"' in source
-    assert "const safeTierClass" in source
+    assert "const safeEntryClass" in source
     assert "const safeLogClass" in source
+    # Pola lama tidak boleh kembali tanpa sengaja.
+    assert "safeTierClass" not in source
 
 
 def test_backtest_ui_exposes_atr_and_fixed_exit_modes() -> None:
