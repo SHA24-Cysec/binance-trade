@@ -28,7 +28,7 @@ from typing import Any, Optional
 
 import requests
 
-from rate_limiter import RateLimitBlockedError, SharedRequestWeightLimiter
+from infrastructure.network.rate_limiter import RateLimitBlockedError, SharedRequestWeightLimiter
 
 logger = logging.getLogger("binance_client")
 

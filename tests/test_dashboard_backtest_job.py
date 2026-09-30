@@ -20,8 +20,8 @@ import time
 
 import pytest
 
-import dashboard
-import portfolio_backtest as pbt
+from web import dashboard
+from backtesting import portfolio_backtest as pbt
 
 MS_PER_5M = 5 * 60 * 1000
 

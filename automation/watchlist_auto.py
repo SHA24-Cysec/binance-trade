@@ -63,9 +63,9 @@ import threading
 import time
 from typing import Callable, Optional
 
-import market_scanner as scanner
-import strategy
-from strategy import Kline
+from market import market_scanner as scanner
+from strategy import indicators as strategy
+from strategy.indicators import Kline
 
 logger = logging.getLogger("watchlist_auto")
 
@@ -83,7 +83,7 @@ KLINE_PAGE = 1000
 # ======================================================================
 def _auto_file(config: dict) -> str:
     """Nama file hasil, dipisah per mode supaya PAPER dan LIVE tidak campur."""
-    import config as cfg_mod
+    from config import config as cfg_mod
     mode = cfg_mod.get_mode(config).lower()
     return f"watchlist_auto_{mode}.json"
 
@@ -515,7 +515,7 @@ def migrate_tiers(data: dict) -> dict:
     """
     if not isinstance(data, dict):
         return data
-    from config import migrate_watchlist_tier
+    from config.config import migrate_watchlist_tier
     for kunci in ("items", "detail"):
         baris = data.get(kunci)
         if not isinstance(baris, list):

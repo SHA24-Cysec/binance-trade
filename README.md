@@ -25,20 +25,54 @@ python dashboard.py
 
 Mode default adalah PAPER. Mode LIVE wajib memakai API key dan secret produksi yang valid.
 
+## Struktur folder berdasarkan domain
+
+Kode produksi dikelompokkan langsung di folder domain pada root repository.
+Root menyimpan entry point, dokumentasi, konfigurasi proyek, template, dan test.
+Tidak ada folder pembungkus `binance_trade/` dan tidak ada shim modul produksi
+lama seperti `config.py`, `strategy.py`, atau `market_scanner.py`.
+
+| Folder | Domain dan fungsi |
+| --- | --- |
+| `config/` | Konfigurasi mode PAPER atau LIVE, schema, dan validasi setelan |
+| `market/` | REST market data, WebSocket, scanner pasar, filter pump, dan sinyal pasar |
+| `strategy/` | Candle, parser klines, indikator momentum, sizing, dan level exit |
+| `trading/` | Bot utama dan alur trading |
+| `trading/clients/` | Abstraksi exchange, client Binance, client LIVE, dan client PAPER |
+| `trading/paper/` | Paper matching engine dan penyimpanan akun PAPER |
+| `backtesting/` | Backtest satu simbol, portfolio, cache, storage SQLite, dan data sintetis |
+| `web/` | Dashboard Flask dan API internal |
+| `automation/` | Penyegar watchlist read-only |
+| `infrastructure/storage/` | I/O atomik dan persistensi state |
+| `infrastructure/paths.py` | Resolusi root repository untuk file runtime dan template |
+| `infrastructure/process/` | Kontrol proses, lifecycle, lock, dan subprocess |
+| `infrastructure/security/` | Penyimpanan kredensial secara aman |
+| `infrastructure/network/` | Rate limiter request ke exchange |
+| `templates/` | Template dashboard |
+| `tests/` | Test suite regresi, keamanan, PAPER, LIVE guard, dan backtest |
+
+Root entry point yang tetap didukung:
+
+- `python dashboard.py` untuk dashboard.
+- `python pump_scanner_bot.py --selftest` untuk selftest bot.
+- `python backtest.py --selftest` untuk selftest backtest satu simbol.
+- `python portfolio_backtest.py --selftest` untuk selftest backtest portofolio.
+- `python run.py` untuk membuka dashboard melalui launcher.
+
 ## File penting
 
-| File | Fungsi |
+| File aktif | Fungsi |
 | --- | --- |
-| `config.py` | Default config dan helper mode runtime |
-| `settings_schema.py` | Schema dan validasi setelan dashboard |
-| `strategy.py` | Struktur candle, parser klines, indikator momentum, sizing, dan level exit ATR |
-| `market_scanner.py` | Filter pasar, gerbang pump, rolling volume, dan deteksi sinyal momentum |
-| `pump_scanner_bot.py` | Loop bot live atau paper |
-| `backtest.py` | Backtest satu simbol dan selftest lokal |
-| `portfolio_backtest.py` | Backtest portofolio lintas simbol |
-| `dashboard.py` | Server dashboard Flask dan API internal |
+| `config/config.py` | Default config dan helper mode runtime |
+| `config/settings_schema.py` | Schema dan validasi setelan dashboard |
+| `strategy/indicators.py` | Struktur candle, parser klines, indikator momentum, sizing, dan level exit ATR |
+| `market/market_scanner.py` | Filter pasar, gerbang pump, rolling volume, dan deteksi sinyal momentum |
+| `trading/pump_scanner_bot.py` | Loop bot live atau paper |
+| `backtesting/backtest.py` | Backtest satu simbol dan selftest lokal |
+| `backtesting/portfolio_backtest.py` | Backtest portofolio lintas simbol |
+| `web/dashboard.py` | Server dashboard Flask dan API internal |
 | `templates/dashboard.html` | Tampilan dashboard |
-| `watchlist_auto.py` | Penyegar watchlist read-only |
+| `automation/watchlist_auto.py` | Penyegar watchlist read-only |
 
 ## Sinyal momentum pump
 
@@ -216,8 +250,8 @@ Trading crypto berisiko tinggi. Gunakan mode PAPER lebih dulu, pakai plafon nomi
 
 Kolom **Skor Entry** pada dashboard merupakan skor kedekatan sinyal
 entry real-time berdasarkan candle yang sudah ditutup: EMA, RSI, MACD histogram,
-dan higher-low. Daftar koin pantauan bersifat statis dari `config.py` (atau menu
-Settings), dan seluruh pergerakan harga serta volume diperbarui secara live per
+dan higher-low. Daftar koin pantauan bersifat statis dari
+`config/config.py` (atau menu Settings), dan seluruh pergerakan harga serta volume diperbarui secara live per
 detik melalui streaming WebSocket resmi Binance.
 
 Perhitungan candle live dilakukan secara mandiri dengan cache TTL terpisah untuk

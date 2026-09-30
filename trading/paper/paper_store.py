@@ -39,7 +39,7 @@ from decimal import Decimal
 from typing import Any, Callable, Optional
 import threading
 
-from atomic_io import archive_corrupt, atomic_write_json
+from infrastructure.storage.atomic_io import archive_corrupt, atomic_write_json
 
 logger = logging.getLogger("paper_store")
 

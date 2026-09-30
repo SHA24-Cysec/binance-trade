@@ -24,14 +24,14 @@ import threading
 
 import pytest
 
-import backtest as bt
-import backtest_storage as storage
-import market_scanner as scanner
-import portfolio_backtest as pbt
-from backtest_storage import KlineStore
-from config import PUMP_CONFIG
-from strategy import Kline
-from synthetic_data import riwayat_harian, seri_banyak_setup
+from backtesting import backtest as bt
+from backtesting import backtest_storage as storage
+from market import market_scanner as scanner
+from backtesting import portfolio_backtest as pbt
+from backtesting.backtest_storage import KlineStore
+from config.config import PUMP_CONFIG
+from strategy.indicators import Kline
+from backtesting.synthetic_data import riwayat_harian, seri_banyak_setup
 
 
 # ======================================================================
@@ -360,7 +360,7 @@ def test_tidak_ada_sql_yang_dirakit_dari_nilai_variabel():
     """Semua nilai harus lewat placeholder '?', tidak ada SQL dari f-string."""
     akar = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     for modul in ("backtest_storage.py", "portfolio_backtest.py"):
-        with open(os.path.join(akar, modul), encoding="utf-8") as handle:
+        with open(os.path.join(akar, "backtesting", modul), encoding="utf-8") as handle:
             isi = handle.read()
         assert not re.search(r"execute(?:script|many)?\s*\(\s*f[\"']", isi), modul
         assert not re.search(r"execute(?:script|many)?\s*\([^)]*\.format\(", isi), modul

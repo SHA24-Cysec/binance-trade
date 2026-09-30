@@ -1,8 +1,8 @@
 """Uji gerbang pump rolling-volume, spread contract, dan filter BTC."""
 from __future__ import annotations
-import market_scanner as scanner
-from strategy import Kline
-from config import PUMP_CONFIG
+from market import market_scanner as scanner
+from strategy.indicators import Kline
+from config.config import PUMP_CONFIG
 
 DAY = 86400000
 

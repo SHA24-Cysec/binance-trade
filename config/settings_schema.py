@@ -1,6 +1,6 @@
 """Skema, validasi, dan penyimpanan override konfigurasi dashboard.
 
-Modul ini tidak meng-import config.py agar config.py dapat memakainya saat
+Modul ini tidak meng-from config import config.py agar config.py dapat memakainya saat
 proses import tanpa circular import. Semua path runtime berakar di folder repo.
 """
 
@@ -15,16 +15,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from atomic_io import (
+from infrastructure.storage.atomic_io import (
     append_json_line,
     archive_corrupt,
     atomic_write_json,
     interprocess_lock,
     read_json,
 )
+from infrastructure.paths import PROJECT_ROOT
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = PROJECT_ROOT
 RUNTIME_FILE = ROOT / "pump_bot_runtime.json"
 RUNTIME_ERROR_FILE = ROOT / "pump_bot_runtime.error.json"
 AUDIT_FILE = ROOT / "pump_bot_settings_audit.log"
@@ -74,7 +75,7 @@ def _required_lookback_bars(candidate: dict) -> int:
     strategy.py sendiri tidak mengimpor modul repo mana pun, jadi tidak ada
     risiko import melingkar.
     """
-    from strategy import required_lookback_bars
+    from strategy.indicators import required_lookback_bars
     return required_lookback_bars(candidate)
 
 

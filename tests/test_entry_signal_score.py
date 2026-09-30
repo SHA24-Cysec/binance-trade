@@ -1,6 +1,6 @@
 """Uji regresi skor entry panel; tidak memanggil jalur trading."""
-from market_scanner import score_entry_signal
-from strategy import Kline
+from market.market_scanner import score_entry_signal
+from strategy.indicators import Kline
 
 
 def _klines(n=40, volume=10.0):

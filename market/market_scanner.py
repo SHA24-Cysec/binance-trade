@@ -95,8 +95,8 @@ def score_entry_signal(klines: list[Kline], config: dict, meta=None) -> EntrySig
     status = "SIAP" if raw >= 75 else "MENDEKAT" if raw >= 50 else "AWAL" if raw >= 25 else "JAUH"
     return EntrySignalScore(0.0 if dq else raw, "TIDAK LOLOS" if dq else status, dq, components, f"EMA={'ya' if cross else 'tidak'}, RSI={rsi:.2f}, MACD={'naik' if improving else 'tidak'}, HL={'ya' if hl else 'tidak'}; {detail}")
 
-import strategy
-from strategy import Kline
+from strategy import indicators as strategy
+from strategy.indicators import Kline
 
 logger = logging.getLogger(__name__)
 

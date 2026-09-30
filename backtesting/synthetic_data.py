@@ -17,7 +17,7 @@ mewakili perilaku pasar sungguhan. Jangan memakainya untuk menilai strategi.
 
 from __future__ import annotations
 
-from strategy import Kline
+from strategy.indicators import Kline
 
 MS_PER_BAR = 300_000  # 5 menit
 

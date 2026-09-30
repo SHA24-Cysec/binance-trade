@@ -4,7 +4,7 @@ from copy import deepcopy
 
 import pytest
 
-import dashboard
+from web import dashboard
 
 
 @pytest.fixture()

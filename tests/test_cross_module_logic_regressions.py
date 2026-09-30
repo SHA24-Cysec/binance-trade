@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from binance_client import BinanceSpotClient, SymbolFilters
-import backtest as bt
-from config import PUMP_CONFIG
-import market_scanner as scanner
-import pump_scanner_bot as bot
-import state as state_mod
-import strategy
-import watchlist_auto
+from trading.clients.binance_client import BinanceSpotClient, SymbolFilters
+from backtesting import backtest as bt
+from config.config import PUMP_CONFIG
+from market import market_scanner as scanner
+from trading import pump_scanner_bot as bot
+from infrastructure.storage import state as state_mod
+from strategy import indicators as strategy
+from automation import watchlist_auto
 
 
 def _config(tmp_path) -> dict:
@@ -515,7 +515,7 @@ def test_watchlist_uses_configured_interval_for_24h_window(monkeypatch) -> None:
     # 170 candle 15 menit = 1,77 hari. Kalau watchlist masih mengasumsikan
     # 5 menit, ia menganggapnya hanya 0,59 hari dan bahkan menolak datanya.
     from types import SimpleNamespace
-    from strategy import Kline
+    from strategy.indicators import Kline
 
     monkeypatch.setattr(scanner, "detect_pullback_retest", lambda *_args, **_kwargs: SimpleNamespace(ok=False))
     bar = 15 * 60_000

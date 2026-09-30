@@ -5,7 +5,7 @@ import stat
 
 import pytest
 
-from credential_store import credential_status, update_env
+from infrastructure.security.credential_store import credential_status, update_env
 
 
 def test_update_env_preserves_crlf_and_unrelated_lines(tmp_path):

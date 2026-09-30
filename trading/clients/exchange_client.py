@@ -161,15 +161,15 @@ def create_exchange_client(config: dict) -> ExchangeClient:
     Import subclass dilakukan di dalam fungsi (lazy) untuk menghindari
     ketergantungan melingkar saat modul-modul saling meng-import.
     """
-    from config import require_valid_mode  # lokal: hindari circular import
+    from config.config import require_valid_mode  # lokal: hindari circular import
 
     mode = require_valid_mode(config)  # melempar bila tidak valid
     if mode == "LIVE":
-        from live_client import LiveClient
+        from trading.clients.live_client import LiveClient
         logger.info("Membuat LiveClient (MODE=LIVE): order & saldo SUNGGUHAN.")
         return LiveClient(config)
     # mode == "PAPER"
-    from paper_client import PaperClient
+    from trading.clients.paper_client import PaperClient
     logger.info("Membuat PaperClient (MODE=PAPER): eksekusi & saldo DISIMULASIKAN lokal.")
     return PaperClient(config)
 

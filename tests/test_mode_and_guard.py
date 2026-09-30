@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import pytest
 
-import config
-from binance_client import BinanceSpotClient, SignedEndpointBlockedError
-from rate_limiter import RateLimitBlockedError, SharedRequestWeightLimiter
+from config import config
+from trading.clients.binance_client import BinanceSpotClient, SignedEndpointBlockedError
+from infrastructure.network.rate_limiter import RateLimitBlockedError, SharedRequestWeightLimiter
 
 
 # ------------------------------------------------------------------
@@ -36,7 +36,7 @@ def test_valid_modes_only_paper_live():
 
 
 def test_create_exchange_client_rejects_invalid_mode():
-    from exchange_client import create_exchange_client
+    from trading.clients.exchange_client import create_exchange_client
     cfg = dict(config.PUMP_CONFIG)
     cfg["MODE"] = "FOO"
     with pytest.raises(config.InvalidModeError):
@@ -93,7 +93,7 @@ def test_keyless_client_blocks_signed_even_with_key():
 
 def test_paper_client_dust_endpoints_blocked(tmp_path, monkeypatch):
     """PaperClient.get_dust_convertible/convert_dust melempar guard."""
-    from paper_client import PaperClient
+    from trading.clients.paper_client import PaperClient
     cfg = dict(config.PUMP_CONFIG)
     cfg["MODE"] = "PAPER"
     cfg["USE_WEBSOCKET"] = False  # hindari koneksi jaringan saat init
@@ -111,7 +111,7 @@ def test_paper_client_dust_endpoints_blocked(tmp_path, monkeypatch):
 
 def test_paper_client_market_data_rest_is_keyless(tmp_path):
     """MarketDataProvider di PAPER memakai REST allow_signed=False."""
-    from paper_client import PaperClient
+    from trading.clients.paper_client import PaperClient
     cfg = dict(config.PUMP_CONFIG)
     cfg["MODE"] = "PAPER"
     cfg["USE_WEBSOCKET"] = False

@@ -13,7 +13,7 @@ from decimal import Decimal
 
 import pytest
 
-from binance_client import BinanceAPIError
+from trading.clients.binance_client import BinanceAPIError
 from conftest import FakeMarket, make_filters
 
 

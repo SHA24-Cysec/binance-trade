@@ -17,10 +17,10 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from binance_client import BinanceAPIError, SymbolFilters
-from config import PUMP_CONFIG
-import market_scanner as scanner
-import pump_scanner_bot as bot
+from trading.clients.binance_client import BinanceAPIError, SymbolFilters
+from config.config import PUMP_CONFIG
+from market import market_scanner as scanner
+from trading import pump_scanner_bot as bot
 
 
 def _config(tmp_path) -> dict:

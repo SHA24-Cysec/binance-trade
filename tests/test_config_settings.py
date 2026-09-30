@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 
-import config
-import settings_schema as ss
+from config import config
+from config import settings_schema as ss
 
 
 def test_schema_covers_every_final_config_key():

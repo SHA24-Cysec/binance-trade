@@ -4,9 +4,9 @@ from copy import deepcopy
 
 import pytest
 
-import config
-import dashboard
-import settings_schema as ss
+from config import config
+from web import dashboard
+from config import settings_schema as ss
 
 
 @pytest.fixture()

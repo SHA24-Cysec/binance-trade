@@ -58,7 +58,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Iterator, Mapping, Optional, Sequence
 
-from strategy import Kline
+from strategy.indicators import Kline
 
 logger = logging.getLogger(__name__)
 

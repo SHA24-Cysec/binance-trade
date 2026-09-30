@@ -46,8 +46,8 @@ import time
 from decimal import Decimal, ROUND_DOWN
 from typing import Callable, Optional
 
-from binance_client import BinanceAPIError, SymbolFilters
-from paper_store import PaperStore, _d
+from trading.clients.binance_client import BinanceAPIError, SymbolFilters
+from trading.paper.paper_store import PaperStore, _d
 
 logger = logging.getLogger("paper_engine")
 

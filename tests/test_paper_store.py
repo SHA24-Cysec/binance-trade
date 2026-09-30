@@ -10,7 +10,7 @@ import json
 import os
 from decimal import Decimal
 
-from paper_store import PaperStore, load_account_snapshot
+from trading.paper.paper_store import PaperStore, load_account_snapshot
 
 
 def test_restart_persists_balances_and_open_orders(tmp_path):

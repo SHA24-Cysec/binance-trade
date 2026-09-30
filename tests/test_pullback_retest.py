@@ -1,9 +1,9 @@
 """Uji sinyal momentum baru, ATR exit, dan kontrak confirm_entry."""
 from __future__ import annotations
 
-import strategy
-import market_scanner as scanner
-from config import PUMP_CONFIG
+from strategy import indicators as strategy
+from market import market_scanner as scanner
+from config.config import PUMP_CONFIG
 
 
 def candles(values):

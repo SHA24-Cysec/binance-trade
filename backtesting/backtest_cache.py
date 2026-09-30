@@ -55,7 +55,7 @@ import time
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
-from strategy import Kline
+from strategy.indicators import Kline
 
 logger = logging.getLogger(__name__)
 

@@ -394,7 +394,7 @@
       </div>
     </div>
     <div class="head-right">
-      <span class="pill" id="modePill"><span class="dot warn"></span><span id="modeText">—</span></span>
+      <span class="pill" id="modePill"><span class="dot warn"></span><span id="modeText">-</span></span>
       <span class="pill" id="connPill"><span class="dot off" id="connDot"></span><span id="connText">Menghubungkan…</span></span>
       <span class="refresh"><span class="spin"></span><span id="lastUpdate">memuat…</span></span>
     </div>
@@ -418,7 +418,7 @@
     <div class="card" id="cardEquity"><div class="accent-bar"></div><div class="label">Equity (Live)</div><div class="value mono" id="equityVal"><span class="skel" style="width:70%"></span></div><div class="sub" id="equitySub">saldo + nilai posisi</div></div>
     <div class="card" id="cardPnl"><div class="accent-bar"></div><div class="label">PnL Posisi Terbuka</div><div class="value mono" id="openPnlVal"><span class="skel" style="width:70%"></span></div><div class="sub" id="openPnlSub">belum ada posisi</div></div>
     <div class="card" id="cardRealized"><div class="accent-bar"></div><div class="label">Total PnL Terealisasi</div><div class="value mono" id="realizedVal"><span class="skel" style="width:70%"></span></div><div class="sub" id="realizedSub">dari riwayat trade</div></div>
-    <div class="card" id="cardWin"><div class="accent-bar"></div><div class="label">Win Rate</div><div class="value mono" id="winVal"><span class="skel" style="width:70%"></span></div><div class="sub" id="winSub">—</div></div>
+    <div class="card" id="cardWin"><div class="accent-bar"></div><div class="label">Win Rate</div><div class="value mono" id="winVal"><span class="skel" style="width:70%"></span></div><div class="sub" id="winSub">-</div></div>
   </div>
 
   <!-- POSISI + EQUITY CHART -->
@@ -686,7 +686,7 @@
       <div class="bt-loading-meta">
         <span>⏱️ Waktu berjalan: <b id="btElapsed">0 dtk</b></span>
         <span>⏳ Estimasi sisa: <b id="btEta">menghitung…</b></span>
-        <span>📅 Estimasi selesai: <b id="btEtaClock">—</b></span>
+        <span>📅 Estimasi selesai: <b id="btEtaClock">-</b></span>
       </div>
     </div>
     <div id="btResult" style="display:none;margin-top:18px">
@@ -784,8 +784,8 @@ async function adminFetch(url, options){
   if(opts.body && !opts.headers['Content-Type']) opts.headers['Content-Type'] = 'application/json';
   return fetch(url, opts);
 }
-const fmt = (n,d=2)=> (n===null||n===undefined||isNaN(n))?'—':Number(n).toLocaleString(LOCALE,{minimumFractionDigits:d,maximumFractionDigits:d});
-const fmtP = (n,d=6)=> (n===null||n===undefined||isNaN(n))?'—':Number(n).toLocaleString(LOCALE,{minimumFractionDigits:2,maximumFractionDigits:d});
+const fmt = (n,d=2)=> (n===null||n===undefined||isNaN(n))?'-':Number(n).toLocaleString(LOCALE,{minimumFractionDigits:d,maximumFractionDigits:d});
+const fmtP = (n,d=6)=> (n===null||n===undefined||isNaN(n))?'-':Number(n).toLocaleString(LOCALE,{minimumFractionDigits:2,maximumFractionDigits:d});
 const sign = n => (n>0?'+':'');
 const cls = n => n>0?'pos':(n<0?'neg':'mut');
 
@@ -923,7 +923,7 @@ function renderStatus(s){
 
   // cards
   const a=s.account;
-  document.getElementById('equityVal').textContent = a.equity_live!=null? fmt(a.equity_live)+' '+s.quote : '—';
+  document.getElementById('equityVal').textContent = a.equity_live!=null? fmt(a.equity_live)+' '+s.quote : '-';
   document.getElementById('equitySub').textContent = a.usdt_free!=null? ('bebas: '+fmt(a.usdt_free)+' '+s.quote) : 'butuh API key untuk saldo';
 
   const p=s.position;
@@ -933,7 +933,7 @@ function renderStatus(s){
     document.getElementById('openPnlSub').innerHTML='<span class="'+cls(p.pnl_pct)+'">'+sign(p.pnl_pct)+fmt(p.pnl_pct)+'%</span> · '+esc(p.symbol);
     oc.className='card '+(p.pnl_usdt>=0?'good':'bad');
   } else {
-    document.getElementById('openPnlVal').textContent='—';
+    document.getElementById('openPnlVal').textContent='-';
     document.getElementById('openPnlSub').textContent= p.has_position?'menunggu harga live…':'belum ada posisi';
     oc.className='card';
   }
@@ -951,17 +951,17 @@ function renderStatus(s){
     const pnlColor = (p.pnl_pct!=null)?cls(p.pnl_pct):'mut';
     let beRow = p.be_active? `<div class="posrow"><span class="k">Breakeven stop</span><span class="v mono">${fmtP(p.be_stop_price)}</span></div>`:'';
     let trRow = p.trailing_active? `<div class="posrow"><span class="k">Trailing stop</span><span class="v mono">${fmtP(p.trailing_stop_price)}</span></div>`:'';
-    let hold = p.hold_minutes!=null? Math.round(p.hold_minutes)+' mnt':'—';
+    let hold = p.hold_minutes!=null? Math.round(p.hold_minutes)+' mnt':'-';
     pb.innerHTML=`
       <div class="bigpnl">
-        <div class="n ${pnlColor}">${p.pnl_pct!=null?sign(p.pnl_pct)+fmt(p.pnl_pct)+'%':'—'}</div>
+        <div class="n ${pnlColor}">${p.pnl_pct!=null?sign(p.pnl_pct)+fmt(p.pnl_pct)+'%':'-'}</div>
         <div class="s">${p.pnl_usdt!=null?sign(p.pnl_usdt)+fmt(p.pnl_usdt)+' '+esc(s.quote):'menunggu harga live'}</div>
       </div>
       <div class="posrow"><span class="k">Simbol</span><span class="v">${esc(p.symbol)}</span></div>
       <div class="posrow"><span class="k">Harga entry</span><span class="v mono">${fmtP(p.entry_price)}</span></div>
-      <div class="posrow"><span class="k">Harga live</span><span class="v mono">${p.live_price!=null?fmtP(p.live_price):'—'}</span></div>
+      <div class="posrow"><span class="k">Harga live</span><span class="v mono">${p.live_price!=null?fmtP(p.live_price):'-'}</span></div>
       <div class="posrow"><span class="k">Qty</span><span class="v mono">${fmt(p.qty,6)}</span></div>
-      <div class="posrow"><span class="k">Nilai posisi</span><span class="v mono">${p.position_value!=null?fmt(p.position_value)+' '+esc(s.quote):'—'}</span></div>
+      <div class="posrow"><span class="k">Nilai posisi</span><span class="v mono">${p.position_value!=null?fmt(p.position_value)+' '+esc(s.quote):'-'}</span></div>
       <div class="posrow"><span class="k">Lama hold</span><span class="v">${hold}</span></div>
       ${beRow}${trRow}`;
     window._currentPositionSymbol = p.symbol;
@@ -1092,7 +1092,7 @@ function renderSummary(sum, quote){
   document.getElementById('realizedVal').innerHTML='<span class="'+cls(sum.total_pnl)+'">'+sign(sum.total_pnl)+fmt(sum.total_pnl)+' '+esc(quote)+'</span>';
   document.getElementById('realizedSub').textContent=sum.total_trades+' trade selesai';
   rc.className='card '+(sum.total_pnl>=0?'good':'bad');
-  document.getElementById('winVal').textContent= sum.total_trades? fmt(sum.win_rate,1)+'%':'—';
+  document.getElementById('winVal').textContent= sum.total_trades? fmt(sum.win_rate,1)+'%':'-';
   document.getElementById('winSub').innerHTML= sum.total_trades? ('<span class="pos">'+fmt(sum.wins,0)+'W</span> / <span class="neg">'+fmt(sum.losses,0)+'L</span> · terbaik '+sign(sum.best_pct)+fmt(sum.best_pct,1)+'%') : 'belum ada trade';
 }
 
@@ -1105,7 +1105,7 @@ function renderTrades(trades, quote){
   if(!closed.length){tb.innerHTML='<tr><td colspan="8" class="empty">Belum ada trade yang selesai.</td></tr>';return;}
   tb.innerHTML=closed.map(t=>`
     <tr>
-      <td class="mono mut">${esc(t.sell_time||'—')}${t.paper?' <span class="tag dry">PAPER</span>':''}</td>
+      <td class="mono mut">${esc(t.sell_time||'-')}${t.paper?' <span class="tag dry">PAPER</span>':''}</td>
       <td><b>${esc(t.symbol)}</b></td>
       <td class="mono">${fmtP(t.entry||t.buy_price)}</td>
       <td class="mono">${fmtP(t.sell_price)}</td>
@@ -1160,7 +1160,7 @@ function renderChart(trades){
 
 // Volume ditulis ringkas supaya kolomnya tidak melebar: 1,2 jt / 340 rb.
 function wlVol(v){
-  if(v===null||v===undefined||isNaN(v)) return '—';
+  if(v===null||v===undefined||isNaN(v)) return '-';
   if(v>=1e9) return fmt(v/1e9,2)+' M';   // miliar
   if(v>=1e6) return fmt(v/1e6,2)+' jt';
   if(v>=1e3) return fmt(v/1e3,0)+' rb';
@@ -1269,7 +1269,7 @@ function updateWatchlistTicks(tickMap){
         if(volEl) volEl.textContent = wlVol(qv);
         if(rpEl){
           rpEl.innerHTML = (r.range_position === null || r.range_position === undefined)
-            ? '<span class="mut">—</span>'
+            ? '<span class="mut">-</span>'
             : `<span class="mono">${fmt(r.range_position*100,0)}%</span>`;
         }
         if(barEl && minVol > 0){
@@ -1342,7 +1342,7 @@ function renderWatchlist(w){
 
     // Bar progres menuju ambang VOLUME. Penuh berarti gerbang likuiditas
     // sudah terlewati; angka di bawahnya menyebut sisa jaraknya.
-    let bar='<span class="mut">—</span>';
+    let bar='<span class="mut">-</span>';
     if(r.quote_volume_24h!==null&&r.quote_volume_24h!==undefined&&cfg.min_quote_volume_24h){
       const ratio=Math.max(0,Math.min(1,r.quote_volume_24h/cfg.min_quote_volume_24h));
       const full=r.pass_volume?' full':'';
@@ -1354,7 +1354,7 @@ function renderWatchlist(w){
     }
 
     const rp=(r.range_position===null||r.range_position===undefined)
-      ? '<span class="mut">—</span>'
+      ? '<span class="mut">-</span>'
       : `<span class="mono">${fmt(r.range_position*100,0)}%</span>`;
 
     const volCls=r.pass_volume===false?' class="mut"':'';
@@ -1372,7 +1372,7 @@ function renderWatchlist(w){
       <td><span class="wl-sym">${esc(r.symbol)}</span></td>
       <td><span class="tag ${entryCls}" title="${esc(entryTitle)}">${esc(entryStatus)}</span>${scoreNumHtml}</td>
       <td class="mono wl-p">${fmtP(r.price)}</td>
-      <td class="mono wl-c ${cls(r.change_24h)}">${r.change_24h===null?'—':sign(r.change_24h)+fmt(r.change_24h,2)+'%'}</td>
+      <td class="mono wl-c ${cls(r.change_24h)}">${r.change_24h===null?'-':sign(r.change_24h)+fmt(r.change_24h,2)+'%'}</td>
       <td class="wl-b">${bar}</td>
       <td${volCls}><span class="mono wl-v">${wlVol(r.quote_volume_24h)}</span></td>
       <td class="wl-r">${rp}</td>
@@ -1439,8 +1439,8 @@ let _settingsConfirmation = null;
 
 function processLabel(p){
   const code = p.exit_code===null||p.exit_code===undefined ? 'tidak tersedia' : p.exit_code;
-  const up = p.uptime_seconds==null ? '—' : fmtDuration(p.uptime_seconds);
-  const pidText=p.pid||'—';
+  const up = p.uptime_seconds==null ? '-' : fmtDuration(p.uptime_seconds);
+  const pidText=p.pid||'-';
   return `<b>${esc(p.status)}</b> · PID <b>${esc(pidText)}</b>`+(p.pid?'':(p.last_pid?` · PID terakhir <b>${esc(p.last_pid)}</b>`:''))+` · uptime <b>${esc(up)}</b>`+
     (p.status==='CRASHED'?` · kode keluar <b>${esc(code)}</b>`:'')+
     (p.reason?`<br><span class="mut">${esc(p.reason)}</span>`:'')+
@@ -1491,7 +1491,7 @@ async function confirmBotAction(){
     let d=await r.json();if(!r.ok)throw new Error(d.error||'Persiapan aksi gagal.');
     r=await adminFetch('/api/control/execute',{body:JSON.stringify({confirmation_id:d.confirmation_id})});
     d=await r.json();if(!r.ok)throw new Error(d.error||'Aksi proses gagal.');
-    toast('ok','Aksi proses berhasil',d.process.status+' · PID '+(d.process.pid||'—'));
+    toast('ok','Aksi proses berhasil',d.process.status+' · PID '+(d.process.pid||'-'));
     closeBotActionModal();await loadControlStatus();
   }catch(e){toast('err','Aksi proses gagal',e.message,9000);}
   finally{btn.disabled=false;btn.textContent='Konfirmasi';}
@@ -1815,7 +1815,7 @@ async function startBacktest(){
   document.getElementById('btPct').textContent = '0%';
   document.getElementById('btElapsed').textContent = '0 dtk';
   document.getElementById('btEta').textContent = 'menghitung…';
-  document.getElementById('btEtaClock').textContent = '—';
+  document.getElementById('btEtaClock').textContent = '-';
 
   try{
     const r = await adminFetch('/api/backtest/start', {
@@ -1835,7 +1835,7 @@ async function startBacktest(){
 }
 
 function fmtDuration(sec){
-  if(sec == null || isNaN(sec)) return '—';
+  if(sec == null || isNaN(sec)) return '-';
   sec = Math.max(0, Math.round(sec));
   if(sec < 60) return sec + ' dtk';
   const m = Math.floor(sec/60), s = sec%60;
@@ -1876,7 +1876,7 @@ function pollBacktest(jobId){
         document.getElementById('btEtaClock').textContent = done.toLocaleTimeString('id-ID');
       } else {
         document.getElementById('btEta').textContent = 'menghitung…';
-        document.getElementById('btEtaClock').textContent = '—';
+        document.getElementById('btEtaClock').textContent = '-';
       }
 
       if(d.status === 'done'){
@@ -1967,7 +1967,7 @@ function renderBacktestResult(res){
       <div class="sub">${fmt(s.total_trades,0)} trade diambil bot</div></div>
     <div class="card"><div class="accent-bar"></div>
       <div class="label">Win Rate</div>
-      <div class="value mono">${s.total_trades? fmt(s.win_rate,1)+'%':'—'}</div>
+      <div class="value mono">${s.total_trades? fmt(s.win_rate,1)+'%':'-'}</div>
       <div class="sub"><span class="pos">${fmt(s.wins,0)}W</span> / <span class="neg">${fmt(s.losses,0)}L</span></div></div>
     <div class="card"><div class="accent-bar"></div>
       <div class="label">Max Drawdown</div>
@@ -2009,7 +2009,7 @@ function renderBacktestResult(res){
        <div class="posrow"><span class="k">SL / TP / BE (trig,lock) / Trail (start,step)</span><span class="v mono" style="font-size:11.5px">${esc(p.SL_PCT)}% / ${esc(p.TP_PCT)}% / ${esc(p.BE_TRIGGER_PCT)}%,${esc(p.BE_LOCK_PCT)}% / ${esc(p.TRAILING_START_PCT)}%,${esc(p.TRAILING_STEP_PCT)}%</span></div>`;
   document.getElementById('btInfoBox').innerHTML = `
     <div class="posrow"><span class="k">Semesta simbol</span><span class="v mono">${fmt(res.universe_with_data,0)} berhasil / ${fmt(res.universe_requested,0)} diminta${res.symbols_failed_count? ' ('+fmt(res.symbols_failed_count,0)+' gagal)':''}</span></div>
-    <div class="posrow"><span class="k">Rentang data</span><span class="v mono" style="font-size:11.5px">${esc(res.start_time||'—')} &rarr; ${esc(res.end_time||'—')}</span></div>
+    <div class="posrow"><span class="k">Rentang data</span><span class="v mono" style="font-size:11.5px">${esc(res.start_time||'-')} &rarr; ${esc(res.end_time||'-')}</span></div>
     <div class="posrow"><span class="k">Titik waktu diproses</span><span class="v mono">${fmt(res.bars_total,0)} bar ${esc(res.interval)}</span></div>
     ${exitRows}
     <div style="border-top:1px solid var(--border);margin:4px 0"></div>

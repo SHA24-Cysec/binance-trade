@@ -21,11 +21,11 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from binance_client import SymbolFilters, build_filters_cache, SignedEndpointBlockedError
-from exchange_client import ExchangeClient
-from market_data import MarketDataProvider
-from paper_engine import PaperMatchingEngine
-from paper_store import PaperStore
+from trading.clients.binance_client import SymbolFilters, build_filters_cache, SignedEndpointBlockedError
+from trading.clients.exchange_client import ExchangeClient
+from market.market_data import MarketDataProvider
+from trading.paper.paper_engine import PaperMatchingEngine
+from trading.paper.paper_store import PaperStore
 
 logger = logging.getLogger("paper_client")
 
@@ -161,7 +161,7 @@ class PaperClient(ExchangeClient):
         self.engine.process_open_orders()
         o = self.store.find_order(order_id=order_id, orig_client_order_id=orig_client_order_id)
         if o is None:
-            from binance_client import BinanceAPIError
+            from trading.clients.binance_client import BinanceAPIError
             raise BinanceAPIError(400, -2013, "Order does not exist.")
         return self._public_order(o)
 

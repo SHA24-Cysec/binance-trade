@@ -20,10 +20,10 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from binance_client import BinanceAPIError, SymbolFilters
-from config import PUMP_CONFIG
-import pump_scanner_bot as bot
-import state as state_mod
+from trading.clients.binance_client import BinanceAPIError, SymbolFilters
+from config.config import PUMP_CONFIG
+from trading import pump_scanner_bot as bot
+from infrastructure.storage import state as state_mod
 
 
 def _config(tmp_path) -> dict:

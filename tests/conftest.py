@@ -16,9 +16,9 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from binance_client import SymbolFilters  # noqa: E402
-from paper_engine import PaperMatchingEngine  # noqa: E402
-from paper_store import PaperStore  # noqa: E402
+from trading.clients.binance_client import SymbolFilters  # noqa: E402
+from trading.paper.paper_engine import PaperMatchingEngine  # noqa: E402
+from trading.paper.paper_store import PaperStore  # noqa: E402
 
 
 class FakeMarket:

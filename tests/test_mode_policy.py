@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-import dashboard
+from web import dashboard
 
 
 @pytest.fixture()

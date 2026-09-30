@@ -28,8 +28,8 @@ import threading
 import time
 from typing import Optional
 
-from binance_client import BinanceSpotClient
-from config import get_base_url, use_websocket
+from trading.clients.binance_client import BinanceSpotClient
+from config.config import get_base_url, use_websocket
 
 logger = logging.getLogger("market_data")
 
@@ -78,7 +78,7 @@ class MarketDataProvider:
         with self._ws_lock:
             if self._ws is None:
                 try:
-                    from market_ws import MarketWebSocket
+                    from market.market_ws import MarketWebSocket
                     self._ws = MarketWebSocket(self.config.get(
                         "WS_BASE_URL", "wss://stream.binance.com:9443"))
                     self._ws.start(all_mini_ticker=True)

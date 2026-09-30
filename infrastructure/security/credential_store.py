@@ -9,10 +9,11 @@ import stat
 import subprocess
 from pathlib import Path
 
-from atomic_io import atomic_write_text, interprocess_lock
+from infrastructure.storage.atomic_io import atomic_write_text, interprocess_lock
+from infrastructure.paths import PROJECT_ROOT
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = PROJECT_ROOT
 ENV_PATH = ROOT / ".env"
 _KEYS = ("BINANCE_API_KEY", "BINANCE_API_SECRET")
 _ASSIGN_RE = re.compile(r"^(?P<prefix>\s*(?:export\s+)?)(?P<key>BINANCE_API_KEY|BINANCE_API_SECRET)\s*=.*$")

@@ -10,12 +10,13 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from atomic_io import atomic_write_json, read_json, replace_with_retry, timestamp_tag
-import procctl
-import state as state_mod
+from infrastructure.storage.atomic_io import atomic_write_json, read_json, replace_with_retry, timestamp_tag
+from infrastructure.process import procctl
+from infrastructure.storage import state as state_mod
+from infrastructure.paths import PROJECT_ROOT
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = PROJECT_ROOT
 
 
 class BotAlreadyRunningError(RuntimeError):
@@ -271,7 +272,7 @@ class BotProcessManager:
 
     @staticmethod
     def _config():
-        import config
+        from config import config
         return config
 
     def _read_lifecycle(self, mode: str) -> dict:
@@ -460,6 +461,8 @@ class BotProcessManager:
             state_mod.clear_stop_request(cfgmod.PUMP_CONFIG["CONTROL_FILE"])
             env = os.environ.copy()
             env["PUMP_BOT_MANAGED"] = "1"
+            # Entry point root dipertahankan sebagai shim kompatibilitas agar
+            # subprocess selalu memiliki package root pada sys.path.
             proc, tree = procctl.spawn_python(
                 ROOT / "pump_scanner_bot.py", cwd=ROOT, env=env,
             )

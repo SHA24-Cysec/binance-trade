@@ -25,11 +25,11 @@ import time
 
 import pytest
 
-import backtest_cache as kcache
-import portfolio_backtest as pbt
-from backtest_cache import KlineCache, merge_ranges, subtract_ranges
-from backtest_storage import KlineStore
-from strategy import Kline
+from backtesting import backtest_cache as kcache
+from backtesting import portfolio_backtest as pbt
+from backtesting.backtest_cache import KlineCache, merge_ranges, subtract_ranges
+from backtesting.backtest_storage import KlineStore
+from strategy.indicators import Kline
 
 MS_5M = 5 * 60 * 1000
 MS_HARI = 24 * 60 * 60 * 1000
@@ -393,7 +393,7 @@ def test_akses_setelah_close_ditolak(tmp_path):
 
 def test_tidak_ada_sql_dari_fstring_di_modul_cache():
     akar = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    with open(os.path.join(akar, "backtest_cache.py"), encoding="utf-8") as handle:
+    with open(os.path.join(akar, "backtesting", "backtest_cache.py"), encoding="utf-8") as handle:
         isi = handle.read()
     assert not re.search(r"execute(?:script|many)?\s*\(\s*f[\"']", isi)
     assert not re.search(r"execute(?:script|many)?\s*\([^)]*\.format\(", isi)

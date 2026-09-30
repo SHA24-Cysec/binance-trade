@@ -17,10 +17,10 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from binance_client import BinanceSpotClient, _fmt_num
-from config import get_base_url
-from exchange_client import ExchangeClient
-from market_data import MarketDataProvider
+from trading.clients.binance_client import BinanceSpotClient, _fmt_num
+from config.config import get_base_url
+from trading.clients.exchange_client import ExchangeClient
+from market.market_data import MarketDataProvider
 
 logger = logging.getLogger("live_client")
 

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from live_client import LiveClient
+from trading.clients.live_client import LiveClient
 
 
 class _FakeSigned:

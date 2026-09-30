@@ -8,11 +8,11 @@ import time
 
 import pytest
 
-import atomic_io
-import procctl
-import runtime_control as rc
-import state
-import pump_scanner_bot as pump_bot
+from infrastructure.storage import atomic_io
+from infrastructure.process import procctl
+from infrastructure.process import runtime_control as rc
+from infrastructure.storage import state
+from trading import pump_scanner_bot as pump_bot
 
 
 def test_per_mode_lock_rejects_duplicate_live_owner(tmp_path, monkeypatch):
@@ -111,14 +111,14 @@ def test_wait_dead_treats_reused_pid_as_old_process_gone(monkeypatch):
 
 
 def test_ws_backoff_resets_after_healthy_connection():
-    from market_ws import MarketWebSocket
+    from market.market_ws import MarketWebSocket
 
     assert MarketWebSocket._next_backoff(60.0, True) == 1.0
     assert MarketWebSocket._next_backoff(4.0, False) == 8.0
 
 
 def test_supervisor_restart_budget_is_bounded(monkeypatch):
-    import config as cfgmod
+    from config import config as cfgmod
 
     monkeypatch.setitem(cfgmod.PUMP_CONFIG, "SUPERVISOR_AUTO_RESTART", True)
     monkeypatch.setitem(cfgmod.PUMP_CONFIG, "SUPERVISOR_MAX_RESTARTS", 2)

@@ -85,11 +85,12 @@ PERINGATAN KEAMANAN
 import os
 from copy import deepcopy
 
+from infrastructure.paths import PROJECT_ROOT
+
 try:
     from dotenv import load_dotenv
-    # Cari file .env di folder yang sama dengan config.py ini, apapun dari
-    # mana skrip dijalankan (run.py, dashboard.py, backtest.py, dll).
-    _ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    # Cari file .env di root repository, apapun dari mana skrip dijalankan.
+    _ENV_PATH = os.path.join(str(PROJECT_ROOT), ".env")
     # Kredensial yang disimpan dashboard di .env adalah sumber aktif. Ini
     # sengaja override environment proses supaya perubahan dari UI benar-benar
     # berlaku setelah restart bot, termasuk bila terminal lama masih memiliki
@@ -622,10 +623,10 @@ def _load_runtime_layers(explicit_mode: str | None = None) -> None:
     """Bangun ulang PUMP_CONFIG dari default + mode runtime + override.
 
     Dictionary global dimutasi in-place agar modul yang sudah melakukan
-    ``from config import PUMP_CONFIG`` tetap melihat nilai baru setelah
+    ``from config.config import PUMP_CONFIG`` tetap melihat nilai baru setelah
     perpindahan mode dashboard.
     """
-    from settings_schema import load_mode_override, load_runtime_mode, validate_candidate
+    from config.settings_schema import load_mode_override, load_runtime_mode, validate_candidate
 
     cfg = deepcopy(PUMP_DEFAULTS)
     # Kredensial dapat berubah dari dashboard saat proses masih hidup.
@@ -826,7 +827,7 @@ def get_control_file(config: dict = None) -> str:
     return _mode_filename(str(cfg.get("CONTROL_FILE", "pump_bot_control.json")), get_mode(cfg))
 
 
-_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = str(PROJECT_ROOT)
 
 
 def _runtime_path(path: str) -> str:
@@ -875,7 +876,7 @@ def build_config_for_mode(mode: str, *, validate: bool = True) -> tuple[dict, li
     ``validate=False`` hanya dipakai editor agar konfigurasi lama yang invalid
     masih dapat dibuka dan diperbaiki. Start dan checklist selalu memvalidasi.
     """
-    from settings_schema import load_mode_override, validate_candidate
+    from config.settings_schema import load_mode_override, validate_candidate
 
     raw = str(mode).strip().upper()
     cfg = default_config_for_mode(raw)

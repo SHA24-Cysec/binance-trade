@@ -7,9 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 
-import procctl
-import runtime_control as rc
-import state
+from infrastructure.process import procctl
+from infrastructure.process import runtime_control as rc
+from infrastructure.storage import state
 
 
 @pytest.mark.skipif(os.name != "posix", reason="E2E lifecycle ini dijalankan di Linux/POSIX")

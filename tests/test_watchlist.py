@@ -2,7 +2,7 @@
 """Audit fitur watchlist pemantauan. Tidak butuh jaringan.
 
 Jalankan:
-    python test_watchlist.py
+    python tests/test_watchlist.py
 
 Yang diverifikasi:
   1. Helper config membaca, membersihkan, dan memvalidasi daftar dengan benar.
@@ -18,9 +18,13 @@ import time
 import unittest
 from unittest import mock
 
-import config as cfg_mod
-import market_scanner as scanner
-from strategy import Kline
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+from config import config as cfg_mod
+from market import market_scanner as scanner
+from strategy.indicators import Kline
 
 
 def _harian_pump(_symbol: str, quote_volume: float = 1_000_000.0) -> list:
@@ -48,7 +52,7 @@ def _ref_ms() -> int:
 # di lingkungan, bukan di kode. Pengujian lain (config, scanner, template)
 # tidak butuh Flask dan tetap berjalan normal.
 try:
-    import dashboard as _dash_mod
+    from web import dashboard as _dash_mod
     _HAS_FLASK = True
     _FLASK_ERR = ""
 except ImportError as _e:
@@ -109,9 +113,9 @@ class TestTidakMenyentuhTrading(unittest.TestCase):
 
     def test_modul_trading_tidak_membaca_watchlist(self):
         import inspect
-        import pump_scanner_bot
-        import portfolio_backtest
-        import backtest
+        from trading import pump_scanner_bot
+        from backtesting import portfolio_backtest
+        from backtesting import backtest
         for mod in (scanner, pump_scanner_bot, portfolio_backtest, backtest):
             src = inspect.getsource(mod)
             self.assertNotIn("WATCHLIST", src,
@@ -432,7 +436,7 @@ class TestTemplate(unittest.TestCase):
 
     def setUp(self):
         import os
-        p = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+        p = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                          "templates", "dashboard.html")
         with open(p, encoding="utf-8") as f:
             self.html = f.read()
@@ -475,7 +479,7 @@ class TestRateLimitClient(unittest.TestCase):
 
     def setUp(self):
         try:
-            import binance_client
+            from trading.clients import binance_client
         except ImportError as e:
             self.skipTest(f"requests belum terpasang ({e})")
         self.bc = binance_client
@@ -582,7 +586,7 @@ class TestAutoRefreshKeamanan(unittest.TestCase):
 
     def setUp(self):
         try:
-            import watchlist_auto
+            from automation import watchlist_auto
         except ImportError as e:
             self.skipTest(f"dependensi belum terpasang ({e})")
         self.wa = watchlist_auto
@@ -690,7 +694,7 @@ class TestAutoRefreshKeamanan(unittest.TestCase):
 
     def test_penyegar_otomatis_tidak_menyentuh_logika_trading(self):
         import inspect
-        import pump_scanner_bot
+        from trading import pump_scanner_bot
         src = inspect.getsource(pump_scanner_bot)
         self.assertNotIn("watchlist_auto", src)
         self.assertNotIn("WATCHLIST", src)
@@ -769,7 +773,7 @@ class TestMigrasiTier(unittest.TestCase):
     """Nama tier lama harus tetap terbaca setelah MOMENTUM diganti AKTIF."""
 
     def test_migrate_tiers_mengubah_items_dan_detail(self):
-        import watchlist_auto as wa
+        from automation import watchlist_auto as wa
         data = {"items": [{"symbol": "AAAUSDT", "tier": "MOMENTUM"},
                           {"symbol": "BBBUSDT", "tier": "INTI"}],
                 "detail": [{"symbol": "AAAUSDT", "tier": "MOMENTUM"}]}
@@ -778,7 +782,7 @@ class TestMigrasiTier(unittest.TestCase):
         self.assertEqual(hasil["detail"][0]["tier"], "AKTIF")
 
     def test_migrate_tiers_aman_untuk_bentuk_data_aneh(self):
-        import watchlist_auto as wa
+        from automation import watchlist_auto as wa
         self.assertEqual(wa.migrate_tiers({}), {})
         self.assertEqual(wa.migrate_tiers({"items": "bukan list"}), {"items": "bukan list"})
         self.assertIsNone(wa.migrate_tiers(None))
@@ -786,7 +790,7 @@ class TestMigrasiTier(unittest.TestCase):
     def test_file_watchlist_lama_dibaca_dengan_tier_baru(self):
         import json
         import tempfile
-        import watchlist_auto as wa
+        from automation import watchlist_auto as wa
         with tempfile.TemporaryDirectory() as d:
             cfg = dict(cfg_mod.PUMP_CONFIG)
             path = os.path.join(d, "watchlist_auto_paper.json")
@@ -807,7 +811,7 @@ class TestEntryTetapUtuh(unittest.TestCase):
     """Pastikan tidak ada logika entry yang ikut berubah saat mengedit file."""
 
     def _momentum(self):
-        from strategy import Kline
+        from strategy.indicators import Kline
         vals = [100.0] * 30 + [100.2,100.4,99.4,98.4,97.4,97.6,98.6,98.1,98.3,97.8,98.8,99.8,98.8,99.8,99.3,99.5,98.5,99.5,98.5,100.0]
         return [Kline(i*300000, v, v+1, v-1, v, i*300000+299999,
                       3000 if i == len(vals)-1 else 1000,

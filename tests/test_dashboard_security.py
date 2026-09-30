@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-import dashboard
+from web import dashboard
 
 
 @pytest.fixture()
