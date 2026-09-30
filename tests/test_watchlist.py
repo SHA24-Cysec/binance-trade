@@ -121,6 +121,12 @@ class TestTidakMenyentuhTrading(unittest.TestCase):
              "quoteVolume": "5000000", "lastPrice": "3.0"},
         ]
         base = dict(cfg_mod.PUMP_CONFIG)
+        # PERBAIKAN AUDIT 2026-09-30 (temuan TINGGI-06): ambang volume dipatok
+        # eksplisit. Sebelumnya test ini memakai MIN_QUOTE_VOLUME_USDT_24H dari
+        # config global, jadi ia pecah begitu operator menaikkan ambang itu
+        # (commit fb980d0: 3,1 juta -> 10 juta) walau logika ranking tidak
+        # berubah sama sekali. Test harus menguji logika, bukan nilai kenop.
+        base["MIN_QUOTE_VOLUME_USDT_24H"] = 1_000_000
         # Panel kini otomatis; satu-satunya kenop yang tersisa adalah
         # WATCHLIST_ENABLED, dan menyalakan/mematikannya TIDAK boleh
         # mengubah ranking kandidat scanner sedikit pun.
@@ -141,8 +147,10 @@ class TestTidakMenyentuhTrading(unittest.TestCase):
         """Ini yang membedakan mode pantau dari whitelist keras."""
         tickers = [{"symbol": "TIDAKADADIDAFTARUSDT", "priceChangePercent": "30.0",
                     "quoteVolume": "9000000", "lastPrice": "1.0"}]
+        cfg = dict(cfg_mod.PUMP_CONFIG)
+        cfg["MIN_QUOTE_VOLUME_USDT_24H"] = 1_000_000  # lihat catatan TINGGI-06
         ranked = scanner.filter_and_rank_candidates(
-            tickers, cfg_mod.PUMP_CONFIG,
+            tickers, cfg,
             get_daily_klines_fn=_harian_pump, reference_ms=_ref_ms())
         self.assertEqual(len(ranked), 1,
                          "koin di luar watchlist seharusnya TETAP jadi kandidat")
@@ -740,6 +748,7 @@ class TestDashboardAutoIntegrasi(unittest.TestCase):
 
         base = dict(self.dash.PUMP_CONFIG)
         base["WATCHLIST_ENABLED"] = True
+        base["MIN_QUOTE_VOLUME_USDT_24H"] = 1_000_000  # lihat catatan TINGGI-06
         with mock.patch.multiple(self.dash, PUMP_CONFIG=base,
                                  get_client=lambda: FakeClient()):
             w = self.dash.build_watchlist()

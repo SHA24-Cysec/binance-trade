@@ -173,14 +173,80 @@ def test_host_with_wrong_port_is_rejected(client):
 
 
 def test_dashboard_backtest_text_is_escaped_before_inner_html() -> None:
-    """Data historis ditampilkan tanpa interpolasi mentah dari API."""
+    """Data dari API tidak boleh masuk innerHTML tanpa melewati esc().
+
+    Catatan perubahan 1 Oktober 2026. Versi sebelumnya test ini juga menuntut
+    kalimat "Backtest tidak membuat trade atau order baru" tetap ada di
+    template. Tuntutan itu dihapus karena mengunci kondisi rusak: kalimat
+    tersebut adalah placeholder dari masa ketika mesin backtest dilucuti.
+    Sekarang mesinnya benar benar menghasilkan trade, sehingga panel itu wajib
+    menampilkan tabel, bukan kalimat penyangkalan.
+
+    Sisi keamanan test ini dipertahankan dan diperluas ke seluruh field yang
+    ikut dipulihkan.
+    """
     source = (Path(__file__).resolve().parents[1] / "templates" / "dashboard.html").read_text(
         encoding="utf-8"
     )
-    assert "Backtest tidak membuat trade atau order baru" in source
-    assert "${w}" not in source
-    assert "${l}" not in source
-    assert "${t.symbol}" not in source
+
+    # Nilai yang berasal dari jaringan tidak boleh diinterpolasi mentah.
+    # Daftar ini mencakup field lama maupun field yang baru dipulihkan.
+    terlarang = [
+        "${w}",             # elemen res.warnings
+        "${l}",             # elemen res.limitations
+        "${t.symbol}",      # simbol pada baris trade
+        "${t.reason}",      # alasan exit, harus lewat btReasonLabel
+        "${t.entry_time}",  # waktu masuk
+        "${t.exit_time}",   # waktu keluar
+        "${x.symbol}",      # simbol pada kontribusi per simbol
+        "${s.symbol}",      # simbol pada sinyal terlewat
+        "${x.holding}",     # simbol yang sedang dipegang
+        "${x.time}",        # waktu sinyal terlewat
+    ]
+    bocor = [pola for pola in terlarang if pola in source]
+    assert not bocor, f"interpolasi mentah ke innerHTML: {bocor}"
+
+
+def test_render_trade_memakai_esc_untuk_semua_field_teks() -> None:
+    """Setiap field teks pada baris tabel trade wajib dibungkus esc().
+
+    Field angka boleh memakai fmt/fmtP karena keduanya mengembalikan angka
+    terformat, bukan teks dari server.
+    """
+    source = (Path(__file__).resolve().parents[1] / "templates" / "dashboard.html").read_text(
+        encoding="utf-8"
+    )
+    awal = source.find("tb.innerHTML = trades.map")
+    assert awal != -1, "blok render baris trade tidak ditemukan"
+    blok = source[awal:awal + 1500]
+
+    for field in ("t.symbol", "t.entry_time", "t.exit_time"):
+        assert f"esc({field})" in blok, f"{field} tidak dibungkus esc()"
+
+    # Alasan exit tidak boleh langsung dicetak. Ia harus melewati pemeta yang
+    # hanya mengenal nilai dari whitelist.
+    assert "btReasonLabel(t.reason)" in blok
+    assert "btReasonTagClass(t.reason)" in blok
+
+
+def test_pemeta_alasan_exit_memakai_whitelist() -> None:
+    """btReasonTagClass hanya boleh mengembalikan nama kelas dari whitelist.
+
+    Nilai ini masuk ke atribut class. Kalau nilai dari server bisa lolos apa
+    adanya, penyerang dapat menyuntikkan atribut lain lewat tanda kutip.
+    """
+    source = (Path(__file__).resolve().parents[1] / "templates" / "dashboard.html").read_text(
+        encoding="utf-8"
+    )
+    awal = source.find("function btReasonTagClass")
+    assert awal != -1
+    blok = source[awal:source.find("}", source.find("return", awal)) + 1]
+
+    # Wajib ada fallback ke nilai tetap, bukan mengembalikan input.
+    assert "map[key] ||" in blok, "btReasonTagClass tidak punya fallback whitelist"
+    assert "return key" not in blok, (
+        "btReasonTagClass mengembalikan input mentah ke atribut class"
+    )
 
 
 def test_dashboard_dynamic_css_classes_are_whitelisted() -> None:
@@ -201,4 +267,8 @@ def test_backtest_ui_exposes_exit_modes_only() -> None:
     assert 'value="fixed"' in source
     assert 'id="btAtrSl"' in source
     assert 'id="btAtrTp"' in source
-    assert 'Backtest tidak membuat trade atau order baru' in source
+    # Panel hasil wajib punya tabel riwayat trade. Sebelumnya di sini ada
+    # tuntutan agar kalimat "Backtest tidak membuat trade atau order baru"
+    # tetap ada, yang justru mengunci kondisi mesin backtest yang dilucuti.
+    assert 'id="btTradeBody"' in source
+    assert 'id="btTradeCount"' in source

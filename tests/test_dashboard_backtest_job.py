@@ -79,6 +79,14 @@ def job_palsu(monkeypatch, tmp_path):
                         lambda *args, **kwargs: klien, raising=False)
     monkeypatch.setitem(dashboard.PUMP_CONFIG, "BACKTEST_CACHE_FILE",
                         str(tmp_path / "backtest_cache.sqlite3"))
+    # PERBAIKAN AUDIT 2026-09-30 (temuan TINGGI-06): ambang volume dipatok
+    # eksplisit agar fixture tidak ikut pecah setiap kali operator mengubah
+    # MIN_QUOTE_VOLUME_USDT_24H di config. Ticker palsu di atas memakai
+    # quoteVolume sekitar 9 juta; ketika default config naik ke 10 juta,
+    # seluruh simbol tersaring habis dan ketiga test ini gagal dengan
+    # "Tidak ada simbol yang lolos saringan pasar" walau alur job-nya sehat.
+    monkeypatch.setitem(dashboard.PUMP_CONFIG, "MIN_QUOTE_VOLUME_USDT_24H",
+                        1_000_000)
 
     job_id = "uji-backtest"
     with dashboard._bt_jobs_lock:
@@ -116,7 +124,10 @@ def test_job_backtest_portofolio_selesai_dan_membersihkan_file(job_palsu, monkey
     assert payload["mode"] == "portfolio"
     assert payload["universe_with_data"] == 3
     assert payload["symbols_failed_count"] == 0
-    assert payload["bars_total"] == 0
+    # Sebelum simulasi dipulihkan (1 Oktober 2026), nilai ini selalu 0 karena
+    # run_portfolio_backtest hanyalah stub. Sekarang mesin benar benar
+    # menelusuri timeline, jadi harus lebih dari nol.
+    assert payload["bars_total"] > 0
     assert "summary" in payload and "trades" in payload
     assert klien.jumlah_request > 0
     assert payload["cache"] is not None and payload["cache"]["rows"] > 0

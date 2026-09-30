@@ -3,24 +3,26 @@ from __future__ import annotations
 import os
 import re
 
-import pytest
 
 from backtesting import backtest as bt
-from backtesting import backtest_storage as storage
 from backtesting import portfolio_backtest as pbt
 from backtesting.backtest_storage import KlineStore
 from backtesting.synthetic_data import riwayat_harian, seri_data
-from market import market_scanner as scanner
 from strategy.indicators import Kline
 
 
 def config_uji(**override) -> dict:
-    cfg = {
+    # Sejak simulasi trading dipulihkan (1 Oktober 2026), run_backtest butuh
+    # kunci config yang sama dengan bot live. Dipakai PUMP_CONFIG sebagai dasar
+    # supaya test tidak perlu menduplikasi 100 kunci dan tidak gampang basi.
+    from config.config import PUMP_CONFIG
+    cfg = dict(PUMP_CONFIG)
+    cfg.update({
         "QUOTE_ASSET": "USDT",
         "EXTRA_EXCLUDE_SYMBOLS": [],
         "MIN_QUOTE_VOLUME_USDT_24H": 0,
         "BACKTEST_INITIAL_EQUITY_USDT": 10_000.0,
-    }
+    })
     cfg.update(override)
     return cfg
 
@@ -59,25 +61,71 @@ class KlienPalsu:
         return [baris_mentah(k) for k in sumber.get(symbol, [])]
 
 
-def test_portfolio_selalu_tanpa_trade():
+def test_portfolio_memuat_bar_dan_tidak_lagi_stub():
+    """Backtest portofolio benar-benar memproses bar, bukan stub.
+
+    Menggantikan test_portfolio_selalu_tanpa_trade yang mengunci perilaku
+    rusak setelah commit 0b6ca1d. Data dua simbol di sini memang tidak
+    membentuk setup entry, jadi jumlah trade boleh nol. Yang penting,
+    mesinnya harus benar-benar menelusuri timeline.
+    """
     data = data_dua_simbol()
     with KlineStore.from_klines(data, harian_dari(data)) as store:
         result = pbt.run_portfolio_backtest(store, config_uji(), "5m")
-    assert result.trades == []
-    assert result.final_equity == pytest.approx(10_000.0)
-    assert any("tidak membuka posisi" in warning for warning in result.warnings)
+    assert result.bars_total > 0, "timeline tidak diproses sama sekali"
+    assert result.symbols_with_data == 2
+    assert not any("tidak membuka posisi" in w for w in result.warnings)
     summary = pbt.summarize_portfolio(result)
     assert summary["total_trades"] == 0
     assert summary["equity_curve"] == [0.0]
 
 
-def test_backtest_satu_simbol_selalu_tanpa_trade():
-    candles = seri_data(bars=400)
-    result = bt.run_backtest(candles, config_uji(_symbol="TESTUSDT"), warmup_bars=0)
-    assert result.trades == []
-    assert result.final_equity == pytest.approx(10_000.0)
-    assert any("tidak membuat trade baru" in warning for warning in result.warnings)
-    assert bt.summarize(result)["total_trades"] == 0
+def test_backtest_satu_simbol_benar_benar_mensimulasikan():
+    """Simulasi trading dipulihkan pada 1 Oktober 2026.
+
+    Test ini menggantikan test lama yang justru MENGUNCI perilaku rusak
+    ("selalu tanpa trade"). Commit 0b6ca1d melucuti run_backtest menjadi
+    stub yang mengembalikan nol untuk semua metrik, dan test lama membuat
+    kerusakan itu terlihat seperti perilaku yang disengaja.
+    """
+    from backtesting.synthetic_data import (
+        cfg_gerbang_pump_nonaktif, riwayat_harian, seri_banyak_setup,
+    )
+    candles = seri_banyak_setup(harga=100.0, siklus=8, bar_datar=288)
+    cfg = cfg_gerbang_pump_nonaktif(config_uji(_symbol="TESTUSDT"))
+    cfg["ROLLING_VOLUME_FILTER_ENABLED"] = False
+    result = bt.run_backtest(candles, cfg, warmup_bars=288,
+                             daily_klines=riwayat_harian(candles))
+    assert result.trades, "backtest tidak menghasilkan satu trade pun"
+    ringkas = bt.summarize(result)
+    assert ringkas["total_trades"] == len(result.trades)
+    assert not any("tidak membuat trade baru" in w for w in result.warnings)
+
+
+def test_hasil_backtest_berubah_saat_parameter_berubah():
+    """Inti dari sebuah backtest: parameter berbeda harus memberi hasil berbeda.
+
+    Kalau test ini gagal, mesin backtest kembali menjadi stub dan setiap
+    fitur optimasi parameter di atasnya menjadi tidak bermakna.
+    """
+    from backtesting.synthetic_data import (
+        cfg_gerbang_pump_nonaktif, riwayat_harian, seri_banyak_setup,
+    )
+    candles = seri_banyak_setup(harga=100.0, siklus=8, bar_datar=288)
+    daily = riwayat_harian(candles)
+
+    hasil = set()
+    for sl, tp in [(1.0, 2.0), (3.0, 6.0), (5.0, 10.0)]:
+        cfg = cfg_gerbang_pump_nonaktif(config_uji(_symbol="TESTUSDT"))
+        cfg["ROLLING_VOLUME_FILTER_ENABLED"] = False
+        cfg["USE_ATR_EXIT"] = False
+        cfg["SL_PCT"] = sl
+        cfg["TP_PCT"] = tp
+        ringkas = bt.summarize(
+            bt.run_backtest(candles, cfg, warmup_bars=288, daily_klines=daily))
+        hasil.add((ringkas["total_trades"], round(ringkas["total_return_pct"], 6)))
+
+    assert len(hasil) > 1, f"semua parameter memberi hasil identik: {hasil}"
 
 
 def test_timeline_dan_statistik_candle_tetap_tersedia():

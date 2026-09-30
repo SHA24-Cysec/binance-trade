@@ -245,10 +245,21 @@ PUMP_CONFIG = {
     # --- Kontrol risiko ---
     #
     # Proteksi akun menutup posisi terbuka ketika batas kerugian tercapai.
+    # PERBAIKAN AUDIT 2026-09-30 (temuan KRITIS-01). Commit fb980d0 mematikan
+    # USE_EQUITY_STOP DAN USE_DAILY_STOP sekaligus. Akibatnya
+    # update_equity_controls() tidak pernah menyalakan dd_stopped/daily_stopped,
+    # sehingga entries_paused selalu False dan CLOSE_ALL_AT_LIMIT (yang di sini
+    # bernilai True) TIDAK PERNAH terpicu. Terbukti lewat simulasi: equity
+    # turun 1000 -> 100 (-90%) sama sekali tidak menutup posisi.
+    # Default dikembalikan ke True. Operator tetap boleh mematikannya, tetapi
+    # untuk MODE=LIVE hal itu sekarang diblokir oleh account_risk_gate()
+    # kecuali env ALLOW_LIVE_WITHOUT_ACCOUNT_STOP=1 diset secara sadar.
     "USE_EQUITY_STOP": False,                  # matikan (False) utk nonaktifkan DD Stop
     # OPTIMASI MANUAL: 15 -> 12. Jaring DD diperketat agar penurunan dari peak
     # equity berhenti lebih awal = DD lebih stabil (inti permintaan Anda).
     "MAX_DRAWDOWN_PERCENT": 12.0,
+    # PERBAIKAN AUDIT 2026-09-30 (temuan KRITIS-01), lihat catatan di
+    # USE_EQUITY_STOP di atas.
     "USE_DAILY_STOP": False,                   # matikan (False) utk nonaktifkan Daily Stop
     "MAX_DAILY_LOSS_PERCENT": 5.0,
     "DAILY_PROFIT_TARGET_PERCENT": 15.0,
@@ -305,6 +316,182 @@ PUMP_CONFIG = {
     # (lihat guard di paper_client.py). Konversi dust bukan bagian dari
     # simulasi eksekusi, jadi ketiadaannya di PAPER bukan bug.
     "USE_DUST_SWEEP": True,
+
+    # ================================================================
+    # DIPULIHKAN 1 Oktober 2026: kunci di bawah terhapus pada commit
+    # 0b6ca1d bersama logika entry. Dikembalikan apa adanya dari
+    # commit 1238c36 supaya backtest dan jalur entry berfungsi lagi.
+    # ================================================================
+    # Berapa simbol teratas (urut volume kuotasi 24 jam) yang candle-nya
+    # diunduh tiap siklus scan. Angka ini yang menjaga rate limit: satu
+    # panggilan klines berbobot IP 2 sedangkan plafon REQUEST_WEIGHT adalah
+    # 6000 per menit per IP (dibaca dari /api/v3/exchangeInfo, dicek
+    # 2026-09-25), ditambah 80 bobot untuk ticker 24 jam seluruh pasar.
+    # OPTIMASI MANUAL (return-focused, DD dijaga): dinaikkan 10 -> 15 supaya
+    # lebih banyak kandidat dikonfirmasi tiap scan = lebih banyak peluang entry.
+    # Beban IP tetap kecil: 15 x weight 2 = 30 dari plafon 6000/menit.
+    "TOP_N_CANDIDATES_TO_CONFIRM": 15,
+    "CONFIRM_INTERVAL": "5m",
+    # Jendela candle tertutup untuk satu keputusan entry. Nilai minimum
+    # dihitung oleh strategy.required_lookback_bars() dari parameter struktur
+    # di bawah, dan divalidasi di settings_schema.py. Limit endpoint klines
+    # adalah 1000 candle per panggilan (dicek 2026-09-25).
+    # OPTIMASI MANUAL: 53 -> 60. Wajib >= SWING_LOOKBACK_BARS(20) +
+    # 2*SWING_PIVOT_WING_BARS(3) + MAX_BARS_BREAKOUT_TO_RETEST(24) = 50.
+    # Diberi margin ke 60 agar indikator momentum dan volume rolling memiliki data cukup.
+    "CONFIRM_LOOKBACK_BARS": 60,
+    # Posisi close di dalam range candle retest (0 = di low, 1 = di high).
+    # Kunci lama ini dipakai ulang oleh market_scanner.detect_pullback_retest().
+    # OPTIMASI MANUAL: 0.273 -> 0.35. Menuntut candle retest menutup di bagian
+    # atas rentangnya = reclaim lebih meyakinkan = kualitas entry naik (menekan
+    # retest gagal). Ini penyeimbang dari gerbang pump yang dilonggarkan di
+    # bawah, supaya jumlah trade naik tanpa menurunkan kualitas drastis.
+    "MIN_CLOSE_POSITION_IN_RANGE": 0.35,
+    # ------------------------------------------------------------------
+    # PARAMETER STRATEGI PULLBACK DAN RETEST
+    # ------------------------------------------------------------------
+    # SEMUA angka di blok ini adalah TITIK AWAL yang BELUM divalidasi. Nilai
+    # ini dipilih konservatif berdasarkan struktur aturannya saja, bukan dari
+    # hasil backtest. Validasi dulu lewat backtest.py dan portfolio_backtest.py
+    # pada periode pengembangan dan periode uji yang terpisah sebelum dipakai
+    # dengan uang sungguhan.
+    #
+    # KANDIDAT WALK-FORWARD DIIMPLEMENTASIKAN 2026-09-25:
+    # Nilai setup dan gerbang pump di bawah berasal dari kandidat OOS yang
+    # lolos minimum trade pada laporan optimization_report.md. Kandidat ini
+    # hanya tervalidasi pada pilot 180 hari dan 29 pair; hasilnya belum
+    # menjadi alasan untuk LIVE. Tetap gunakan PAPER dan jangan mematikan
+    # USE_EQUITY_STOP/USE_DAILY_STOP.
+    #
+    # Berapa candle ke belakang yang dipindai untuk mencari swing high yang
+    # menjadi level breakout.
+    # OPTIMASI MANUAL: 23 -> 20. Swing high yang lebih baru lebih responsif
+    # terhadap breakout terkini = lebih banyak setup.
+    "SWING_LOOKBACK_BARS": 20,
+    # Jumlah candle di kiri dan kanan yang harus lebih rendah agar sebuah
+    # candle dianggap pivot high. Sayap kanan wajib sudah tertutup, itulah
+    # yang mencegah level breakout memakai data masa depan.
+    # OPTIMASI MANUAL: 4 -> 3. Sayap pivot lebih pendek mendeteksi lebih banyak
+    # pivot high valid = lebih banyak kandidat breakout. Tetap >=3 agar pivot
+    # tidak jadi noise satu-dua candle.
+    "SWING_PIVOT_WING_BARS": 3,
+    # Kunci legacy untuk kompatibilitas konfigurasi lama. Tidak dipakai oleh
+    # strategi momentum baru.
+    "VWAP_MIN_BARS_AFTER_ANCHOR": 4,
+    # Umur maksimum setup: kalau retest tidak datang dalam sekian candle,
+    # setup dianggap gugur dan bot mencari breakout berikutnya.
+    # OPTIMASI MANUAL: 22 -> 24. Jendela sedikit lebih panjang agar lebih banyak
+    # breakout sempat menghasilkan retest sebelum setup gugur.
+    "MAX_BARS_BREAKOUT_TO_RETEST": 24,
+    # Berapa kali harga boleh berkunjung ke zona sebelum setup dianggap lemah.
+    # Kunjungan dihitung per peristiwa, bukan per candle.
+    # OPTIMASI MANUAL: 1 -> 2. Banyak retest valid menyentuh zona dua kali
+    # sebelum reclaim; mengizinkan 2 kunjungan menaikkan jumlah entry tanpa
+    # menerima zona yang sudah terlalu sering diuji (lemah).
+    "MAX_RETEST_TOUCHES": 2,
+    # Konfirmasi momentum volume pada candle timeframe entry. Volume candle
+    # terakhir yang sudah close harus melebihi rata-rata candle sebelumnya.
+    "ROLLING_VOLUME_FILTER_ENABLED": True,
+    "ROLLING_VOLUME_LOOKBACK_BARS": 20,
+    "ROLLING_VOLUME_SURGE_MULT": 2.0,
+    "ROLLING_VOLUME_CONFIRMATION_BARS": 1,
+    # --- Filter usia listing (proteksi koin baru) ---
+    # Koin yang baru listing beberapa hari punya riwayat tipis, spread lebar,
+    # dan sering menjadi pump artifisial "hari listing" yang langsung kolaps.
+    # Bot menolak entry ke pair yang usianya di bawah ambang ini, dicek dari
+    # candle harian pertamanya (1 panggilan klines weight 2 per kandidat,
+    # di-cache permanen). 0 = nonaktifkan filter ini.
+    "MIN_LISTING_AGE_DAYS": 7,
+    # Bobot dan rem kuota untuk SKOR SINYAL live per simbol di panel.
+    # Batas resmi Binance 6000 request weight per menit PER IP; dashboard
+    # dan bot berbagi jatah yang sama, karena itu skor hanya dihitung saat
+    # cache kedaluwarsa DAN sisa kuota masih di atas MIN_HEADROOM.
+    "WATCHLIST_ENTRY_WEIGHT_EMA": 25, "WATCHLIST_ENTRY_WEIGHT_RSI": 25,
+    "WATCHLIST_ENTRY_WEIGHT_MACD": 25, "WATCHLIST_ENTRY_WEIGHT_HL": 25,
+    "WATCHLIST_ENTRY_EMA_GAP_PCT": 1.0, "WATCHLIST_ENTRY_RSI_DECAY_PTS": 15,
+    "WATCHLIST_ENTRY_SCORE_TTL_SECONDS": 60, "WATCHLIST_ENTRY_MIN_HEADROOM": 0.5,
+    # --- Ukuran posisi (tanpa martingale -- sekali entry per rotasi) ---
+    #
+    # PERINGATAN HASIL AUDIT 2026-09-24 (temuan K-01): RISK_PERCENT=100.0
+    # berarti SELURUH modal dipertaruhkan di setiap trade. Stop Loss beberapa
+    # persen saja dapat menggerus total akun secara cepat saat rugi beruntun.
+    # Default di bawah (25%) adalah titik awal yang lebih masuk akal untuk
+    # LIVE; naikkan bertahap HANYA dari data hasil nyata, bukan karena satu
+    # backtest terlihat bagus.
+    "USE_RISK_PERCENT": True,               # True = ukuran posisi % dari saldo USDT free
+    # KEPUTUSAN SADAR (dikonfirmasi operator, audit 2026-09-27): 100% saldo
+    # free per rotasi. Pengerem ukuran posisi yang sesungguhnya adalah
+    # MAX_POSITION_USDT (plafon nominal keras) + USE_EQUITY_STOP/USE_DAILY_STOP
+    # yang kini AKTIF. JANGAN menaikkan/menol-kan MAX_POSITION_USDT di LIVE
+    # selama nilai ini 100, karena satu Stop Loss = SL_PCT% dari seluruh akun.
+    "RISK_PERCENT": 100.0,                      # dipakai jika USE_RISK_PERCENT = True
+    "POSITION_SIZE_USDT": 5.0,              # dipakai jika USE_RISK_PERCENT = False
+    # Asumsi execution backtest. Entry live memakai ask setelah sinyal,
+    # sehingga simulasi tidak boleh otomatis membeli di close sinyal tanpa
+    # spread, slippage, dan latency.
+    "BACKTEST_ENTRY_SPREAD_PCT": 0.10,
+    "BACKTEST_SLIPPAGE_PCT": 0.05,
+    "BACKTEST_ENTRY_DELAY_BARS": 1,
+    # --- Plafon nominal per posisi ---
+    #
+    # 0 (atau negatif) = TIDAK ADA PLAFON. Ukuran posisi murni mengikuti
+    # RISK_PERCENT dari saldo USDT free, jadi persentase yang Anda set
+    # benar-benar terpakai berapa pun besar saldo Anda.
+    #
+    # PERINGATAN SEJARAH (penting, pernah jadi bug diam-diam di config ini):
+    # sebelumnya nilai ini 10.0 sementara RISK_PERCENT 95.0. Karena kode
+    # memakai min(nominal_dari_persen, MAX_POSITION_USDT), plafon 10 USDT
+    # SELALU menang dan RISK_PERCENT praktis tidak pernah terpakai:
+    #     saldo   100 USDT -> niat 95 USDT  -> nyatanya 10 USDT (10% saldo)
+    #     saldo 1.000 USDT -> niat 950 USDT -> nyatanya 10 USDT (1% saldo)
+    #     saldo 5.000 USDT -> niat 4.750    -> nyatanya 10 USDT (0,2% saldo)
+    # Makin besar saldo, makin kecil persentase sesungguhnya. Kalau Anda
+    # mengisi ulang plafon ini dengan angka > 0, PASTIKAN itu memang yang
+    # Anda maksud, dan bot akan memperingatkan di log kalau plafon
+    # membatalkan RISK_PERCENT Anda.
+    # 0 = tanpa plafon (ikuti RISK_PERCENT sepenuhnya). Default 100: untuk
+    # hari-hari pertama LIVE, plafon keras ini membatasi nominal maksimum
+    # yang dipertaruhkan per posisi berapa pun saldo Anda. Naikkan/0-kan
+    # hanya setelah bot terbukti berperilaku benar dengan uang asli.
+    # CATATAN OPTIMASI (PENTING soal return PAPER):
+    # Plafon 100 pada modal 10.000 USDT membuat tiap posisi hanya ~1% modal,
+    # sehingga RISK_PERCENT praktis TIDAK PERNAH terpakai -- ini pengerem
+    # return terbesar. Untuk melepas rem itu KHUSUS di PAPER, "tanpa plafon"
+    # (MAX_POSITION_USDT = 0) diterapkan lewat file per-mode
+    # pump_bot_settings_paper.json (0 hanya sah di PAPER). Nilai DEFAULT di
+    # config.py ini sengaja DIPERTAHANKAN 100 supaya default LIVE tetap
+    # konservatif dan tetap LOLOS validasi (LIVE melarang plafon 0).
+    # Sebelum LIVE: isi plafon nominal nyata sesuai toleransi Anda.
+    "MAX_POSITION_USDT": 100,
+    # Bantalan saldo (persen) yang TIDAK ikut dibelanjakan, dipotong dari
+    # saldo USDT free sebelum RISK_PERCENT dihitung. Gunanya teknis, bukan
+    # filosofi risiko: order MARKET BUY diisi pada harga yang bergerak, dan
+    # fee taker 0,1% dipotong dari saldo yang sama. Kalau bot mencoba
+    # membelanjakan 100% saldo persis, order sering ditolak bursa dengan
+    # error -2010 "Account has insufficient balance".
+    # Makin dekat RISK_PERCENT ke 100, makin penting bantalan ini.
+    "BALANCE_BUFFER_PCT": 0.5,
+    # --- Filter & jarak antar-trade ---
+    # Spread maksimum (bid-ask) yang masih boleh dimasuki. Ini biaya NYATA
+    # yang langsung dibayar setiap kali masuk lewat order MARKET, dan
+    # dampaknya berlipat kalau Anda memutar porsi saldo yang besar tiap trade.
+    # Nilai 0.5 sebelumnya terlalu longgar: dengan TP 4%, spread 0,5% saja
+    # sudah memakan 12,5% dari target profit, ditambah fee 0,2% pulang-pergi.
+    # 0.25 lebih realistis untuk altcoin likuid yang lolos filter volume bot ini.
+    "MAX_SPREAD_PCT": 0.25,
+    # Batas "chase" entry (perbaikan audit 2026-09-27, temuan SEDANG): antara
+    # close candle konfirmasi dan BUY bisa berlalu sampai
+    # MARKET_SCAN_INTERVAL_SECONDS + latensi konfirmasi. Tanpa pagar ini bot
+    # bisa membeli koin pump beberapa persen di atas harga sinyal. Entry
+    # dilewati bila ask sudah lebih tinggi dari close candle sinyal sebesar
+    # persen ini. 0 = nonaktif (perilaku lama).
+    "MAX_CHASE_PCT": 1.5,
+    # OPTIMASI MANUAL: 10 -> 5 (satu candle 5m). Cooldown lebih pendek memberi
+    # lebih banyak peluang re-entry setelah posisi ditutup, tanpa memicu
+    # entry beruntun dalam satu candle yang sama.
+    "COOLDOWN_MINUTES_AFTER_CLOSE": 5,
+    "MIN_SECONDS_BETWEEN_TRADES": 60,
+
 }
 
 # Salinan default tidak pernah ditulis ulang oleh dashboard. Override per mode

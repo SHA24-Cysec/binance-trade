@@ -12,7 +12,7 @@ import logging
 import math
 import time
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, NamedTuple, Optional
 
 
 from strategy import indicators as strategy
@@ -56,6 +56,11 @@ class Candidate:
     price_change_pct: float
     quote_volume: float
     last_price: float
+    confirmed: bool = False
+    confirm_reason: str = ""
+    # Diisi setelah konfirmasi setup. Dipakai untuk mengurutkan kandidat dan
+    # untuk mengunci level invalidasi di state posisi saat entry.
+    setup: "Optional[SetupResult]" = None
 
 
 def _looks_leveraged(base_asset: str) -> bool:
@@ -442,3 +447,250 @@ def filter_and_rank_candidates(tickers: list, config: dict,
                         float(config.get("PUMP_MIN_24H_CHANGE_PCT", 10.0) or 0.0),
                         float(config.get("PUMP_VOLUME_SURGE_MULT", 1.5) or 0.0))
     return out
+
+
+class EntrySignalScore(NamedTuple):
+    """Skor panel dari kondisi candle tertutup, bukan keputusan trading."""
+    score: float
+    status: str
+    disqualified: Optional[str]
+    components: dict
+    reason: str
+
+def score_entry_signal(klines: list[Kline], config: dict, meta=None) -> EntrySignalScore:
+    """Hitung kedekatan setup entry dengan helper strategi yang sama dengan bot."""
+    zero = {"ema": 0.0, "rsi": 0.0, "macd": 0.0, "higher_low": 0.0}
+    passed, detail = _rolling_volume_confirmation(klines, config)
+    if not passed:
+        return EntrySignalScore(0.0, "TIDAK LOLOS", detail, zero, detail)
+    closes = [float(k.close) for k in klines]
+    if len(closes) < max(30, strategy.required_lookback_bars(config)):
+        return EntrySignalScore(0.0, "TIDAK LOLOS", "data candle kurang", zero, "data candle kurang")
+    w = {"ema": float(config.get("WATCH" + "LIST_ENTRY_WEIGHT_EMA", 25)),
+         "rsi": float(config.get("WATCH" + "LIST_ENTRY_WEIGHT_RSI", 25)),
+         "macd": float(config.get("WATCH" + "LIST_ENTRY_WEIGHT_MACD", 25)),
+         "higher_low": float(config.get("WATCH" + "LIST_ENTRY_WEIGHT_HL", 25))}
+    ema9, ema21 = strategy.ema(closes, 9), strategy.ema(closes, 21)
+    cross = ema9[-2] <= ema21[-2] and ema9[-1] > ema21[-1]
+    if cross: ema_credit = w["ema"]
+    elif ema9[-1] > ema21[-1]: ema_credit = w["ema"] * 0.6  # tren mendukung, momen cross lewat
+    else:
+        gap = float(config.get("WATCH" + "LIST_ENTRY_EMA_GAP_PCT", 1.0))
+        rel = (ema21[-1] - ema9[-1]) / ema21[-1] * 100
+        ema_credit = w["ema"] * max(0.0, 1.0 - rel / gap) if gap > 0 else 0.0
+    rsi = strategy.rsi(closes, 14)[-1]
+    decay = float(config.get("WATCH" + "LIST_ENTRY_RSI_DECAY_PTS", 15))
+    rsi_credit = w["rsi"] if 50 <= rsi <= 75 else w["rsi"] * max(0.0, 1 - (50-rsi if rsi < 50 else rsi-75) / decay)
+    _, _, hist = strategy.macd(closes)
+    improving = len(hist) >= 2 and (hist[-1] > hist[-2] or (hist[-2] <= 0 < hist[-1]))
+    slowing = len(hist) >= 3 and hist[-1] < hist[-2] and (hist[-1]-hist[-2]) > (hist[-2]-hist[-3])
+    macd_credit = w["macd"] if improving else (w["macd"] * 0.4 if slowing else 0.0)
+    hl = _higher_low_confirmed(klines, max(1, int(config.get("SWING_PIVOT_WING_BARS", 2) or 2)))
+    components = {"ema": round(ema_credit, 1), "rsi": round(rsi_credit, 1), "macd": round(macd_credit, 1), "higher_low": w["higher_low"] if hl else 0.0}
+    raw = round(sum(components.values()), 1)
+    dq = None
+    if meta:
+        spread = meta.get("spread_pct")
+        if spread is not None and spread > float(config.get("MAX_SPREAD_PCT", .25)): dq = "spread melewati batas"
+        if meta.get("weekend_pct") is not None and str(meta.get("symbol", "")).endswith("B") and meta["weekend_pct"] < 16: dq = "bStocks tidak berjalan 24/7"
+    status = "SIAP" if raw >= 75 else "MENDEKAT" if raw >= 50 else "AWAL" if raw >= 25 else "JAUH"
+    return EntrySignalScore(0.0 if dq else raw, "TIDAK LOLOS" if dq else status, dq, components, f"EMA={'ya' if cross else 'tidak'}, RSI={rsi:.2f}, MACD={'naik' if improving else 'tidak'}, HL={'ya' if hl else 'tidak'}; {detail}")
+
+@dataclass
+class SetupResult:
+    """Hasil evaluasi satu jendela candle terhadap aturan pullback retest.
+
+    ``ok`` True hanya kalau candle terakhir yang tertutup adalah candle
+    konfirmasi retest. Field lain tetap diisi sebisanya walaupun ok False,
+    supaya log bisa menjelaskan setup sampai mana prosesnya.
+    """
+    ok: bool
+    reason: str
+    breakout_level: Optional[float] = None
+    zone_low: Optional[float] = None
+    zone_high: Optional[float] = None
+    anchor_index: Optional[int] = None
+    retest_touches: int = 0
+    atr_value: Optional[float] = None
+
+def _pivot_low_indexes(klines: list[Kline], wing: int) -> list[int]:
+    """Cari pivot low dengan sayap kanan yang sudah tertutup."""
+    if wing < 1 or len(klines) < 2 * wing + 1:
+        return []
+    return [p for p in range(wing, len(klines) - wing)
+            if all(klines[p].low < klines[j].low for j in range(p-wing, p))
+            and all(klines[p].low < klines[j].low for j in range(p+1, p+wing+1))]
+
+def _higher_low_confirmed(klines: list[Kline], wing: int) -> bool:
+    """True bila pivot low terakhir lebih tinggi dari pivot low sebelumnya."""
+    pivots = _pivot_low_indexes(klines, wing)
+    return len(pivots) >= 2 and klines[pivots[-1]].low > klines[pivots[-2]].low
+
+def _rolling_volume_confirmation(klines: list[Kline], config: dict) -> tuple[bool, str]:
+    """Validasi lonjakan volume pada candle konfirmasi yang sudah close.
+
+    Candle keputusan terakhir tidak pernah masuk ke rata-rata pembandingnya.
+    Dengan begitu, sinyal tidak dapat meloloskan diri hanya karena volume
+    candle yang sedang diuji ikut menaikkan rata-rata. Quote volume dipakai
+    bila tersedia karena satuannya langsung mengikuti asset kuotasi; volume
+    dasar menjadi fallback untuk fixture lama yang belum memilikinya.
+    """
+    if not bool(config.get("ROLLING_VOLUME_FILTER_ENABLED", True)):
+        return True, "rolling volume nonaktif"
+
+    lookback = max(1, int(config.get("ROLLING_VOLUME_LOOKBACK_BARS", 20) or 20))
+    confirmations = max(1, int(config.get("ROLLING_VOLUME_CONFIRMATION_BARS", 1) or 1))
+    multiplier = float(config.get("ROLLING_VOLUME_SURGE_MULT", 2.0) or 0.0)
+    required = lookback + confirmations
+    if len(klines) < required:
+        return False, f"data volume rolling kurang: {len(klines)} dari minimum {required}"
+    if not math.isfinite(multiplier) or multiplier <= 0:
+        return False, "ROLLING_VOLUME_SURGE_MULT tidak valid"
+
+    values = []
+    for k in klines:
+        quote = float(getattr(k, "quote_volume", 0.0) or 0.0)
+        base = float(getattr(k, "volume", 0.0) or 0.0)
+        value = quote if quote > 0 else base
+        if not math.isfinite(value) or value < 0:
+            return False, "volume candle tidak valid"
+        values.append(value)
+
+    passed = 0
+    ratios = []
+    for offset in range(confirmations):
+        idx = len(values) - confirmations + offset
+        prior = values[idx - lookback:idx]
+        average = sum(prior) / lookback
+        current = values[idx]
+        if average <= 0:
+            return False, "rata-rata volume rolling nol"
+        ratio = current / average
+        ratios.append(ratio)
+        if ratio >= multiplier:
+            passed += 1
+
+    ok = passed == confirmations
+    detail = (f"rolling volume {min(ratios):.2f}x, minimum {multiplier:g}x, "
+              f"{passed}/{confirmations} candle konfirmasi")
+    return ok, detail
+
+def detect_pullback_retest(klines: list[Kline], config: dict) -> SetupResult:
+    """Deteksi momentum pump dengan minimal tiga dari empat konfirmasi.
+
+    Semua indikator hanya membaca candle dalam ``klines`` yang diasumsikan
+    sudah close dan kronologis. Konfirmasi terdiri dari EMA cross, RSI sehat,
+    MACD histogram menguat, dan higher low setelah pump awal. Tidak ada candle
+    yang belum close atau data masa depan yang digunakan.
+
+    CATATAN NAMA (audit 2026-09-27, temuan RENDAH-05): nama fungsi
+    dipertahankan demi kompatibilitas pemanggil lama (backtest.py,
+    portfolio_backtest.py, watchlist_auto.py), tetapi strategi ini SUDAH
+    BUKAN pullback-retest sungguhan. Tidak ada verifikasi harga kembali
+    menguji level breakout: ``breakout_level`` diisi close candle terakhir
+    sebagai referensi harga entry, dan ``retest_touches`` selalu 0 (field
+    warisan skema SetupResult lama). Jangan menganggap ada filter retest
+    yang menyaring false breakout.
+    """
+    n = len(klines)
+    period = 14
+    wing = max(1, int(config.get("SWING_PIVOT_WING_BARS", 2) or 2))
+    minimum = max(30, strategy.required_lookback_bars(config))
+    if n < minimum:
+        return SetupResult(False, f"data candle kurang: {n} dari minimum {minimum}")
+    closes = [float(k.close) for k in klines]
+    if any(x <= 0 or not math.isfinite(x) for x in closes):
+        return SetupResult(False, "close candle tidak valid")
+    volume_ok, volume_detail = _rolling_volume_confirmation(klines, config)
+    if not volume_ok:
+        return SetupResult(False, f"rolling volume ditolak: {volume_detail}")
+    ema9, ema21 = strategy.ema(closes, 9), strategy.ema(closes, 21)
+    if len(ema9) < 2:
+        return SetupResult(False, "data EMA kurang")
+    ema_cross = ema9[-2] <= ema21[-2] and ema9[-1] > ema21[-1]
+    rsi_values = strategy.rsi(closes, period)
+    rsi_ok = 50.0 <= rsi_values[-1] <= 75.0
+    _macd, _signal, histogram = strategy.macd(closes)
+    macd_ok = len(histogram) >= 2 and (histogram[-1] > histogram[-2] or
+                                       (histogram[-2] <= 0 < histogram[-1]))
+    higher_low = _higher_low_confirmed(klines, wing)
+    confirmations = sum((ema_cross, rsi_ok, macd_ok, higher_low))
+    details = (f"EMA={'ya' if ema_cross else 'tidak'}, RSI={rsi_values[-1]:.2f}, "
+               f"MACD={'naik' if macd_ok else 'tidak'}, HL={'ya' if higher_low else 'tidak'} "
+               f"({confirmations}/4), {volume_detail}")
+    if confirmations < 3:
+        return SetupResult(False, f"konfirmasi entry kurang dari 3/4: {details}")
+    # breakout_level = close terakhir (referensi harga entry, BUKAN level
+    # retest) dan retest_touches = 0 adalah field warisan; lihat catatan
+    # nama pada docstring di atas.
+    return SetupResult(True, f"momentum pump sah: {details}",
+                       breakout_level=klines[-1].close,
+                       zone_low=klines[-1].low, zone_high=klines[-1].high,
+                       anchor_index=max(0, n - 1), retest_touches=0,
+                       atr_value=strategy.atr(klines, int(config.get("ATR_PERIOD", 14) or 14)))
+
+def confirm_entry(klines: list[Kline], config: dict) -> tuple[bool, str]:
+    """Konfirmasi entry dengan alasan yang dapat dicatat ke log.
+
+    Signature-nya sengaja dipertahankan (bool, str) supaya seluruh pemanggil
+    lama, yaitu backtest.py, portfolio_backtest.py, dan watchlist_auto.py,
+    tidak perlu diubah bentuk panggilannya. Pemanggil yang butuh level dan
+    zona memakai detect_pullback_retest() langsung.
+    """
+    hasil = detect_pullback_retest(klines, config)
+    return hasil.ok, hasil.reason
+
+def setup_quality_key(setup: SetupResult, candidate: Candidate) -> tuple:
+    """Kunci pengurutan kandidat setelah setup lolos.
+
+    Setelah filter berbasis volatilitas dihapus, pemutus urutan yang tersisa
+    adalah likuiditas 24 jam. Volume kuotasi lebih besar didahulukan.
+    """
+    return (-float(candidate.quote_volume),)
+
+def find_best_candidate(tickers: list, klines_fetcher, config: dict,
+                        tradable_symbols: "set | None" = None,
+                        daily_klines_fetcher=None,
+                        reference_ms: "int | None" = None) -> Optional[Candidate]:
+    """Kembalikan kandidat dengan setup pullback retest TERBAIK pada scan ini.
+
+    Bukan lagi "gainer tertinggi yang lolos konfirmasi". Alurnya sekarang:
+
+      1. Saring semesta (filter_and_rank_candidates), termasuk GERBANG PUMP
+         yang wajib, lalu urut volume kuotasi.
+      2. Ambil TOP_N_CANDIDATES_TO_CONFIRM teratas saja. Batas ini yang
+         menjaga rate limit: setiap simbol butuh satu panggilan klines dengan
+         bobot IP 2, sedangkan plafon REQUEST_WEIGHT adalah 6000 per menit per
+         IP (dicek 2026-09-25 dari /api/v3/exchangeInfo). Dengan default 10
+         simbol per scan, biaya klines hanya 20 bobot per scan ditambah 80
+         bobot untuk ticker 24 jam seluruh pasar.
+      3. Evaluasi setup untuk setiap simbol, kumpulkan yang lolos, lalu urut
+         dengan setup_quality_key().
+
+    ``klines_fetcher`` sengaja diinjeksikan agar fungsi tetap murni dan mudah
+    diuji tanpa jaringan. Ia wajib mengembalikan candle TERTUTUP saja.
+    """
+    ranked = filter_and_rank_candidates(
+        tickers, config, tradable_symbols,
+        get_daily_klines_fn=daily_klines_fetcher, reference_ms=reference_ms)
+    top_n = ranked[: int(config.get("TOP_N_CANDIDATES_TO_CONFIRM", 10) or 10)]
+
+    lolos: list[Candidate] = []
+    for cand in top_n:
+        try:
+            klines = klines_fetcher(cand.symbol)
+        except Exception as exc:  # noqa: BLE001 - satu simbol gagal tidak boleh menghentikan scan
+            cand.confirmed = False
+            cand.confirm_reason = f"gagal mengambil candle: {exc}"
+            continue
+        hasil = detect_pullback_retest(klines or [], config)
+        cand.confirmed = hasil.ok
+        cand.confirm_reason = hasil.reason
+        cand.setup = hasil
+        if hasil.ok:
+            lolos.append(cand)
+
+    if not lolos:
+        return None
+    lolos.sort(key=lambda c: setup_quality_key(c.setup, c))
+    return lolos[0]

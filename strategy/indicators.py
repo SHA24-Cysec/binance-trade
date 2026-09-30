@@ -93,6 +93,134 @@ def parse_klines(raw: list) -> list[Kline]:
 # ---------------------------------------------------------------------
 # Exit calculations
 # ---------------------------------------------------------------------
+def required_lookback_bars(config: dict) -> int:
+    """Jumlah candle minimum untuk indikator momentum dan volume rolling.
+
+    EMA, RSI, MACD, ATR, pivot low, serta rata-rata volume rolling hanya
+    boleh memakai candle yang sudah close. Angka ini dipakai bersama oleh
+    bot live, backtest, dan watchlist agar jendelanya konsisten.
+    """
+    rolling_lookback = int(config.get("ROLLING_VOLUME_LOOKBACK_BARS", 20) or 20)
+    confirmation_bars = int(config.get("ROLLING_VOLUME_CONFIRMATION_BARS", 1) or 1)
+    return max(30, rolling_lookback + max(1, confirmation_bars))
+
+def confirm_window_bars(config: dict) -> int:
+    """Jumlah candle tertutup yang harus diambil untuk satu keputusan entry.
+
+    Sama dengan CONFIRM_LOOKBACK_BARS, tetapi tidak pernah lebih kecil dari
+    required_lookback_bars(). Ini yang dipakai pengambil klines di bot live,
+    dashboard, dan watchlist supaya ketiganya melihat jendela yang identik.
+    """
+    lookback = int(config.get("CONFIRM_LOOKBACK_BARS", 48) or 48)
+    return max(1, min(1000, max(lookback, required_lookback_bars(config))))
+
+def resolve_position_notional(config: dict, quote_free: float) -> dict:
+    """Tentukan nominal entry dari saldo quote dengan policy yang dipakai live."""
+    free = max(0.0, float(quote_free or 0.0))
+    use_percent = bool(config.get("USE_RISK_PERCENT"))
+    buffer_pct = max(0.0, float(config.get("BALANCE_BUFFER_PCT", 0.5) or 0.0))
+    buffer_pct = min(buffer_pct, 100.0)
+
+    if use_percent:
+        spendable = free * (1.0 - buffer_pct / 100.0)
+        requested = spendable * float(config.get("RISK_PERCENT", 25.0) or 0.0) / 100.0
+        mode = "PERCENT"
+    else:
+        spendable = free
+        requested = float(config.get("POSITION_SIZE_USDT", 5.0) or 0.0)
+        mode = "FIXED"
+
+    requested = max(0.0, requested)
+    cap = float(config.get("MAX_POSITION_USDT", 0.0) or 0.0)
+    cap_active = cap > 0.0 and requested > cap
+    notional = min(requested, cap) if cap > 0.0 else requested
+    effective_pct = (notional / free * 100.0) if free > 0 else 0.0
+
+    return {
+        "notional": notional,
+        "requested_notional": requested,
+        "mode": mode,
+        "quote_free": free,
+        "spendable_quote": spendable,
+        "buffer_pct": buffer_pct if use_percent else 0.0,
+        "cap": cap if cap > 0.0 else None,
+        "cap_active": cap_active,
+        "effective_pct_of_free": effective_pct,
+    }
+
+def backtest_buy_execution_price(open_price: float, spread_pct: float = 0.0,
+                                  slippage_pct: float = 0.0) -> float:
+    """Perkiraan harga ask adverse untuk entry backtest.
+
+    ``spread_pct`` adalah spread total bid-ask. Separuh spread dibebankan ke
+    sisi BUY, lalu slippage tambahan dibebankan sebagai adverse movement.
+    """
+    price = float(open_price)
+    adverse = max(0.0, float(spread_pct)) / 200.0 + max(0.0, float(slippage_pct)) / 100.0
+    return price * (1.0 + adverse)
+
+def backtest_sell_execution_price(price: float, spread_pct: float = 0.0,
+                                  slippage_pct: float = 0.0) -> float:
+    """Perkiraan harga bid adverse untuk exit backtest."""
+    raw = max(0.0, float(price))
+    adverse = max(0.0, float(spread_pct)) / 200.0 + max(0.0, float(slippage_pct)) / 100.0
+    return raw * max(0.0, 1.0 - adverse)
+
+def ema(closes: list[float], period: int) -> list[float]:
+    """Hitung EMA kronologis dan mengembalikan seluruh deret EMA.
+
+    Candle pada indeks 0 adalah candle paling lama. Nilai awal memakai close
+    pertama, sehingga tidak ada data masa depan yang masuk ke perhitungan.
+    """
+    period = int(period)
+    values = [float(x) for x in closes]
+    if period <= 0:
+        raise ValueError("period EMA harus lebih besar dari nol")
+    if not values:
+        return []
+    alpha = 2.0 / (period + 1.0)
+    out = [values[0]]
+    for value in values[1:]:
+        out.append(alpha * value + (1.0 - alpha) * out[-1])
+    return out
+
+def rsi(closes: list[float], period: int = 14) -> list[float]:
+    """Hitung RSI Wilder kronologis; nilai yang belum matang bernilai 50.0."""
+    period = int(period)
+    values = [float(x) for x in closes]
+    if period <= 0:
+        raise ValueError("period RSI harus lebih besar dari nol")
+    if not values:
+        return []
+    out = [50.0] * len(values)
+    if len(values) <= period:
+        return out
+    gains = [max(0.0, values[i] - values[i - 1]) for i in range(1, len(values))]
+    losses = [max(0.0, values[i - 1] - values[i]) for i in range(1, len(values))]
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    def value():
+        if avg_loss == 0:
+            return 100.0 if avg_gain > 0 else 50.0
+        return 100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
+    out[period] = value()
+    for i in range(period + 1, len(values)):
+        avg_gain = (avg_gain * (period - 1) + gains[i - 1]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i - 1]) / period
+        out[i] = value()
+    return out
+
+def macd(closes: list[float], fast: int = 12, slow: int = 26,
+         signal: int = 9) -> tuple[list[float], list[float], list[float]]:
+    """Hitung MACD line, signal line, dan histogram secara kronologis."""
+    fast_line = ema(closes, fast)
+    slow_line = ema(closes, slow)
+    line = [a - b for a, b in zip(fast_line, slow_line)]
+    signal_line = ema(line, signal)
+    histogram = [a - b for a, b in zip(line, signal_line)]
+    return line, signal_line, histogram
+
+
 def atr(klines: list[Kline], period: int = 14) -> float | None:
     """Kembalikan ATR Wilder terakhir dari candle yang sudah tertutup."""
     period = int(period)

@@ -9,6 +9,7 @@ replace dicoba ulang dengan backoff singkat.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -27,6 +28,8 @@ try:
 except ImportError:  # pragma: no cover, POSIX
     msvcrt = None
 
+
+logger = logging.getLogger("atomic_io")
 
 _REPLACE_DELAYS = (0.02, 0.04, 0.08, 0.16, 0.32, 0.50)
 
@@ -50,6 +53,93 @@ def _thread_lock_for(lock_path: str) -> threading.RLock:
         return lock
 
 
+# =====================================================================
+# Primitif lock file lintas platform.
+#
+# PERBAIKAN AUDIT 2026-09-30 (temuan KRITIS-02).
+#
+# Implementasi lama memakai open(lock_path, "a+") lalu:
+#     seek(0); write("0"); flush(); msvcrt.locking(fd, LK_LOCK, 1)
+#   ... blok kritis ...
+#     seek(0); msvcrt.locking(fd, LK_UNLCK, 1)
+#
+# Ada dua fakta yang bertabrakan di sana:
+#   1. msvcrt.locking() mengunci region relatif terhadap POSISI FILE SAAT INI.
+#   2. Mode "a+" berarti O_APPEND, sehingga setiap write() dipaksa ke AKHIR
+#      file tanpa peduli seek(0) yang baru saja dipanggil, dan posisi file
+#      ikut pindah ke akhir.
+#
+# Akibatnya LOCK diambil di offset akhir file (1, lalu 2, lalu 3, ... karena
+# file tumbuh satu byte setiap kali), sedangkan UNLOCK selalu dicoba di
+# offset 0. Membuka kunci region yang tidak pernah terkunci membuat CRT
+# Windows mengembalikan EACCES, yang muncul di Python sebagai
+# "PermissionError: [Errno 13] Permission denied" dan menggagalkan import
+# config sebelum bot maupun dashboard sempat start.
+#
+# Bug ini tidak pernah terlihat di Linux atau macOS karena di sana cabang
+# fcntl.flock yang dipakai, dan flock mengunci seluruh berkas tanpa konsep
+# offset. Kedua cabang msvcrt juga ditandai "pragma: no cover" sehingga tidak
+# pernah teruji sama sekali.
+#
+# Perbaikan: pakai file descriptor mentah tanpa O_APPEND, posisikan offset
+# secara eksplisit ke 0 dengan os.lseek() sebelum lock MAUPUN unlock, dan
+# tulis byte penanda maksimal sekali seumur berkas.
+# =====================================================================
+
+_LOCK_OFFSET = 0
+_LOCK_LENGTH = 1
+
+
+def _open_lock_fd(lock_path: str) -> int:
+    """Buka file lock sebagai fd mentah, sengaja TANPA O_APPEND.
+
+    O_BINARY hanya ada di Windows dan wajib supaya CRT tidak melakukan
+    terjemahan newline yang bisa menggeser offset.
+    """
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0)
+    fd = os.open(lock_path, flags, 0o600)
+    try:
+        if msvcrt is not None and fcntl is None:  # pragma: no cover, Windows
+            # Windows butuh minimal satu byte untuk dikunci. Ditulis hanya
+            # ketika berkas masih kosong, supaya lock file tidak tumbuh satu
+            # byte setiap kali lock diambil seperti pada versi lama.
+            if os.lseek(fd, 0, os.SEEK_END) == 0:
+                os.write(fd, b"0")
+    except OSError:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _acquire_lock(fd: int) -> None:
+    if fcntl is not None:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    elif msvcrt is not None:  # pragma: no cover, Windows
+        os.lseek(fd, _LOCK_OFFSET, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_LOCK, _LOCK_LENGTH)
+
+
+def _release_lock(fd: int) -> None:
+    """Lepas lock. Kegagalan di sini TIDAK boleh menutupi exception asli.
+
+    Menutup file descriptor sudah melepaskan lock pada kedua platform, jadi
+    kegagalan unlock aman untuk diturunkan menjadi peringatan. Versi lama
+    membiarkannya naik dari blok finally, sehingga error asli dari blok
+    kritis tertimpa PermissionError yang menyesatkan.
+    """
+    try:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        elif msvcrt is not None:  # pragma: no cover, Windows
+            os.lseek(fd, _LOCK_OFFSET, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, _LOCK_LENGTH)
+    except OSError as exc:
+        logger.warning(
+            "Gagal melepas lock file secara eksplisit (%s). File descriptor "
+            "tetap ditutup, sehingga lock dilepas oleh sistem operasi.", exc,
+        )
+
+
 @contextmanager
 def interprocess_lock(path: os.PathLike | str) -> Iterator[None]:
     """Lock advisory lintas proses untuk satu file runtime.
@@ -63,22 +153,15 @@ def interprocess_lock(path: os.PathLike | str) -> Iterator[None]:
     parent = os.path.dirname(lock_path) or "."
     Path(parent).mkdir(parents=True, exist_ok=True)
     with _thread_lock_for(os.path.abspath(lock_path)):
-        with open(lock_path, "a+", encoding="utf-8") as handle:
-            if fcntl is not None:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            elif msvcrt is not None:  # pragma: no cover, Windows
-                handle.seek(0)
-                handle.write("0")
-                handle.flush()
-                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        fd = _open_lock_fd(lock_path)
+        try:
+            _acquire_lock(fd)
             try:
                 yield
             finally:
-                if fcntl is not None:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-                elif msvcrt is not None:  # pragma: no cover, Windows
-                    handle.seek(0)
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                _release_lock(fd)
+        finally:
+            os.close(fd)
 
 
 def timestamp_tag() -> str:

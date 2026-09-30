@@ -21,6 +21,7 @@ import hashlib
 import hmac
 import logging
 import math
+import re
 import time
 import urllib.parse
 from decimal import Decimal, ROUND_DOWN
@@ -101,7 +102,37 @@ def _fmt_num(value) -> str:
     return format(Decimal(str(value)), "f")
 
 
+_REDACT_PARAMS = ("signature", "apiKey", "api_key", "secret", "token")
+_REDACT_RE = re.compile(
+    r"(?i)\b(" + "|".join(_REDACT_PARAMS) + r")=[^&\s\"'>]*"
+)
+
+
 class BinanceSpotClient:
+    @staticmethod
+    def _redact(text) -> str:
+        """Buang material kredensial dari teks sebelum masuk log.
+
+        PERBAIKAN AUDIT 2026-09-30 (temuan TINGGI-03).
+
+        Request bertanda tangan dikirim dengan seluruh query string ada di
+        URL, termasuk `signature=<hmac sha256>`. Ketika request gagal di
+        lapisan jaringan, pesan requests memuat URL penuh
+        ("Max retries exceeded with url: ..."), dan pesan itu langsung
+        diteruskan ke logger.warning. Akibatnya signature HMAC tertulis
+        apa adanya ke pump_bot_*.log, yang juga ditampilkan dashboard di
+        endpoint /api/logs.
+
+        Secret mentah tidak ikut bocor (ia tidak pernah masuk URL), tetapi
+        signature tetap material kredensial dan tidak boleh tersimpan di
+        berkas log biasa. Redaksi ini mempertahankan host, path, dan
+        parameter non-rahasia supaya nilai diagnostiknya tidak hilang.
+        """
+        try:
+            return _REDACT_RE.sub(r"\1=<REDACTED>", str(text))
+        except Exception:  # pragma: no cover - redaksi tidak boleh menggagalkan log
+            return "<pesan tidak dapat diredaksi>"
+
     def __init__(self, api_key: str, api_secret: str, base_url: str, timeout: float = 10.0,
                  allow_signed: bool = True, rate_limit_state_file: str | None = None,
                  rate_limit_limit: int = 6000, rate_limit_safety_margin: int = 100):
@@ -307,17 +338,20 @@ class BinanceSpotClient:
                 # pada percobaan terakhir (mis. POST order max_retries=1) tidak
                 # ada retry berikutnya, jadi sleep hanya menambah latensi mati
                 # di jalur kritis sebelum pemulihan/rekonsiliasi dimulai.
+                # self._redact WAJIB di sini (temuan TINGGI-03): pesan
+                # requests.RequestException memuat URL penuh, dan untuk
+                # request signed URL itu mengandung signature=<hmac>.
                 if attempt < max_retries:
                     wait = min(2 ** attempt, 10)
                     logger.warning(
                         "Request %s %s gagal (percobaan %d/%d): %s. Tunggu %ds.",
-                        method, path, attempt, max_retries, exc, wait,
+                        method, path, attempt, max_retries, self._redact(exc), wait,
                     )
                     time.sleep(wait)
                 else:
                     logger.warning(
                         "Request %s %s gagal (percobaan terakhir %d/%d): %s.",
-                        method, path, attempt, max_retries, exc,
+                        method, path, attempt, max_retries, self._redact(exc),
                     )
         raise last_exc
 

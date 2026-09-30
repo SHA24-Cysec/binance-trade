@@ -827,7 +827,25 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 return None
             return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
 
-        trades_out = []
+        trades_out = [{
+            "symbol": t.symbol,
+            "entry_time": _ts(t.entry_time),
+            "exit_time": _ts(t.exit_time),
+            "entry_price": t.entry_price,
+            "exit_price": t.exit_price,
+            "reason": t.reason,
+            "hold_minutes": t.hold_minutes,
+            "pnl_pct": t.pnl_pct,
+            "rank_at_entry": t.rank_at_entry,
+            "pct24h_at_entry": t.pct24h_at_entry,
+        } for t in result.trades]
+
+        skipped_out = [{
+            "time": _ts(s.time),
+            "symbol": s.symbol,
+            "reason": s.reason,
+            "holding": s.holding,
+        } for s in result.skipped[:200]]
 
         payload = {
             "mode": "portfolio",
@@ -844,6 +862,7 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
             "params_used": {k: cfg.get(k) for k in BT_PARAM_KEYS},
             "summary": summary,
             "trades": trades_out,
+            "skipped": skipped_out,
             "warnings": result.warnings,
             "limitations": [
                 "SURVIVORSHIP BIAS, dan ini tidak bisa diperbaiki: Binance hanya menyediakan "
@@ -854,7 +873,18 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "ticker/24hr historis (Binance tidak menyediakannya). Nilainya sangat dekat "
                 "tetapi tidak identik dengan yang dilihat bot saat itu. Volume itulah yang "
                 "menentukan simbol mana yang masuk top-N kandidat per bar.",
-                "Modul ini hanya memuat dan memvalidasi candle historis; tidak ada simulasi order.",
+                "Fill exit memperhitungkan gap: candle yang DIBUKA sudah menembus level "
+                "SL/TP/BE/Trailing diisi pada harga pembukaan candle itu, konsisten dengan "
+                "simulasi PAPER, bukan pada harga levelnya.",
+                "Exit dievaluasi per-candle " + interval + " (bukan tiap "
+                + str(PUMP_CONFIG.get("LOOP_INTERVAL_SECONDS", 15)) + " detik seperti bot asli), "
+                "dengan urutan prioritas konservatif: STOP_LOSS -> TAKE_PROFIT -> BREAKEVEN -> "
+                "TRAILING. Stop Loss dianggap kena lebih dulu kalau ambigu dalam satu candle, "
+                "supaya hasil tidak melebih-lebihkan profit.",
+                "Entry memodelkan spread (BACKTEST_ENTRY_SPREAD_PCT), slippage "
+                "(BACKTEST_SLIPPAGE_PCT), dan jeda eksekusi (BACKTEST_ENTRY_DELAY_BARS). "
+                "Fee taker beli dan jual sudah dipotong. Yang belum dimodelkan adalah "
+                "kedalaman order book, jadi order besar di koin tipis akan lebih buruk dari ini.",
                 "Volume 24 jam direkonstruksi dari penjumlahan quote volume candle, "
                 "sehingga bisa sedikit berbeda dari field quoteVolume di ticker.",
             ],
@@ -1385,6 +1415,32 @@ def _credentials_tested_for_active_values() -> bool:
     return compare_digest(fingerprint, _credential_fingerprint(key, secret))
 
 
+def _withdrawal_permission_safe() -> bool:
+    """True bila key yang sudah diuji terbukti TIDAK punya izin penarikan.
+
+    PERBAIKAN AUDIT 2026-09-30 (temuan TINGGI-05).
+
+    Nilai ini fail-closed: selama Uji Koneksi belum dijalankan untuk nilai
+    kredensial yang aktif, hasilnya False. Dengan begitu perpindahan ke LIVE
+    tidak pernah lolos hanya karena status penarikan belum pernah diperiksa.
+    Operator yang sadar risiko dapat melewatinya lewat environment
+    ALLOW_LIVE_WITHDRAWAL_KEY=1.
+    """
+    if str(os.environ.get("ALLOW_LIVE_WITHDRAWAL_KEY", "")).strip().lower() in (
+        "1", "true", "yes", "on"
+    ):
+        return True
+    if not _credentials_tested_for_active_values():
+        return False
+    with _credential_lock:
+        account = _credential_test_state.get("account") or {}
+    if "can_withdraw" not in account:
+        # Hasil uji dari versi lama tidak merekam field ini. Jangan
+        # menyimpulkan aman; minta operator menjalankan Uji Koneksi lagi.
+        return False
+    return not bool(account.get("can_withdraw"))
+
+
 def _risk_summary(config: dict) -> dict:
     return {
         "USE_STOP_LOSS": config.get("USE_STOP_LOSS"),
@@ -1648,6 +1704,12 @@ def api_mode_checklist():
         "no_open_position": not position["has_position"],
         "credentials_complete": target != "LIVE" or creds_complete,
         "connection_tested": target != "LIVE" or tested,
+        # Temuan TINGGI-05: key LIVE tidak boleh punya izin penarikan dana.
+        "withdrawal_disabled": target != "LIVE" or _withdrawal_permission_safe(),
+        # Temuan KRITIS-01: minimal satu rem kerugian tingkat akun wajib aktif.
+        "account_stop_enabled": target != "LIVE" or bool(
+            target_cfg.get("USE_EQUITY_STOP") or target_cfg.get("USE_DAILY_STOP")
+        ),
         "settings_valid": not target_errors,
     }
     return jsonify({
@@ -1686,6 +1748,20 @@ def api_mode_prepare():
             return jsonify({"error": "API key dan secret belum lengkap."}), 409
         if not _credentials_tested_for_active_values():
             return jsonify({"error": "Kredensial tersimpan belum lulus Uji Koneksi pada sesi ini."}), 409
+        # Temuan TINGGI-05: blokir key yang masih boleh menarik dana.
+        if not _withdrawal_permission_safe():
+            return jsonify({
+                "error": "API key masih mengizinkan penarikan dana, atau status itu belum "
+                         "diverifikasi lewat Uji Koneksi. Matikan permission Enable "
+                         "Withdrawals di Binance lalu jalankan Uji Koneksi ulang."
+            }), 409
+        # Temuan KRITIS-01: jangan izinkan LIVE tanpa rem kerugian akun.
+        if not (target_cfg.get("USE_EQUITY_STOP") or target_cfg.get("USE_DAILY_STOP")):
+            return jsonify({
+                "error": "USE_EQUITY_STOP dan USE_DAILY_STOP dua-duanya nonaktif. "
+                         "Mode LIVE akan berjalan tanpa rem kerugian tingkat akun dan "
+                         "CLOSE_ALL_AT_LIMIT tidak akan pernah terpicu. Aktifkan minimal satu."
+            }), 409
     token = _make_confirmation("mode", {
         "from": get_mode(PUMP_CONFIG), "target": target,
         "risk_revision": _revision(target_cfg),
@@ -1714,6 +1790,13 @@ def api_mode_commit():
         return jsonify({"error": "Konfigurasi target berubah sejak konfirmasi."}), 409
     if target == "LIVE" and not _credentials_tested_for_active_values():
         return jsonify({"error": "Status uji kredensial tidak lagi valid."}), 409
+    # Gerbang yang sama diperiksa ULANG saat commit (temuan TINGGI-05 dan
+    # KRITIS-01): kondisi bisa berubah di antara prepare dan commit.
+    if target == "LIVE" and not _withdrawal_permission_safe():
+        return jsonify({"error": "API key masih mengizinkan penarikan dana."}), 409
+    if target == "LIVE" and not (target_cfg.get("USE_EQUITY_STOP")
+                                 or target_cfg.get("USE_DAILY_STOP")):
+        return jsonify({"error": "Mode LIVE membutuhkan minimal satu rem kerugian akun."}), 409
     ok, left = _cooldown("mode", 5.0)
     if not ok:
         return jsonify({"error": f"Tunggu {left:.1f} detik sebelum ganti mode."}), 429
@@ -1824,8 +1907,15 @@ def api_credentials_test():
         }), 400
     except Exception:
         return jsonify({"error": "Uji koneksi gagal karena jaringan atau layanan Binance tidak tersedia."}), 502
+    # PERBAIKAN AUDIT 2026-09-30 (temuan TINGGI-05): canWithdraw ikut dibaca
+    # dan disimpan. Sebelumnya respons /api/v3/account sudah memuat field ini
+    # tetapi dibuang, sehingga rekomendasi "gunakan key tanpa izin withdrawal"
+    # tidak pernah diverifikasi oleh apa pun. Key dengan izin penarikan yang
+    # bocor berarti dana bisa dikuras, bukan sekadar disalahtradingkan.
     tested_account = {"account_type": account.get("accountType"),
                       "can_trade": bool(account.get("canTrade")),
+                      "can_withdraw": bool(account.get("canWithdraw")),
+                      "can_deposit": bool(account.get("canDeposit")),
                       "permissions": account.get("permissions", [])}
     with _credential_lock:
         _credential_test_state.update({
@@ -1833,8 +1923,18 @@ def api_credentials_test():
             "tested_at": datetime.now(timezone.utc).isoformat(),
             "account": tested_account,
         })
+    warnings = []
+    if tested_account["can_withdraw"]:
+        warnings.append(
+            "API key ini MENGIZINKAN PENARIKAN DANA. Bot tidak pernah membutuhkannya. "
+            "Matikan permission Enable Withdrawals di Binance sebelum memakai mode LIVE."
+        )
+    if not tested_account["can_trade"]:
+        warnings.append("API key ini tidak mengizinkan Spot Trading, jadi bot tidak bisa menjual.")
     return jsonify({"ok": True, "message": "Koneksi signed read-only berhasil.",
                     "account": tested_account,
+                    "warnings": warnings,
+                    "withdrawal_enabled": tested_account["can_withdraw"],
                     "api_key_last4": key[-4:]})
 
 

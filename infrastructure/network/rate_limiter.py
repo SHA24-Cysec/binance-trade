@@ -19,15 +19,19 @@ from typing import Iterator
 
 logger = logging.getLogger("rate_limiter")
 
-try:
-    import fcntl  # type: ignore
-except ImportError:  # pragma: no cover, exercised on Windows
-    fcntl = None
+# Primitif lock file dipakai bersama dengan atomic_io supaya hanya ada satu
+# implementasi yang perlu dijaga kebenarannya lintas platform
+# (perbaikan audit 2026-09-30, temuan KRITIS-02).
+from infrastructure.storage.atomic_io import (  # noqa: E402
+    _acquire_lock,
+    _open_lock_fd,
+    _release_lock,
+)
 
-try:
-    import msvcrt  # type: ignore
-except ImportError:  # pragma: no cover, exercised on POSIX
-    msvcrt = None
+# fcntl dan msvcrt sengaja TIDAK diimpor di sini lagi. Modul ini dulu punya
+# salinan sendiri dari logika lock per platform, dan salinan itulah yang ikut
+# membawa bug offset msvcrt (audit 2026-09-30, temuan KRITIS-02). Seluruh
+# detail per platform sekarang tinggal di satu tempat: atomic_io.
 
 
 class RateLimitBlockedError(RuntimeError):
@@ -138,24 +142,22 @@ class SharedRequestWeightLimiter:
         lock_path = self.state_file + ".lock"
         parent = os.path.dirname(lock_path) or "."
         os.makedirs(parent, mode=0o700, exist_ok=True)
-        with open(lock_path, "a+", encoding="utf-8") as lock_fh:
-            if fcntl is not None:
-                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
-            elif msvcrt is not None:  # pragma: no cover
-                lock_fh.seek(0)
-                lock_fh.write("0")
-                lock_fh.flush()
-                msvcrt.locking(lock_fh.fileno(), msvcrt.LK_LOCK, 1)
+        # PERBAIKAN AUDIT 2026-09-30 (temuan KRITIS-02): blok ini dulu
+        # menyalin pola lock msvcrt yang salah offset dari atomic_io dan
+        # membawa bug PermissionError yang sama persis. Sekarang memakai
+        # primitif bersama yang sudah benar, sehingga hanya ada SATU
+        # implementasi lock file di repo ini.
+        fd = _open_lock_fd(lock_path)
+        try:
+            _acquire_lock(fd)
             try:
                 state = self._normalise(self._read_file(), time.time())
                 yield state
                 self._write_file(state)
             finally:
-                if fcntl is not None:
-                    fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
-                elif msvcrt is not None:  # pragma: no cover
-                    lock_fh.seek(0)
-                    msvcrt.locking(lock_fh.fileno(), msvcrt.LK_UNLCK, 1)
+                _release_lock(fd)
+        finally:
+            os.close(fd)
 
     def reserve(self, weight: int, ignore_block: bool = False) -> None:
         """Tunggu sampai bobot aman untuk window saat ini, lalu reservasi."""

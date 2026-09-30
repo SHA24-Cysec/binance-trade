@@ -701,13 +701,33 @@
           <div class="posbox" id="btInfoBox"></div>
         </div>
       </div>
+      <div class="grid cols" style="margin-bottom:14px">
+        <div class="panel" style="background:var(--panel2)">
+          <h2 style="font-size:13px">🏆 Kontribusi per Simbol</h2>
+          <div id="btSymbolBox"></div>
+        </div>
+        <div class="panel" style="background:var(--panel2)">
+          <h2 style="font-size:13px">🚫 Sinyal Terlewat <span class="mut" style="font-weight:400;font-size:11.5px" id="btSkipCount"></span></h2>
+          <p class="mut" style="font-size:11.5px;margin-bottom:10px;line-height:1.6">
+            Peluang yang lolos semua filter tetapi TIDAK bisa diambil karena bot hanya
+            boleh memegang satu posisi. Inilah yang dihitung sebagai trade oleh backtest
+            satu simbol, sehingga hasilnya terlihat jauh lebih bagus dari kenyataan.
+          </p>
+          <div id="btSkipBox"></div>
+        </div>
+      </div>
       <div class="panel" style="background:var(--panel2);margin-bottom:14px">
         <h2 style="font-size:13px">⚠️ Batasan Backtest</h2>
         <ul id="btLimitList" style="padding-left:18px;font-size:12px;color:var(--muted);line-height:1.9"></ul>
       </div>
       <div class="panel" style="background:var(--panel2)">
-        <h2 style="font-size:13px">🧾 Status Simulasi</h2>
-        <div class="posbox" id="btTradeBody"><div class="empty">Backtest tidak membuat trade atau order baru.</div></div>
+        <h2 style="font-size:13px">🧾 Riwayat Trade Hasil Simulasi <span class="mut" style="font-weight:400" id="btTradeCount"></span></h2>
+        <div style="overflow-x:auto">
+          <table>
+            <thead><tr><th>Simbol</th><th>Masuk</th><th>Keluar</th><th>Entry</th><th>Exit</th><th>Peringkat</th><th>Hold</th><th>PnL %</th><th>Alasan</th></tr></thead>
+            <tbody id="btTradeBody"></tbody>
+          </table>
+        </div>
       </div>
     </div>
   </div><!-- /paneBacktest -->
@@ -1454,7 +1474,7 @@ async function loadModeChecklist(){
   try{
     const r=await fetch('/api/mode/checklist?target='+encodeURIComponent(target),{cache:'no-store'}),d=await r.json();
     if(!r.ok)throw new Error(d.error||'Checklist gagal.');
-    const labels={different_mode:'Target berbeda dari mode aktif',bot_stopped:'Bot sudah STOPPED',no_open_position:'Posisi mode aktif kosong',credentials_complete:'API key dan secret terisi',connection_tested:'Kredensial lulus Uji Koneksi sesi ini',settings_valid:'Settings target valid'};
+    const labels={different_mode:'Target berbeda dari mode aktif',bot_stopped:'Bot sudah STOPPED',no_open_position:'Posisi mode aktif kosong',credentials_complete:'API key dan secret terisi',connection_tested:'Kredensial lulus Uji Koneksi sesi ini',withdrawal_disabled:'API key TIDAK punya izin penarikan dana',account_stop_enabled:'Minimal satu rem kerugian akun aktif (DD stop atau daily stop)',settings_valid:'Settings target valid'};
     let html=Object.entries(d.checks).map(([k,v])=>`<div>${v?'✅':'❌'} ${esc(labels[k]||k)}</div>`).join('');
     html+=`<div style="margin-top:8px"><b>Ringkasan risiko target</b><br>${Object.entries(d.risk||{}).map(([k,v])=>esc(k)+'='+esc(v)).join(' · ')}</div>`;
     html+=`<div class="mut" style="margin-top:7px">${esc(d.state_separation_note)}</div>`;
@@ -1858,6 +1878,48 @@ function finishBacktestUI(){
   document.getElementById('btProgressWrap').style.display = 'none';
 }
 
+function renderSymbolBreakdown(s){
+  const box = document.getElementById('btSymbolBox');
+  if(!box) return;
+  const top = s.top_symbols || [];
+  if(!top.length){ box.innerHTML = '<div class="empty">Belum ada trade.</div>'; return; }
+  const max = Math.max(...top.map(x=>Math.abs(Number(x.pnl_pct))), 1);
+  box.innerHTML = top.map(x=>{
+    const pnl = Number(x.pnl_pct);
+    // Lebar bar sengaja dipaksa menjadi angka lalu dibatasi 0 sampai 100.
+    // Nama variabel satu huruf dihindari di dalam template string supaya
+    // penjaga XSS di test_dashboard_security bisa membedakan interpolasi
+    // angka yang aman dari interpolasi teks mentah yang berbahaya.
+    const lebarBar = Math.min(100, Math.max(2, Math.abs(pnl)/max*100)).toFixed(1);
+    const col = pnl>=0 ? 'var(--green)' : 'var(--red)';
+    return `<div style="margin-bottom:9px">
+      <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px">
+        <span><b>${esc(x.symbol)}</b> <span class="mut">${fmt(x.trades,0)}x</span></span>
+        <span class="mono ${cls(x.pnl_pct)}">${sign(x.pnl_pct)}${fmt(x.pnl_pct)}%</span>
+      </div>
+      <div style="height:5px;border-radius:99px;background:var(--inset,rgba(148,163,184,.12))">
+        <i style="display:block;height:100%;border-radius:99px;width:${lebarBar}%;background:${col}"></i>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderSkipped(res){
+  const box = document.getElementById('btSkipBox');
+  const cnt = document.getElementById('btSkipCount');
+  if(!box || !cnt) return;
+  const sk = res.skipped || [];
+  cnt.textContent = (res.summary && res.summary.skipped_signals)
+    ? '(' + fmt(res.summary.skipped_signals,0) + ' total)' : '';
+  if(!sk.length){
+    box.innerHTML = '<div class="empty">Tidak ada sinyal yang terlewat pada rentang ini.</div>';
+    return;
+  }
+  box.innerHTML = '<div class="logbox" style="max-height:220px">' + sk.map(x=>
+    `<div class="logline INFO"><b>${esc(x.symbol)}</b> terlewat pada ${esc(x.time)}, bot sedang memegang ${esc(x.holding)}</div>`
+  ).join('') + '</div>';
+}
+
 function btReasonTagClass(r){
   const key=String(r===null||r===undefined?'':r).toUpperCase();
   const map={STOP_LOSS:'stop_loss',TAKE_PROFIT:'take_profit',BREAKEVEN:'breakeven',
@@ -1897,7 +1959,8 @@ function renderBacktestResult(res){
 
   // info box
   const p = res.params_used;
-  const reasonRows = '';
+  let reasonRows = Object.entries(s.reason_counts||{}).map(([k,v])=>
+    `<div class="posrow"><span class="k">${btReasonLabel(k)}</span><span class="v mono">${fmt(v,0)}x</span></div>`).join('');
   const exitRows = p.USE_ATR_EXIT
     ? `<div class="posrow"><span class="k">Mode exit</span><span class="v mono">ATR adaptif</span></div>
        <div class="posrow"><span class="k">ATR period</span><span class="v mono">${fmt(p.ATR_PERIOD,0)}</span></div>
@@ -1919,16 +1982,38 @@ function renderBacktestResult(res){
 
   document.getElementById('btLimitList').innerHTML = (res.limitations||[]).map(l=>`<li>${esc(l)}</li>`).join('');
 
-  document.getElementById('btTradeCount').textContent = '';
-  document.getElementById('btTradeBody').innerHTML =
-    '<tr><td colspan="1" class="empty">Tidak ada trade. Backtest ini hanya memuat dan memvalidasi data historis.</td></tr>';
+  // Riwayat trade. Elemen btTradeCount sempat hilang dari HTML sementara baris
+  // ini tetap ada, sehingga getElementById mengembalikan null dan panel hasil
+  // gagal dirender seluruhnya. Sekarang keduanya kembali sepasang.
+  const trades = res.trades || [];
+  document.getElementById('btTradeCount').textContent = trades.length ? '('+trades.length+' trade)' : '';
+  const tb = document.getElementById('btTradeBody');
+  if(!trades.length){
+    tb.innerHTML = '<tr><td colspan="9" class="empty">Tidak ada setup pullback retest yang sah pada rentang ini. Coba longgarkan parameter setup, perbanyak simbol, atau perpanjang rentang hari.</td></tr>';
+  } else {
+    tb.innerHTML = trades.map(t=>`
+      <tr>
+        <td><b>${esc(t.symbol)}</b></td>
+        <td class="mono mut">${esc(t.entry_time)}</td>
+        <td class="mono mut">${esc(t.exit_time)}</td>
+        <td class="mono">${fmtP(t.entry_price)}</td>
+        <td class="mono">${fmtP(t.exit_price)}</td>
+        <td class="mono mut">#${fmt(t.rank_at_entry,0)} <span style="opacity:.7">(${sign(t.pct24h_at_entry)}${fmt(t.pct24h_at_entry,1)}%)</span></td>
+        <td class="mono">${Math.round(t.hold_minutes)} mnt</td>
+        <td class="mono ${cls(t.pnl_pct)}">${sign(t.pnl_pct)}${fmt(t.pnl_pct)}%</td>
+        <td><span class="tag ${btReasonTagClass(t.reason)}">${btReasonLabel(t.reason)}</span></td>
+      </tr>`).join('');
+  }
+
+  renderSymbolBreakdown(s);
+  renderSkipped(res);
 
 
   // chart return kumulatif
   const wrap = document.getElementById('btChartWrap');
   const pts = s.equity_curve || [0];
   if(pts.length < 2){
-    wrap.innerHTML = '<div class="empty"><div class="big">📊</div>Tidak ada trade untuk digambar karena backtest bersifat data-only.</div>';
+    wrap.innerHTML = '<div class="empty"><div class="big">📊</div>Belum ada trade untuk digambar.</div>';
   } else {
     const W=560,H=220,pad=32;
     const min=Math.min(...pts,0), max=Math.max(...pts,0);

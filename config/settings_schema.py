@@ -154,6 +154,44 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "CONTROL_FILE": _field("Sistem", "File kontrol", "Path komunikasi dashboard ke bot.", "str", read_only=True),
     "USE_DUST_SWEEP": _field("Sistem", "Konversi dust ke BNB", "Konversi dust base asset setelah close di LIVE.", "bool"),
     "BASE_URL": _field("Sistem", "Base URL aktif", "Alias turunan dari LIVE_BASE_URL.", "str", read_only=True),
+
+    # ----------------------------------------------------------------
+    # DIPULIHKAN 1 Oktober 2026 bersama logika entry dan backtest.
+    # ----------------------------------------------------------------
+    "BACKTEST_ENTRY_DELAY_BARS": _field("Ukuran Posisi", "Latency entry backtest", "Jumlah bar tunggu setelah sinyal sebelum simulasi entry.", "int", minimum=0, maximum=10, unit="bar"),
+    "BACKTEST_ENTRY_SPREAD_PCT": _field("Ukuran Posisi", "Spread entry backtest", "Total spread bid-ask yang dibebankan pada simulasi entry.", "float", minimum=0, maximum=10, unit="%"),
+    "BACKTEST_SLIPPAGE_PCT": _field("Ukuran Posisi", "Slippage backtest", "Slippage adverse per eksekusi backtest.", "float", minimum=0, maximum=10, unit="%"),
+    "BALANCE_BUFFER_PCT": _field("Ukuran Posisi", "Bantalan saldo", "Saldo yang tidak dibelanjakan untuk fee dan pergerakan harga.", "float", minimum=0, maximum=50, unit="%"),
+    "CONFIRM_INTERVAL": _field("Scan", "Interval konfirmasi", "Interval candle konfirmasi setup.", "str", editor="select", options=["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"]),
+    "CONFIRM_LOOKBACK_BARS": _field("Scan", "Jumlah candle konfirmasi", "Jumlah candle tertutup untuk deteksi setup. Limit endpoint klines 1000 per panggilan.", "int", minimum=3, maximum=1000, unit="candle"),
+    "COOLDOWN_MINUTES_AFTER_CLOSE": _field("Fee dan Filter", "Cooldown setelah close", "Jeda entry setelah posisi ditutup.", "int", minimum=0, maximum=525600, unit="menit"),
+    "MAX_BARS_BREAKOUT_TO_RETEST": _field("Setup Pullback", "Umur maksimum setup", "Batas jarak candle dari breakout ke retest.", "int", minimum=1, maximum=500, unit="candle"),
+    "MAX_CHASE_PCT": _field("Fee dan Filter", "Batas chase entry", "Entry dilewati bila ask sudah melebihi close candle sinyal sebesar persen ini. 0 = nonaktif.", "float", minimum=0, maximum=100, unit="%", dangerous=True),
+    "MAX_POSITION_USDT": _field("Ukuran Posisi", "Plafon posisi", "Nol berarti tanpa plafon di PAPER, tetapi dilarang di LIVE.", "float", minimum=0, maximum=1e9, unit="USDT", dangerous=True),
+    "MAX_RETEST_TOUCHES": _field("Setup Pullback", "Maksimum kunjungan zona", "Berapa kali harga boleh kembali ke zona sebelum setup dianggap lemah.", "int", minimum=1, maximum=20),
+    "MAX_SPREAD_PCT": _field("Fee dan Filter", "Spread maksimum", "Spread bid-ask maksimum untuk entry.", "float", minimum=0, maximum=100, unit="%", dangerous=True),
+    "MIN_CLOSE_POSITION_IN_RANGE": _field("Scan", "Minimum posisi close", "Posisi close candle retest di dalam rentang high-low.", "float", minimum=0, maximum=1),
+    "MIN_LISTING_AGE_DAYS": _field("Scan", "Usia listing minimum", "Pasangan lebih muda akan ditolak.", "int", minimum=0, maximum=36500, unit="hari"),
+    "MIN_SECONDS_BETWEEN_TRADES": _field("Fee dan Filter", "Jarak minimum trade", "Jeda keras antartrade.", "int", minimum=0, maximum=31536000, unit="detik"),
+    "POSITION_SIZE_USDT": _field("Ukuran Posisi", "Ukuran posisi tetap", "Nominal saat mode persen dimatikan.", "float", minimum=0.01, maximum=1e9, unit="USDT", dangerous=True),
+    "RISK_PERCENT": _field("Ukuran Posisi", "Persen saldo per entry", "Persentase saldo bebas yang digunakan.", "float", minimum=0.01, maximum=100, unit="%", dangerous=True),
+    "ROLLING_VOLUME_CONFIRMATION_BARS": _field("Setup Momentum", "Candle volume konfirmasi", "Jumlah candle terakhir yang wajib memenuhi lonjakan volume.", "int", minimum=1, maximum=20, unit="candle"),
+    "ROLLING_VOLUME_FILTER_ENABLED": _field("Setup Momentum", "Filter volume rolling", "Wajibkan volume candle konfirmasi melampaui rata-rata candle sebelumnya.", "bool"),
+    "ROLLING_VOLUME_LOOKBACK_BARS": _field("Setup Momentum", "Lookback volume rolling", "Jumlah candle sebelumnya untuk menghitung rata-rata volume.", "int", minimum=2, maximum=500, unit="candle"),
+    "ROLLING_VOLUME_SURGE_MULT": _field("Setup Momentum", "Pengali volume rolling", "Volume candle konfirmasi minimal sekian kali rata-rata sebelumnya.", "float", minimum=0.1, maximum=100, unit="x"),
+    "SWING_LOOKBACK_BARS": _field("Setup Pullback", "Lookback swing high", "Berapa candle ke belakang dipindai untuk mencari level breakout.", "int", minimum=3, maximum=500, unit="candle"),
+    "SWING_PIVOT_WING_BARS": _field("Setup Pullback", "Sayap pivot", "Candle di kiri dan kanan yang harus lebih rendah agar sebuah candle menjadi pivot high.", "int", minimum=1, maximum=50, unit="candle"),
+    "TOP_N_CANDIDATES_TO_CONFIRM": _field("Scan", "Jumlah kandidat konfirmasi", "Berapa kandidat teratas yang diperiksa.", "int", minimum=1, maximum=1000),
+    "USE_RISK_PERCENT": _field("Ukuran Posisi", "Gunakan persen risiko", "Ukuran posisi dihitung dari saldo bebas.", "bool", dangerous=True),
+    "VWAP_MIN_BARS_AFTER_ANCHOR": _field("Legacy", "Parameter setup lama", "Disimpan untuk membaca konfigurasi lama. Tidak dipakai oleh strategi momentum baru.", "int", minimum=1, maximum=200, unit="candle", read_only=True),
+    "WATCHLIST_ENTRY_EMA_GAP_PCT": _field("Watchlist", "Jarak EMA", "Ambang EMA dekat.", "float", minimum=0.01, maximum=100),
+    "WATCHLIST_ENTRY_MIN_HEADROOM": _field("Watchlist", "Headroom skor", "Sisa kuota minimum.", "float", minimum=0, maximum=1),
+    "WATCHLIST_ENTRY_RSI_DECAY_PTS": _field("Watchlist", "Decay RSI", "Lebar decay RSI.", "float", minimum=1, maximum=100),
+    "WATCHLIST_ENTRY_SCORE_TTL_SECONDS": _field("Watchlist", "TTL skor entry", "Cache skor candle.", "int", minimum=1, maximum=86400, unit="detik"),
+    "WATCHLIST_ENTRY_WEIGHT_EMA": _field("Watchlist", "Bobot EMA", "Bobot skor entry.", "float", minimum=0, maximum=100),
+    "WATCHLIST_ENTRY_WEIGHT_HL": _field("Watchlist", "Bobot higher low", "Bobot skor entry.", "float", minimum=0, maximum=100),
+    "WATCHLIST_ENTRY_WEIGHT_MACD": _field("Watchlist", "Bobot MACD", "Bobot skor entry.", "float", minimum=0, maximum=100),
+    "WATCHLIST_ENTRY_WEIGHT_RSI": _field("Watchlist", "Bobot RSI", "Bobot skor entry.", "float", minimum=0, maximum=100),
 }
 
 
@@ -426,6 +464,30 @@ def validate_candidate(candidate: dict, mode: str) -> tuple[dict, dict[str, str]
             relation("SL_PCT", cleaned["SL_PCT"] > 0, "harus lebih besar dari nol saat Stop Loss aktif")
         if cleaned["USE_TP"]:
             relation("TP_PCT", cleaned["TP_PCT"] > 0, "harus lebih besar dari nol saat Take Profit aktif")
+
+        # PERBAIKAN AUDIT 2026-09-30 (temuan KRITIS-01). Mematikan kedua rem
+        # kerugian tingkat akun sekaligus membuat dd_stopped dan daily_stopped
+        # tidak pernah menyala, sehingga CLOSE_ALL_AT_LIMIT menjadi mati total
+        # walaupun nilainya True. Kombinasi ini tidak diblokir di sini (operator
+        # berhak memilihnya untuk PAPER), tetapi wajib terlihat jelas. Mode LIVE
+        # memblokirnya terpisah di dashboard dan di account_risk_gate().
+        if not cleaned["USE_EQUITY_STOP"] and not cleaned["USE_DAILY_STOP"]:
+            pesan = ("USE_EQUITY_STOP dan USE_DAILY_STOP dua-duanya nonaktif: "
+                     "tidak ada rem kerugian tingkat akun sama sekali.")
+            if cleaned.get("CLOSE_ALL_AT_LIMIT"):
+                pesan += (" CLOSE_ALL_AT_LIMIT bernilai aktif tetapi TIDAK AKAN "
+                          "PERNAH terpicu karena tidak ada limit yang bisa tercapai.")
+            pesan += " Mode LIVE akan menolak start dengan kombinasi ini."
+            warnings.append(pesan)
+
+        # Peringatan ukuran risiko per posisi. SL yang sangat lebar berarti satu
+        # posisi saja dapat menghapus sebagian besar modal sebelum stop bekerja.
+        if cleaned["USE_STOP_LOSS"] and cleaned["SL_PCT"] >= 20:
+            warnings.append(
+                f"SL_PCT {cleaned['SL_PCT']:g}% sangat lebar: satu posisi dapat rugi "
+                f"sekitar {cleaned['SL_PCT']:g}% dari nilai posisi sebelum stop bekerja. "
+                "Pastikan ukuran posisi memang sekecil itu relatif terhadap modal."
+            )
 
     return cleaned, errors, warnings
 
