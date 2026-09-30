@@ -32,9 +32,6 @@ class _FakeSigned:
 
 
 def _client() -> tuple[LiveClient, _FakeSigned]:
-    # object.__new__: konstruktor asli membangun BinanceSpotClient dan
-    # MarketDataProvider sungguhan; untuk menguji format parameter cukup
-    # atribut signed yang dipakai new_order.
     client = object.__new__(LiveClient)
     fake = _FakeSigned()
     client.signed = fake
@@ -76,7 +73,6 @@ def test_new_order_rejects_non_finite_values_before_sending() -> None:
     for bad in (float("nan"), float("inf"), float("-inf")):
         with pytest.raises(ValueError):
             client.new_order("TESTUSDT", "SELL", "MARKET", quantity=bad)
-    # Tidak satu pun request boleh terkirim ketika angka non-finite.
     assert fake.calls == []
 
 
@@ -88,6 +84,4 @@ def test_new_order_is_signed_and_never_auto_retried() -> None:
     assert call["method"] == "POST"
     assert call["path"] == "/api/v3/order"
     assert call["signed"] is True
-    # POST order non-idempotent: retry otomatis dilarang (rekonsiliasi
-    # memakai clientOrderId adalah satu-satunya jalur pemulihan yang aman).
     assert call["max_retries"] == 1

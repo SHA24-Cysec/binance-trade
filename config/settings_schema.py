@@ -34,7 +34,7 @@ _WRITE_LOCK = threading.RLock()
 
 
 class ConcurrentSettingsError(RuntimeError):
-    """Override berubah setelah preview, sehingga commit ditolak aman."""
+    pass
 
 
 _SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,40}$")
@@ -70,7 +70,6 @@ def _field(group: str, label: str, description: str, kind: str,
     }
 
 
-# Satu entri untuk setiap kunci PUMP_CONFIG final, termasuk BASE_URL.
 PARAMETER_SCHEMA: dict[str, dict] = {
     "QUOTE_ASSET": _field("Sistem", "Aset kuotasi", "Aset modal dan kuotasi pasangan.", "str", editor="asset"),
     "MODE": _field("Sistem", "Mode aktif", "Diubah melalui panel Mode.", "str", read_only=True, managed_by="mode"),
@@ -93,7 +92,6 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "LOOP_INTERVAL_SECONDS": _field("Scan", "Interval loop", "Jarak evaluasi posisi dan kontrol.", "int", minimum=1, maximum=300, unit="detik"),
     "MIN_QUOTE_VOLUME_USDT_24H": _field("Scan", "Minimum volume kuotasi", "Volume 24 jam minimum.", "float", minimum=0, maximum=1e15, unit="USDT"),
     "MARKET_DATA_INTERVAL": _field("Scan", "Interval data pasar", "Interval candle yang digunakan untuk monitoring pasar.", "str", editor="select", options=["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"]),
-    # Filter kondisi pasar untuk monitoring.
     "PUMP_MIN_24H_CHANGE_PCT": _field("Monitoring Pasar", "Minimum perubahan 24 jam", "Filter monitoring perubahan harga 24 jam.", "float", minimum=0, maximum=1000, unit="%"),
     "PUMP_VOLUME_SURGE_MULT": _field("Monitoring Pasar", "Pengali volume monitoring", "Filter monitoring volume kuotasi dibandingkan rata-rata 7 hari.", "float", minimum=1, maximum=100, unit="x"),
     "BTC_FILTER_ENABLED": _field("Monitoring Pasar", "Filter kondisi BTC", "Filter monitoring kondisi BTC pada jendela candle tertutup.", "bool"),
@@ -155,9 +153,6 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "USE_DUST_SWEEP": _field("Sistem", "Konversi dust ke BNB", "Konversi dust base asset setelah close di LIVE.", "bool"),
     "BASE_URL": _field("Sistem", "Base URL aktif", "Alias turunan dari LIVE_BASE_URL.", "str", read_only=True),
 
-    # ----------------------------------------------------------------
-    # DIPULIHKAN 1 Oktober 2026 bersama logika entry dan backtest.
-    # ----------------------------------------------------------------
     "BACKTEST_ENTRY_DELAY_BARS": _field("Ukuran Posisi", "Latency entry backtest", "Jumlah bar tunggu setelah sinyal sebelum simulasi entry.", "int", minimum=0, maximum=10, unit="bar"),
     "BACKTEST_ENTRY_SPREAD_PCT": _field("Ukuran Posisi", "Spread entry backtest", "Total spread bid-ask yang dibebankan pada simulasi entry.", "float", minimum=0, maximum=10, unit="%"),
     "BACKTEST_SLIPPAGE_PCT": _field("Ukuran Posisi", "Slippage backtest", "Slippage adverse per eksekusi backtest.", "float", minimum=0, maximum=10, unit="%"),
@@ -262,7 +257,6 @@ def _load_mode_override_unlocked(mode: str) -> tuple[dict, list[str]]:
         if unknown:
             raise ValueError("kunci override tidak dikenal: " + ", ".join(unknown))
         forbidden = [k for k in data if PARAMETER_SCHEMA[k]["read_only"]]
-        # PAPER_INITIAL_BALANCES adalah pengecualian terkelola oleh reset.
         forbidden = [k for k in forbidden if k != "PAPER_INITIAL_BALANCES"]
         if forbidden:
             raise ValueError("override memuat kunci read-only: " + ", ".join(forbidden))
@@ -347,7 +341,6 @@ def _validate_symbol_list(value: Any, quote: str) -> list[str]:
     return result
 
 
-# CATATAN AUDIT 2026-09-27: _validate_watchlist() dihapus bersama field
 
 def validate_balances(value: Any) -> dict[str, float]:
     if not isinstance(value, dict) or not value:
@@ -408,13 +401,11 @@ def coerce_field(key: str, value: Any, candidate: dict) -> Any:
 
 
 def validate_candidate(candidate: dict, mode: str) -> tuple[dict, dict[str, str], list[str]]:
-    """Validasi semua nilai editable dan relasi lintas-field."""
     raw_mode = str(mode).strip().upper()
     cleaned = deepcopy(candidate)
     errors: dict[str, str] = {}
     warnings: list[str] = []
 
-    # QUOTE_ASSET divalidasi lebih dulu karena dipakai editor simbol.
     keys = ["QUOTE_ASSET"] + [k for k in PARAMETER_SCHEMA if k != "QUOTE_ASSET"]
     for key in keys:
         spec = PARAMETER_SCHEMA[key]
@@ -433,8 +424,6 @@ def validate_candidate(candidate: dict, mode: str) -> tuple[dict, dict[str, str]
             errors[key] = message
 
     if not errors:
-        # Filter monitoring. Ambang ekstrem tetap diberi peringatan agar perubahan
-        # konfigurasi mudah diaudit.
         relation("PUMP_VOLUME_SURGE_MULT", cleaned["PUMP_VOLUME_SURGE_MULT"] >= 1.0,
                  "harus minimal 1 kali rata-rata 7 hari, di bawah itu berarti volume justru turun")
         relation("ATR_MULT_TRAIL", cleaned["ATR_MULT_TRAIL"] <= cleaned["ATR_MULT_SL"],
@@ -443,9 +432,6 @@ def validate_candidate(candidate: dict, mode: str) -> tuple[dict, dict[str, str]
                  "tidak boleh melebihi trigger trailing")
         relation("ATR_MULT_BE_LOCK", cleaned["ATR_MULT_BE_LOCK"] <= cleaned["ATR_MULT_BE_TRIGGER"],
                  "tidak boleh melebihi trigger breakeven")
-        # Relasi R:R (perbaikan audit 2026-09-27): TP harus lebih jauh dari SL.
-        # Konfigurasi terbalik (SL >= TP) membuat rasio risk-reward negatif
-        # secara struktural dan hampir pasti merupakan salah ketik.
         relation("ATR_MULT_TP", cleaned["ATR_MULT_TP"] > cleaned["ATR_MULT_SL"],
                  "harus lebih besar dari ATR_MULT_SL agar rasio risk-reward tidak terbalik")
         if cleaned["USE_TP"] and cleaned["USE_STOP_LOSS"]:
@@ -465,12 +451,6 @@ def validate_candidate(candidate: dict, mode: str) -> tuple[dict, dict[str, str]
         if cleaned["USE_TP"]:
             relation("TP_PCT", cleaned["TP_PCT"] > 0, "harus lebih besar dari nol saat Take Profit aktif")
 
-        # PERBAIKAN AUDIT 2026-09-30 (temuan KRITIS-01). Mematikan kedua rem
-        # kerugian tingkat akun sekaligus membuat dd_stopped dan daily_stopped
-        # tidak pernah menyala, sehingga CLOSE_ALL_AT_LIMIT menjadi mati total
-        # walaupun nilainya True. Kombinasi ini tidak diblokir di sini (operator
-        # berhak memilihnya untuk PAPER), tetapi wajib terlihat jelas. Mode LIVE
-        # memblokirnya terpisah di dashboard dan di account_risk_gate().
         if not cleaned["USE_EQUITY_STOP"] and not cleaned["USE_DAILY_STOP"]:
             pesan = ("USE_EQUITY_STOP dan USE_DAILY_STOP dua-duanya nonaktif: "
                      "tidak ada rem kerugian tingkat akun sama sekali.")
@@ -480,8 +460,6 @@ def validate_candidate(candidate: dict, mode: str) -> tuple[dict, dict[str, str]
             pesan += " Mode LIVE akan menolak start dengan kombinasi ini."
             warnings.append(pesan)
 
-        # Peringatan ukuran risiko per posisi. SL yang sangat lebar berarti satu
-        # posisi saja dapat menghapus sebagian besar modal sebelum stop bekerja.
         if cleaned["USE_STOP_LOSS"] and cleaned["SL_PCT"] >= 20:
             warnings.append(
                 f"SL_PCT {cleaned['SL_PCT']:g}% sangat lebar: satu posisi dapat rugi "
@@ -522,7 +500,6 @@ def diff_values(old: dict, new: dict) -> list[dict]:
 
 
 def dangerous_relaxations(old: dict, new: dict) -> list[str]:
-    """Kembalikan perubahan LIVE yang menambah eksposur atau melepas guard."""
     relaxed: list[str] = []
     for key, label in (
         ("USE_TP", "Take Profit dimatikan"),
@@ -536,8 +513,6 @@ def dangerous_relaxations(old: dict, new: dict) -> list[str]:
         if bool(old.get(key)) and not bool(new.get(key)):
             relaxed.append(label)
         elif key == "USE_DAILY_STOP" and not bool(new.get(key)):
-            # Default repo saat ini memang False; tetap laporkan sebagai guard
-            # yang tidak aktif agar audit LIVE tidak melewatkan risiko ini.
             relaxed.append(label)
     if not bool(old.get("SHOW_BACKTEST_IN_LIVE")) and bool(new.get("SHOW_BACKTEST_IN_LIVE")):
         relaxed.append("Backtest diaktifkan saat LIVE dan dapat memakai rate limit IP")
@@ -581,7 +556,6 @@ def public_schema(defaults: dict, current: dict) -> list[dict]:
     fields = []
     for key, spec in PARAMETER_SCHEMA.items():
         row = {"key": key, **deepcopy(spec)}
-        # Kredensial tidak pernah dikirim, bahkan bila defaults berasal dari env.
         if key in ("API_KEY", "API_SECRET"):
             row["default"] = None
             row["value"] = None
@@ -592,23 +566,3 @@ def public_schema(defaults: dict, current: dict) -> list[dict]:
             row["modified"] = defaults.get(key) != current.get(key)
         fields.append(row)
     return fields
-
-
-# ==== RINGKASAN AUDIT (settings_schema.py, bagian cache backtest) =====
-# Lingkup perubahan: HANYA empat entri _field() baru untuk kunci cache
-#   backtest. Tidak ada validator, relasi, daftar kunci terhapus, atau logika
-#   penyimpanan override yang disentuh.
-# Kenapa wajib: PARAMETER_SCHEMA adalah kontrak satu-satu dengan PUMP_CONFIG
-#   (dijaga tests/test_config_settings.py). Menambah kunci config tanpa entri
-#   skema akan membuat tes itu merah dan panel setelan menolak override.
-# Sintaks/tipe: BACKTEST_CACHE_ENABLED bool; BACKTEST_CACHE_FILE str dan
-#   read_only=True mengikuti pola path runtime lain (STATE_FILE, LOG_FILE,
-#   RATE_LIMIT_STATE_FILE) supaya path tidak bisa diubah lewat HTTP;
-#   FRESH_HOURS dan TTL_DAYS int dengan batas wajar (0-168 jam, 0-3650 hari).
-# Keamanan: tidak ada entri yang ditandai dangerous karena tidak satu pun
-#   menyentuh risiko order; path cache dibuat read_only sehingga endpoint
-#   setelan tidak bisa dipakai mengarahkan penulisan file ke lokasi lain.
-#   test_schema_public_payload_never_contains_credentials tetap hijau.
-# Race condition: tidak relevan, modul ini hanya deklarasi skema; penulisan
-#   override tetap lewat _WRITE_LOCK dan interprocess_lock yang sudah ada.
-# =======================================================================

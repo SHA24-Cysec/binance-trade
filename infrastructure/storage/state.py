@@ -17,13 +17,6 @@ from infrastructure.storage.atomic_io import archive_corrupt, atomic_write_json,
 
 logger = logging.getLogger("state")
 
-# Dirampingkan pada audit 2026-09-24 (temuan R-02): kunci sisa bot grid
-# martingale lama ("layers", "avg_price", "total_qty", "last_signal_bar_time")
-# dan "last_order_time" tidak dibaca satu baris pun di kode aktif, jadi
-# dihapus supaya tidak menyesatkan. Skema posisi lengkap milik pump scanner
-# ada di DEFAULT_STATE pump_scanner_bot.py (yang digabung di atas hasil
-# load_state di sini); dashboard membaca file state dengan .get() yang aman,
-# jadi kunci yang hilang tidak merusak apa pun.
 DEFAULT_STATE = {
     "be_active": False,
     "be_stop_price": 0.0,
@@ -69,7 +62,6 @@ def load_state(path: str) -> dict:
 
 
 def save_state(path: str, state: dict) -> None:
-    """Tulis JSON atomik dengan retry sharing violation Windows."""
     with interprocess_lock(path):
         atomic_write_json(path, state)
 
@@ -82,14 +74,6 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
-# ---------------------------------------------------------------------
-# "Control file" -- jalur sinyal SEARAH dari dashboard.py (proses lain)
-# ke pump_scanner_bot.py, dipakai untuk perintah manual dari dashboard
-# (mis. tombol "Jual Sekarang"). Dipisah dari file state utama supaya
-# TIDAK ada risiko tabrakan tulis dengan state.json yang aktif ditulis
-# terus-menerus oleh loop utama bot -- dashboard hanya menulis file kecil
-# ini, bot yang membaca & memprosesnya, lalu menghapusnya.
-# ---------------------------------------------------------------------
 
 def _load_control_unlocked(path: str) -> dict:
     if not os.path.exists(path):
@@ -115,7 +99,6 @@ def load_control(path: str) -> dict:
 
 
 def save_control(path: str, data: dict) -> None:
-    """Tulis kontrol atomik dengan temporary unik dan retry Windows."""
     with interprocess_lock(path):
         atomic_write_json(path, data)
 
@@ -134,11 +117,6 @@ def clear_control(path: str) -> None:
 
 
 def get_stop_control_file(control_path: str) -> str:
-    """Path khusus perintah STOP, terpisah dari CLOSE_POSITION.
-
-    Pemisahan mencegah klik Stop menimpa perintah Jual Sekarang yang sedang
-    menunggu diproses bot. Keduanya tetap memakai kanal file kontrol state.py.
-    """
     path = Path(control_path)
     return str(path.with_name(f"{path.stem}.stop{path.suffix or '.json'}"))
 
@@ -159,11 +137,6 @@ def clear_stop_request(control_path: str) -> None:
 
 
 def consume_stop_request(control_path: str, max_age_seconds: int = 300) -> bool:
-    """Ambil dan hapus permintaan stop satu kali.
-
-    Permintaan stale dibuang agar bot yang dinyalakan berjam-jam kemudian
-    tidak langsung berhenti karena file lama.
-    """
     stop_path = get_stop_control_file(control_path)
     with interprocess_lock(stop_path):
         cmd = _load_control_unlocked(stop_path)
@@ -182,4 +155,3 @@ def consume_stop_request(control_path: str, max_age_seconds: int = 300) -> bool:
             logger.warning("Perintah stop diabaikan karena stale/tidak valid (umur %.1f detik).", age)
             return False
         return True
-

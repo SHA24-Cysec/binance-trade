@@ -19,17 +19,11 @@ from __future__ import annotations
 
 from strategy.indicators import Kline
 
-MS_PER_BAR = 300_000  # 5 menit
+MS_PER_BAR = 300_000
 
 
 def make_candle(index: int, open_: float, high: float, low: float, close: float,
                 volume: float = 1_000.0, bar_ms: int = MS_PER_BAR) -> Kline:
-    """Satu candle dengan quote_volume yang konsisten terhadap volume dan harga.
-
-    quote_volume = volume x rata-rata (high, low, close). Ini mendekati cara
-    bursa menghitung quote asset volume (jumlah harga x kuantitas per trade),
-    cukup untuk membuat simulasi setup lama tetap terbaca pada data uji.
-    """
     harga_rata = (high + low + close) / 3.0
     return Kline(
         open_time=index * bar_ms,
@@ -46,18 +40,6 @@ def make_candle(index: int, open_: float, high: float, low: float, close: float,
 def seri_dengan_setup(harga: float = 1.0, bar_datar: int = 288, volume: float = 5_000_000.0,
                       ekor: str = "naik", panjang_ekor: int = 20,
                       mulai_index: int = 0) -> list[Kline]:
-    """Deret panjang yang memuat SATU setup pullback retest di dekat ujungnya.
-
-    Dipakai backtest satu simbol dan backtest portofolio supaya keduanya
-    memakai skenario yang sama persis. Bagian datar di depan diperlukan
-    karena run_backtest() butuh 24 jam penuh (288 candle 5 menit) sebelum
-    statistik bergulir 24 jam terisi.
-
-    ekor:
-      "naik"       harga naik terus setelah entry (menguji Take Profit)
-      "invalidasi" harga jatuh menembus batas invalidasi setelah entry
-      "bertahan"   harga bergerak datar sedikit di atas level breakout
-    """
     out: list[Kline] = []
     i = mulai_index
     for _ in range(bar_datar):
@@ -85,14 +67,8 @@ def seri_dengan_setup(harga: float = 1.0, bar_datar: int = 288, volume: float = 
 
 
 def blok_setup(harga: float, mulai_index: int, volume: float = 5_000_000.0):
-    """Satu blok 16 candle: konsolidasi, pivot high, breakout, lalu retest sah.
-
-    Return (candles, harga_penutupan_terakhir, index_berikutnya). Dipisah dari
-    seri_dengan_setup supaya bisa dirangkai berkali-kali pada satu deret.
-    """
     out: list[Kline] = []
     i = mulai_index
-    # Struktur: 12 candle datar dengan satu pivot high di tengah.
     for j in range(12):
         o = harga
         h = harga * 1.004
@@ -105,16 +81,10 @@ def blok_setup(harga: float, mulai_index: int, volume: float = 5_000_000.0):
         i += 1
 
     level = harga * 1.012
-    # Candle breakout, close jelas di atas level.
     out.append(make_candle(i, harga * 1.002, level * 1.013, harga * 0.999, level * 1.012, volume)); i += 1
-    # Tiga candle menjauh lalu mulai turun kembali. Jumlah TIGA ini dijaga
-    # supaya candle retest adalah candle ke-4 setelah anchor (breakout),
-    # memenuhi VWAP_MIN_BARS_AFTER_ANCHOR produksi (4). Semua low tetap di
-    # dalam zona retest sehingga dihitung SATU kunjungan (MAX_RETEST_TOUCHES 1).
     out.append(make_candle(i, level * 1.012, level * 1.014, level * 1.006, level * 1.008, volume)); i += 1
     out.append(make_candle(i, level * 1.008, level * 1.010, level * 1.004, level * 1.006, volume)); i += 1
     out.append(make_candle(i, level * 1.006, level * 1.008, level * 1.002, level * 1.004, volume)); i += 1
-    # Candle retest: low masuk zona, close kembali di atas level.
     out.append(make_candle(i, level * 1.001, level * 1.009, level * 0.997, level * 1.008, volume)); i += 1
     return out, level * 1.008, i
 
@@ -122,13 +92,6 @@ def blok_setup(harga: float, mulai_index: int, volume: float = 5_000_000.0):
 def seri_banyak_setup(harga: float = 100.0, siklus: int = 10, bar_datar: int = 288,
                       volume: float = 5_000_000.0, naik: int = 6, turun: int = 20,
                       mulai_index: int = 0) -> list[Kline]:
-    """Deret panjang berisi BANYAK setup pullback retest berturut-turut.
-
-    Setiap siklus: struktur setup, lalu harga naik sebentar, lalu turun lagi
-    ke sekitar harga awal siklus supaya deretnya tidak meledak secara
-    eksponensial. Dipakai backtest portofolio yang butuh banyak kesempatan
-    entry di sepanjang garis waktu.
-    """
     out: list[Kline] = []
     i = mulai_index
     for _ in range(bar_datar):
@@ -149,24 +112,10 @@ def seri_banyak_setup(harga: float = 100.0, siklus: int = 10, bar_datar: int = 2
     return out
 
 
-# ======================================================================
-# Data pendukung GERBANG PUMP (naik 24 jam + volume naik)
-# ======================================================================
 
 def riwayat_harian(klines: list[Kline], hari: int = 7,
                    quote_volume_harian: float = 1_000_000.0,
                    harga: float = 1.0) -> list[Kline]:
-    """Candle 1d PENUH yang seluruhnya tertutup SEBELUM deret ``klines``.
-
-    Dipakai tes dan selftest yang memanggil backtest: gerbang pump menolak
-    simbol yang belum punya tujuh candle harian penuh (fail closed), jadi
-    skenario yang ingin menguji hal LAIN (exit, sizing, invalidasi) tetap
-    harus menyediakan riwayat harian yang masuk akal.
-
-    Candle dibuat mundur dari candle pertama ``klines``, satu hari per candle.
-    Timestamp boleh negatif karena data sintetis memakai open_time mulai dari
-    nol; yang dipakai gerbang hanya urutan waktu dan quote_volume.
-    """
     ms_per_day = 86_400_000
     mulai = int(klines[0].open_time) if klines else 0
     out: list[Kline] = []
@@ -183,15 +132,6 @@ def riwayat_harian(klines: list[Kline], hari: int = 7,
 
 
 def cfg_gerbang_pump_nonaktif(config: dict) -> dict:
-    """Salinan config dengan ambang gerbang pump dilonggarkan total.
-
-    HANYA untuk pengujian yang menguji bagian lain dari pipeline (exit,
-    sizing, paritas live vs backtest). Gerbang pump sendiri diuji terpisah di
-    tests/test_pump_gate.py dengan ambang sungguhan. Melonggarkan ambang di
-    sini membuat tes tersebut tidak ikut merah setiap kali default gerbang
-    diubah, tanpa perlu mematikan gerbangnya lewat jalan belakang di kode
-    produksi.
-    """
     out = dict(config)
     out["PUMP_MIN_24H_CHANGE_PCT"] = -1000.0
     out["PUMP_VOLUME_SURGE_MULT"] = 0.0
@@ -200,8 +140,4 @@ def cfg_gerbang_pump_nonaktif(config: dict) -> dict:
 
 def seri_data(harga: float = 100.0, bars: int = 400,
               volume: float = 5_000_000.0) -> list[Kline]:
-    """Alias kompatibilitas untuk pemanggil yang dibuat setelah commit 0b6ca1d.
-
-    Mengembalikan deret dengan satu setup pullback retest yang valid.
-    """
     return seri_dengan_setup(harga=harga, bar_datar=max(1, bars - 12), volume=volume)

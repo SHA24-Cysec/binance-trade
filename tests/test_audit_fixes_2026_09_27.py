@@ -41,19 +41,14 @@ def _filters() -> dict:
     )}
 
 
-# ---------------------------------------------------------------------
-# 2. Fallback sadar-unit
-# ---------------------------------------------------------------------
 def test_exit_distance_converts_pct_fallback_in_atr_mode() -> None:
     state = {"sl_pct": 0.0, "exit_source": "ATR"}
     cfg = {"SL_PCT": 28.8}
-    entry = 0.5  # koin murah: fallback lama menghasilkan jarak absolut 28.8
+    entry = 0.5
     jarak = bot._exit_distance(state, cfg, "sl_pct", "SL_PCT", atr_mode=True, entry=entry)
     assert abs(jarak - 0.5 * 0.288) < 1e-12, "persen wajib dikonversi ke jarak harga"
-    # Nilai state yang sudah terkunci tetap menang apa adanya.
     state["sl_pct"] = 0.01
     assert bot._exit_distance(state, cfg, "sl_pct", "SL_PCT", True, entry) == 0.01
-    # Mode persen: fallback tetap berdenominasi persen (perilaku lama).
     state["sl_pct"] = 0.0
     assert bot._exit_distance(state, cfg, "sl_pct", "SL_PCT", False, entry) == 28.8
 
@@ -65,13 +60,9 @@ def test_native_stop_price_pct_fallback_stays_positive_for_cheap_coin() -> None:
     assert 0 < stop < 0.5, f"stopPrice harus valid di bawah entry, dapat {stop}"
 
 
-# ---------------------------------------------------------------------
-# 3. Settle pasca-fill proteksi native
-# ---------------------------------------------------------------------
 def test_settle_native_fill_clears_flag(tmp_path) -> None:
     class Client:
         def get_account(self):
-            # Leg proteksi sudah menjual habis base asset.
             return {"balances": [{"asset": "USDT", "free": "1000", "locked": "0"}]}
 
     cfg = _config(tmp_path)
@@ -104,24 +95,16 @@ def test_settle_native_fill_stays_fail_closed_when_account_unavailable(tmp_path)
     })
     bot._settle_native_protective_fill(Client(), cfg, state, "TESTUSDT", "NATIVE_OCO_FILLED")
 
-    # Saldo tidak terverifikasi -> tetap fail-closed, posisi tidak disentuh.
     assert state["reconciliation_required"] is True
     assert state["current_symbol"] == "TESTUSDT"
 
 
-# ---------------------------------------------------------------------
-# 4. Klasifikasi reject deterministik
-# ---------------------------------------------------------------------
 def test_definitive_reject_includes_invalid_ordertype_codes() -> None:
     assert bot._is_definitive_reject(BinanceAPIError(400, -1116, "Invalid orderType."))
     assert bot._is_definitive_reject(BinanceAPIError(400, -1020, "Unsupported operation."))
-    # Kode tak dikenal tetap fail-closed (UNKNOWN).
     assert not bot._is_definitive_reject(BinanceAPIError(500, -1000, "Unknown error."))
 
 
-# ---------------------------------------------------------------------
-# 5. Force close hanya untuk episode kerugian
-# ---------------------------------------------------------------------
 def _force_close_calls(monkeypatch, tmp_path, source: str) -> list:
     calls = []
     monkeypatch.setattr(bot, "close_position",
@@ -148,5 +131,4 @@ def test_close_all_at_limit_still_fires_on_loss_episode(monkeypatch, tmp_path) -
 
 
 def test_close_all_at_limit_legacy_state_treated_as_loss(monkeypatch, tmp_path) -> None:
-    # State lama tanpa daily_stop_source -> konservatif: tetap menutup.
     assert len(_force_close_calls(monkeypatch, tmp_path, None)) == 1

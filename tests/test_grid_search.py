@@ -23,13 +23,8 @@ from backtesting.synthetic_data import (
 )
 
 
-# ---------------------------------------------------------------------
-# Penyusunan rentang
-# ---------------------------------------------------------------------
 def test_rentang_inklusif_dan_bebas_galat_float():
-    """Penjumlahan float berulang membuat nilai akhir hilang dari deret."""
     assert gs.buat_rentang(1.0, 3.0, 0.5) == [1.0, 1.5, 2.0, 2.5, 3.0]
-    # 0.1 + 0.1 + 0.1 == 0.30000000000000004 pada aritmetika float.
     assert gs.buat_rentang(0.1, 0.5, 0.1) == [0.1, 0.2, 0.3, 0.4, 0.5]
     assert gs.buat_rentang(2.0, 2.0, 0.5) == [2.0]
 
@@ -43,18 +38,11 @@ def test_rentang_menolak_masukan_tidak_masuk_akal():
         gs.buat_rentang(3.0, 1.0, 0.5)
 
 
-# ---------------------------------------------------------------------
-# Pemangkasan kombinasi
-# ---------------------------------------------------------------------
 def test_kombinasi_mubazir_dipangkas():
-    """Saat mode ATR aktif, parameter persen tidak dibaca mesin backtest.
-
-    Menjalankannya tetap hanya membuang waktu karena hasilnya identik.
-    """
     spec = {
         "USE_ATR_EXIT": [True],
         "ATR_MULT_SL": [1.5, 2.0],
-        "SL_PCT": [1.0, 2.0, 3.0],   # tidak berpengaruh saat mode ATR
+        "SL_PCT": [1.0, 2.0, 3.0],
     }
     komb, dipangkas = gs.expand_grid(spec)
     assert len(komb) == 2, "SL_PCT seharusnya tidak melipatgandakan kombinasi"
@@ -65,7 +53,7 @@ def test_kombinasi_mubazir_dipangkas_arah_sebaliknya():
     spec = {
         "USE_ATR_EXIT": [False],
         "SL_PCT": [1.0, 2.0],
-        "ATR_MULT_SL": [1.5, 2.0, 2.5],  # tidak berpengaruh saat mode persen
+        "ATR_MULT_SL": [1.5, 2.0, 2.5],
     }
     komb, dipangkas = gs.expand_grid(spec)
     assert len(komb) == 2
@@ -73,7 +61,6 @@ def test_kombinasi_mubazir_dipangkas_arah_sebaliknya():
 
 
 def test_kedua_mode_tetap_diuji_terpisah():
-    """Pemangkasan tidak boleh sampai membuang salah satu mode exit."""
     spec = {"USE_ATR_EXIT": [True, False], "SL_PCT": [1.0], "ATR_MULT_SL": [1.5]}
     komb, _ = gs.expand_grid(spec)
     mode = {k["USE_ATR_EXIT"] for k in komb}
@@ -81,7 +68,6 @@ def test_kedua_mode_tetap_diuji_terpisah():
 
 
 def test_batas_keras_kombinasi_ditegakkan():
-    """Tanpa batas, satu klik bisa membuat dashboard menggantung berjam jam."""
     with pytest.raises(gs.GridSearchError, match="melebihi batas|Terlalu besar"):
         gs.expand_grid({"SL_PCT": gs.buat_rentang(0.1, 60.0, 0.01)})
 
@@ -93,14 +79,7 @@ def test_grid_kosong_ditolak():
         gs.expand_grid({"SL_PCT": []})
 
 
-# ---------------------------------------------------------------------
-# Skor
-# ---------------------------------------------------------------------
 def test_skor_menetralkan_nilai_tak_hingga():
-    """Profit factor tak hingga muncul saat belum pernah rugi sekali pun.
-
-    Kalau dibiarkan, kombinasi bersampel kecil akan selalu menang.
-    """
     assert gs.hitung_skor({"profit_factor": float("inf")}, "profit_factor") == 1e9
     assert gs.hitung_skor({"profit_factor": float("nan")}, "profit_factor") == 0.0
 
@@ -116,9 +95,6 @@ def test_metrik_tidak_dikenal_ditolak():
         gs.hitung_skor({}, "sharpe_ratio_imajiner")
 
 
-# ---------------------------------------------------------------------
-# Eksekusi penuh
-# ---------------------------------------------------------------------
 @pytest.fixture()
 def data_uji():
     kl = seri_banyak_setup(harga=100.0, siklus=20, bar_datar=288)
@@ -142,24 +118,17 @@ def test_grid_search_menghasilkan_peringkat(data_uji):
 
 
 def test_periode_latih_dan_uji_benar_benar_terpisah(data_uji):
-    """Kalau keduanya beririsan, validasi out-of-sample tidak ada artinya."""
     kl, daily, cfg = data_uji
     hasil = gs.run_grid_search(
         kl, cfg, {"USE_ATR_EXIT": [False], "TP_PCT": [4.0]},
         warmup_bars=288, daily_klines=daily, rasio_latih=0.7, min_trades=1)
     total_bar_tradable = len(kl) - 288
-    # Bar latih dan bar uji masing masing hanya sebagian dari total.
     assert hasil.bar_latih < total_bar_tradable
     assert hasil.bar_uji < total_bar_tradable
-    assert hasil.bar_latih > hasil.bar_uji  # rasio 0.7
+    assert hasil.bar_latih > hasil.bar_uji
 
 
 def test_peringkat_memakai_skor_latih_bukan_skor_uji(data_uji):
-    """Skor uji tidak boleh ikut menentukan urutan.
-
-    Begitu periode uji dipakai memilih, ia bukan lagi data yang belum pernah
-    dilihat, dan angkanya berhenti bermakna sebagai validasi.
-    """
     kl, daily, cfg = data_uji
     hasil = gs.run_grid_search(
         kl, cfg, {"USE_ATR_EXIT": [False], "TP_PCT": [2.0, 3.0, 4.0, 5.0, 6.0]},
@@ -170,7 +139,6 @@ def test_peringkat_memakai_skor_latih_bukan_skor_uji(data_uji):
 
 
 def test_sampel_kecil_ditandai_tidak_andal(data_uji):
-    """Rata rata dari beberapa trade tidak layak dijadikan dasar keputusan."""
     kl, daily, cfg = data_uji
     hasil = gs.run_grid_search(
         kl, cfg, {"USE_ATR_EXIT": [False], "TP_PCT": [4.0]},
@@ -180,7 +148,6 @@ def test_sampel_kecil_ditandai_tidak_andal(data_uji):
 
 
 def test_hasil_tidak_andal_selalu_di_bawah(data_uji):
-    """Kombinasi bersampel kecil tidak boleh menempati peringkat teratas."""
     kl, daily, cfg = data_uji
     hasil = gs.run_grid_search(
         kl, cfg, {"USE_ATR_EXIT": [False], "TP_PCT": [2.0, 4.0, 80.0]},
@@ -202,7 +169,6 @@ def test_degradasi_dihitung_dari_selisih_latih_dan_uji(data_uji):
 
 
 def test_mematikan_periode_uji_memunculkan_peringatan(data_uji):
-    """rasio_latih=1.0 berarti tidak ada validasi sama sekali."""
     kl, daily, cfg = data_uji
     hasil = gs.run_grid_search(
         kl, cfg, {"USE_ATR_EXIT": [False], "TP_PCT": [4.0]},
@@ -224,7 +190,6 @@ def test_banyak_kombinasi_memunculkan_peringatan_pengujian_berganda(data_uji):
 
 
 def test_kombinasi_tidak_valid_dilewati_bukan_menggagalkan(data_uji):
-    """Satu nilai di luar rentang wajar tidak boleh membatalkan seluruh grid."""
     kl, daily, cfg = data_uji
     hasil = gs.run_grid_search(
         kl, cfg, {"USE_ATR_EXIT": [False], "TP_PCT": [4.0], "SL_PCT": [2.0, 99999.0]},
@@ -286,17 +251,8 @@ def test_ringkas_untuk_tabel_membatasi_jumlah_baris(data_uji):
 
 
 def test_candle_harian_periode_latih_tidak_bocor_dari_masa_depan(data_uji):
-    """Gerbang pump periode latih tidak boleh melihat candle harian setelahnya.
-
-    Kalau bocor, hasil latih menjadi terlalu optimistis dan seluruh
-    perbandingan latih lawan uji kehilangan makna.
-    """
     kl, _, cfg = data_uji
 
-    # riwayat_harian() menaruh seluruh candle harian SEBELUM deret intraday,
-    # jadi tidak ada yang bisa bocor dan penyaringan tidak teruji. Di sini
-    # dibangun deret harian yang benar benar membentang sepanjang periode
-    # intraday, sehingga penyaringan punya sesuatu untuk dipotong.
     from strategy.indicators import Kline
     ms_hari = 86_400_000
     awal = kl[0].open_time - 7 * ms_hari
@@ -310,8 +266,6 @@ def test_candle_harian_periode_latih_tidak_bocor_dari_masa_depan(data_uji):
         t += ms_hari
     assert len(daily) > 8, "deret harian uji harus melampaui periode intraday"
 
-    # Direkam pasangan (batas waktu potongan intraday, daftar candle harian)
-    # supaya invarian bisa diperiksa langsung, bukan lewat proksi.
     terpakai: list[tuple[int, list]] = []
     asli = gs.bt.run_backtest
 
@@ -330,25 +284,17 @@ def test_candle_harian_periode_latih_tidak_bocor_dari_masa_depan(data_uji):
     assert len(terpakai) == 2, "harus ada satu panggilan latih dan satu uji"
     (batas_latih, harian_latih), (batas_uji, harian_uji) = terpakai
 
-    # Invarian inti: tidak satu pun candle harian boleh tertutup SETELAH bar
-    # terakhir periode yang sedang disimulasikan. Kalau ini dilanggar, gerbang
-    # pump memakai informasi masa depan.
     assert all(d.close_time <= batas_latih for d in harian_latih), \
         "periode latih memakai candle harian yang belum tertutup"
     assert all(d.close_time <= batas_uji for d in harian_uji), \
         "periode uji memakai candle harian yang belum tertutup"
 
-    # Periode latih berakhir lebih awal, jadi riwayat hariannya tidak boleh
-    # lebih panjang daripada periode uji.
     assert batas_latih < batas_uji
     assert len(harian_latih) <= len(harian_uji)
     assert harian_uji[:len(harian_latih)] == harian_latih, \
         "riwayat harian periode latih bukan awalan dari periode uji"
 
 
-# ---------------------------------------------------------------------
-# Parser spesifikasi baris perintah
-# ---------------------------------------------------------------------
 def test_parse_spec_rentang_dan_daftar():
     spec = gs.parse_spec_cli("USE_ATR_EXIT=false,SL_PCT=1:3:1,TP_PCT=2|4|6")
     assert spec["USE_ATR_EXIT"] == [False]
@@ -357,18 +303,12 @@ def test_parse_spec_rentang_dan_daftar():
 
 
 def test_parse_spec_boolean_string_false_tidak_menjadi_true():
-    """Jebakan klasik: bool("False") bernilai True.
-
-    Kalau ini lolos, grid akan diam diam menguji mode ATR padahal pengguna
-    memintanya dimatikan, dan hasilnya salah tanpa pesan galat apa pun.
-    """
     assert gs.parse_spec_cli("USE_ATR_EXIT=false")["USE_ATR_EXIT"] == [False]
     assert gs.parse_spec_cli("USE_ATR_EXIT=0")["USE_ATR_EXIT"] == [False]
     assert gs.parse_spec_cli("USE_ATR_EXIT=true")["USE_ATR_EXIT"] == [True]
 
 
 def test_parse_spec_atr_period_tetap_integer():
-    """ATR_PERIOD dipakai sebagai indeks, float akan menggagalkan perhitungan."""
     spec = gs.parse_spec_cli("ATR_PERIOD=10:20:5")
     assert spec["ATR_PERIOD"] == [10, 15, 20]
     assert all(isinstance(v, int) for v in spec["ATR_PERIOD"])

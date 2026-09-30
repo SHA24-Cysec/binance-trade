@@ -53,7 +53,6 @@ logger = logging.getLogger("paper_engine")
 
 _ZERO = Decimal("0")
 
-# Kode error yang ditiru dari Binance (untuk menguji penanganan error bot).
 ERR_INVALID_QTY = (-1013, "Filter failure: LOT_SIZE")
 ERR_MIN_NOTIONAL = (-1013, "Filter failure: NOTIONAL")
 ERR_PRICE_FILTER = (-1013, "Filter failure: PRICE_FILTER")
@@ -69,8 +68,6 @@ def _reject(err: tuple[int, str], extra: str = "") -> BinanceAPIError:
 
 
 class PaperMatchingEngine:
-    """Mesin simulasi order. Tidak menyentuh jaringan langsung; data pasar
-    diambil lewat callable yang di-inject (mudah diuji dengan data palsu)."""
 
     def __init__(
         self,
@@ -87,11 +84,6 @@ class PaperMatchingEngine:
         self.depth_provider = depth_provider
         self.price_provider = price_provider
         self.quote_asset = quote_asset.upper()
-        # Tarif fee dihitung sebagai Decimal EKSAK dari nilai mentah config
-        # (bukan lewat helper float get_taker_fee_pct) agar tidak menyerap galat
-        # pembulatan float, mis. 0.1*0.75 -> 0.07500000000000001. Nilai persen
-        # tetap konsisten dengan config.get_taker_fee_pct() (helper maker sudah
-        # dihapus sebagai dead code pada audit 2026-09-27).
         taker_base = Decimal(str(config.get("TAKER_FEE_PCT", 0.1)))
         maker_base = Decimal(str(config.get("MAKER_FEE_PCT", config.get("TAKER_FEE_PCT", 0.1))))
         if config.get("USE_BNB_FEE_DISCOUNT"):
@@ -101,20 +93,13 @@ class PaperMatchingEngine:
         self._maker_rate = maker_base / Decimal("100")
         self._trade_seq = int(time.time())
 
-    # ------------------------------------------------------------------
-    # Util
-    # ------------------------------------------------------------------
     def _split_assets(self, symbol: str) -> tuple[str, str]:
-        """Pisah simbol menjadi (base, quote). Bot memakai quote tetap
-        (USDT). Bila simbol tidak berakhiran quote_asset, cari dari daftar
-        quote umum."""
         s = symbol.upper()
         if s.endswith(self.quote_asset):
             return s[: -len(self.quote_asset)], self.quote_asset
         for q in ("USDT", "FDUSD", "USDC", "BTC", "ETH", "BNB", "TUSD", "TRY", "EUR"):
             if s.endswith(q) and len(s) > len(q):
                 return s[: -len(q)], q
-        # fallback: anggap 3 huruf terakhir quote
         return s[:-3], s[-3:]
 
     def _now_ms(self) -> int:
@@ -132,7 +117,6 @@ class PaperMatchingEngine:
                           f"(qty {qty} < minQty {filters.min_qty})")
         step = filters.step_size
         if step > 0:
-            # (qty - minQty) harus kelipatan step.
             rem = (qty - filters.min_qty) % step
             if rem != 0:
                 raise _reject(ERR_INVALID_QTY,
@@ -147,8 +131,6 @@ class PaperMatchingEngine:
                           f"(price {price} tidak kelipatan tickSize {tick})")
 
     def _levels(self, symbol: str, side: str) -> list[tuple[Decimal, Decimal]]:
-        """Ambil level order book relevan: asks (naik) untuk BUY, bids (turun)
-        untuk SELL. Kembalikan list (price, qty) Decimal."""
         depth = self.depth_provider(symbol)
         raw = depth.get("asks" if side == "BUY" else "bids", [])
         out: list[tuple[Decimal, Decimal]] = []
@@ -161,8 +143,6 @@ class PaperMatchingEngine:
 
     def _walk_by_qty(self, levels: list[tuple[Decimal, Decimal]], target_qty: Decimal
                      ) -> tuple[Decimal, Decimal, list[tuple[Decimal, Decimal]]]:
-        """Berjalan melalui level sampai target_qty terpenuhi atau habis.
-        Kembalikan (filled_qty, quote_spent, fills[(price, qty)])."""
         remaining = target_qty
         filled = _ZERO
         quote = _ZERO
@@ -181,7 +161,6 @@ class PaperMatchingEngine:
 
     def _walk_by_quote(self, levels: list[tuple[Decimal, Decimal]], target_quote: Decimal
                        ) -> tuple[Decimal, Decimal, list[tuple[Decimal, Decimal]]]:
-        """Berjalan sampai dana quote habis (untuk BUY quoteOrderQty)."""
         remaining_quote = target_quote
         filled = _ZERO
         quote = _ZERO
@@ -204,9 +183,6 @@ class PaperMatchingEngine:
             remaining_quote -= cost
         return filled, quote, fills
 
-    # ------------------------------------------------------------------
-    # Bentuk respons
-    # ------------------------------------------------------------------
     def _new_order_record(self, symbol: str, side: str, order_type: str,
                           orig_qty: Decimal, price: Decimal, stop_price: Optional[Decimal],
                           time_in_force: Optional[str], client_order_id: str) -> dict:
@@ -234,7 +210,6 @@ class PaperMatchingEngine:
 
     def _apply_fills(self, order: dict, base: str, quote: str, side: str,
                      fills: list[tuple[Decimal, Decimal]], maker: bool) -> None:
-        """Terapkan fills ke saldo + fee, dan isi bidang respons order."""
         rate = self._maker_rate if maker else self._taker_rate
         exec_qty = _ZERO
         cum_quote = _ZERO
@@ -246,7 +221,6 @@ class PaperMatchingEngine:
             return
 
         if side == "BUY":
-            # Bayar quote penuh, terima base dikurangi fee (fee dari base).
             self.store.debit(quote, cum_quote)
             fee_total_base = _ZERO
             for price, qty in fills:
@@ -261,8 +235,7 @@ class PaperMatchingEngine:
                 })
             self.store.credit(base, exec_qty - fee_total_base)
             self.store.add_fee(base, fee_total_base)
-        else:  # SELL
-            # Serahkan base penuh, terima quote dikurangi fee (fee dari quote).
+        else:
             self.store.debit(base, exec_qty)
             fee_total_quote = _ZERO
             for price, qty in fills:
@@ -282,7 +255,6 @@ class PaperMatchingEngine:
         order["executedQty"] = str(exec_qty)
         order["cummulativeQuoteQty"] = str(cum_quote)
         order["fills"] = fill_records
-        # Catat trade ke riwayat.
         self.store.add_trade({
             "symbol": order["symbol"],
             "orderId": order["orderId"],
@@ -294,9 +266,6 @@ class PaperMatchingEngine:
             "time": self._now_ms(),
         })
 
-    # ------------------------------------------------------------------
-    # Titik masuk utama
-    # ------------------------------------------------------------------
     def place_order(
         self,
         symbol: str,
@@ -322,7 +291,6 @@ class PaperMatchingEngine:
         coid = client_order_id or f"paper-{int(time.time()*1000)}-{self.store.next_order_id()}"
 
         with self.store.lock:
-            # Idempotensi: clientOrderId duplikat ditolak seperti Binance.
             if self.store.is_duplicate_client_order_id(client_order_id):
                 raise _reject(ERR_DUPLICATE, f"(clientOrderId {client_order_id})")
 
@@ -344,9 +312,6 @@ class PaperMatchingEngine:
             self.store.save()
             return result
 
-    # ------------------------------------------------------------------
-    # MARKET
-    # ------------------------------------------------------------------
     def _place_market(self, symbol, side, base, quote, filters, quantity,
                       quote_order_qty, coid) -> dict:
         if quantity is None and quote_order_qty is None:
@@ -360,7 +325,6 @@ class PaperMatchingEngine:
         if quantity is not None:
             qty = _d(quantity)
             self._check_lot_size(filters, qty)
-            # Cek MIN_NOTIONAL memakai harga terbaik (estimasi konservatif).
             best_price = levels[0][0]
             est_notional = qty * best_price
             if filters.min_notional > 0 and est_notional < filters.min_notional:
@@ -374,16 +338,13 @@ class PaperMatchingEngine:
                 raise _reject(ERR_MIN_NOTIONAL,
                               f"(quoteOrderQty {qoq} < minNotional {filters.min_notional})")
             filled, spent, fills = self._walk_by_quote(levels, qoq)
-            # Bulatkan filled ke LOT_SIZE (Binance mengembalikan qty patuh lot).
             filled = self._round_down_step(filled, filters)
-            # Bangun ulang fills agar konsisten dengan filled yang dibulatkan.
             filled, spent, fills = self._walk_by_qty(levels, filled) if filled > 0 else (_ZERO, _ZERO, [])
             orig_qty = filled
 
         if filled <= 0:
             raise _reject(ERR_INSUFFICIENT, "(tidak ada yang terisi)")
 
-        # Cek saldo.
         if side == "BUY":
             need = spent
             if self.store.get_free(quote) < need:
@@ -398,8 +359,6 @@ class PaperMatchingEngine:
                                        Decimal("0"), None, None, coid)
         self._apply_fills(order, base, quote, side, fills, maker=False)
 
-        # Status akhir: FILLED bila penuh, EXPIRED bila kedalaman kurang
-        # (sisa market order dianggap kadaluarsa -- lihat catatan asumsi).
         exec_qty = _d(order["executedQty"])
         if exec_qty >= orig_qty:
             order["status"] = "FILLED"
@@ -417,9 +376,6 @@ class PaperMatchingEngine:
         steps = (qty / step).to_integral_value(rounding=ROUND_DOWN)
         return steps * step
 
-    # ------------------------------------------------------------------
-    # LIMIT
-    # ------------------------------------------------------------------
     def _place_limit(self, symbol, side, base, quote, filters, quantity, price,
                      time_in_force, coid) -> dict:
         if quantity is None or price is None:
@@ -435,7 +391,6 @@ class PaperMatchingEngine:
         order = self._new_order_record(symbol, side, "LIMIT", qty, px, None,
                                        time_in_force or "GTC", coid)
 
-        # Kunci dana untuk order yang mengendap.
         if side == "BUY":
             need = qty * px
             if self.store.get_free(quote) < need:
@@ -451,8 +406,6 @@ class PaperMatchingEngine:
         order["_createdMs"] = self._now_ms()
         order["_timeoutMs"] = int(self.config.get("PAPER_LIMIT_ORDER_TIMEOUT_SECONDS", 60)) * 1000
 
-        # Coba isi segera bila sudah marketable (konservatif: hanya bila harga
-        # pasar benar-benar melintasi limit).
         self._try_fill_limit(order, base, quote, filters)
         if order["status"] in ("FILLED",):
             self.store.archive_order(order)
@@ -470,27 +423,23 @@ class PaperMatchingEngine:
         if remaining_qty <= 0:
             return
         levels = self._levels(symbol, side)
-        # Saring hanya level yang melintasi limit (aturan konservatif).
         if side == "BUY":
             usable = [(p, q) for (p, q) in levels if p <= limit_px]
         else:
             usable = [(p, q) for (p, q) in levels if p >= limit_px]
         if not usable:
-            return  # belum melintasi -> tetap NEW
+            return
         filled, spent, fills = self._walk_by_qty(usable, remaining_qty)
         if filled <= 0:
             return
-        # Lepas dana terkunci untuk bagian yang terisi, lalu terapkan fills.
         if side == "BUY":
             self._consume_locked_tracked(order, quote, spent)
-            # fee dari base; kredit base bersih.
             self._credit_base_after_fee(base, fills, maker=True, order=order,
                                         quote=quote, spent=spent)
         else:
             self._consume_locked_tracked(order, base, filled)
             self._credit_quote_after_fee(quote, fills, maker=True, order=order,
                                          base=base)
-        # Perbarui akumulasi eksekusi.
         new_exec = already + filled
         new_cum = _d(order["cummulativeQuoteQty"]) + spent
         order["executedQty"] = str(new_exec)
@@ -524,9 +473,6 @@ class PaperMatchingEngine:
                          "commission": str(p_q_fee(p=price, q=qty, rate=rate)),
                          "commissionAsset": quote, "tradeId": self._next_trade_id()})
 
-    # ------------------------------------------------------------------
-    # STOP
-    # ------------------------------------------------------------------
     def _place_stop(self, symbol, side, base, quote, filters, order_type,
                     quantity, price, stop_price, time_in_force, coid) -> dict:
         if quantity is None or stop_price is None:
@@ -540,7 +486,6 @@ class PaperMatchingEngine:
 
         order = self._new_order_record(symbol, side, order_type, qty, px, sp,
                                        time_in_force or "GTC", coid)
-        # Kunci base untuk stop SELL (kasus umum stop-loss bot).
         if side == "SELL":
             if self.store.get_free(base) < qty:
                 raise _reject(ERR_INSUFFICIENT, f"(butuh {qty} {base})")
@@ -548,7 +493,6 @@ class PaperMatchingEngine:
             order["_lockedAsset"] = base
             order["_lockedRemaining"] = str(qty)
         else:
-            # Stop BUY: kunci estimasi quote (pakai stopPrice sbg acuan).
             need = qty * sp
             if self.store.get_free(quote) < need:
                 raise _reject(ERR_INSUFFICIENT, f"(butuh {need} {quote})")
@@ -559,15 +503,7 @@ class PaperMatchingEngine:
         self.store.add_open_order(order)
         return order
 
-    # ------------------------------------------------------------------
-    # Pemrosesan order terbuka (limit crossing, stop trigger, timeout)
-    # ------------------------------------------------------------------
     def process_open_orders(self, now_ms: Optional[int] = None) -> list[dict]:
-        """Evaluasi semua order terbuka terhadap harga pasar terkini:
-        - LIMIT: isi bila harga melintasi; EXPIRED bila lewat timeout.
-        - STOP: picu bila harga menembus stopPrice (dukung GAP), lalu isi
-          sebagai market.
-        Kembalikan daftar order yang berubah status. Aman dipanggil berkala."""
         now = now_ms if now_ms is not None else self._now_ms()
         changed: list[dict] = []
         with self.store.lock:
@@ -611,19 +547,16 @@ class PaperMatchingEngine:
         sp = _d(order["stopPrice"])
         side = order["side"]
         otype = order["type"]
-        # STOP_LOSS SELL memicu saat harga <= stop; TAKE_PROFIT SELL saat >= stop.
         if side == "SELL":
             if otype.startswith("STOP_LOSS"):
                 return mkt <= sp
-            return mkt >= sp  # TAKE_PROFIT
-        else:  # BUY
+            return mkt >= sp
+        else:
             if otype.startswith("STOP_LOSS"):
                 return mkt >= sp
             return mkt <= sp
 
     def _execute_stop_as_market(self, order, base, quote, filters) -> None:
-        """Jalankan order stop sebagai market saat terpicu. Mendukung GAP:
-        harga isi mengikuti order book SAAT INI (post-gap), bukan stopPrice."""
         side = order["side"]
         qty = _d(order["origQty"]) - _d(order["executedQty"])
         levels = self._levels(order["symbol"], side)
@@ -643,9 +576,6 @@ class PaperMatchingEngine:
         order["status"] = "FILLED" if new_exec >= _d(order["origQty"]) else "PARTIALLY_FILLED"
 
     def _finalize_open(self, order: dict) -> None:
-        """Pindahkan order terbuka yang sudah FILLED ke riwayat, lepas sisa
-        dana terkunci bila ada."""
-        # Lepas sisa dana terkunci (mis. limit yang tak terisi penuh lalu selesai).
         self._release_leftover_lock(order)
         self.store.remove_open_order(order["orderId"])
         for k in ("_lockedAsset", "_lockedRemaining", "_createdMs", "_timeoutMs"):
@@ -661,12 +591,6 @@ class PaperMatchingEngine:
         self.store.archive_order(order)
 
     def _consume_locked_tracked(self, order: dict, asset: str, amount: Decimal) -> None:
-        """consume_locked + perbarui _lockedRemaining order.
-
-        Tanpa pembaruan ini, _lockedRemaining berhenti cocok dengan sisa kunci
-        nyata di store begitu order terisi sebagian, dan
-        _release_leftover_lock() melepas jumlah yang salah (temuan audit B-05).
-        """
         self.store.consume_locked(asset, amount)
         prev = _d(order.get("_lockedRemaining", "0"))
         order["_lockedRemaining"] = str(prev - amount) if prev > amount else str(_ZERO)
@@ -677,14 +601,8 @@ class PaperMatchingEngine:
             return
         raw = order.get("_lockedRemaining")
         if raw is not None:
-            # Sisa kunci PERSIS seperti yang tercatat saat penempatan dikurangi
-            # setiap bagian yang sudah terisi. Ini menangani semua bentuk order:
-            # LIMIT BUY (kunci qty x limitPrice), STOP BUY market (kunci
-            # qty x stopPrice dengan price="0"), dan SELL (kunci qty base).
             leftover = _d(raw)
         else:
-            # Kompatibilitas order lama tanpa _lockedRemaining: hitung ulang
-            # dari sisa kuantitas (perilaku lama, tidak akurat untuk stop BUY).
             side = order["side"]
             remaining_qty = _d(order["origQty"]) - _d(order["executedQty"])
             if remaining_qty <= 0:
@@ -693,8 +611,6 @@ class PaperMatchingEngine:
                 leftover = remaining_qty * _d(order["price"]) if _d(order["price"]) > 0 else _ZERO
             else:
                 leftover = remaining_qty
-        # unlock_funds sudah meng-clamp ke total locked aset, jadi rilis tidak
-        # pernah melampaui saldo yang memang sedang terkunci.
         if leftover > 0:
             self.store.unlock_funds(asset, leftover)
 
@@ -720,25 +636,4 @@ class PaperMatchingEngine:
 
 
 def p_q_fee(p: Decimal, q: Decimal, rate: Decimal) -> Decimal:
-    """Fee quote untuk satu fill = harga * qty * rate."""
     return p * q * rate
-
-
-# ==== RINGKASAN AUDIT (paper_engine.py) ================================
-# Sintaks/tipe: Decimal untuk semua uang/qty; type hints lengkap.
-# Filter: _check_lot_size (minQty + kelipatan step) & _check_price_filter
-#   (tick) & MIN_NOTIONAL -> menolak dengan kode Binance (-1013/-1111/-2010).
-# Market walk: _walk_by_qty / _walk_by_quote menelusuri level; partial fill
-#   didukung; sisa -> EXPIRED (asumsi didokumentasikan).
-# Fee: dipotong dari base (BUY) / quote (SELL); tarif dari config (satu sumber).
-# Idempotensi: is_duplicate_client_order_id -> -2010 "Duplicate order sent".
-# Race: seluruh place_order/process_open_orders/cancel dibungkus store.lock;
-#   save() dipanggil sekali per operasi majemuk.
-# Konsistensi saldo: debit/consume_locked melempar bila kurang -> tak ada
-#   saldo negatif diam-diam.
-# Limit/stop: aturan konservatif (hanya isi bila harga melintasi); stop
-#   mendukung GAP (isi pada harga book terkini, bukan stopPrice).
-# CATATAN diverifikasi manual saat menulis tes: _credit_quote_after_fee memakai
-#   helper p_q_fee agar nilai commission per-fill konsisten.
-# Batasan: tidak memodelkan antrean/ latensi/ dampak pasar (ditulis di README).
-# =======================================================================

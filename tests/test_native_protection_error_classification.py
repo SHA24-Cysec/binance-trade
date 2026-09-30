@@ -72,7 +72,6 @@ def test_definitive_reject_marks_oco_failed_without_blocking_local_exit(tmp_path
 
     assert bot._arm_native_oco(Client(), cfg, _filters(), state) is False
     assert state["native_oco"]["status"] == "FAILED"
-    # Inti perbaikan: exit lokal TIDAK boleh terblokir untuk penolakan pasti.
     assert state["_native_stop_exit_blocked"] is False
     assert state["reconciliation_required"] is True
 
@@ -132,7 +131,6 @@ def test_unconfirmed_missing_order_list_unblocks_local_exit(tmp_path) -> None:
     state["_native_stop_exit_blocked"] = True
 
     assert bot._reconcile_native_oco(Client(), cfg, state) is False
-    # POST tidak pernah mendarat: intent dibersihkan, exit lokal hidup lagi.
     assert state["native_oco"] is None
     assert state["_native_stop_exit_blocked"] is False
     assert state["reconciliation_required"] is True
@@ -148,7 +146,7 @@ def test_fresh_unconfirmed_intent_stays_fail_closed(tmp_path) -> None:
     state["native_oco"] = {
         "symbol": "TESTUSDT", "order_list_id": None,
         "list_client_order_id": "list-x", "status": "PENDING",
-        "created_at": state_mod.now_ms(),  # baru saja: bisa masih in-flight
+        "created_at": state_mod.now_ms(),
     }
 
     assert bot._reconcile_native_oco(Client(), cfg, state) is False
@@ -165,7 +163,7 @@ def test_confirmed_intent_with_not_found_error_stays_fail_closed(tmp_path) -> No
     cfg = _config(tmp_path)
     state = _position_state()
     state["native_oco"] = {
-        "symbol": "TESTUSDT", "order_list_id": 7001,  # SUDAH terkonfirmasi
+        "symbol": "TESTUSDT", "order_list_id": 7001,
         "list_client_order_id": "list-x", "status": "EXECUTING",
         "created_at": state_mod.now_ms() - 60_000,
     }

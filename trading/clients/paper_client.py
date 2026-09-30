@@ -41,7 +41,6 @@ class PaperClient(ExchangeClient):
         state_file = config.get("PAPER_ACCOUNT_STATE_FILE", "pump_paper_account_paper.json")
         self.store = PaperStore(state_file, config.get("PAPER_INITIAL_BALANCES"))
 
-        # Cache filter simbol (dibangun dari exchangeInfo publik).
         self._filters_cache: dict[str, SymbolFilters] = {}
 
         self.engine = PaperMatchingEngine(
@@ -57,9 +56,6 @@ class PaperClient(ExchangeClient):
                     config.get("TAKER_FEE_PCT"),
                     " (diskon BNB aktif)" if config.get("USE_BNB_FEE_DISCOUNT") else "")
 
-    # ------------------------------------------------------------------
-    # Filter simbol
-    # ------------------------------------------------------------------
     def _ensure_filters(self, force: bool = False) -> None:
         if self._filters_cache and not force:
             return
@@ -73,7 +69,6 @@ class PaperClient(ExchangeClient):
         if s not in self._filters_cache:
             self._ensure_filters()
         if s not in self._filters_cache:
-            # Simbol tidak ada di cache: coba ambil khusus simbol itu.
             try:
                 info = self.market.get_exchange_info(symbol=s)
                 syms = info.get("symbols", []) if isinstance(info, dict) else []
@@ -84,14 +79,9 @@ class PaperClient(ExchangeClient):
         return self._filters_cache.get(s)
 
     def _depth_for_engine(self, symbol: str) -> dict:
-        # Staleness guard: depth REST snapshot selalu SEGAR saat diambil, jadi
-        # order simulasi tidak pernah jalan di atas data basi.
         limit = int(self.config.get("PAPER_DEPTH_LIMIT", 100))
         return self.market.get_depth(symbol, limit=limit)
 
-    # ------------------------------------------------------------------
-    # Infrastruktur / data pasar (delegasi ke MarketDataProvider)
-    # ------------------------------------------------------------------
     def sync_time(self) -> None:
         self.market.sync_time()
 
@@ -118,12 +108,7 @@ class PaperClient(ExchangeClient):
     def get_depth(self, symbol: str, limit: int = 100) -> dict:
         return self.market.get_depth(symbol, limit=limit)
 
-    # ------------------------------------------------------------------
-    # Akun & order (disimulasikan)
-    # ------------------------------------------------------------------
     def get_account(self) -> dict:
-        # Sebelum melaporkan saldo, proses order terbuka (limit/stop) supaya
-        # saldo mencerminkan fill terbaru.
         try:
             self.engine.process_open_orders()
         except Exception as exc:  # noqa: BLE001
@@ -175,9 +160,6 @@ class PaperClient(ExchangeClient):
         self.engine.process_open_orders()
         return [self._public_order(o) for o in self.store.get_open_orders(symbol)]
 
-    # ------------------------------------------------------------------
-    # Endpoint bertanda tangan: DILARANG di PAPER
-    # ------------------------------------------------------------------
     def get_dust_convertible(self, account_type: str = "SPOT") -> dict:
         raise SignedEndpointBlockedError(
             "get_dust_convertible (POST /sapi/v1/asset/dust-btc) diblokir di mode PAPER: "
@@ -188,25 +170,6 @@ class PaperClient(ExchangeClient):
             "convert_dust (POST /sapi/v1/asset/dust) diblokir di mode PAPER: "
             "endpoint bertanda tangan tidak boleh dipanggil.")
 
-    # ------------------------------------------------------------------
-    # Util
-    # ------------------------------------------------------------------
     @staticmethod
     def _public_order(order: dict) -> dict:
-        """Buang kunci internal (_lockedAsset, dll) sebelum dikembalikan ke
-        pemanggil, agar bentuknya bersih seperti respons Binance."""
         return {k: v for k, v in order.items() if not k.startswith("_")}
-
-
-# ==== RINGKASAN AUDIT (paper_client.py) ================================
-# Sintaks/tipe: type hints lengkap; mematuhi ABC ExchangeClient (semua metode
-#   abstrak diimplementasikan) -> tidak bisa lupa metode (TypeError saat init).
-# Guard PAPER: get_dust_convertible/convert_dust melempar
-#   SignedEndpointBlockedError; MarketDataProvider memakai REST allow_signed=
-#   False -> tidak ada jalur signed sama sekali. Diuji di tests.
-# Staleness: fill order memakai depth REST snapshot yang segar; get_price
-#   memakai WS hanya bila cukup segar (logika di MarketDataProvider).
-# Race: penulisan state seluruhnya di dalam engine yang memegang store.lock.
-# Kebersihan respons: _public_order membuang kunci internal.
-# Kebocoran rahasia: tidak menyentuh API key sama sekali.
-# =======================================================================

@@ -15,6 +15,5 @@ PROJECT_ROOT = PACKAGE_ROOT.parent
 
 
 def project_path(path: str | Path) -> Path:
-    """Kembalikan path relatif terhadap root repository sebagai path absolut."""
     value = Path(path)
     return value if value.is_absolute() else PROJECT_ROOT / value

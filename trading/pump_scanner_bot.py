@@ -74,8 +74,6 @@ DEFAULT_STATE = {
     "be_stop_price": 0.0,
     "trailing_active": False,
     "trailing_stop_price": 0.0,
-    # Level exit yang DIKUNCI saat posisi dikelola. 0.0 berarti
-    # belum di-set, dan manage_exit akan jatuh ke SL_PCT/TP_PCT config.
     "sl_pct": 0.0,
     "tp_pct": 0.0,
     "be_trigger_pct": 0.0,
@@ -90,31 +88,14 @@ DEFAULT_STATE = {
     "dd_stopped": False,
     "dd_stop_until": 0,
     "daily_stopped": False,
-    # Sumber daily stop: "LOSS" (rugi harian) atau "PROFIT" (target profit
-    # tercapai). CLOSE_ALL_AT_LIMIT hanya boleh menutup paksa pada episode
-    # LOSS; menutup posisi yang sedang untung karena target harian tercapai
-    # bukan aksi darurat risiko (perbaikan audit 2026-09-27).
     "daily_stop_source": None,
-    # Penanda episode CLOSE_ALL_AT_LIMIT: True = posisi sudah ditutup paksa
-    # oleh kill switch pada episode stop yang sedang berjalan, supaya tidak
-    # ditutup berulang kali. Direset saat episode stop berakhir.
     "_limit_close_done": False,
-    # Penghitung kegagalan SELL berturut-turut untuk eskalasi alarm (lihat
-    # close_position). Direset ke 0 saat entry baru atau SELL berhasil.
     "sell_fail_count": 0,
-    # Intent order disimpan SEBELUM request dikirim. Jika proses mati atau
-    # respons jaringan hilang setelah exchange menerima order, startup dapat
-    # menanyakannya kembali lewat clientOrderId dan tidak menganggap posisi
-    # nyata sebagai state kosong.
     "pending_order": None,
-    # Intent stop native disimpan sebelum request agar status UNKNOWN tidak
-    # menyebabkan bot mengirim stop market kedua atau menjual tanpa cancel.
     "native_stop": None,
     "native_oco": None,
     "native_protection_retry_at": 0,
     "_native_stop_exit_blocked": False,
-    # Posisi/aset yang tidak dapat dipetakan aman ke state bot memblokir entry
-    # baru sampai operator melakukan rekonsiliasi, bukan diabaikan diam-diam.
     "reconciliation_required": False,
     "reconciliation_assets": [],
 }
@@ -125,20 +106,6 @@ _LOGGING_MARKER = "_pump_bot_handler"
 
 
 def setup_logging(config: dict) -> None:
-    """Pasang handler konsol + file, idempoten.
-
-    PERBAIKAN AUDIT 2026-09-30 (temuan TINGGI-04).
-
-    Versi sebelumnya selalu memanggil root.addHandler() tanpa memeriksa
-    handler yang sudah terpasang. Setiap pemanggilan run() kedua di dalam
-    proses yang sama (restart in-process, selftest, atau pengujian)
-    menggandakan handler, sehingga satu baris log ditulis dua kali, empat
-    kali, dan seterusnya ke file yang sama. Pada bot yang berjalan lama itu
-    mempercepat rotasi log dan membuat riwayat di dashboard sulit dibaca.
-
-    Handler milik modul ini ditandai supaya hanya miliknya yang dibersihkan;
-    handler lain (mis. milik pytest) dibiarkan utuh.
-    """
     root = logging.getLogger()
     root.setLevel(logging.INFO)
 
@@ -182,7 +149,6 @@ def load_pump_state(path: str) -> dict:
 
 
 def get_balance(account: dict, asset: str) -> float:
-    """Saldo free aset, dipertahankan untuk caller yang akan mengirim MARKET."""
     for b in account.get("balances", []):
         if b.get("asset") == asset:
             return float(b.get("free", 0.0))
@@ -190,11 +156,6 @@ def get_balance(account: dict, asset: str) -> float:
 
 
 def get_total_balance(account: dict, asset: str) -> float:
-    """Saldo free + locked untuk rekonsiliasi kepemilikan aset.
-
-    Aset locked tetap milik akun. Menganggapnya nol akan membuat limit SELL
-    manual terlihat seperti posisi hilang lalu state bot dihapus salah.
-    """
     for b in account.get("balances", []):
         if b.get("asset") == asset:
             return float(b.get("free", 0.0)) + float(b.get("locked", 0.0))
@@ -203,15 +164,6 @@ def get_total_balance(account: dict, asset: str) -> float:
 
 def get_equity(client: ExchangeClient, config: dict, state: dict,
                position_price: float | None = None) -> "float | None":
-    """Equity total (USDT free + nilai posisi saat ini).
-
-    Return None kalau harga posisi TIDAK bisa diambil dari API. Ini disengaja
-    (perbaikan audit 2026-09-24, temuan T-05): versi lama menelan error dan
-    mengembalikan equity TANPA nilai posisi, sehingga gangguan API 15 detik
-    membuat drawdown semu mendekati 100% dan bisa salah memicu kill switch.
-    Lebih baik melewati satu iterasi evaluasi risiko daripada menghitung dari
-    angka yang keliru.
-    """
     account = client.get_account()
     usdt_free = get_balance(account, config["QUOTE_ASSET"])
     if state["current_symbol"] and state["qty"] > 0:
@@ -227,33 +179,11 @@ def get_equity(client: ExchangeClient, config: dict, state: dict,
                     state["current_symbol"], exc,
                 )
                 return None
-        # Equity posisi long memakai bid executable, bukan last trade. Ini
-        # membuat drawdown dan daily stop tidak terlalu optimistis menjelang SELL.
         usdt_free += state["qty"] * price
     return usdt_free
 
 
 def account_risk_gate(config: dict) -> "tuple[bool, str]":
-    """Gerbang kesiapan risiko tingkat akun sebelum bot boleh jalan di LIVE.
-
-    PERBAIKAN AUDIT 2026-09-30 (temuan KRITIS-01).
-
-    Ketika USE_EQUITY_STOP dan USE_DAILY_STOP dua-duanya False,
-    update_equity_controls() tidak pernah menyalakan dd_stopped maupun
-    daily_stopped. Nilainya berantai: entries_paused selalu False, sehingga
-    maybe_force_close_at_risk_limit() tidak pernah menutup posisi walaupun
-    CLOSE_ALL_AT_LIMIT bernilai True. Hasil akhirnya bot LIVE berjalan tanpa
-    satu pun rem kerugian tingkat akun.
-
-    Versi sebelumnya hanya mencatat logger.critical dan tetap lanjut. Untuk
-    uang asli itu tidak cukup: peringatan mudah terlewat di antara ratusan
-    baris log. Sekarang start dihentikan, kecuali operator secara sadar
-    menyetel environment ALLOW_LIVE_WITHOUT_ACCOUNT_STOP=1.
-
-    Mode PAPER tidak pernah diblokir karena tidak memakai uang asli.
-
-    Return: (boleh_jalan, alasan). alasan kosong bila boleh jalan.
-    """
     if str(config.get("MODE", "")).strip().upper() != "LIVE":
         return True, ""
     if config.get("USE_EQUITY_STOP") or config.get("USE_DAILY_STOP"):
@@ -275,17 +205,6 @@ def account_risk_gate(config: dict) -> "tuple[bool, str]":
 
 
 def describe_exit_mode(config: dict, state: dict) -> str:
-    """Deskripsi mode exit yang BENAR-BENAR dipakai runtime.
-
-    PERBAIKAN AUDIT 2026-09-30 (temuan TINGGI-01).
-
-    Versi sebelumnya mencetak "Mode exit: ATR (...)" hanya berdasarkan
-    config USE_ATR_EXIT. Padahal manage_exit() memilih jalur ATR dari
-    state["exit_source"] == "ATR", bukan dari config. Karena jalur pembukaan
-    posisi sudah dihapus, exit_source tidak pernah terisi, sehingga runtime
-    SELALU memakai SL_PCT/TP_PCT. Operator jadi mengira stop-nya 12x ATR
-    padahal nyatanya -28.8 persen.
-    """
     atr_active = str(state.get("exit_source", "")).upper() == "ATR"
     sl_pct = float(config.get("SL_PCT", 0) or 0)
     tp_pct = float(config.get("TP_PCT", 0) or 0)
@@ -323,20 +242,6 @@ def update_equity_controls(state: dict, equity: float, config: dict) -> bool:
             logger.critical("STOP DRAWDOWN: turun %.2f%% dari puncak equity. Entry baru dijeda %d jam.",
                              dd_pct, config["DD_COOLDOWN_HOURS"])
 
-    # PERBAIKAN AUDIT 2026-09-30 (temuan TINGGI-02).
-    #
-    # Versi sebelumnya: `if dd_stopped and dd_stop_until and now >= dd_stop_until`.
-    # Ada dua jalan buntu di sana.
-    #   1) State lama/korup dengan dd_stopped=True tetapi dd_stop_until=0 atau
-    #      hilang membuat syarat kedua selalu falsy, sehingga dd_stopped TIDAK
-    #      PERNAH bisa lepas. Bot terkunci permanen tanpa cara memulihkan
-    #      lewat konfigurasi; satu-satunya jalan adalah menyunting file state
-    #      secara manual.
-    #   2) Mematikan USE_EQUITY_STOP tidak melepas dd_stopped yang terlanjur
-    #      menyala, jadi operator yang sengaja melepas rem tetap terblokir.
-    #
-    # Sekarang: deadline yang hilang/nol diperlakukan sebagai SUDAH LEWAT, dan
-    # mematikan USE_EQUITY_STOP melepas kunci secara eksplisit.
     if state.get("dd_stopped"):
         deadline = state.get("dd_stop_until") or 0
         if not config.get("USE_EQUITY_STOP"):
@@ -377,23 +282,6 @@ def update_equity_controls(state: dict, equity: float, config: dict) -> bool:
 def maybe_force_close_at_risk_limit(client: ExchangeClient, config: dict,
                                      filters_cache: dict, state: dict,
                                      entries_paused: bool, current_price) -> None:
-    """Implementasi CLOSE_ALL_AT_LIMIT (perbaikan audit 2026-09-24, temuan
-    T-06: parameter ini sebelumnya tidak pernah dibaca kode sama sekali).
-
-    Saat kill switch (drawdown stop / daily stop) AKTIF dan config meminta,
-    posisi terbuka ditutup paksa SATU KALI per episode stop -- bukan hanya
-    menjeda entry baru. Penanda _limit_close_done mencegah penutupan berulang
-    dan direset otomatis begitu episode stop selesai (cooldown DD habis atau
-    hari UTC berganti).
-
-    Dipisah jadi fungsi kecil supaya bisa diuji di selftest tanpa menjalankan
-    loop utama.
-    """
-    # Hanya episode KERUGIAN yang memicu penutupan paksa. daily_stopped yang
-    # bersumber dari DAILY_PROFIT_TARGET_PERCENT cukup menjeda entry baru;
-    # posisi yang sedang untung tidak boleh ditutup paksa sebagai "risk limit"
-    # (perbaikan audit 2026-09-27). State lama tanpa daily_stop_source
-    # diperlakukan konservatif sebagai LOSS agar perilaku darurat tetap ada.
     profit_stop_only = (
         bool(state.get("daily_stopped"))
         and not state.get("dd_stopped")
@@ -422,13 +310,6 @@ def maybe_force_close_at_risk_limit(client: ExchangeClient, config: dict,
 
 def reconcile_state_with_exchange(client: ExchangeClient, config: dict, state: dict,
                                   filters_cache: dict | None = None) -> None:
-    """Selaraskan intent/state posisi dengan saldo exchange saat startup.
-
-    Rekonsiliasi tidak hanya menangani state yang terlalu besar. Ia juga
-    memulihkan BUY ber-intent yang responsnya hilang, menghitung saldo locked
-    sebagai kepemilikan, dan memblokir entry bila ada aset base yang tidak dapat
-    dipetakan aman ke posisi bot.
-    """
     quote = config["QUOTE_ASSET"]
     try:
         account = client.get_account()
@@ -448,8 +329,6 @@ def reconcile_state_with_exchange(client: ExchangeClient, config: dict, state: d
             order = client.get_order(symbol,
                                      orig_client_order_id=pending["client_order_id"])
         except BinanceAPIError as exc:
-            # -2013 berarti order tidak pernah tercatat di exchange. Error lain
-            # tidak boleh menghapus intent karena statusnya masih tidak pasti.
             if getattr(exc, "code", None) == -2013:
                 logger.warning("Intent %s untuk %s tidak ditemukan di exchange; dibersihkan.",
                                pending.get("side"), symbol)
@@ -468,9 +347,6 @@ def reconcile_state_with_exchange(client: ExchangeClient, config: dict, state: d
             if side == "BUY" and executed_qty > 0 and (
                 _order_status_is_terminal(status) or not status
             ):
-                # BUY hanya dipulihkan bila order sudah terminal. BUY
-                # PARTIALLY_FILLED yang masih open tidak boleh dijadikan posisi
-                # final karena fill lanjutan dapat terjadi setelah restart.
                 if _restore_pending_buy(config, state, pending, order, account):
                     logger.critical("BUY %s dipulihkan dari intent/order setelah respons hilang.", symbol)
                     state["reconciliation_required"] = False
@@ -481,12 +357,9 @@ def reconcile_state_with_exchange(client: ExchangeClient, config: dict, state: d
                 state["pending_order"] = None
                 changed = True
             elif _order_status_is_terminal(status):
-                # SELL finalized akan diselaraskan dengan saldo di bawah.
                 state["pending_order"] = None
                 changed = True
             else:
-                # NEW, PARTIALLY_FILLED, status kosong, atau status baru yang
-                # belum dikenal tetap dipertahankan sebagai intent ambigu.
                 pending["last_status"] = status or "UNKNOWN"
                 pending["executed_qty"] = executed_qty
                 state["reconciliation_required"] = True
@@ -508,9 +381,6 @@ def reconcile_state_with_exchange(client: ExchangeClient, config: dict, state: d
             reset_position(state)
             changed = True
         elif total_base <= 0 and pending_unresolved:
-            # Order unresolved dapat sudah mengunci atau mengisi saldo tanpa
-            # tercermin pada snapshot account yang dipakai saat restart. Jangan
-            # mereset posisi selama intent masih menunggu verifikasi.
             state["reconciliation_required"] = True
             state["reconciliation_assets"] = [base_asset]
             changed = True
@@ -527,16 +397,12 @@ def reconcile_state_with_exchange(client: ExchangeClient, config: dict, state: d
             state["qty"] = total_base
             changed = True
         if free_base <= 0 and total_base > 0:
-            # Ada order manual/open order. Jangan reset posisi dan jangan
-            # berpura-pura MARKET SELL dapat mengelolanya.
             state["reconciliation_required"] = True
             state["reconciliation_assets"] = [base_asset]
             changed = True
             logger.critical("%s seluruhnya locked. Entry baru diblokir sampai order manual direkonsiliasi.",
                             base_asset)
     elif not state.get("current_symbol") and not state.get("pending_order"):
-        # State kosong tidak cukup untuk menyimpulkan akun kosong. Base asset
-        # yang tersisa bisa berasal dari BUY yang respons/state-nya hilang.
         foreign = []
         for bal in account.get("balances", []):
             asset = str(bal.get("asset") or "")
@@ -593,36 +459,6 @@ def reset_position(state: dict) -> None:
 
 
 def try_dust_sweep(client: ExchangeClient, config: dict, symbol: "str | None") -> None:
-    """Dipanggil SETELAH posisi `symbol` ditutup (SL/TP/BE/Trailing/manual/dsb)
-    untuk mengecek apakah masih ada sisa saldo kecil (dust) dari koin itu di
-    akun -- biasanya muncul karena pembulatan qty ke LOT_SIZE bursa, atau
-    sisa yang tidak lolos MIN_NOTIONAL saat dijual. Kalau Binance mengakui
-    sisa itu sebagai "dust convertible", langsung dikonversi ke BNB lewat
-    endpoint resmi POST /sapi/v1/asset/dust (dicek developers.binance.com
-    2026-09-23).
-
-    PROTEKSI KERAS terhadap modal (TIDAK bisa dimatikan lewat config,
-    disengaja demi keamanan dana):
-    1. HANYA base asset dari `symbol` yang BARU SAJA ditutup yang pernah
-       disentuh -- TIDAK PERNAH "menyapu semua aset kecil di akun" secara
-       serampangan. Ambang "dust" Binance (nilainya < 0.001 BTC, bisa
-       100+ USD tergantung harga BTC) jauh lebih besar dari modal trading
-       kecil bot ini, jadi kalau modal USDT/BNB ikut disapu, bot bisa
-       kehabisan modal untuk trading berikutnya.
-    2. Quote asset (USDT) dan BNB itu sendiri SELALU dikecualikan secara
-       eksplisit di kode ini, apa pun isi config -- bukan cuma "defaultnya
-       tidak termasuk", tapi memang tidak mungkin lolos pengecekan di bawah.
-    3. Di mode PAPER, fungsi ini otomatis DILEWATI: konversi dust memakai
-       Network hanya menyediakan endpoint /api/*, sedangkan dust convert
-       memakai /sapi/v1/asset/dust yang memang tidak ada di sana (sumber:
-       endpoint /sapi/* yang BERTANDA TANGAN, sedangkan PAPER dilarang keras
-       mengirim request bertanda tangan. Bukan bagian dari simulasi, jadi tidak
-       dipanggil sama sekali dan cukup dicatat di log.
-    4. Kegagalan (rate limit Binance untuk endpoint ini -- dilaporkan sekitar
-       tiap 6-24 jam sekali per akun, aset tidak/belum diakui sebagai dust,
-       dsb) SELALU ditangani sebagai hal wajar (dicoba lagi di kesempatan
-       berikutnya), bukan dianggap error yang menghentikan bot.
-    """
     if not config.get("USE_DUST_SWEEP", True):
         return
     if not symbol:
@@ -632,7 +468,6 @@ def try_dust_sweep(client: ExchangeClient, config: dict, symbol: "str | None") -
         return
     base_asset = symbol[: -len(quote_asset)]
     if not base_asset or base_asset in (quote_asset, "BNB"):
-        # Proteksi keras: tidak pernah convert quote asset (modal) atau BNB itu sendiri.
         return
 
     if is_paper(config):
@@ -652,8 +487,6 @@ def try_dust_sweep(client: ExchangeClient, config: dict, symbol: "str | None") -
     details = convertible.get("details", []) if isinstance(convertible, dict) else []
     match = next((d for d in details if d.get("asset") == base_asset), None)
     if not match:
-        # Wajar: sisa saldo mungkin nol, atau di atas/bawah ambang dust
-        # Binance saat ini, atau datanya belum "segar". Bukan error.
         logger.info("Dust sweep: %s tidak (lagi) terdaftar sebagai dust convertible saat ini, dilewati.",
                      base_asset)
         return
@@ -661,8 +494,6 @@ def try_dust_sweep(client: ExchangeClient, config: dict, symbol: "str | None") -
     try:
         result = client.convert_dust([base_asset])
     except BinanceAPIError as exc:
-        # Termasuk rate limit endpoint dust Binance (per akun, bukan dibatasi
-        # kode ini) -- SEMUA ditangani sebagai "coba lagi nanti", bukan bug.
         logger.warning(
             "Dust sweep %s -> BNB gagal (%s). Sisa saldo dibiarkan, dicoba lagi di kesempatan berikutnya.",
             base_asset, exc,
@@ -675,22 +506,12 @@ def try_dust_sweep(client: ExchangeClient, config: dict, symbol: "str | None") -
 
 
 def _new_client_order_id(prefix: str) -> str:
-    """ID singkat, unik, dan dapat dipakai untuk recovery order Binance."""
     return f"pump-{prefix}-{uuid.uuid4().hex[:24]}"
 
 
 def _submit_market_order(client: ExchangeClient, symbol: str, side: str,
                          quantity: float | None, client_order_id: str,
                          quote_order_qty: float | None = None) -> dict:
-    """Kirim satu market order dengan idempotency key.
-
-    ``quote_order_qty`` dipakai untuk BUY yang dibatasi nominal quote.
-    Seluruh implementasi ExchangeClient wajib menerima clientOrderId. Tidak
-    ada fallback pemanggilan kedua setelah TypeError karena fallback tersebut
-    dapat menghilangkan idempotency key dan berpotensi membuat order duplikat.
-    Request POST sendiri tidak diulang oleh BinanceSpotClient setelah status
-    jaringan UNKNOWN.
-    """
     return client.new_market_order(
         symbol, side, quantity=quantity, quote_order_qty=quote_order_qty,
         new_client_order_id=client_order_id,
@@ -732,14 +553,6 @@ def _native_protection_enabled(config: dict) -> bool:
 
 def _exit_distance(state: dict, config: dict, state_key: str, cfg_key: str,
                    atr_mode: bool, entry: float) -> float:
-    """Jarak exit dengan satuan yang KONSISTEN (perbaikan audit 2026-09-27).
-
-    Pada mode ATR, nilai state adalah JARAK HARGA ABSOLUT. Fallback config
-    (SL_PCT/TP_PCT dkk) SELALU berdenominasi persen, jadi saat dipakai pada
-    mode ATR ia wajib dikonversi ke jarak harga (entry * pct / 100). Versi
-    lama memakai persen mentah sebagai jarak absolut, sehingga untuk koin
-    berharga < SL_PCT USDT level stop praktis tidak pernah tersentuh.
-    """
     locked = abs(float(state.get(state_key) or 0.0))
     if locked > 0:
         return locked
@@ -777,8 +590,6 @@ def _native_stop_price(state: dict, filters: SymbolFilters | None,
                        config: dict | None = None) -> float:
     entry = float(state.get("entry_price") or 0.0)
     atr_mode = str(state.get("exit_source", "")).upper() == "ATR"
-    # Fallback config sadar-unit (perbaikan audit 2026-09-27): SL_PCT persen
-    # dikonversi ke jarak harga bila state mode ATR (lihat _exit_distance).
     sl = _exit_distance(state, config or {}, "sl_pct", "SL_PCT", atr_mode, entry)
     if atr_mode:
         raw = entry - sl
@@ -789,50 +600,27 @@ def _native_stop_price(state: dict, filters: SymbolFilters | None,
     return raw
 
 
-# ==== Klasifikasi error Binance untuk proteksi native (perbaikan KRITIS-01) ====
-# BinanceAPIError HANYA dilempar saat Binance MEMBALAS request dengan body
-# error (lihat binance_client._request). Kegagalan jaringan murni muncul
-# sebagai requests.RequestException dan tidak pernah masuk klasifikasi ini.
-# Karena itu aman membedakan dua dunia:
-#   1) Penolakan DETERMINISTIK: Binance menjamin order TIDAK pernah tercipta
-#      (filter harga/qty, presisi, saldo kurang, timestamp di luar recvWindow,
-#      simbol salah). Intent boleh disimpulkan FAILED sehingga jalur pemulihan
-#      yang sudah ada berjalan: exit lokal TETAP hidup dan proteksi dipasang
-#      ulang. Tanpa klasifikasi ini, posisi bisa telanjang total: tidak ada
-#      order proteksi di bursa DAN exit lokal terblokir tanpa batas waktu.
-#   2) Status TIDAK PASTI (5xx, 429/418, kode tak dikenal): tetap fail-closed
-#      sebagai UNKNOWN supaya tidak pernah ada dua proteksi/dua exit untuk
-#      satu posisi.
 _DEFINITIVE_REJECT_CODES = {
-    -1013,  # Filter failure (PRICE_FILTER / LOT_SIZE / NOTIONAL, dst)
-    -1021,  # Timestamp di luar recvWindow: request ditolak sebelum diproses
-    -1100, -1101, -1102, -1103, -1104, -1106,  # parameter ilegal/kurang/berlebih
-    -1111,  # presisi qty/price salah
-    -1121,  # simbol tidak valid
-    -2010,  # NEW_ORDER_REJECTED (saldo kurang, dsb)
-    # Perbaikan audit 2026-09-27: dua kode deterministik yang sebelumnya
-    # terklasifikasi UNKNOWN dan membuat loop arm->reconcile->arm berulang
-    # tiap iterasi tanpa hasil.
-    -1116,  # INVALID_ORDERTYPE: simbol tidak mengizinkan tipe order ini
-    -1020,  # UNSUPPORTED_OPERATION: operasi tidak didukung endpoint/akun
+    -1013,
+    -1021,
+    -1100, -1101, -1102, -1103, -1104, -1106,
+    -1111,
+    -1121,
+    -2010,
+    -1116,
+    -1020,
 }
-_NOT_FOUND_CODES = {-2013}  # "Order does not exist." / "Order list does not exist."
-# GET pada intent yang belum pernah dikonfirmasi tercipta baru boleh
-# disimpulkan FAILED setelah usia minimum ini, sebagai penyangga terhadap
-# jeda propagasi POST yang (secara teori) masih diproses bursa.
+_NOT_FOUND_CODES = {-2013}
 _NOT_FOUND_MIN_INTENT_AGE_MS = 10_000
 
 
 def _is_definitive_reject(exc: BinanceAPIError) -> bool:
-    """True bila Binance MENJAMIN order tidak pernah tercipta."""
     if isinstance(exc, BinanceRateLimitError):
-        # 429/418 lapisan rate limit: konservatif, tetap fail-closed.
         return False
     return getattr(exc, "code", None) in _DEFINITIVE_REJECT_CODES
 
 
 def _is_order_not_found(exc: BinanceAPIError) -> bool:
-    """True bila error berarti order/order-list tidak ada di bursa."""
     if getattr(exc, "code", None) in _NOT_FOUND_CODES:
         return True
     return "does not exist" in str(getattr(exc, "msg", "") or "").lower()
@@ -840,12 +628,6 @@ def _is_order_not_found(exc: BinanceAPIError) -> bool:
 
 def _arm_native_oco(client: ExchangeClient, config: dict,
                     filters: SymbolFilters | None, state: dict) -> bool:
-    """Pasang OCO SELL native dan simpan seluruh intent sebelum POST.
-
-    Leg atas adalah TAKE_PROFIT_LIMIT, leg bawah STOP_LOSS_LIMIT. Semua ID
-    disimpan sebelum request karena timeout pada POST order-list membuat status
-    eksekusi tidak dapat dianggap gagal.
-    """
     if not _native_oco_enabled(config):
         return False
     symbol = state.get("current_symbol")
@@ -931,10 +713,6 @@ def _arm_native_oco(client: ExchangeClient, config: dict,
     except BinanceAPIError as exc:
         intent = state.get("native_oco")
         if _is_definitive_reject(exc):
-            # Perbaikan KRITIS-01: Binance MENOLAK order-list secara
-            # deterministik, order dijamin tidak tercipta. Exit lokal tidak
-            # boleh diblokir, dan _ensure_native_protection boleh mencoba
-            # fallback native stop karena tidak mungkin ada proteksi ganda.
             if isinstance(intent, dict):
                 intent["status"] = "FAILED"
                 intent["last_error"] = str(exc)
@@ -1003,12 +781,6 @@ def _arm_native_oco(client: ExchangeClient, config: dict,
 
 def _arm_native_stop(client: ExchangeClient, config: dict,
                      filters: SymbolFilters | None, state: dict) -> bool:
-    """Pasang satu STOP_LOSS market SELL dan simpan intent sebelum POST.
-
-    Bila POST timeout, ID tetap berada di state. Tidak ada percobaan kedua
-    otomatis karena request order tidak dapat dianggap idempotent tanpa
-    rekonsiliasi GET berdasarkan clientOrderId.
-    """
     if not _native_stop_enabled(config):
         return True
     state["_native_stop_exit_blocked"] = False
@@ -1050,9 +822,6 @@ def _arm_native_stop(client: ExchangeClient, config: dict,
         )
     except (BinanceAPIError, NotImplementedError) as exc:
         intent = state.get("native_stop")
-        # Perbaikan KRITIS-01: penolakan deterministik Binance berarti order
-        # dijamin tidak tercipta, jadi statusnya FAILED (bukan UNKNOWN) agar
-        # jalur pemulihan berjalan dan exit lokal tidak pernah tertahan.
         definitive = (isinstance(exc, NotImplementedError)
                       or (isinstance(exc, BinanceAPIError) and _is_definitive_reject(exc)))
         if isinstance(intent, dict):
@@ -1096,27 +865,16 @@ def _arm_native_stop(client: ExchangeClient, config: dict,
 
 def _ensure_native_protection(client: ExchangeClient, config: dict,
                               filters: SymbolFilters | None, state: dict) -> bool:
-    """Pastikan tepat satu proteksi native aktif atau state fail-closed."""
     if not _native_protection_enabled(config):
         return True
     if isinstance(state.get("native_oco"), dict) or isinstance(state.get("native_stop"), dict):
         return True
     if _native_oco_enabled(config):
-        # Perbaikan audit 2026-09-27: jendela backoff OCO dihormati DI SINI.
-        # Sebelumnya _arm_native_oco return False tanpa intent saat backoff,
-        # lalu cabang fallback di bawah salah mengiranya "OCO tidak didukung"
-        # dan memasang STOP polos -- proteksi terdegradasi permanen ke
-        # stop-only (tanpa TP exchange-side) hanya karena satu kali hiccup.
         if state_mod.now_ms() < int(state.get("native_protection_retry_at", 0) or 0):
             return False
         if _arm_native_oco(client, config, filters, state):
             return True
         oco_status = (state.get("native_oco") or {}).get("status")
-        # Fallback hanya untuk client yang jelas tidak mendukung OCO,
-        # penolakan deterministik (FAILED), atau validasi level lokal yang
-        # gagal pada panggilan INI (status None tanpa backoff). Status POST
-        # Binance yang UNKNOWN tidak boleh diberi proteksi kedua karena OCO
-        # pertama mungkin sudah aktif.
         if oco_status in (None, "FAILED") and _native_stop_enabled(config):
             state["native_oco"] = None
             return _arm_native_stop(client, config, filters, state)
@@ -1135,27 +893,12 @@ def _oco_response_has_fill(response: dict) -> bool:
 
 def _settle_native_protective_fill(client: ExchangeClient, config: dict,
                                    state: dict, symbol: str, reason: str) -> None:
-    """Rekonsiliasi pasca-fill proteksi native + pembersihan flag fail-closed.
-
-    Perbaikan audit 2026-09-27 (temuan TINGGI): sebelumnya
-    ``reconciliation_required`` disetel True sebelum reconcile dan TIDAK ADA
-    jalur yang membersihkannya setelah exit native normal, sehingga SETIAP
-    exit lewat OCO/stop native menghentikan entry baru secara PERMANEN sampai
-    file state diedit manual. Sekarang flag dibersihkan tepat sebelum
-    reconcile sehingga reconcile menjadi satu-satunya penentu status; bila
-    posisi terbukti bersih, administrasi close (cooldown, penanda waktu
-    trade, dust sweep) diselesaikan seperti exit lokal. Bila reconcile TIDAK
-    berhasil membuktikan posisi bersih (mis. get_account gagal, ada saldo
-    locked, atau fill baru parsial), state kembali fail-closed seperti dulu.
-    """
     entry_price = float(state.get("entry_price") or 0.0)
     base = symbol[: -len(config["QUOTE_ASSET"])]
     state["reconciliation_required"] = False
     state["reconciliation_assets"] = []
     reconcile_state_with_exchange(client, config, state)
     if state.get("current_symbol") or state.get("pending_order"):
-        # Saldo belum terverifikasi bersih. Kembali fail-closed; iterasi
-        # atau restart berikutnya mengulang rekonsiliasi.
         state["reconciliation_required"] = True
         state["reconciliation_assets"] = [base]
         state_mod.save_state(config["STATE_FILE"], state)
@@ -1174,7 +917,6 @@ def _settle_native_protective_fill(client: ExchangeClient, config: dict,
 
 def _reconcile_native_oco(client: ExchangeClient, config: dict,
                           state: dict) -> bool:
-    """Rekonsiliasi OCO dan cegah SELL kedua setelah salah satu leg mengisi."""
     intent = state.get("native_oco")
     symbol = state.get("current_symbol")
     if not isinstance(intent, dict) or not symbol:
@@ -1198,12 +940,6 @@ def _reconcile_native_oco(client: ExchangeClient, config: dict,
             ),
         )
     except BinanceAPIError as exc:
-        # Perbaikan KRITIS-01: bila order-list TIDAK ADA di bursa padahal
-        # intent tidak pernah dikonfirmasi tercipta (POST gagal/timeout,
-        # order_list_id masih None), kesimpulannya deterministik: POST tidak
-        # pernah mendarat. Tanpa cabang ini, GET yang terus melempar error
-        # "does not exist" membuat exit lokal terblokir selamanya sementara
-        # tidak ada satu pun proteksi di bursa (posisi telanjang permanen).
         never_confirmed = intent.get("order_list_id") is None
         age_ms = state_mod.now_ms() - int(intent.get("created_at") or 0)
         if (_is_order_not_found(exc) and never_confirmed
@@ -1249,9 +985,6 @@ def _reconcile_native_oco(client: ExchangeClient, config: dict,
 
     filled = _oco_response_has_fill(response)
     if not filled and status == "ALL_DONE":
-        # Beberapa response order-list hanya mengembalikan daftar child tanpa
-        # orderReports. Query kedua leg sebelum menyimpulkan ALL_DONE sebagai
-        # cancel/expire biasa.
         for leg_name in ("above", "below"):
             leg = intent.get(leg_name)
             if not isinstance(leg, dict) or leg.get("order_id") is None:
@@ -1304,21 +1037,12 @@ def _reconcile_native_oco(client: ExchangeClient, config: dict,
 
 def _reconcile_native_stop(client: ExchangeClient, config: dict,
                            state: dict) -> bool:
-    """Kembalikan True jika native stop masih menjadi sumber kebenaran.
-
-    Status FILLED memicu rekonsiliasi saldo dan tidak pernah diikuti SELL
-    market kedua. Status UNKNOWN juga menutup jalur manual exit sampai GET
-    berhasil, sehingga satu posisi tidak memiliki dua proteksi/dua exit.
-    """
     intent = state.get("native_stop")
     symbol = state.get("current_symbol")
     if not isinstance(intent, dict) or not symbol:
         return True
     status = str(intent.get("status") or "UNKNOWN").upper()
     if status == "FAILED":
-        # Kegagalan lokal seperti client PAPER/fake yang tidak mendukung
-        # native stop bukan status request yang tidak pasti. Proteksi native
-        # dibersihkan agar local exit tetap dapat menutup posisi.
         state["native_stop"] = None
         state["_native_stop_exit_blocked"] = False
         state["reconciliation_required"] = True
@@ -1342,9 +1066,6 @@ def _reconcile_native_stop(client: ExchangeClient, config: dict,
             ),
         )
     except BinanceAPIError as exc:
-        # Perbaikan KRITIS-01: analogi dengan _reconcile_native_oco. Order
-        # stop yang tidak pernah dikonfirmasi tercipta (order_id None) dan
-        # dinyatakan tidak ada oleh bursa berarti POST tidak pernah mendarat.
         never_confirmed = intent.get("order_id") is None
         age_ms = state_mod.now_ms() - int(intent.get("created_at") or 0)
         if (_is_order_not_found(exc) and never_confirmed
@@ -1402,7 +1123,6 @@ def _reconcile_native_stop(client: ExchangeClient, config: dict,
 
 def _cancel_native_oco_before_exit(client: ExchangeClient, config: dict,
                                    state: dict) -> bool:
-    """Batalkan OCO dan verifikasi kedua leg sebelum SELL manual."""
     intent = state.get("native_oco")
     symbol = state.get("current_symbol")
     if not isinstance(intent, dict) or not symbol:
@@ -1463,7 +1183,6 @@ def _cancel_native_oco_before_exit(client: ExchangeClient, config: dict,
 
 def _cancel_native_stop_before_exit(client: ExchangeClient, config: dict,
                                     state: dict) -> bool:
-    """Batalkan proteksi native dan verifikasi cancel sebelum SELL manual."""
     if isinstance(state.get("native_oco"), dict):
         if not _cancel_native_oco_before_exit(client, config, state):
             return False
@@ -1513,12 +1232,6 @@ def _cancel_native_stop_before_exit(client: ExchangeClient, config: dict,
 
 def _executable_bid(client: ExchangeClient, symbol: str,
                     reference_price: float | None = None) -> float | None:
-    """Ambil bid yang benar-benar dapat dieksekusi untuk SELL.
-
-    Harga last trade tidak menjamin order MARKET SELL terisi pada harga itu.
-    Jalur exit memakai bid bookTicker yang segar, sedangkan reference_price
-    dipakai bila loop utama sudah mengambil bid pada iterasi yang sama.
-    """
     if reference_price is not None:
         try:
             bid = float(reference_price)
@@ -1533,8 +1246,6 @@ def _executable_bid(client: ExchangeClient, symbol: str,
         try:
             book = getter(symbol, max_retries=1)
         except TypeError:
-            # Kompatibilitas fake client lama. GET bookTicker idempotent, jadi
-            # fallback ini tidak memiliki risiko duplikasi order.
             book = getter(symbol)
         bid = float(book.get("bidPrice", 0.0))
         return bid if bid > 0 else None
@@ -1543,19 +1254,10 @@ def _executable_bid(client: ExchangeClient, symbol: str,
         return None
 
 
-# Cache permanen usia listing per simbol (usia tidak pernah menyusut),
-# supaya hanya kandidat BARU yang memakan 1 panggilan klines (weight 2).
 _listing_age_cache: dict = {}
 
 
 def listing_age_days(client: ExchangeClient, symbol: str, now_ms: int) -> float:
-    """Usia pair sejak candle harian pertamanya, dalam hari (perbaikan audit
-    2026-09-24, temuan S-08).
-
-    Dipakai untuk menolak entry ke koin yang baru listing: riwayat tipis,
-    spread lebar, dan fase pump artifisial "hari listing" yang sering langsung
-    kolaps. Dipanggil HANYA untuk kandidat yang sudah lolos konfirmasi entry.
-    """
     if symbol in _listing_age_cache:
         return _listing_age_cache[symbol]
     raw = client.get_klines(symbol, "1d", limit=1, start_time_ms=0)
@@ -1565,7 +1267,6 @@ def listing_age_days(client: ExchangeClient, symbol: str, now_ms: int) -> float:
 
 def _restore_pending_buy(config: dict, state: dict, pending: dict, order: dict,
                          account: dict) -> bool:
-    """Pulihkan state minimal dari BUY yang terisi tetapi responsnya hilang."""
     executed = float(order.get("executedQty", 0.0) or 0.0)
     quoted = float(order.get("cummulativeQuoteQty", 0.0) or 0.0)
     symbol = str(pending.get("symbol") or order.get("symbol") or "")
@@ -1575,9 +1276,6 @@ def _restore_pending_buy(config: dict, state: dict, pending: dict, order: dict,
     if not symbol.endswith(quote):
         return False
     base = symbol[: -len(quote)]
-    # PAPER dapat memotong fee dari base. Untuk pengelolaan posisi, jangan
-    # pernah menyimpan qty lebih besar dari saldo free yang benar-benar bisa
-    # dijual sekarang.
     qty = min(executed, get_balance(account, base))
     if qty <= 0:
         return False
@@ -1606,15 +1304,8 @@ def open_position(client: ExchangeClient, config: dict, filters_cache: dict,
         logger.warning("Tidak ada data filter untuk %s, entry dilewati.", candidate.symbol)
         return
 
-    # Harga acuan ukuran posisi (temuan S-07): utamakan harga ASK segar dari
-    # bookTicker yang baru diambil pemanggil, bukan candidate.last_price dari
-    # ticker 24 jam yang bisa sudah beberapa menit basi saat order dikirim.
-    # Pada koin pump yang bergerak cepat, bedanya menentukan apakah cek
-    # qty/MIN_NOTIONAL masih valid di harga eksekusi riil.
     price_ref = reference_price if (reference_price and reference_price > 0) else candidate.last_price
 
-    # Kedua mode sizing perlu saldo aktual: mode persen menghitung proporsi,
-    # mode fixed perlu ditolak sebelum order bila nominal melebihi saldo.
     try:
         account = client.get_account()
     except BinanceAPIError as exc:
@@ -1644,9 +1335,6 @@ def open_position(client: ExchangeClient, config: dict, filters_cache: dict,
                        candidate.symbol, price_ref)
         return
 
-    # Hormati batas MARKET_LOT_SIZE/LOT_SIZE dan NOTIONAL dari exchangeInfo.
-    # Untuk BUY, quoteOrderQty tetap menjadi sumber sizing utama, tetapi
-    # nominal diturunkan bila filter maxNotional atau maxQty membatasinya.
     order_quote_qty = usdt_amount
     if filters.max_notional > 0:
         order_quote_qty = min(order_quote_qty, float(filters.max_notional))
@@ -1673,22 +1361,12 @@ def open_position(client: ExchangeClient, config: dict, filters_cache: dict,
     use_quote_order_qty = bool(filters.quote_order_qty_market_allowed)
     order_quantity = None if use_quote_order_qty else qty
     if not use_quote_order_qty:
-        # Quantity MARKET tetap dibatasi oleh quantity yang sudah dibulatkan.
         order_quote_qty = None
 
-    # Simpan intent dan preview level SEBELUM request. Bila respons hilang
-    # setelah exchange mengisi BUY, startup dapat memulihkan posisi dengan
-    # clientOrderId tanpa menganggap akun kosong.
     level_cfg = dict(config)
     if candidate.setup is not None and candidate.setup.atr_value is not None:
         level_cfg["_atr_value"] = candidate.setup.atr_value
     elif bool(config.get("USE_ATR_EXIT", False)):
-        # Perbaikan audit 2026-09-27 (temuan KRITIS): tanpa _atr_value,
-        # resolve_exit_levels mengembalikan multiplier mentah sebagai JARAK
-        # HARGA ABSOLUT (mis. "SL = entry - 12 USDT"). Untuk koin berharga
-        # rendah level itu tidak pernah tersentuh DAN OCO/stop native gagal
-        # validasi, sehingga posisi hidup tanpa exit efektif. Entry ditolak;
-        # kandidat lain/scan berikutnya akan menyediakan ATR yang valid.
         logger.warning(
             "Entry %s dilewati: USE_ATR_EXIT aktif tetapi nilai ATR kandidat "
             "tidak tersedia, level exit tidak dapat dikunci dengan aman.",
@@ -1699,8 +1377,6 @@ def open_position(client: ExchangeClient, config: dict, filters_cache: dict,
     if str(preview.get("source", "")).upper() == "ATR" and not (
         0.0 < float(preview.get("sl_pct") or 0.0) < price_ref
     ):
-        # Sabuk pengaman kedua: jarak SL absolut wajib positif dan lebih
-        # kecil dari harga acuan, kalau tidak stop berada di harga <= 0.
         logger.critical(
             "Entry %s dilewati: jarak SL ATR %.10g tidak masuk akal terhadap "
             "harga acuan %.10g. Cek ATR_MULT_SL/ATR kandidat.",
@@ -1721,9 +1397,6 @@ def open_position(client: ExchangeClient, config: dict, filters_cache: dict,
     pending_intent = dict(state["pending_order"])
     state_mod.save_state(config["STATE_FILE"], state)
     try:
-        # Policy sizing adalah nominal quote. Jangan mengubahnya menjadi
-        # quantity berbasis ASK karena harga dapat bergerak sebelum fill dan
-        # membuat quote aktual melampaui MAX_POSITION_USDT.
         resp = _submit_market_order(
             client, candidate.symbol, "BUY", order_quantity, client_order_id,
             quote_order_qty=order_quote_qty,
@@ -1740,8 +1413,6 @@ def open_position(client: ExchangeClient, config: dict, filters_cache: dict,
     executed_qty = float(resp.get("executedQty", 0.0))
     cumm_quote = float(resp.get("cummulativeQuoteQty", 0.0))
     if executed_qty <= 0 or cumm_quote <= 0:
-        # Respons diterima tetapi belum cukup untuk membangun posisi. Simpan
-        # intent agar startup dapat memeriksa get_order(), bukan scan lagi.
         state["pending_order"] = pending_intent
         state["reconciliation_required"] = True
         state["reconciliation_assets"] = [candidate.symbol]
@@ -1756,9 +1427,6 @@ def open_position(client: ExchangeClient, config: dict, filters_cache: dict,
         candidate.symbol, executed_qty, fill_price, candidate.price_change_pct,
         candidate.quote_volume, candidate.confirm_reason,
     )
-    # Fee BUY dapat dipotong dari base asset. Selaraskan qty state dengan
-    # saldo yang benar-benar bisa dijual agar equity dan close tidak memakai
-    # executedQty gross secara keliru, terutama di PAPER.
     base_asset = candidate.symbol[: -len(config["QUOTE_ASSET"])]
     managed_qty = executed_qty
     try:
@@ -1786,8 +1454,6 @@ def open_position(client: ExchangeClient, config: dict, filters_cache: dict,
     state["reconciliation_required"] = False
     state["reconciliation_assets"] = []
 
-    # Level exit dihitung sekali di sini lalu dikunci di state. Stop hanya
-    # boleh mengetat lewat Breakeven/Trailing, tidak pernah melonggar.
     levels = strategy.resolve_exit_levels(level_cfg)
     state["sl_pct"] = levels["sl_pct"]
     state["tp_pct"] = levels["tp_pct"]
@@ -1798,17 +1464,10 @@ def open_position(client: ExchangeClient, config: dict, filters_cache: dict,
     state["exit_source"] = levels["source"]
     state["sell_fail_count"] = 0
 
-    # Simpan SEKARANG (temuan T-04), jangan menunggu akhir iterasi loop:
-    # crash beberapa ratus milidetik setelah BUY FILLED tidak boleh
-    # meninggalkan POSISI YATIM (ada di exchange, tapi state di disk masih
-    # kosong sehingga bot restart tanpa tahu posisi ini ada dan tanpa SL/TP).
     state_mod.save_state(config["STATE_FILE"], state)
     logger.info("%s: level exit dikunci -> %s | %s",
                 candidate.symbol, levels["source"], levels["note"])
 
-    # LIVE memakai stop market native sebagai proteksi utama. Intent dan
-    # clientOrderId disimpan oleh helper sebelum POST; bila pemasangan gagal,
-    # local stop tetap berjalan tetapi bot fail-closed untuk entry baru.
     if _native_protection_enabled(config):
         _ensure_native_protection(client, config, filters, state)
 
@@ -1829,9 +1488,6 @@ def close_position(client: ExchangeClient, config: dict, filters_cache: dict,
         state_mod.save_state(config["STATE_FILE"], state)
         return
 
-    # Proteksi exchange-side harus dibatalkan dan dikonfirmasi lebih dulu.
-    # Jika status cancel tidak pasti, SELL manual ditahan untuk mencegah dua
-    # order SELL berlomba pada saldo yang sama.
     if not _cancel_native_stop_before_exit(client, config, state):
         return
 
@@ -1857,7 +1513,6 @@ def close_position(client: ExchangeClient, config: dict, filters_cache: dict,
         logger.error("Gagal ambil saldo sebelum SELL %s: %s", symbol, exc)
 
     if filters:
-        # Patuhi batas quantity MARKET maupun LOT_SIZE yang paling ketat.
         if filters.max_qty > 0:
             qty_to_sell = min(qty_to_sell, float(filters.max_qty))
         qty_to_sell = filters.round_qty(qty_to_sell)
@@ -1869,9 +1524,6 @@ def close_position(client: ExchangeClient, config: dict, filters_cache: dict,
             qty_to_sell = filters.round_qty(
                 float(filters.max_notional) / executable_bid
             )
-        # Locked asset tetap milik akun dan mungkin masih berada di open order.
-        # Jangan menyimpulkan posisi sudah menjadi dust hanya karena bagian free
-        # bernilai nol atau lebih kecil dari minQty.
         if account_loaded and locked_base > 0 and qty_to_sell < float(filters.min_qty):
             logger.critical(
                 "SELL %s ditahan: free base %.8f di bawah minQty tetapi masih "
@@ -1896,8 +1548,6 @@ def close_position(client: ExchangeClient, config: dict, filters_cache: dict,
             and filters.min_notional > 0
             and qty_to_sell * executable_bid < float(filters.min_notional)
         ):
-            # Aset masih ada, tetapi order MARKET akan ditolak oleh filter
-            # notional. Jangan reset state dan jangan menganggap saldo hilang.
             logger.critical(
                 "SELL %s ditahan: notional executable %.8f di bawah minNotional %.8f. "
                 "Saldo dipertahankan untuk rekonsiliasi/dust sweep.",
@@ -1928,9 +1578,6 @@ def close_position(client: ExchangeClient, config: dict, filters_cache: dict,
     try:
         resp = _submit_market_order(client, symbol, "SELL", qty_to_sell, client_order_id)
     except BinanceAPIError as exc:
-        # Respons gagal dapat berarti exchange sudah menerima order. Intent
-        # sengaja dipertahankan dan entry baru diblokir sampai get_order()
-        # merekonsiliasinya, bukan mencoba SELL kedua secara buta.
         state["sell_fail_count"] = int(state.get("sell_fail_count", 0)) + 1
         state["reconciliation_required"] = True
         state["reconciliation_assets"] = [base_asset]
@@ -1952,10 +1599,6 @@ def close_position(client: ExchangeClient, config: dict, filters_cache: dict,
     cumm_quote = max(0.0, float(resp.get("cummulativeQuoteQty", 0.0) or 0.0))
     status = str(resp.get("status") or "").upper()
 
-    # NEW/PARTIALLY_FILLED belum terminal. Intent harus tetap disimpan agar
-    # iterasi berikutnya melakukan GET order, bukan mengirim SELL kedua.
-    # Response fake lama tanpa status hanya boleh dianggap FILLED bila seluruh
-    # quantity target sudah reported filled.
     if status in _NONTERMINAL_ORDER_STATUSES or (
         not status and executed_qty < qty_to_sell - 1e-12
     ):
@@ -1975,12 +1618,8 @@ def close_position(client: ExchangeClient, config: dict, filters_cache: dict,
         return
 
     if not status:
-        # Kompatibilitas response lama tanpa status yang sudah mengembalikan
-        # seluruh fill. Client Binance resmi selalu mengembalikan status.
         status = "FILLED"
 
-    # Status terminal sudah diketahui. Intent boleh dibersihkan, tetapi saldo
-    # post-order tetap dipakai untuk mempertahankan aset yang masih locked.
     state["pending_order"] = None
     sell_price = (cumm_quote / executed_qty) if executed_qty > 0 else 0.0
     pnl = (sell_price - entry_price) * executed_qty if entry_price > 0 else 0.0
@@ -1998,11 +1637,8 @@ def close_position(client: ExchangeClient, config: dict, filters_cache: dict,
              if b.get("asset") == base_asset),
             0.0,
         )
-        # Total balance mencakup free dan locked. Menggunakan free saja dapat
-        # menghapus posisi yang masih menunggu order lain selesai.
         remaining = min(remaining, post_total)
     except BinanceAPIError:
-        # Pengurangan dari qty state tetap lebih aman daripada reset penuh.
         pass
 
     min_qty = float(filters.min_qty) if filters else 0.0
@@ -2023,8 +1659,6 @@ def close_position(client: ExchangeClient, config: dict, filters_cache: dict,
         try_dust_sweep(client, config, symbol)
         return
 
-    # Market order dapat EXPIRED/CANCELED dengan partial fill. Posisi harus
-    # tetap ada agar SL/TP/recovery berikutnya tahu aset yang belum terjual.
     state["qty"] = remaining
     state["sell_fail_count"] = 0
     state["reconciliation_required"] = bool(post_loaded and post_locked > 0)
@@ -2036,29 +1670,11 @@ def close_position(client: ExchangeClient, config: dict, filters_cache: dict,
 
 def check_manual_control(client: ExchangeClient, config: dict, filters_cache: dict,
                           state: dict) -> None:
-    """Cek "control file" yang bisa ditulis dashboard.py (proses terpisah)
-    untuk perintah manual, mis. tombol "Jual Sekarang". Dipanggil tiap
-    iterasi loop utama (maks setiap LOOP_INTERVAL_SECONDS, default 15 detik)
-    supaya perintah dari dashboard direspons cepat tanpa perlu bot di-restart.
-
-    Kenapa lewat file, bukan panggilan langsung? Bot dan dashboard sengaja
-    berjalan sebagai DUA PROSES terpisah (lihat run.py) supaya crash di satu
-    proses tidak menjatuhkan proses lain. Satu-satunya cara komunikasi antar
-    proses yang sudah dipakai di proyek ini adalah file (file state, mis.
-    pump_bot_state_paper.json), jadi kontrol manual memakai pola yang sama
-    demi konsistensi."""
-    # Nama file kontrol ikut terpisah per mode (pump_bot_control_paper.json
-    # vs ..._live.json), sudah otomatis dihitung di config.py. Fallback ke
-    # get_control_file() supaya dict config custom tanpa kunci ini pun tetap
-    # mendapat nama yang benar untuk mode aktif, bukan nama tanpa akhiran.
     control_path = config.get("CONTROL_FILE") or get_control_file(config)
     cmd = state_mod.load_control(control_path)
     if not cmd:
         return
 
-    # Perintah kadaluarsa (mis. bot sempat mati/lama tidak jalan lalu baru
-    # nyala lagi) TIDAK dieksekusi -- mencegah "Jual Sekarang" yang diklik
-    # user berjam-jam lalu tiba-tiba dieksekusi tanpa konteks saat ini.
     requested_at = int(cmd.get("requested_at", 0) or 0)
     age_sec = (state_mod.now_ms() - requested_at) / 1000.0
     MAX_AGE_SECONDS = 120
@@ -2074,9 +1690,6 @@ def check_manual_control(client: ExchangeClient, config: dict, filters_cache: di
         state_mod.clear_control(control_path)
         return
 
-    # Selalu hapus file SEBELUM eksekusi (bukan sesudah) -- kalau proses
-    # crash di tengah close_position(), file tidak akan "menyangkut" dan
-    # dieksekusi ulang berkali-kali begitu bot menyala lagi.
     state_mod.clear_control(control_path)
 
     if not state["current_symbol"] or state["qty"] <= 0:
@@ -2101,13 +1714,9 @@ def check_manual_control(client: ExchangeClient, config: dict, filters_cache: di
 
 def manage_exit(client: ExchangeClient, config: dict, filters_cache: dict,
                  state: dict, current_price: float) -> None:
-    """Kelola SL, TP, breakeven, dan trailing dalam unit persen atau harga."""
     if not state["current_symbol"] or state["qty"] <= 0 or state["entry_price"] <= 0:
         return
 
-    # Poll status native sebelum mengevaluasi local exit. Native FILLED wajib
-    # direkonsiliasi, bukan diikuti MARKET SELL kedua. Bila order hilang
-    # karena cancel/expire, coba pasang ulang dengan intent baru.
     if _native_protection_enabled(config):
         if isinstance(state.get("native_oco"), dict):
             if not _reconcile_native_oco(client, config, state):
@@ -2121,10 +1730,6 @@ def manage_exit(client: ExchangeClient, config: dict, filters_cache: dict,
             state.get("current_symbol")
             and not state.get("native_oco")
             and not state.get("native_stop")
-            # Jangan memasang proteksi BARU selama exit masih diblokir oleh
-            # fill native yang belum terverifikasi bersih: qty state bisa
-            # sudah tidak dimiliki lagi, dan POST hanya akan ditolak berulang
-            # (perbaikan audit 2026-09-27, pendamping _settle_native_protective_fill).
             and not state.get("_native_stop_exit_blocked")
         ):
             filters = filters_cache.get(state["current_symbol"])
@@ -2133,10 +1738,6 @@ def manage_exit(client: ExchangeClient, config: dict, filters_cache: dict,
                     return
 
     atr_mode = str(state.get("exit_source", "")).upper() == "ATR"
-    # Fallback config sadar-unit (perbaikan audit 2026-09-27): pada mode ATR
-    # nilai state adalah jarak harga absolut, sedangkan config berdenominasi
-    # persen. _exit_distance mengonversi persen -> jarak harga bila perlu,
-    # supaya SL tidak pernah "mati" hanya karena satuan tercampur.
     entry = float(state["entry_price"])
     sl = _exit_distance(state, config, "sl_pct", "SL_PCT", atr_mode, entry)
     tp = _exit_distance(state, config, "tp_pct", "TP_PCT", atr_mode, entry)
@@ -2194,8 +1795,6 @@ def run(config: dict, lifecycle=None) -> int:
     setup_logging(config)
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
-    # Windows hanya dapat mengirim CTRL_BREAK_EVENT secara graceful ke child
-    # yang dibuat dengan CREATE_NEW_PROCESS_GROUP.
     if os.name == "nt" and hasattr(signal, "SIGBREAK"):
         signal.signal(signal.SIGBREAK, _handle_signal)
 
@@ -2204,8 +1803,6 @@ def run(config: dict, lifecycle=None) -> int:
                         "; ".join(CONFIG_LOAD_ERRORS))
         return 2
 
-    # Validasi MODE secara KETAT paling awal: nilai tak dikenal/kosong/typo
-    # menghentikan bot dengan pesan jelas, TIDAK pernah jatuh diam-diam ke LIVE.
     from config.config import InvalidModeError
     try:
         mode = require_valid_mode(config)
@@ -2236,9 +1833,6 @@ def run(config: dict, lifecycle=None) -> int:
     else:
         logger.warning("MODE LIVE AKTIF: order memakai UANG ASLI di Binance produksi.")
 
-    # Gerbang risiko akun (temuan KRITIS-01). Diperiksa SEBELUM client dibuat
-    # dan sebelum satu pun request terkirim, supaya bot LIVE tanpa rem
-    # kerugian berhenti di sini, bukan sekadar mencetak peringatan.
     risk_ok, risk_reason = account_risk_gate(config)
     if not risk_ok:
         logger.critical("%s", risk_reason)
@@ -2268,18 +1862,10 @@ def run(config: dict, lifecycle=None) -> int:
     logger.info("Filter untuk %d simbol berhasil dimuat.", len(filters_cache))
 
     state = load_pump_state(config["STATE_FILE"])
-    # Mode exit dilaporkan SETELAH state dimuat (temuan TINGGI-01): jalur ATR
-    # ditentukan oleh state["exit_source"] pada posisi yang sudah berjalan,
-    # bukan oleh config USE_ATR_EXIT saat ini. Melaporkannya sebelum state
-    # dimuat membuat log mengklaim mode yang tidak dipakai runtime.
     logger.info("Mode exit efektif: %s", describe_exit_mode(config, state))
     if state["current_symbol"]:
         logger.info("Melanjutkan posisi yang sudah ada: %s qty=%.8f @ %.6f",
                     state["current_symbol"], state["qty"], state["entry_price"])
-    # Rekonsiliasi startup (temuan S-02): pastikan posisi di state benar-benar
-    # masih ada di exchange. Tanpa ini, penjualan manual atau reset state atau penjualan
-    # manual membuat bot mengelola "posisi hantu" dan SL/TP-nya menembak
-    # order yang tidak masuk akal.
     reconcile_state_with_exchange(client, config, state, filters_cache)
     if lifecycle is not None:
         lifecycle.write("RUNNING")
@@ -2291,21 +1877,6 @@ def run(config: dict, lifecycle=None) -> int:
     FILTERS_REFRESH_INTERVAL_SECONDS = 6 * 3600
 
     def klines_fetcher(symbol: str):
-        """Ambil tepat window candle TERTUTUP untuk keputusan entry.
-
-        Endpoint kline Binance hampir selalu menyertakan candle interval saat
-        ini yang belum selesai. Memakai candle itu untuk sinyal live sementara
-        backtest memakai candle final menciptakan look-ahead/repaint mismatch.
-        Karena itu satu candle ekstra diminta, candle yang close_time-nya
-        belum lewat dibuang, lalu hanya window terbaru yang sudah selesai
-        dikembalikan. Cukup untuk deteksi setup.
-
-        Jumlah candle memakai strategy.confirm_window_bars(), fungsi yang
-        sama dengan yang dipakai backtest, dashboard, dan watchlist, sehingga
-        keempat jalur melihat jendela identik. Limit endpoint klines adalah
-        1000 candle per panggilan dengan bobot IP 2 (dicek 2026-09-25 di
-        developers.binance.com/en/docs/catalog/core-trading-spot-trading/api/rest-api/market#klines).
-        """
         lookback = strategy.confirm_window_bars(config)
         raw = client.get_klines(symbol, config["CONFIRM_INTERVAL"], limit=lookback + 1)
         now_ms = state_mod.now_ms()
@@ -2316,9 +1887,6 @@ def run(config: dict, lifecycle=None) -> int:
     while not _shutdown_requested:
         loop_start = time.time()
         try:
-            # Jalur shutdown utama di Windows dan Linux: file perintah stop.
-            # Dipisahkan dari file CLOSE_POSITION agar kedua perintah tidak
-            # saling menimpa.
             if state_mod.consume_stop_request(config["CONTROL_FILE"]):
                 _shutdown_requested = True
                 _shutdown_event.set()
@@ -2337,10 +1905,6 @@ def run(config: dict, lifecycle=None) -> int:
                 tradable_symbols = build_trading_symbols(exchange_info)
                 filters_cache_time = time.time()
                 logger.info("Filter simbol disegarkan ulang (%d simbol).", len(filters_cache))
-                # PERBAIKAN AUDIT 2026-09-30 (temuan RENDAH-01): peringatkan bila
-                # simbol yang SEDANG DIPEGANG berhenti berstatus TRADING. Dalam
-                # kondisi itu setiap MARKET SELL pasti ditolak bursa, dan operator
-                # perlu tahu secepatnya.
                 held = state.get("current_symbol")
                 if held and tradable_symbols and held not in tradable_symbols:
                     logger.critical(
@@ -2349,25 +1913,15 @@ def run(config: dict, lifecycle=None) -> int:
                         held,
                     )
 
-            # MARKET order normalnya selesai segera. Namun timeout jaringan
-            # dapat terjadi setelah Binance menerima order. Intent pending
-            # direkonsiliasi aktif pada loop berikutnya (bukan hanya saat
-            # restart), dan semua entry tetap diblokir sampai status pasti.
             if state.get("pending_order"):
                 logger.warning("Merekonsiliasi intent order pending %s sebelum melanjutkan loop.",
                                state["pending_order"].get("client_order_id"))
                 reconcile_state_with_exchange(client, config, state)
 
-            # Perintah manual dari dashboard (mis. "Jual Sekarang") dicek
-            # PALING AWAL setiap iterasi, sebelum logika exit otomatis --
-            # kalau user memintanya, itu harus didahulukan.
             check_manual_control(client, config, filters_cache, state)
 
             current_price = None
             if state["current_symbol"]:
-                # Exit long harus dinilai pada bid executable, bukan last trade.
-                # Jika bookTicker gagal atau bid tidak valid, jangan mengevaluasi
-                # SL/TP memakai harga basi; iterasi berikutnya akan mencoba lagi.
                 book = client.get_book_ticker(state["current_symbol"], max_retries=1)
                 current_price = float(book.get("bidPrice", 0.0))
                 if current_price <= 0:
@@ -2379,15 +1933,10 @@ def run(config: dict, lifecycle=None) -> int:
             equity = get_equity(client, config, state,
                                 position_price=current_price)
             if equity is None:
-                # Harga API sedang bermasalah (temuan T-05): JANGAN ubah
-                # kontrol risiko sama sekali berdasarkan equity yang keliru.
-                # Status berhenti yang sudah ada sebelumnya tetap dihormati.
                 entries_paused = bool(state.get("dd_stopped") or state.get("daily_stopped"))
             else:
                 entries_paused = update_equity_controls(state, equity, config)
 
-            # CLOSE_ALL_AT_LIMIT (temuan T-06): kill switch aktif sekarang
-            # benar-benar menutup posisi, bukan cuma menjeda entry baru.
             maybe_force_close_at_risk_limit(client, config, filters_cache, state,
                                             entries_paused, current_price)
 
@@ -2409,24 +1958,9 @@ def run(config: dict, lifecycle=None) -> int:
                     and now - state.get("last_trade_time", 0) >= config["MIN_SECONDS_BETWEEN_TRADES"] * 1000
                 )
                 if can_enter:
-                    # Semesta dibatasi ke simbol berstatus TRADING dari
-                    # exchangeInfo, bukan sekadar apa pun yang muncul di
-                    # ticker 24 jam. Simbol HALT atau BREAK tetap mengirim
-                    # ticker, dan order ke simbol seperti itu pasti ditolak.
-                    # Gerbang pump butuh candle harian, tetapi HANYA untuk
-                    # simbol yang sudah lolos syarat kenaikan 24 jam. Cache
-                    # dibuat baru tiap siklus scan supaya candle harian tidak
-                    # pernah dipakai ulang dari siklus sebelumnya (bisa basi),
-                    # namun satu simbol tidak diminta dua kali dalam satu
-                    # siklus yang sama.
                     daily_fetcher = scanner.make_daily_klines_fetcher(client, cache={})
-                    # Filter korelasi BTC memakai candle konfirmasi yang sudah
-                    # close. Nilai hanya disuntikkan untuk satu siklus scan.
                     scan_config = dict(config)
                     if config.get("BTC_FILTER_ENABLED", False):
-                        # Filter korelasi BTC bersifat fail-closed di LIVE.
-                        # Tanpa data BTC tertutup yang valid, tidak boleh ada
-                        # kandidat altcoin yang lolos secara diam-diam.
                         scan_config["_btc_filter_fail_closed"] = True
                         try:
                             btc_raw = client.get_klines(
@@ -2439,9 +1973,6 @@ def run(config: dict, lifecycle=None) -> int:
                                 scan_config["_btc_drop_pct"] = (btc_closed[-1].close /
                                     btc_closed[-look-1].close - 1.0) * 100.0
                         except Exception as exc:
-                            # Proses scan tetap hidup, tetapi fail-closed:
-                            # scan_config tidak memiliki _btc_drop_pct sehingga
-                            # evaluate_pump_gate menolak semua kandidat.
                             logger.warning("Filter BTC tidak dapat dihitung; kandidat ditolak: %s", exc)
                     best = scanner.find_best_candidate(tickers, klines_fetcher, scan_config,
                                                        tradable_symbols,
@@ -2451,13 +1982,6 @@ def run(config: dict, lifecycle=None) -> int:
                         book = client.get_book_ticker(best.symbol)
                         bid, ask = float(book["bidPrice"]), float(book["askPrice"])
                         spread_pct = scanner.spread_pct_from_book(bid, ask)
-                        # Pagar chase (perbaikan audit 2026-09-27): antara
-                        # close candle konfirmasi dan detik ini bisa berlalu
-                        # sampai MARKET_SCAN_INTERVAL_SECONDS. Kalau ask
-                        # sudah lari terlalu jauh di atas harga sinyal
-                        # (setup.breakout_level = close candle konfirmasi),
-                        # entry dilewati; SL/TP dihitung dari fill sehingga
-                        # membeli puncak lokal merusak seluruh geometri exit.
                         max_chase = float(config.get("MAX_CHASE_PCT", 0) or 0)
                         signal_close = float(best.setup.breakout_level or 0.0) if (
                             best.setup is not None and best.setup.breakout_level
@@ -2480,9 +2004,6 @@ def run(config: dict, lifecycle=None) -> int:
                                 best.symbol, best.quote_volume, best.price_change_pct,
                                 spread_pct, best.confirm_reason,
                             )
-                            # Filter usia listing (temuan S-08): koin yang
-                            # baru listing sering pump buatan lalu kolaps.
-                            # Dicek hanya untuk kandidat yang sudah lolos.
                             min_age = float(config.get("MIN_LISTING_AGE_DAYS", 0) or 0)
                             if min_age > 0:
                                 try:
@@ -2552,25 +2073,19 @@ def run(config: dict, lifecycle=None) -> int:
             break
 
         elapsed = time.time() - loop_start
-        # Event membuat SIGTERM/SIGBREAK membangunkan sleep segera, sehingga
-        # state masih sempat disimpan sebelum timeout fallback berakhir.
         _shutdown_event.wait(max(1.0, config["LOOP_INTERVAL_SECONDS"] - elapsed))
 
     if lifecycle is not None and _shutdown_requested:
         lifecycle.write("STOPPING", reason="Shutdown graceful sedang menyimpan state.")
-    # Simpan sekali lagi setelah loop agar perubahan iterasi terakhir tidak
-    # hilang saat sinyal datang di antara dua operasi.
     try:
         state_mod.save_state(config["STATE_FILE"], state)
     except OSError as exc:
         logger.error("Gagal menyimpan state saat shutdown: %s", exc)
         exit_code = 1
 
-    # Tutup sumber daya klien (mis. thread WebSocket di PAPER/LIVE) dengan
-    # rapi. Aman dipanggil untuk klien apa pun (default no-op).
     try:
         client.close()
-    except Exception:  # noqa: BLE001 - penutupan best-effort saat shutdown
+    except Exception:  # noqa: BLE001
         pass
     logger.info("Bot berhenti.")
     return exit_code
@@ -2580,39 +2095,18 @@ def selftest() -> None:
     import tempfile
 
     cfg = dict(PUMP_CONFIG)
-    # WAJIB: open_position/close_position sekarang memanggil save_state SEGERA
-    # setelah order terisi (perbaikan T-04). Tanpa pengalihan ini, selftest
-    # (yang memakai client tiruan) akan MENULIS state palsu ke file state asli
-    # dan bisa merusak state bot yang sedang berjalan.
     cfg["STATE_FILE"] = os.path.join(tempfile.gettempdir(), "pump_bot_selftest_state.json")
-    # PERBAIKAN AUDIT 2026-09-30 (temuan TINGGI-06). Ticker sintetis di bawah
-    # memakai quoteVolume 4 sampai 10 juta yang dipilih relatif terhadap ambang
-    # LAMA (sekitar 3,1 juta). Saat operator menaikkan MIN_QUOTE_VOLUME_USDT_24H
-    # ke 10 juta, seluruh simbol tersaring habis dan selftest gagal dengan
-    # "Hasil saringan/urutan salah: []" walaupun logika saringannya sehat.
-    # Ambang dipatok eksplisit supaya selftest menguji LOGIKA, bukan nilai
-    # kenop yang memang boleh diubah operator kapan saja.
     cfg["MIN_QUOTE_VOLUME_USDT_24H"] = 1_000_000
 
     print("=== SELFTEST: saringan semesta, gerbang pump, dan urutan volume ===")
-    # Gerbang pump WAJIB: naik >= PUMP_MIN_24H_CHANGE_PCT dalam 24 jam DAN
-    # volume kuotasi 24 jam >= PUMP_VOLUME_SURGE_MULT x rata-rata 7 hari.
     HARI_MS = 86_400_000
 
     def _harian(quote_volume_harian: float):
-        """Tujuh candle harian PENUH dengan volume kuotasi tertentu."""
         return [strategy.Kline(open_time=i * HARI_MS, open=1.0, high=1.0, low=1.0,
                                close=1.0, close_time=(i + 1) * HARI_MS - 1,
                                volume=quote_volume_harian, quote_volume=quote_volume_harian)
                 for i in range(7)]
 
-    # Rata-rata harian per simbol dibuat supaya rasio volumenya jelas
-    # terhadap PUMP_VOLUME_SURGE_MULT produksi (2.7149...) dan ambang
-    # likuiditas MIN_QUOTE_VOLUME_USDT_24H produksi (3.099.455):
-    #   AUSDT  6.000.000 / 2.000.000 = 3.00x  -> lolos
-    #   BUSDT  4.000.000 / 1.000.000 = 4.00x  -> lolos
-    #   EUSDT  4.000.000 / 4.000.000 = 1.00x  -> GAGAL syarat volume
-    #   FUSDT  belum punya 7 candle harian     -> GAGAL (koin baru listing)
     RATA_HARIAN = {
         "AUSDT": 2_000_000.0, "BUSDT": 1_000_000.0, "CUSDT": 1_000_000.0,
         "DUSDT": 1_000.0, "EUSDT": 4_000_000.0, "BTCUPUSDT": 1_000.0,
@@ -2620,25 +2114,25 @@ def selftest() -> None:
     }
 
     def daily_fetcher(symbol: str):
-        if symbol == "FUSDT":          # baru listing: hanya 3 candle harian
+        if symbol == "FUSDT":
             return _harian(1_000.0)[:3]
-        if symbol == "GUSDT":          # simbol bermasalah: request gagal
+        if symbol == "GUSDT":
             raise RuntimeError("timeout simulasi")
         return _harian(RATA_HARIAN.get(symbol, 1_000.0))
 
-    ref_ms = 7 * HARI_MS + 1           # semua candle harian di atas sudah tertutup
+    ref_ms = 7 * HARI_MS + 1
 
     tickers = [
         {"symbol": "AUSDT", "priceChangePercent": "15.0", "quoteVolume": "6000000", "lastPrice": "1.0"},
         {"symbol": "BUSDT", "priceChangePercent": "25.0", "quoteVolume": "4000000", "lastPrice": "2.0"},
-        {"symbol": "CUSDT", "priceChangePercent": "-3.0", "quoteVolume": "9000000", "lastPrice": "0.5"},   # gagal: turun 24 jam
-        {"symbol": "DUSDT", "priceChangePercent": "40.0", "quoteVolume": "10000", "lastPrice": "0.1"},     # gagal: volume kurang
-        {"symbol": "EUSDT", "priceChangePercent": "20.0", "quoteVolume": "4000000", "lastPrice": "1.0"},   # gagal: volume tidak naik
-        {"symbol": "FUSDT", "priceChangePercent": "30.0", "quoteVolume": "8000000", "lastPrice": "1.0"},   # gagal: riwayat harian < 7
-        {"symbol": "GUSDT", "priceChangePercent": "30.0", "quoteVolume": "8000000", "lastPrice": "1.0"},   # gagal: klines harian error
-        {"symbol": "BTCUPUSDT", "priceChangePercent": "50.0", "quoteVolume": "9000000", "lastPrice": "3.0"},  # gagal: leveraged token
-        {"symbol": "USDCUSDT", "priceChangePercent": "20.0", "quoteVolume": "9000000", "lastPrice": "1.0"},   # gagal: stablecoin
-        {"symbol": "HALTUSDT", "priceChangePercent": "10.0", "quoteVolume": "8000000", "lastPrice": "1.0"},   # gagal: status bukan TRADING
+        {"symbol": "CUSDT", "priceChangePercent": "-3.0", "quoteVolume": "9000000", "lastPrice": "0.5"},
+        {"symbol": "DUSDT", "priceChangePercent": "40.0", "quoteVolume": "10000", "lastPrice": "0.1"},
+        {"symbol": "EUSDT", "priceChangePercent": "20.0", "quoteVolume": "4000000", "lastPrice": "1.0"},
+        {"symbol": "FUSDT", "priceChangePercent": "30.0", "quoteVolume": "8000000", "lastPrice": "1.0"},
+        {"symbol": "GUSDT", "priceChangePercent": "30.0", "quoteVolume": "8000000", "lastPrice": "1.0"},
+        {"symbol": "BTCUPUSDT", "priceChangePercent": "50.0", "quoteVolume": "9000000", "lastPrice": "3.0"},
+        {"symbol": "USDCUSDT", "priceChangePercent": "20.0", "quoteVolume": "9000000", "lastPrice": "1.0"},
+        {"symbol": "HALTUSDT", "priceChangePercent": "10.0", "quoteVolume": "8000000", "lastPrice": "1.0"},
     ]
     tradable = {"AUSDT", "BUSDT", "CUSDT", "DUSDT", "EUSDT", "FUSDT", "GUSDT",
                 "BTCUPUSDT", "USDCUSDT"}
@@ -2651,19 +2145,13 @@ def selftest() -> None:
     print("      koin yang TURUN 24 jam, volume yang tidak naik, koin baru listing,")
     print("      dan simbol yang gagal diambil candle hariannya semuanya ter-exclude)")
 
-    # Gerbang ini WAJIB: tanpa sumber candle harian, semua simbol ditolak.
     tanpa_sumber = scanner.filter_and_rank_candidates(tickers, cfg, tradable)
     assert tanpa_sumber == [], \
         "Tanpa sumber candle harian, gerbang pump harus menolak semua simbol (fail closed)"
     print("  -> OK (tanpa sumber candle harian, gerbang pump fail closed)")
 
     print("\n=== SELFTEST: deteksi setup pullback dan retest ===")
-    # Data sintetis mengisi volume dan quote_volume agar gerbang rolling
-    # volume dapat diuji tanpa jaringan. Dua candle terakhir dibuat melonjak
-    # sehingga candle keputusan memiliki volume minimal 2x rata-rata.
 
-    # Seri sintetis momentum: EMA9 baru menembus EMA21, RSI tetap sehat,
-    # histogram MACD naik, dan dua pivot low terakhir membentuk higher low.
     vals = [100.0] * 30 + [100.2, 100.4, 99.4, 98.4, 97.4, 97.6,
                             98.6, 98.1, 98.3, 97.8, 98.8, 99.8, 98.8,
                             99.8, 99.3, 99.5, 98.5, 99.5, 98.5, 100.0, 100.5]
@@ -2685,13 +2173,6 @@ def selftest() -> None:
     from trading.clients.binance_client import SymbolFilters
 
     class FakeTradeClient:
-        """Client palsu untuk selftest exit/kontrol manual.
-
-        close_position() SELALU benar-benar memanggil get_account()
-        lalu new_market_order() -- persis seperti di
-        PAPER maupun LIVE. Jadi selftest butuh client tiruan (bukan None)
-        supaya bisa menguji logika exit tanpa menyentuh jaringan sama sekali.
-        """
 
         def __init__(self, base_asset="TEST", free=1.0, price=100.0):
             self.base_asset = base_asset
@@ -2722,10 +2203,6 @@ def selftest() -> None:
 
     filters_cache = {"TESTUSDT": SymbolFilters(step_size=D("0.01"), min_qty=D("0.01"),
                                                 min_notional=D("5"), tick_size=D("0.0001"))}
-    # Ambang exit dikunci eksplisit di selftest ini supaya hasilnya
-    # deterministik dan tidak ikut berubah setiap kali nilai di config.py
-    # di-tuning (sebelumnya selftest memakai nilai config langsung padahal
-    # angka pembandingnya hardcode, sehingga gagal begitu SL_PCT diubah).
     cfg_exit = dict(cfg)
     cfg_exit.update({
         "USE_TP": True, "TP_PCT": 6.0,
@@ -2740,12 +2217,12 @@ def selftest() -> None:
     state["qty"] = 1.0
     state["entry_time"] = state_mod.now_ms()
 
-    manage_exit(FakeTradeClient(), cfg_exit, filters_cache, state, 103.5)  # >= BE_TRIGGER_PCT (3.0%)
+    manage_exit(FakeTradeClient(), cfg_exit, filters_cache, state, 103.5)
     assert state["be_active"], "Breakeven harusnya sudah aktif di profit 3.5%"
     assert state["current_symbol"] == "TESTUSDT", "Belum boleh close, baru breakeven aktif"
     print(f"  Setelah profit +3.5%: be_active={state['be_active']}, be_stop={state['be_stop_price']:.4f} -> OK")
 
-    manage_exit(FakeTradeClient(), cfg_exit, filters_cache, state, 106.5)  # TP_PCT = 6.0
+    manage_exit(FakeTradeClient(), cfg_exit, filters_cache, state, 106.5)
     assert state["current_symbol"] is None, "Posisi harusnya sudah tertutup kena TAKE_PROFIT"
     print("  Setelah profit +6.5%: posisi tertutup (TAKE_PROFIT) -> OK")
 
@@ -2757,14 +2234,11 @@ def selftest() -> None:
     state2["qty"] = 1.0
     state2["entry_time"] = state_mod.now_ms()
 
-    # Rugi -2% dulu -- masih di atas ambang SL_PCT (3.0%), posisi harus TETAP terbuka.
     manage_exit(FakeTradeClient(), cfg_exit, filters_cache, state2, 98.0)
     assert state2["current_symbol"] == "TESTUSDT", "Rugi -2% belum boleh kena Stop Loss (ambang 3.0%)"
     assert not state2["be_active"], "Breakeven tidak boleh aktif kalau posisi rugi"
     print("  Rugi -2%: posisi masih terbuka, BE/Trailing tidak aktif -> OK")
 
-    # Rugi -3.5% -- melewati SL_PCT (3.0%), posisi harus dipaksa tertutup STOP_LOSS,
-    # walau BE_TRIGGER_PCT/TRAILING_START_PCT tidak pernah tersentuh sama sekali.
     manage_exit(FakeTradeClient(), cfg_exit, filters_cache, state2, 96.5)
     assert state2["current_symbol"] is None, "Posisi harusnya sudah tertutup kena STOP_LOSS di rugi -3.5%"
     print("  Rugi -3.5%: posisi tertutup (STOP_LOSS) -> OK")
@@ -2772,8 +2246,6 @@ def selftest() -> None:
     print("\n=== SELFTEST: ukuran posisi (RISK_PERCENT, plafon, bantalan saldo) ===")
 
     class SizingClient(FakeTradeClient):
-        """Client tiruan dengan saldo USDT yang bisa diatur, untuk memeriksa
-        PERSIS berapa nominal yang dipakai open_position saat BUY."""
 
         def __init__(self, usdt_free):
             super().__init__(base_asset="TESTB", free=0.0, price=1.0)
@@ -2805,8 +2277,6 @@ def selftest() -> None:
                               confirm_reason="selftest")
 
     def nominal_dipakai(cfg_size, saldo):
-        """Jalankan open_position lalu kembalikan nominal USDT yang benar-benar
-        dibelanjakan (harga = 1.0, jadi qty = nominal)."""
         cl = SizingClient(saldo)
         st = dict(DEFAULT_STATE)
         open_position(cl, cfg_size, size_filters, st, cand)
@@ -2814,22 +2284,16 @@ def selftest() -> None:
         return float(cl.orders[-1][2])
 
     cfg_size = dict(cfg)
-    # USE_ATR_EXIT dimatikan untuk sub-test sizing: kandidat selftest tidak
-    # membawa setup/ATR, dan sejak perbaikan audit 2026-09-27 open_position
-    # MENOLAK entry mode ATR tanpa nilai ATR. Fokus di sini murni sizing.
     cfg_size.update({"USE_RISK_PERCENT": True, "RISK_PERCENT": 95.0,
                       "BALANCE_BUFFER_PCT": 0.5, "MAX_POSITION_USDT": 0,
                       "USE_ATR_EXIT": False})
 
-    # Tanpa plafon: persentase harus BENAR-BENAR terpakai dan ikut tumbuh
-    # bersama saldo. Inilah yang dulu tidak terjadi karena plafon 10 USDT.
     for saldo, harap in ((100.0, 100 * 0.995 * 0.95), (1000.0, 1000 * 0.995 * 0.95),
                           (5000.0, 5000 * 0.995 * 0.95)):
         got = nominal_dipakai(cfg_size, saldo)
         assert abs(got - harap) < 0.01, f"saldo {saldo}: harap {harap:.2f}, dapat {got:.2f}"
         print(f"  Saldo {saldo:>7.0f} -> pakai {got:>8.2f} USDT ({got / saldo * 100:.2f}% saldo) -> OK")
 
-    # Plafon aktif harus benar-benar membatasi (dan bot memperingatkan di log).
     cfg_cap = dict(cfg_size)
     cfg_cap["MAX_POSITION_USDT"] = 10.0
     got_cap = nominal_dipakai(cfg_cap, 1000.0)
@@ -2837,8 +2301,6 @@ def selftest() -> None:
     print(f"  Plafon 10 USDT aktif, saldo 1000 -> pakai {got_cap:.2f} USDT "
           f"({got_cap / 1000 * 100:.2f}% saldo) -> OK (inilah bug lama)")
 
-    # RISK_PERCENT 100 + bantalan: tidak boleh melebihi saldo, harus menyisakan
-    # ruang untuk fee supaya order tidak ditolak bursa (-2010).
     cfg_allin = dict(cfg_size)
     cfg_allin["RISK_PERCENT"] = 100.0
     got_allin = nominal_dipakai(cfg_allin, 1000.0)
@@ -2847,7 +2309,6 @@ def selftest() -> None:
     print(f"  RISK_PERCENT=100, saldo 1000 -> pakai {got_allin:.2f} USDT "
           f"(sisa {1000 - got_allin:.2f} untuk fee) -> OK")
 
-    # Mode nominal tetap harus tetap bekerja seperti dulu.
     cfg_fixed_size = dict(cfg_size)
     cfg_fixed_size.update({"USE_RISK_PERCENT": False, "POSITION_SIZE_USDT": 25.0})
     got_fixed = nominal_dipakai(cfg_fixed_size, 1000.0)
@@ -2855,8 +2316,6 @@ def selftest() -> None:
     print(f"  Mode nominal tetap (USE_RISK_PERCENT=False) -> {got_fixed:.2f} USDT -> OK")
 
     print("\n=== SELFTEST: level exit yang dikunci di state dipakai manage_exit ===")
-    # Membuktikan manage_exit memakai level yang dikunci di state, bukan diam-diam
-    # kembali ke nilai config. Ini penting untuk posisi lama yang sudah dibuka.
     cfg_locked = dict(cfg_exit)
     cfg_locked["SL_PCT"] = 3.0
     state_locked = dict(DEFAULT_STATE)
@@ -2935,9 +2394,6 @@ def selftest() -> None:
         cfg_ctrl = dict(cfg_exit)
         cfg_ctrl["CONTROL_FILE"] = control_path
 
-        # Skenario A: ada posisi terbuka, perintah CLOSE_POSITION untuk simbol
-        # yang sesuai dan masih segar (baru saja ditulis) -> posisi harus
-        # tertutup dengan alasan MANUAL_CLOSE_DASHBOARD.
         state3 = dict(DEFAULT_STATE)
         state3["current_symbol"] = "TESTUSDT"
         state3["entry_price"] = 100.0
@@ -2951,8 +2407,6 @@ def selftest() -> None:
         assert not state_mod.load_control(control_path), "Control file harus terhapus setelah diproses"
         print("  Perintah valid untuk simbol yang sesuai -> posisi ditutup, control file dibersihkan -> OK")
 
-        # Skenario B: perintah kadaluarsa (requested_at sangat lampau) -> HARUS
-        # diabaikan, posisi tetap terbuka.
         state4 = dict(DEFAULT_STATE)
         state4["current_symbol"] = "TESTUSDT"
         state4["entry_price"] = 100.0
@@ -2960,14 +2414,12 @@ def selftest() -> None:
         state4["entry_time"] = state_mod.now_ms()
         state_mod.save_control(control_path, {
             "action": "CLOSE_POSITION", "symbol": "TESTUSDT",
-            "requested_at": state_mod.now_ms() - 10 * 60 * 1000,  # 10 menit lalu
+            "requested_at": state_mod.now_ms() - 10 * 60 * 1000,
         })
         check_manual_control(FakeTradeClient(), cfg_ctrl, filters_cache, state4)
         assert state4["current_symbol"] == "TESTUSDT", "Perintah kadaluarsa (>2 menit) harus DIABAIKAN"
         print("  Perintah kadaluarsa (10 menit lalu) -> diabaikan, posisi tetap terbuka -> OK")
 
-        # Skenario C: perintah untuk simbol yang BEDA dari posisi saat ini
-        # (mis. posisi sudah berganti sejak tombol diklik) -> HARUS diabaikan.
         state5 = dict(DEFAULT_STATE)
         state5["current_symbol"] = "LAINUSDT"
         state5["entry_price"] = 50.0
@@ -2980,8 +2432,6 @@ def selftest() -> None:
         assert state5["current_symbol"] == "LAINUSDT", "Perintah untuk simbol berbeda dari posisi aktif harus DIABAIKAN"
         print("  Perintah untuk simbol yang sudah tidak dipegang -> diabaikan, posisi lain tetap aman -> OK")
 
-        # Skenario D: tidak ada posisi sama sekali saat perintah diproses ->
-        # tidak boleh error, cukup diabaikan dengan aman.
         state6 = dict(DEFAULT_STATE)
         state_mod.save_control(control_path, {
             "action": "CLOSE_POSITION", "symbol": "TESTUSDT", "requested_at": state_mod.now_ms(),
@@ -2993,14 +2443,9 @@ def selftest() -> None:
     print("\n=== SELFTEST: dust sweep ke BNB setelah posisi ditutup ===")
 
     class FakeDustClient:
-        """Client palsu utk mensimulasikan endpoint dust Binance tanpa jaringan.
-        Mencatat panggilan (convert_calls) supaya selftest bisa memverifikasi
-        PERSIS aset apa yang coba dikonversi -- ini krusial karena proteksi
-        modal di try_dust_sweep() harus terbukti tidak pernah menyentuh
-        quote asset atau BNB, bukan cuma "kelihatannya begitu"."""
 
         def __init__(self, convertible_assets):
-            self.convertible_assets = convertible_assets  # list of asset code, mis. ["PEPE"]
+            self.convertible_assets = convertible_assets
             self.convert_calls = []
             self.fail_convert = False
 
@@ -3015,38 +2460,24 @@ def selftest() -> None:
             return {"totalTransfered": "0.0001", "totalServiceCharge": "0.000002", "transferResult": []}
 
     assert cfg["USE_DUST_SWEEP"], "USE_DUST_SWEEP harusnya True di config default"
-    # Dust sweep hanya aktif di mode LIVE, jadi skenario di bawah memakai
-    # salinan config dengan MODE="LIVE" (tanpa menyentuh config asli).
     cfg = dict(cfg)
     cfg["MODE"] = "LIVE"
 
-    # Skenario A: base asset dari simbol yang baru ditutup MEMANG terdaftar
-    # sebagai dust convertible -> harus dikonversi (convert_dust dipanggil
-    # persis dengan asset itu saja).
     fake_a = FakeDustClient(convertible_assets=["PEPE"])
     try_dust_sweep(fake_a, cfg, "PEPEUSDT")
     assert fake_a.convert_calls == [["PEPE"]], f"Harusnya convert PEPE saja, dapat: {fake_a.convert_calls}"
     print("  Sisa PEPE terdaftar dust convertible -> convert_dust(['PEPE']) dipanggil -> OK")
 
-    # Skenario B: base asset TIDAK terdaftar sebagai dust convertible (mis.
-    # saldo sudah nol atau di atas ambang) -> convert_dust TIDAK boleh dipanggil.
     fake_b = FakeDustClient(convertible_assets=[])
     try_dust_sweep(fake_b, cfg, "PEPEUSDT")
     assert fake_b.convert_calls == [], "Tidak boleh convert kalau asset tidak terdaftar sebagai dust"
     print("  Sisa PEPE TIDAK terdaftar dust convertible -> convert_dust tidak dipanggil -> OK")
 
-    # Skenario C (PROTEKSI MODAL -- paling penting): symbol yang ditutup
-    # adalah quote asset itu sendiri seharusnya mustahil terjadi di alur
-    # normal (symbol selalu "<BASE>USDT"), tapi diuji eksplisit bahwa base
-    # asset "USDT" atau "BNB" TIDAK PERNAH dikonversi walau seandainya lolos
-    # sampai ke fungsi ini.
     fake_c = FakeDustClient(convertible_assets=["USDT", "BNB"])
-    try_dust_sweep(fake_c, cfg, "BNBUSDT")  # base asset = "BNB"
+    try_dust_sweep(fake_c, cfg, "BNBUSDT")
     assert fake_c.convert_calls == [], "BNB tidak boleh pernah dikonversi (proteksi keras)"
     print("  Simbol dengan base asset BNB -> TIDAK PERNAH dikonversi (proteksi modal) -> OK")
 
-    # Skenario D: MODE=PAPER -> konversi dust memakai /sapi/* bertanda tangan
-    # yang dilarang di PAPER, jadi convert_dust TIDAK boleh dipanggil sama sekali.
     cfg_paper = dict(cfg)
     cfg_paper["MODE"] = "PAPER"
     fake_d = FakeDustClient(convertible_assets=["PEPE"])
@@ -3054,8 +2485,6 @@ def selftest() -> None:
     assert fake_d.convert_calls == [], "Mode PAPER tidak boleh memanggil convert_dust (endpoint /sapi bertanda tangan)"
     print("  Mode PAPER -> dust sweep dilewati, tidak ada panggilan /sapi -> OK")
 
-    # Skenario E: endpoint convert_dust gagal (mis. kena rate limit Binance)
-    # -> harus ditangani dengan aman, TIDAK boleh melempar exception ke pemanggil.
     fake_e = FakeDustClient(convertible_assets=["PEPE"])
     fake_e.fail_convert = True
     try:
@@ -3066,8 +2495,6 @@ def selftest() -> None:
     assert gagal_ditangani, "Kegagalan convert_dust (mis. rate limit) harus ditangani, bukan dilempar ke pemanggil"
     print("  convert_dust gagal (simulasi rate limit Binance) -> ditangani dengan aman, tidak crash -> OK")
 
-    # Skenario F: USE_DUST_SWEEP=False -> fitur nonaktif total, tidak ada
-    # panggilan API apa pun walau semua syarat lain terpenuhi.
     cfg_no_dust = dict(cfg)
     cfg_no_dust["USE_DUST_SWEEP"] = False
     fake_f = FakeDustClient(convertible_assets=["PEPE"])
@@ -3105,7 +2532,6 @@ def selftest() -> None:
     cfg_limit = dict(cfg_exit)
     cfg_limit["CLOSE_ALL_AT_LIMIT"] = True
 
-    # Skenario 1: kill switch aktif + posisi terbuka -> ditutup paksa SATU KALI.
     st_lim = dict(DEFAULT_STATE)
     st_lim["current_symbol"] = "TESTUSDT"
     st_lim["entry_price"] = 100.0
@@ -3118,7 +2544,6 @@ def selftest() -> None:
     assert st_lim["_limit_close_done"] is True, "Penanda episode harus di-set setelah penutupan paksa"
     print("  DD stop aktif + posisi terbuka -> SELL paksa, _limit_close_done=True -> OK")
 
-    # Skenario 2: dipanggil lagi di episode yang sama -> tidak menutup dua kali.
     st_lim2 = dict(DEFAULT_STATE)
     st_lim2["current_symbol"] = "TESTUSDT"
     st_lim2["qty"] = 1.0
@@ -3130,7 +2555,6 @@ def selftest() -> None:
     assert st_lim2["current_symbol"] == "TESTUSDT"
     print("  Penanda episode -> tidak ada penutupan berulang -> OK")
 
-    # Skenario 3: fitur dimatikan di config -> tidak menutup apa pun.
     cfg_limit_off = dict(cfg_limit)
     cfg_limit_off["CLOSE_ALL_AT_LIMIT"] = False
     st_lim3 = dict(DEFAULT_STATE)
@@ -3142,7 +2566,6 @@ def selftest() -> None:
     assert klien3.orders == [], "CLOSE_ALL_AT_LIMIT=False tidak boleh menutup posisi"
     print("  CLOSE_ALL_AT_LIMIT=False -> posisi dibiarkan, hanya entry dijeda -> OK")
 
-    # Skenario 4: episode selesai (tidak paused) -> penanda direset otomatis.
     st_lim4 = dict(DEFAULT_STATE)
     st_lim4["_limit_close_done"] = True
     maybe_force_close_at_risk_limit(FakeTradeClient(), cfg_limit, filters_cache, st_lim4, False, 100.0)
@@ -3169,7 +2592,6 @@ def selftest() -> None:
     with tempfile.TemporaryDirectory() as tmprec:
         cfg_rec["STATE_FILE"] = f"{tmprec}/state.json"
 
-        # a. Saldo 0 (mis. state di-reset) -> posisi hantu direset.
         st_r = dict(DEFAULT_STATE)
         st_r["current_symbol"] = "PEPEUSDT"
         st_r["qty"] = 1000.0
@@ -3179,7 +2601,6 @@ def selftest() -> None:
             "Saldo 0 -> posisi hantu harus direset"
         print("  Saldo 0 di exchange -> posisi hantu direset -> OK")
 
-        # b. Qty state > saldo nyata -> disesuaikan ke saldo nyata.
         st_r2 = dict(DEFAULT_STATE)
         st_r2["current_symbol"] = "SOLUSDT"
         st_r2["qty"] = 10.0
@@ -3189,14 +2610,11 @@ def selftest() -> None:
             "Qty harus disesuaikan ke saldo nyata"
         print("  Qty state > saldo nyata -> qty disesuaikan -> OK")
 
-        # c. State kosong tetap perlu satu kali cek saldo untuk mendeteksi
-        # orphan asset hasil BUY yang responsnya hilang.
         cl_idle = ReconClient({})
         st_idle = dict(DEFAULT_STATE)
         reconcile_state_with_exchange(cl_idle, cfg_rec, st_idle)
         assert cl_idle.calls == 1 and not st_idle["reconciliation_required"], \
             "State kosong harus cek saldo sekali tetapi tidak boleh memblokir akun benar-benar kosong"
-        # d. API gagal -> tidak crash, state dibiarkan.
         st_r4 = dict(DEFAULT_STATE)
         st_r4["current_symbol"] = "PEPEUSDT"
         st_r4["qty"] = 10.0

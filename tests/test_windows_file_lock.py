@@ -36,7 +36,6 @@ import pytest
 
 
 class MsvcrtPalsu(types.ModuleType):
-    """Tiruan msvcrt yang setia pada kontrak _locking() Windows."""
 
     LK_LOCK = 0
     LK_NBLCK = 1
@@ -46,7 +45,6 @@ class MsvcrtPalsu(types.ModuleType):
 
     def __init__(self, name: str = "msvcrt") -> None:
         super().__init__(name)
-        # {(inode, offset): jumlah_byte}
         self.terkunci: dict[tuple[int, int], int] = {}
         self.jejak: list[tuple[str, int]] = []
 
@@ -56,7 +54,6 @@ class MsvcrtPalsu(types.ModuleType):
         if mode == self.LK_UNLCK:
             self.jejak.append(("unlock", offset))
             if kunci not in self.terkunci:
-                # Inilah perilaku Windows yang memicu laporan bug asli.
                 raise PermissionError(errno.EACCES, "Permission denied")
             del self.terkunci[kunci]
             return
@@ -68,7 +65,6 @@ class MsvcrtPalsu(types.ModuleType):
 
 @pytest.fixture()
 def atomic_io_windows(monkeypatch):
-    """Muat atomic_io seolah-olah berjalan di Windows."""
     palsu = MsvcrtPalsu()
     monkeypatch.setitem(sys.modules, "msvcrt", palsu)
 
@@ -77,13 +73,11 @@ def atomic_io_windows(monkeypatch):
     monkeypatch.setattr(modul, "fcntl", None)
     monkeypatch.setattr(modul, "msvcrt", palsu)
     yield modul, palsu
-    # Kembalikan modul ke kondisi asli platform ini untuk test lain.
     sys.modules.pop("msvcrt", None)
     importlib.reload(aio)
 
 
 def test_lock_dan_unlock_memakai_offset_yang_sama(atomic_io_windows, tmp_path):
-    """Inti bug: offset LOCK dan UNLOCK wajib identik."""
     modul, palsu = atomic_io_windows
     target = tmp_path / "pump_bot_settings_paper.json"
 
@@ -99,16 +93,13 @@ def test_lock_dan_unlock_memakai_offset_yang_sama(atomic_io_windows, tmp_path):
 
 
 def test_tidak_melempar_permission_error_di_windows(atomic_io_windows, tmp_path):
-    """Reproduksi langsung traceback yang dilaporkan pengguna."""
     modul, _ = atomic_io_windows
     target = tmp_path / "pump_bot_settings_paper.json"
-    # Sebelum perbaikan, baris ini melempar PermissionError [Errno 13].
     with modul.interprocess_lock(target):
         pass
 
 
 def test_lock_berulang_tetap_stabil(atomic_io_windows, tmp_path):
-    """Bot memanggil lock ini ribuan kali per hari, harus tetap sehat."""
     modul, palsu = atomic_io_windows
     target = tmp_path / "pump_bot_state_paper.json"
     for _ in range(50):
@@ -119,11 +110,6 @@ def test_lock_berulang_tetap_stabil(atomic_io_windows, tmp_path):
 
 
 def test_lock_file_tidak_tumbuh_setiap_akuisisi(atomic_io_windows, tmp_path):
-    """Versi lama menambah satu byte SETIAP kali lock diambil.
-
-    Pertumbuhan itulah yang menggeser offset lock dan sekaligus membuat
-    berkas lock membengkak tanpa batas pada bot yang berjalan lama.
-    """
     modul, _ = atomic_io_windows
     target = tmp_path / "pump_bot_state_paper.json"
     lock_file = tmp_path / "pump_bot_state_paper.json.lock"
@@ -144,12 +130,6 @@ def test_lock_file_tidak_tumbuh_setiap_akuisisi(atomic_io_windows, tmp_path):
 
 
 def test_unlock_gagal_tidak_menutupi_exception_asli(atomic_io_windows, tmp_path):
-    """Kegagalan unlock tidak boleh menyembunyikan error sebenarnya.
-
-    Pada versi lama, PermissionError dari blok finally menimpa exception
-    asli dari blok kritis. Itu sebabnya traceback yang dilaporkan hanya
-    menunjuk ke msvcrt.locking dan bukan ke akar masalahnya.
-    """
     modul, palsu = atomic_io_windows
     target = tmp_path / "pump_bot_state_paper.json"
 
@@ -165,14 +145,13 @@ def test_unlock_gagal_tidak_menutupi_exception_asli(atomic_io_windows, tmp_path)
 
 
 def test_file_descriptor_selalu_ditutup(atomic_io_windows, tmp_path):
-    """Kebocoran fd akan menghabiskan handle pada proses yang berjalan lama."""
     modul, _ = atomic_io_windows
     target = tmp_path / "pump_bot_state_paper.json"
 
     def hitung_fd() -> int:
         try:
             return len(os.listdir(f"/proc/{os.getpid()}/fd"))
-        except OSError:  # pragma: no cover - selain Linux
+        except OSError:  # pragma: no cover
             pytest.skip("penghitungan fd hanya tersedia di Linux")
 
     sebelum = hitung_fd()
@@ -183,15 +162,8 @@ def test_file_descriptor_selalu_ditutup(atomic_io_windows, tmp_path):
 
 
 def test_rate_limiter_memakai_primitif_lock_yang_sama():
-    """Cegah bug ini muncul lagi lewat salinan kode kedua.
-
-    rate_limiter.py dulu menyalin pola msvcrt yang salah. Sekarang ia wajib
-    memakai helper yang sama dengan atomic_io.
-    """
     import infrastructure.network.rate_limiter as rl
 
-    # Dibandingkan lewat modul asal, bukan identitas objek, supaya assertion
-    # ini tetap benar walaupun test lain sempat me-reload atomic_io.
     for nama in ("_open_lock_fd", "_acquire_lock", "_release_lock"):
         fungsi = getattr(rl, nama)
         assert fungsi.__module__ == "infrastructure.storage.atomic_io", (
@@ -207,11 +179,6 @@ def test_rate_limiter_memakai_primitif_lock_yang_sama():
 
 
 def _flag_yang_dipakai(fungsi) -> set[str]:
-    """Kumpulkan nama atribut os.* yang benar-benar DIEKSEKUSI fungsi.
-
-    Memakai AST, bukan pencarian teks, supaya komentar dan docstring yang
-    menyebut O_APPEND tidak ikut terhitung.
-    """
     import ast
     import inspect
     import textwrap
@@ -227,7 +194,6 @@ def _flag_yang_dipakai(fungsi) -> set[str]:
 
 
 def test_mode_append_tidak_dipakai_lagi():
-    """O_APPEND adalah akar masalahnya, jadi dijaga agar tidak kembali."""
     import infrastructure.storage.atomic_io as aio
 
     flag = _flag_yang_dipakai(aio._open_lock_fd)
@@ -239,7 +205,6 @@ def test_mode_append_tidak_dipakai_lagi():
 
 
 def test_offset_lock_dan_unlock_diset_eksplisit():
-    """Posisi file wajib diset eksplisit, tidak boleh diwarisi."""
     import infrastructure.storage.atomic_io as aio
 
     assert "lseek" in _flag_yang_dipakai(aio._acquire_lock)

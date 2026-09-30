@@ -11,7 +11,6 @@ from decimal import Decimal
 
 import pytest
 
-# Pastikan root repo ada di sys.path saat pytest dijalankan dari mana pun.
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
@@ -22,7 +21,6 @@ from trading.paper.paper_store import PaperStore  # noqa: E402
 
 
 class FakeMarket:
-    """Sumber data pasar palsu yang bisa diatur per tes."""
 
     def __init__(self, book=None, price=10.0):
         self.book = book or {"bids": [], "asks": []}
@@ -44,7 +42,6 @@ def make_filters(step="1", min_qty="1", min_notional="5", tick="0.01") -> Symbol
 
 @pytest.fixture
 def base_config():
-    """Config minimal untuk mesin simulasi (fee 0,1% + diskon BNB -> 0,075%)."""
     return {
         "QUOTE_ASSET": "USDT",
         "TAKER_FEE_PCT": 0.1,
@@ -57,7 +54,6 @@ def base_config():
 
 @pytest.fixture
 def make_engine(base_config, tmp_path):
-    """Factory: buat (engine, store, market) dengan filter & saldo awal tertentu."""
 
     def _factory(initial_balances=None, filters=None, market=None):
         store = PaperStore(str(tmp_path / "acct.json"),

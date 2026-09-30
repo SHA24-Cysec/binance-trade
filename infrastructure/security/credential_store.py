@@ -32,7 +32,6 @@ def _validate_secret_value(value: str, label: str) -> str:
 
 
 def _quote(value: str) -> str:
-    # Format single-quoted didukung python-dotenv. Escape backslash lebih dulu.
     return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
@@ -44,11 +43,6 @@ def _dominant_newline(text: str) -> str:
 
 def _update_env_unlocked(*, api_key: str | None = None, api_secret: str | None = None,
                          path: os.PathLike | str = ENV_PATH) -> dict:
-    """Perbarui dua kunci dan pertahankan semua baris lain serta newline.
-
-    None berarti tidak diubah. String kosong adalah nilai sah untuk operasi
-    hapus kredensial yang dilakukan secara eksplisit oleh endpoint.
-    """
     target = Path(path)
     replacements: dict[str, str] = {}
     if api_key is not None:
@@ -59,7 +53,6 @@ def _update_env_unlocked(*, api_key: str | None = None, api_secret: str | None =
         return permission_status(target)
 
     try:
-        # newline="" mencegah universal-newline mengubah CRLF menjadi LF.
         with open(target, "r", encoding="utf-8", newline="") as handle:
             original = handle.read()
     except FileNotFoundError:
@@ -76,7 +69,6 @@ def _update_env_unlocked(*, api_key: str | None = None, api_secret: str | None =
         if match and match.group("key") in replacements:
             key = match.group("key")
             if key in seen:
-                # Hapus duplikat agar tidak ada perbedaan tafsir first/last value.
                 continue
             output.append(f"{match.group('prefix')}{key}={_quote(replacements[key])}{ending or newline}")
             seen.add(key)
@@ -96,13 +88,11 @@ def _update_env_unlocked(*, api_key: str | None = None, api_secret: str | None =
 
 def update_env(*, api_key: str | None = None, api_secret: str | None = None,
                path: os.PathLike | str = ENV_PATH) -> dict:
-    """Perbarui kredensial dengan serialisasi thread dan lintas proses."""
     with interprocess_lock(path):
         return _update_env_unlocked(api_key=api_key, api_secret=api_secret, path=path)
 
 
 def read_credentials(path: os.PathLike | str = ENV_PATH) -> tuple[str, str]:
-    """Parse .env memakai python-dotenv bila tersedia."""
     target = Path(path)
     try:
         from dotenv import dotenv_values
@@ -122,7 +112,7 @@ def credential_status(path: os.PathLike | str = ENV_PATH) -> dict:
     }
 
 
-def _windows_current_sid() -> str | None:  # pragma: no cover - Windows
+def _windows_current_sid() -> str | None:  # pragma: no cover
     try:
         result = subprocess.run(
             ["whoami.exe", "/user", "/fo", "csv", "/nh"],
@@ -153,7 +143,7 @@ def secure_permissions(path: os.PathLike | str) -> dict:
         except OSError as exc:
             return {"ok": False, "platform": "posix", "message": f"Gagal mengatur izin: {exc}"}
 
-    if os.name == "nt":  # pragma: no cover - Windows
+    if os.name == "nt":  # pragma: no cover
         sid = _windows_current_sid()
         if not sid:
             return {
@@ -210,9 +200,7 @@ def permission_status(path: os.PathLike | str = ENV_PATH) -> dict:
             }
         except OSError as exc:
             return {"ok": False, "platform": "posix", "message": str(exc)}
-    # ACL Windows tidak disimpulkan hanya dari metadata file. Jalankan kembali
-    # verifikasi icacls supaya UI tidak menampilkan klaim yang stale.
-    if os.name == "nt":  # pragma: no cover - Windows
+    if os.name == "nt":  # pragma: no cover
         sid = _windows_current_sid()
         if not sid:
             return {"ok": False, "platform": "windows", "message": "SID pengguna tidak tersedia."}

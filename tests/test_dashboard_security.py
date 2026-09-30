@@ -103,8 +103,6 @@ def test_credential_response_never_echoes_secret(client, monkeypatch):
 
 
 def test_parameterized_post_routes_reject_missing_admin_token(client):
-    # S-01: route POST dengan parameter jalur (mis. /api/backtest/cancel/<job_id>)
-    # juga wajib ditolak tanpa token; sebelumnya tidak ikut diuji.
     routes = []
     for rule in dashboard.app.url_map.iter_rules():
         if "POST" in rule.methods and "<" in rule.rule:
@@ -117,7 +115,6 @@ def test_parameterized_post_routes_reject_missing_admin_token(client):
 
 
 def test_write_without_origin_and_referer_is_rejected(client):
-    # S-02: POST tanpa Origin DAN tanpa Referer harus ditolak, walau tokennya benar.
     response = client.post("/api/control/prepare", json={"action": "START"},
                            headers={"X-Admin-Token": dashboard._ADMIN_TOKEN})
     assert response.status_code == 403
@@ -125,9 +122,6 @@ def test_write_without_origin_and_referer_is_rejected(client):
 
 
 def test_write_rate_limit_returns_429_after_120_attempts(client):
-    # S-02: batas global 120 request tulis per menit per alamat; percobaan
-    # dengan token salah pun dihitung, jadi percobaan ke-121 ditolak 429
-    # sebelum token sempat diperiksa.
     bad = {"Origin": "http://localhost", "X-Admin-Token": "token-salah"}
     for _ in range(120):
         response = client.post("/api/control/prepare", json={"action": "START"},
@@ -140,8 +134,6 @@ def test_write_rate_limit_returns_429_after_120_attempts(client):
 
 
 def test_backtest_endpoints_return_403_in_live_mode(client, monkeypatch):
-    # S-02: seluruh endpoint /api/backtest/* wajib 403 saat mode LIVE,
-    # termasuk saat permintaan sudah lolos token+origin yang sah.
     monkeypatch.setitem(dashboard.PUMP_CONFIG, "MODE", "LIVE")
     monkeypatch.setitem(dashboard.PUMP_CONFIG, "SHOW_BACKTEST_IN_LIVE", False)
     blocked = client.get("/api/backtest/defaults")
@@ -156,7 +148,6 @@ def test_backtest_endpoints_return_403_in_live_mode(client, monkeypatch):
 
 
 def test_security_headers_present_on_every_response(client):
-    # S-02: header higiene wajib ada di semua response (after_request).
     response = client.get("/")
     assert response.status_code == 200
     assert response.headers["X-Content-Type-Options"] == "nosniff"
@@ -166,53 +157,33 @@ def test_security_headers_present_on_every_response(client):
 
 
 def test_host_with_wrong_port_is_rejected(client):
-    # S-02: Host dengan port yang tidak cocok binding ditolak 400.
     response = client.get("/api/status", base_url="http://localhost:9999")
     assert response.status_code == 400
     assert "Host" in response.get_json()["error"]
 
 
 def test_dashboard_backtest_text_is_escaped_before_inner_html() -> None:
-    """Data dari API tidak boleh masuk innerHTML tanpa melewati esc().
-
-    Catatan perubahan 1 Oktober 2026. Versi sebelumnya test ini juga menuntut
-    kalimat "Backtest tidak membuat trade atau order baru" tetap ada di
-    template. Tuntutan itu dihapus karena mengunci kondisi rusak: kalimat
-    tersebut adalah placeholder dari masa ketika mesin backtest dilucuti.
-    Sekarang mesinnya benar benar menghasilkan trade, sehingga panel itu wajib
-    menampilkan tabel, bukan kalimat penyangkalan.
-
-    Sisi keamanan test ini dipertahankan dan diperluas ke seluruh field yang
-    ikut dipulihkan.
-    """
     source = (Path(__file__).resolve().parents[1] / "templates" / "dashboard.html").read_text(
         encoding="utf-8"
     )
 
-    # Nilai yang berasal dari jaringan tidak boleh diinterpolasi mentah.
-    # Daftar ini mencakup field lama maupun field yang baru dipulihkan.
     terlarang = [
-        "${w}",             # elemen res.warnings
-        "${l}",             # elemen res.limitations
-        "${t.symbol}",      # simbol pada baris trade
-        "${t.reason}",      # alasan exit, harus lewat btReasonLabel
-        "${t.entry_time}",  # waktu masuk
-        "${t.exit_time}",   # waktu keluar
-        "${x.symbol}",      # simbol pada kontribusi per simbol
-        "${s.symbol}",      # simbol pada sinyal terlewat
-        "${x.holding}",     # simbol yang sedang dipegang
-        "${x.time}",        # waktu sinyal terlewat
+        "${w}",
+        "${l}",
+        "${t.symbol}",
+        "${t.reason}",
+        "${t.entry_time}",
+        "${t.exit_time}",
+        "${x.symbol}",
+        "${s.symbol}",
+        "${x.holding}",
+        "${x.time}",
     ]
     bocor = [pola for pola in terlarang if pola in source]
     assert not bocor, f"interpolasi mentah ke innerHTML: {bocor}"
 
 
 def test_render_trade_memakai_esc_untuk_semua_field_teks() -> None:
-    """Setiap field teks pada baris tabel trade wajib dibungkus esc().
-
-    Field angka boleh memakai fmt/fmtP karena keduanya mengembalikan angka
-    terformat, bukan teks dari server.
-    """
     source = (Path(__file__).resolve().parents[1] / "templates" / "dashboard.html").read_text(
         encoding="utf-8"
     )
@@ -223,18 +194,11 @@ def test_render_trade_memakai_esc_untuk_semua_field_teks() -> None:
     for field in ("t.symbol", "t.entry_time", "t.exit_time"):
         assert f"esc({field})" in blok, f"{field} tidak dibungkus esc()"
 
-    # Alasan exit tidak boleh langsung dicetak. Ia harus melewati pemeta yang
-    # hanya mengenal nilai dari whitelist.
     assert "btReasonLabel(t.reason)" in blok
     assert "btReasonTagClass(t.reason)" in blok
 
 
 def test_pemeta_alasan_exit_memakai_whitelist() -> None:
-    """btReasonTagClass hanya boleh mengembalikan nama kelas dari whitelist.
-
-    Nilai ini masuk ke atribut class. Kalau nilai dari server bisa lolos apa
-    adanya, penyerang dapat menyuntikkan atribut lain lewat tanda kutip.
-    """
     source = (Path(__file__).resolve().parents[1] / "templates" / "dashboard.html").read_text(
         encoding="utf-8"
     )
@@ -242,7 +206,6 @@ def test_pemeta_alasan_exit_memakai_whitelist() -> None:
     assert awal != -1
     blok = source[awal:source.find("}", source.find("return", awal)) + 1]
 
-    # Wajib ada fallback ke nilai tetap, bukan mengembalikan input.
     assert "map[key] ||" in blok, "btReasonTagClass tidak punya fallback whitelist"
     assert "return key" not in blok, (
         "btReasonTagClass mengembalikan input mentah ke atribut class"
@@ -267,8 +230,5 @@ def test_backtest_ui_exposes_exit_modes_only() -> None:
     assert 'value="fixed"' in source
     assert 'id="btAtrSl"' in source
     assert 'id="btAtrTp"' in source
-    # Panel hasil wajib punya tabel riwayat trade. Sebelumnya di sini ada
-    # tuntutan agar kalimat "Backtest tidak membuat trade atau order baru"
-    # tetap ada, yang justru mengunci kondisi mesin backtest yang dilucuti.
     assert 'id="btTradeBody"' in source
     assert 'id="btTradeCount"' in source

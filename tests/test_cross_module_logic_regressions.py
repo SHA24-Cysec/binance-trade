@@ -399,8 +399,6 @@ def test_backtest_exit_mode_overrides_match_atr_and_fixed_live_paths() -> None:
 
 
 def test_watchlist_uses_configured_interval_for_24h_window(monkeypatch) -> None:
-    # 170 candle 15 menit = 1,77 hari. Kalau watchlist masih mengasumsikan
-    # 5 menit, ia menganggapnya hanya 0,59 hari dan bahkan menolak datanya.
     from strategy.indicators import Kline
 
     bar = 15 * 60_000

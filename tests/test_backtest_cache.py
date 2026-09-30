@@ -35,12 +35,8 @@ MS_5M = 5 * 60 * 1000
 MS_HARI = 24 * 60 * 60 * 1000
 
 
-# ======================================================================
-# Perkakas
-# ======================================================================
 
 def deret_5m(bars: int, akhir_ms: int, harga_awal: float = 100.0) -> list[Kline]:
-    """Candle 5 menit deterministik yang berakhir pada ``akhir_ms``."""
     mulai = akhir_ms - bars * MS_5M
     mulai -= mulai % MS_5M
     keluar = []
@@ -60,7 +56,6 @@ def baris_mentah(k: Kline) -> list:
 
 
 class KlienPencatat:
-    """Klien palsu yang menghormati rentang waktu dan menghitung request."""
 
     def __init__(self, data: dict[str, list[Kline]]) -> None:
         self.data = data
@@ -85,9 +80,6 @@ def cache(tmp_path) -> KlineCache:
     obj.close()
 
 
-# ======================================================================
-# 1. Aritmetika rentang
-# ======================================================================
 
 def test_merge_ranges_menggabungkan_yang_tumpang_tindih_dan_berdempetan():
     assert merge_ranges([(10, 20), (15, 30)]) == [(10, 30)]
@@ -114,7 +106,6 @@ def test_missing_ranges_menghormati_jendela_segar(cache):
 
     cache.put("AUSDT", "5m", [], awal, sekarang)
     sisa = cache.missing_ranges("AUSDT", "5m", awal, sekarang)
-    # Bagian historis dipercaya, 24 jam terakhir tetap wajib diunduh ulang.
     assert len(sisa) == 1
     lebar_jam = (sisa[0][1] - sisa[0][0]) / 3_600_000
     assert 23.9 <= lebar_jam <= 24.1
@@ -128,12 +119,8 @@ def test_jendela_segar_nol_membuat_seluruh_cakupan_dipercaya(tmp_path):
         assert c.missing_ranges("AUSDT", "5m", sekarang - MS_HARI, sekarang) == []
 
 
-# ======================================================================
-# 2 & 3. Unduh inkremental dan kesegaran
-# ======================================================================
 
 def _unduh(klien, cache, symbols, awal, akhir) -> dict:
-    """Jalankan satu 'job' unduh ke store sementara, kembalikan isinya."""
     with KlineStore.create_temp() as store:
         berhasil, gagal = pbt.fetch_universe_klines(
             klien, symbols, "5m", awal, akhir, store, cache=cache)
@@ -142,9 +129,6 @@ def _unduh(klien, cache, symbols, awal, akhir) -> dict:
 
 
 def test_job_kedua_hanya_mengunduh_jendela_segar(cache):
-    # Sepuluh hari = 2.880 candle 5 menit, jadi unduh penuh butuh tiga
-    # halaman (batas 1.000 candle per request) sedangkan job kedua cukup
-    # satu halaman untuk jendela segar 24 jam.
     sekarang = int(time.time() * 1000)
     data = {"AUSDT": deret_5m(10 * 288, sekarang)}
     awal = data["AUSDT"][0].open_time
@@ -161,10 +145,8 @@ def test_job_kedua_hanya_mengunduh_jendela_segar(cache):
 
     assert request_pertama >= 3, request_pertama
     assert klien.request < request_pertama
-    # Yang diminta hanya jendela segar, bukan seluruh periode tiga hari.
     for _sym, minta_awal, _minta_akhir in klien.rentang_diminta:
         assert minta_awal >= cache.trusted_until() - MS_5M
-    # Datanya tetap utuh: job kedua melihat candle yang sama persis.
     assert kedua["isi"]["AUSDT"] == pertama["isi"]["AUSDT"]
 
 
@@ -175,7 +157,6 @@ def test_candle_dalam_jendela_segar_selalu_diperbarui(cache):
     klien = KlienPencatat(data)
     _unduh(klien, cache, ["AUSDT"], awal, sekarang)
 
-    # Bursa merevisi candle terakhir (mis. candle tadinya belum tertutup).
     terakhir = data["AUSDT"][-1]
     data["AUSDT"][-1] = terakhir._replace(close=terakhir.close * 1.5,
                                           high=terakhir.high * 1.5)
@@ -187,7 +168,6 @@ def test_candle_dalam_jendela_segar_selalu_diperbarui(cache):
 
 
 def test_candle_lama_tidak_ikut_berubah_saat_sumber_direvisi(cache):
-    """Bukti bahwa bagian historis memang tidak diunduh ulang."""
     sekarang = int(time.time() * 1000)
     data = {"AUSDT": deret_5m(3 * 288, sekarang)}
     awal = data["AUSDT"][0].open_time
@@ -202,7 +182,6 @@ def test_candle_lama_tidak_ikut_berubah_saat_sumber_direvisi(cache):
 
 
 def test_rentang_kosong_tidak_diminta_ulang_setiap_job(cache):
-    """Koin yang belum listing tidak boleh memicu request berulang selamanya."""
     sekarang = int(time.time() * 1000)
     lampau_awal = sekarang - 30 * MS_HARI
     lampau_akhir = sekarang - 20 * MS_HARI
@@ -250,18 +229,11 @@ def test_simbol_gagal_tetap_masuk_daftar_gagal_walau_cache_aktif(cache):
     hasil = _unduh(klien, cache, ["AUSDT", "RUSAKUSDT"], awal, sekarang)
     assert hasil["berhasil"] == ["AUSDT"]
     assert [g["symbol"] for g in hasil["gagal"]] == ["RUSAKUSDT"]
-    # Kegagalan tidak boleh mencatat cakupan palsu.
     assert cache.coverage("RUSAKUSDT", "5m") == []
 
 
-# ======================================================================
-# 4. Hasil simulasi tidak berubah karena cache
-# ======================================================================
 
 
-# ======================================================================
-# 5. Perawatan cache
-# ======================================================================
 
 def test_prune_membuang_simbol_yang_lama_tidak_dipakai(tmp_path):
     with KlineCache(str(tmp_path / "c.sqlite3"), ttl_days=7) as c:
@@ -269,7 +241,6 @@ def test_prune_membuang_simbol_yang_lama_tidak_dipakai(tmp_path):
         c.put("AUSDT", "5m", deret_5m(10, sekarang), sekarang - MS_HARI, sekarang)
         assert c.stats()["rows"] == 10
         assert c.prune() == 0
-        # Seolah-olah pemakaian terakhir 30 hari lalu.
         assert c.prune(now_ms=sekarang + 30 * MS_HARI) == 1
         assert c.stats()["rows"] == 0
         assert c.coverage("AUSDT", "5m") == []
@@ -305,7 +276,6 @@ def test_versi_skema_berbeda_membuang_isi_cache_lama(tmp_path):
 
 
 def test_cache_dipakai_dua_objek_sekaligus_tanpa_saling_merusak(tmp_path):
-    """Dua job backtest paralel boleh menulis file cache yang sama."""
     path = str(tmp_path / "c.sqlite3")
     sekarang = int(time.time() * 1000)
     with KlineCache(path) as satu, KlineCache(path) as dua:
@@ -315,9 +285,6 @@ def test_cache_dipakai_dua_objek_sekaligus_tanpa_saling_merusak(tmp_path):
         assert len(dua.read("AUSDT", "5m", 0, sekarang)) == 10
 
 
-# ======================================================================
-# 6. Konfigurasi, kegagalan, dan keamanan
-# ======================================================================
 
 def test_open_kline_cache_menghormati_config(tmp_path):
     path = str(tmp_path / "c.sqlite3")
@@ -339,14 +306,12 @@ def test_open_kline_cache_menghormati_config(tmp_path):
 
 
 def test_cache_tidak_bisa_dibuka_tidak_menggagalkan_backtest(tmp_path):
-    """Disk penuh atau izin tulis hilang tidak boleh membunuh job."""
     tabrakan = tmp_path / "bukan_folder"
     tabrakan.write_text("ini file, bukan direktori", encoding="utf-8")
     hasil = pbt.open_kline_cache({"BACKTEST_CACHE_ENABLED": True,
                                   "BACKTEST_CACHE_FILE": str(tabrakan / "c.sqlite3")})
     assert hasil is None
 
-    # Unduh tetap jalan tanpa cache.
     sekarang = int(time.time() * 1000)
     data = {"AUSDT": deret_5m(300, sekarang)}
     klien = KlienPencatat(data)
@@ -371,26 +336,3 @@ def test_tidak_ada_sql_dari_fstring_di_modul_cache():
         tanpa_komentar = baris.split("#", 1)[0]
         if re.search(r"f[\"'][^\"']*\b(SELECT|INSERT|UPDATE|DELETE)\b", tanpa_komentar):
             raise AssertionError(f"SQL dari f-string: {baris.strip()}")
-
-
-# ==== RINGKASAN AUDIT (tests/test_backtest_cache.py) ==================
-# Lingkup: berkas tes BARU untuk backtest_cache.py dan integrasinya di
-#   portfolio_backtest.fetch_universe_klines().
-# Cakupan: aritmetika rentang, unduh inkremental (dibuktikan dengan
-#   penghitung request), kebijakan kesegaran ketat 24 jam (candle baru
-#   tertimpa, candle lama tidak diunduh ulang), rentang kosong tidak diminta
-#   ulang, celah di tengah periode, daftar simbol gagal, paritas hasil
-#   simulasi dengan dan tanpa cache, prune TTL, clear, kenaikan versi skema,
-#   dua objek cache pada satu file, config, fallback saat cache gagal dibuka,
-#   dan larangan SQL dari f-string.
-# Sintaks/tipe: tanpa jaringan, tanpa tidur, deterministik. Semua cache
-#   dibuat di tmp_path sehingga tes tidak pernah menulis ke folder repo
-#   (bawaan produksi Data/backtest_cache.sqlite3).
-# Keamanan: satu tes khusus membaca sumber backtest_cache.py dan menolak SQL
-#   yang dirakit dari f-string atau .format().
-# Race condition: test_cache_dipakai_dua_objek_sekaligus_tanpa_saling_merusak
-#   meniru dua job backtest paralel yang memakai satu file cache (WAL +
-#   busy_timeout).
-# Kebersihan: fixture memakai yield lalu close(), dan tes lain memakai
-#   context manager, jadi tidak ada koneksi menggantung.
-# =======================================================================

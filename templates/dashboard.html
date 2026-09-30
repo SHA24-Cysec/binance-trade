@@ -5,17 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Pump Scanner Bot - Dashboard</title>
 <style>
-  /* ============================================================
-     TEMA: Terminal Slate (glassmorphism)
-     ------------------------------------------------------------
-     Semua nama kelas & id dipertahankan persis seperti versi
-     sebelumnya supaya seluruh kode JavaScript di bawah tetap
-     bekerja tanpa perubahan. Yang berubah hanya lapisan visual.
-     Catatan teknis: backdrop-filter didukung semua browser
-     evergreen (Chrome/Edge 76+, Firefox 103+, Safari 9 dengan
-     prefix -webkit-). Untuk browser yang tidak mendukung, panel
-     tetap terbaca karena warna dasarnya sudah cukup pekat.
-     ============================================================ */
+
   :root{
     --bg:#0e1116; --panel:rgba(23,28,36,.72); --panel2:rgba(148,163,184,.07);
     --solid:#171c24; --border:rgba(148,163,184,.16); --border2:rgba(148,163,184,.26);
@@ -32,8 +22,7 @@
     font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
     line-height:1.55;-webkit-font-smoothing:antialiased;overflow-x:hidden;width:100%;min-height:100vh}
   a{color:var(--accent)}
-  /* Lapisan cahaya latar. position:fixed + z-index:-1 supaya tidak
-     pernah menangkap klik dan tidak ikut ter-scroll. */
+
   .bgfx{position:fixed;inset:0;z-index:-1;overflow:hidden;pointer-events:none}
   .bgfx i{position:absolute;border-radius:50%;filter:blur(90px);opacity:.28;display:block}
   .bgfx .o1{width:520px;height:520px;background:#15803d;top:-180px;left:-140px}
@@ -41,7 +30,7 @@
   .bgfx .o3{width:520px;height:520px;background:#334155;bottom:-220px;left:28%}
   .wrap{max-width:1420px;margin:0 auto;padding:18px 18px 34px}
 
-  /* ---------- header ---------- */
+
   header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;
     margin-bottom:14px;padding:12px 16px;border-radius:var(--radius);
     background:var(--panel);border:1px solid var(--border);box-shadow:var(--shadow);
@@ -65,7 +54,7 @@
   .dot.live-dot{background:var(--red);animation:pulseLive 1.4s infinite}
   @keyframes pulseLive{0%{box-shadow:0 0 0 0 rgba(244,63,94,.65)}70%{box-shadow:0 0 0 8px rgba(244,63,94,0)}100%{box-shadow:0 0 0 0 rgba(244,63,94,0)}}
 
-  /* ---------- tab navigasi ---------- */
+
   .tabs{display:flex;gap:3px;padding:4px;border-radius:12px;background:var(--panel2);
     border:1px solid var(--border);overflow-x:auto;scrollbar-width:none}
   .tabs::-webkit-scrollbar{display:none}
@@ -75,10 +64,9 @@
   .tabs button[aria-selected="true"]{background:rgba(148,163,184,.18);color:var(--txt)}
   .tabpane[hidden]{display:none}
 
-  /* ---------- grid & kartu ---------- */
+
   .grid{display:grid;gap:14px}
-  /* min-width:0 wajib: tanpa ini item grid melebar mengikuti konten
-     terpanjang (mis. baris log) dan memicu scroll horizontal. */
+
   .grid > *{min-width:0}
   .cards{grid-template-columns:repeat(4,1fr)}
   .card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);
@@ -101,7 +89,7 @@
   .panel h2{font-size:13.5px;font-weight:700;margin-bottom:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
   .panel h2 .ic{width:18px;height:18px;opacity:.8}
 
-  /* ---------- tabel ---------- */
+
   table{width:100%;border-collapse:collapse;font-size:12.5px}
   th{text-align:left;color:var(--muted);font-weight:700;font-size:10.5px;text-transform:uppercase;
     letter-spacing:.8px;padding:9px 12px;border-bottom:1px solid var(--border);background:var(--panel2)}
@@ -120,7 +108,7 @@
   .tag.stop_loss{background:rgba(244,63,94,.13);color:var(--red);border-color:rgba(244,63,94,.3)}
   .mono{font-variant-numeric:tabular-nums;font-family:var(--mono)}
 
-  /* ---------- watchlist (panel pantau, read-only) ---------- */
+
   .wl-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
   .wl-chip{font-size:10.5px;font-weight:700;padding:3px 9px;border-radius:20px;
     border:1px solid var(--border);background:var(--panel2);color:var(--muted);white-space:nowrap}
@@ -145,7 +133,7 @@
   .tag.ti-aktif{background:rgba(56,189,248,.12);color:var(--info);border-color:rgba(56,189,248,.26)}
   .tag.ti-spekulatif{background:rgba(245,158,11,.12);color:var(--amber);border-color:rgba(245,158,11,.28)}
   .tag.ti-lainnya{background:rgba(148,163,184,.1);color:var(--muted);border-color:var(--border)}
-  /* bar jarak menuju ambang volume: penuh = sudah lolos */
+
   .wl-bar{position:relative;height:5px;border-radius:3px;background:rgba(148,163,184,.14);
     overflow:hidden;min-width:52px}
   .wl-bar span{position:absolute;inset:0 auto 0 0;border-radius:3px;background:var(--info);
@@ -154,7 +142,7 @@
   .wl-gap{font-size:10.5px;color:var(--muted);margin-top:3px;font-variant-numeric:tabular-nums}
   @media(max-width:640px){ table.wl{min-width:600px} }
 
-  /* ---------- kotak posisi ---------- */
+
   .posbox{display:flex;flex-direction:column;gap:2px}
   .posrow{display:flex;justify-content:space-between;align-items:baseline;gap:12px;font-size:12.5px;
     padding:8px 11px;border-radius:7px}
@@ -168,13 +156,13 @@
   .empty{text-align:center;padding:30px 16px;color:var(--muted);font-size:13px}
   .empty .big{font-size:36px;opacity:.45;margin-bottom:8px}
 
-  /* ---------- skeleton loading ---------- */
+
   .skel{display:block;height:1em;border-radius:6px;background:linear-gradient(90deg,
     rgba(148,163,184,.1),rgba(148,163,184,.22),rgba(148,163,184,.1));
     background-size:200% 100%;animation:skel 1.3s ease-in-out infinite}
   @keyframes skel{0%{background-position:200% 0}100%{background-position:-200% 0}}
 
-  /* ---------- progress ---------- */
+
   .progress{height:7px;border-radius:5px;background:var(--grid);overflow:hidden;margin-top:8px;position:relative}
   .progress > span{display:block;height:100%;border-radius:5px;
     background:linear-gradient(90deg,var(--accent),var(--accent2));
@@ -200,7 +188,7 @@
   .bt-dots::after{content:'';animation:dots 1.4s steps(4,end) infinite}
   @keyframes dots{0%{content:''}25%{content:'.'}50%{content:'..'}75%{content:'...'}100%{content:''}}
 
-  /* ---------- log ---------- */
+
   .logbox{max-height:330px;overflow-y:auto;overflow-x:hidden;width:100%;font-family:var(--mono);
     font-size:11.5px;line-height:1.7;border:1px solid var(--border);border-radius:9px;
     background:rgba(14,17,22,.5);padding:4px}
@@ -217,7 +205,7 @@
     border-radius:50%;animation:sp 1s linear infinite;flex:none}
   @keyframes sp{to{transform:rotate(360deg)}}
 
-  /* ---------- banner ---------- */
+
   .banner{padding:11px 15px;border-radius:9px;font-size:12.5px;margin-bottom:14px;display:none;
     align-items:center;gap:9px;border-left-width:3px;border-left-style:solid}
   .banner.show{display:flex}
@@ -226,7 +214,7 @@
   .banner.err{background:rgba(244,63,94,.09);border:1px solid rgba(244,63,94,.3);
     border-left:3px solid var(--red);color:#fda4af}
 
-  /* ---------- form backtest ---------- */
+
   .bt-form{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}
   .bt-form > *{min-width:0}
   .bt-field{display:flex;flex-direction:column;gap:6px;min-width:0}
@@ -258,7 +246,7 @@
   .bt-actions button:hover:not(:disabled){box-shadow:0 6px 18px rgba(74,222,128,.28);transform:translateY(-1px)}
   .bt-actions button:disabled{opacity:.45;cursor:not-allowed}
 
-  /* ---------- tombol bahaya & modal ---------- */
+
   .btn-danger{background:rgba(244,63,94,.14);color:#fda4af;border:1px solid rgba(244,63,94,.35);
     border-radius:9px;padding:11px 14px;font-size:13px;font-weight:700;cursor:pointer;
     transition:.16s;width:100%;margin-top:14px;font-family:inherit}
@@ -289,7 +277,7 @@
   .modal-confirm{background:var(--red);color:#fff}
   .modal-confirm:disabled{opacity:.45;cursor:not-allowed}
 
-  /* ---------- toast ---------- */
+
   .toastwrap{position:fixed;right:16px;bottom:16px;z-index:200;display:flex;flex-direction:column;
     gap:9px;max-width:min(360px,calc(100vw - 32px));pointer-events:none}
   .toast{pointer-events:auto;display:flex;gap:10px;align-items:flex-start;padding:11px 13px;
@@ -304,7 +292,7 @@
   .toast.warn{border-left:3px solid var(--amber)} .toast.warn b{color:var(--amber)}
   .toast.info{border-left:3px solid var(--info)} .toast.info b{color:var(--info)}
 
-  /* ---------- panel kontrol ---------- */
+
   .ctl-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
   .ctl-full{grid-column:1/-1}
   .ctl-actions{display:flex;gap:9px;flex-wrap:wrap}
@@ -347,7 +335,7 @@
   @media(max-width:1000px){.settings-fields{grid-template-columns:repeat(2,minmax(0,1fr))}}
   @media(max-width:760px){.ctl-grid{grid-template-columns:1fr}.ctl-full{grid-column:auto}.settings-fields,.ctl-form{grid-template-columns:1fr}}
 
-  /* ---------- responsif ---------- */
+
   @media(max-width:1200px){.bt-form{grid-template-columns:repeat(3,1fr)}}
   @media(max-width:1080px){
     .cards{grid-template-columns:repeat(2,1fr)}
@@ -374,7 +362,7 @@
     .posrow{flex-direction:column;align-items:flex-start;gap:2px}
     .posrow .v{text-align:left}
   }
-  /* Hormati preferensi sistem pengguna yang mematikan animasi. */
+
   @media(prefers-reduced-motion:reduce){
     *,*::after,*::before{animation-duration:.001ms !important;animation-iteration-count:1 !important;
       transition-duration:.001ms !important;scroll-behavior:auto !important}
@@ -403,7 +391,7 @@
   <div class="banner dry" id="paperBanner"><span>🧪</span><span>Mode <b>PAPER</b> aktif: eksekusi order, fee, dan saldo <b>disimulasikan lokal</b>. Data pasar tetap asli dari Binance produksi. Tidak ada uang asli dan tidak ada order sungguhan. Hasil PAPER bukan jaminan hasil LIVE.</span></div>
   <div class="banner err" id="errBanner"><span>⚠️</span><span id="errText"></span></div>
 
-  <!-- NAVIGASI TAB -->
+
   <nav class="tabs" role="tablist" aria-label="Bagian dashboard" style="margin-bottom:14px">
     <button role="tab" aria-selected="true" aria-controls="paneIkhtisar" data-tab="Ikhtisar">Ikhtisar</button>
     <button role="tab" aria-selected="false" aria-controls="paneRiwayat" data-tab="Riwayat">Riwayat<span class="mut" id="tabTradeBadge"></span></button>
@@ -413,7 +401,7 @@
 
   <div class="tabpane" id="paneIkhtisar" role="tabpanel">
 
-  <!-- KARTU RINGKASAN -->
+
   <div class="grid cards" style="margin-bottom:16px">
     <div class="card" id="cardEquity"><div class="accent-bar"></div><div class="label">Equity (Live)</div><div class="value mono" id="equityVal"><span class="skel" style="width:70%"></span></div><div class="sub" id="equitySub">saldo + nilai posisi</div></div>
     <div class="card" id="cardPnl"><div class="accent-bar"></div><div class="label">PnL Posisi Terbuka</div><div class="value mono" id="openPnlVal"><span class="skel" style="width:70%"></span></div><div class="sub" id="openPnlSub">belum ada posisi</div></div>
@@ -421,7 +409,7 @@
     <div class="card" id="cardWin"><div class="accent-bar"></div><div class="label">Win Rate</div><div class="value mono" id="winVal"><span class="skel" style="width:70%"></span></div><div class="sub" id="winSub">-</div></div>
   </div>
 
-  <!-- POSISI + EQUITY CHART -->
+
   <div class="grid cols" style="margin-bottom:16px">
     <div class="panel">
       <h2>📈 Kurva PnL Kumulatif</h2>
@@ -435,7 +423,7 @@
     </div>
   </div>
 
-  <!-- WATCHLIST PANTAU (READ-ONLY, TIDAK MEMENGARUHI BOT) -->
+
   <div class="panel" id="watchlistPanel" style="display:none;margin-bottom:16px">
     <h2>👁️ Watchlist Pantau <span class="mut" style="font-weight:400;font-size:11.5px" id="wlCount"></span></h2>
     <div class="wl-head" id="wlChips"></div>
@@ -451,7 +439,7 @@
     </div>
   </div>
 
-  <!-- LOG + KONFIG -->
+
   <div class="grid cols">
     <div class="panel">
       <h2>📜 Log Aktivitas Terbaru</h2>
@@ -463,10 +451,10 @@
     </div>
   </div>
 
-  </div><!-- /paneIkhtisar -->
+  </div>
 
   <div class="tabpane" id="paneRiwayat" role="tabpanel" hidden>
-  <!-- RIWAYAT TRADE -->
+
   <div class="panel" style="margin-bottom:16px">
     <h2>🧾 Riwayat Trade <span class="mut" style="font-weight:400;font-size:12px" id="tradeCount"></span></h2>
     <div style="overflow-x:auto">
@@ -477,7 +465,7 @@
     </div>
   </div>
 
-  </div><!-- /paneRiwayat -->
+  </div>
 
   <div class="tabpane" id="paneKontrol" role="tabpanel" hidden>
     <div id="controlReadOnlyWarning" class="readonly-warning">
@@ -566,10 +554,10 @@
         <div id="settingsHistory" class="history-list"><div class="empty">Belum ada riwayat.</div></div>
       </section>
     </div>
-  </div><!-- /paneKontrol -->
+  </div>
 
   <div class="tabpane" id="paneBacktest" role="tabpanel" hidden>
-  <!-- BACKTEST -->
+
   <div class="panel" style="margin-top:16px">
     <h2>🧪 Backtest Portofolio (meniru cara bot live bekerja)</h2>
     <p class="mut" style="font-size:12.5px;margin-bottom:12px">
@@ -730,9 +718,9 @@
         </div>
       </div>
     </div>
-  </div><!-- /paneBacktest -->
+  </div>
 
-  <!-- MODAL KONFIRMASI START / STOP / RESTART -->
+
   <div class="modal-overlay" id="botActionModal">
     <div class="modal-box">
       <h3 id="botActionTitle">Konfirmasi Aksi Bot</h3>
@@ -748,7 +736,7 @@
     </div>
   </div>
 
-  <!-- MODAL KONFIRMASI JUAL MANUAL -->
+
   <div class="modal-overlay" id="manualCloseModal">
     <div class="modal-box">
       <h3>⚠️ Konfirmasi Jual Sekarang</h3>
@@ -768,12 +756,7 @@
 </div>
 
 <script>
-// Format angka memakai locale id-ID (pemisah ribuan titik, desimal koma).
-// Hanya memengaruhi TAMPILAN; nilai yang dikirim ke server tetap angka mentah.
 const LOCALE = 'id-ID';
-// Token anti-CSRF per proses dashboard (temuan S-05): disisipkan server saat
-// halaman dirender, dan WAJIB dikirim balik di header X-Admin-Token untuk
-// endpoint POST /api/manual/close. Situs lain tidak mengetahui nilai ini.
 const ADMIN_TOKEN = {{ admin_token | tojson }};
 async function adminFetch(url, options){
   const opts = Object.assign({}, options || {});
@@ -788,12 +771,6 @@ const sign = n => (n>0?'+':'');
 const cls = n => n>0?'pos':(n<0?'neg':'mut');
 
 
-// ======================= TAB NAVIGASI =======================
-// Tab murni di sisi klien: semua pane tetap ada di DOM (hanya
-// disembunyikan dengan properti hidden) supaya fungsi render yang
-// memanggil getElementById tidak pernah menemukan elemen null.
-// Pilihan tab disimpan di localStorage agar tidak balik ke Ikhtisar
-// setiap kali halaman dimuat ulang.
 const TAB_KEY = 'psb_tab';
 function showTab(name, save){
   const btns = document.querySelectorAll('.tabs button[data-tab]');
@@ -807,7 +784,7 @@ function showTab(name, save){
   });
   if(!found){ showTab('Ikhtisar', false); return; }
   if(save !== false){
-    try{ localStorage.setItem(TAB_KEY, name); }catch(e){ /* mode privat: abaikan */ }
+    try{ localStorage.setItem(TAB_KEY, name); }catch(e){ }
   }
 }
 document.querySelectorAll('.tabs button[data-tab]').forEach(b => {
@@ -819,9 +796,6 @@ document.querySelectorAll('.tabs button[data-tab]').forEach(b => {
   showTab(saved || 'Ikhtisar', false);
 })();
 
-// ======================= TOAST =======================
-// Notifikasi ringan. Otomatis hilang, bisa ditutup dengan klik.
-// Dibatasi 4 buah agar tidak menumpuk memenuhi layar.
 function toast(kind, title, msg, ms){
   const wrap = document.getElementById('toastWrap');
   if(!wrap) return;
@@ -842,21 +816,14 @@ function toast(kind, title, msg, ms){
   setTimeout(close, ms || 6000);
 }
 
-// Penanda agar toast "koneksi putus" tidak diulang tiap 5 detik.
 let _connWasDown = false;
 
-// ======================= VISIBILITAS BACKTEST =======================
-// Sumber kebenarannya adalah field backtest_enabled dari /api/status.
-// Server yang memutuskan (config SHOW_BACKTEST_IN_LIVE + mode aktif),
-// dashboard hanya mengikuti. Endpoint /api/backtest/* juga dijaga
-// terpisah di sisi server, jadi menyembunyikan tab di sini adalah soal
-// kerapian tampilan, bukan pengamanan.
-let _btVisibility = null;   // null = belum tahu; true/false = sudah diputuskan
+let _btVisibility = null;
 let _btDefaultsLoaded = false;
 
 function applyBacktestVisibility(enabled){
   enabled = !!enabled;
-  if(_btVisibility === enabled) return;   // tidak berubah, jangan kerja ulang
+  if(_btVisibility === enabled) return;
   const first = (_btVisibility === null);
   _btVisibility = enabled;
 
@@ -866,16 +833,11 @@ function applyBacktestVisibility(enabled){
   if(pane && !enabled) pane.hidden = true;
 
   if(enabled){
-    // Muat nilai default form sekali saja, dan hanya kalau diizinkan.
     if(!_btDefaultsLoaded){
       _btDefaultsLoaded = true;
       loadBacktestDefaults();
     }
   } else {
-    // Kalau pengguna sedang berada di tab Backtest saat fitur ini mati
-    // (misalnya tab tersimpan di localStorage dari sesi PAPER, lalu
-    // config diganti ke LIVE), pindahkan ke Ikhtisar supaya tidak
-    // terjebak di halaman kosong.
     if(btn && btn.getAttribute('aria-selected') === 'true'){
       showTab('Ikhtisar');
     }
@@ -901,22 +863,16 @@ function reasonTag(r){
 }
 
 function renderStatus(s){
-  // mode
   const mp=document.getElementById('modePill'), md=mp.querySelector('.dot');
   var isPaper = (s.mode==='PAPER') || !!s.paper;
   if(isPaper){mp.className='pill dry';document.getElementById('modeText').textContent='PAPER';md.className='dot warn';document.getElementById('paperBanner').classList.add('show');}
   else{mp.className='pill live';document.getElementById('modeText').textContent='LIVE · UANG ASLI';md.className='dot live-dot';document.getElementById('paperBanner').classList.remove('show');}
-  // Backtest boleh tampil atau tidak (diputuskan server). Kalau field-nya
-  // tidak ada -- misalnya dashboard.py versi lama -- anggap aktif supaya
-  // perilakunya tidak berubah diam-diam.
   applyBacktestVisibility(s.backtest_enabled === undefined ? true : s.backtest_enabled);
 
-  // conn
   const cd=document.getElementById('connDot'), ct=document.getElementById('connText');
   if(s.live_connected){cd.className='dot on';ct.textContent=s.has_api_key?'Binance terhubung':'Harga live (tanpa API key)';}
   else{cd.className='dot off';ct.textContent='Offline (data dari file)';}
 
-  // cards
   const a=s.account;
   document.getElementById('equityVal').textContent = a.equity_live!=null? fmt(a.equity_live)+' '+s.quote : '-';
   document.getElementById('equitySub').textContent = a.usdt_free!=null? ('bebas: '+fmt(a.usdt_free)+' '+s.quote) : 'butuh API key untuk saldo';
@@ -933,13 +889,11 @@ function renderStatus(s){
     oc.className='card';
   }
 
-  // flags -> footer
   let flags=[];
   if(s.flags.dd_stopped) flags.push('🛑 DD-STOP aktif');
   if(s.flags.daily_stopped) flags.push('🛑 DAILY-STOP aktif');
   document.getElementById('footer').innerHTML='Dashboard kontrol lokal · settings PAPER dan LIVE disimpan terpisah.'+(flags.length?' &nbsp;|&nbsp; '+flags.join(' · '):'');
 
-  // position box
   const pb=document.getElementById('positionBox');
   if(p.has_position){
     const pnlColor = (p.pnl_pct!=null)?cls(p.pnl_pct):'mut';
@@ -964,8 +918,6 @@ function renderStatus(s){
     pb.innerHTML='<div class="empty"><div class="big">💤</div>Tidak ada posisi terbuka.<br>Bot sedang memindai pasar…</div>';
     window._currentPositionSymbol = null;
     document.getElementById('manualCloseBtn').style.display = 'none';
-    // Posisi sudah tertutup (mis. karena perintah manual berhasil dieksekusi
-    // bot) -- hentikan polling status manual kalau masih berjalan.
     if(window._manualPollTimer){ clearInterval(window._manualPollTimer); window._manualPollTimer=null; }
   }
 
@@ -975,7 +927,6 @@ function renderStatus(s){
     hideManualStatus();
   }
 
-  // config
   const c=s.config;
   document.getElementById('configBox').innerHTML=`
     <div class="posrow"><span class="k">Mode exit</span><span class="v mono">${c.exit_source==='ATR'?'ATR':'PERSEN LAMA'}</span></div>
@@ -986,7 +937,6 @@ function renderStatus(s){
     `;
 }
 
-// ======================= JUAL SEKARANG (MANUAL) =======================
 function showManualStatus(kind, msg){
   const el = document.getElementById('manualStatus');
   el.className = 'manual-status show ' + kind;
@@ -1042,7 +992,7 @@ async function confirmManualClose(){
 function startManualClosePolling(symbol){
   if(window._manualPollTimer) clearInterval(window._manualPollTimer);
   let attempts = 0;
-  const MAX_ATTEMPTS = 40; // ~2 menit dengan interval 3 detik
+  const MAX_ATTEMPTS = 40;
   window._manualPollTimer = setInterval(async ()=>{
     attempts++;
     try{
@@ -1058,8 +1008,6 @@ function startManualClosePolling(symbol){
         return;
       }
       if(!d.pending && d.has_position && d.current_symbol !== symbol){
-        // Posisi lama sudah tidak ada tapi bukan karena perintah kita
-        // (mis. kena SL/TP lebih dulu sebelum perintah diproses).
         clearInterval(window._manualPollTimer); window._manualPollTimer = null;
         window._manualStatusLocked = false;
         hideManualStatus();
@@ -1070,7 +1018,7 @@ function startManualClosePolling(symbol){
         window._manualStatusLocked = true;
         showManualStatus('warn', '⚠️ Menunggu bot memproses... tapi proses bot sepertinya sedang tidak berjalan.');
       }
-    }catch(e){ /* diamkan, coba lagi di tick berikutnya */ }
+    }catch(e){ }
     if(attempts >= MAX_ATTEMPTS){
       clearInterval(window._manualPollTimer); window._manualPollTimer = null;
       window._manualStatusLocked = true;
@@ -1117,7 +1065,7 @@ function renderLogs(events){
 
 function renderChart(trades){
   const wrap=document.getElementById('chartWrap');
-  const closed=trades.filter(t=>t.sell_time && 'pnl' in t).slice().reverse(); // kronologis
+  const closed=trades.filter(t=>t.sell_time && 'pnl' in t).slice().reverse();
   if(closed.length<1){wrap.innerHTML='<div class="empty"><div class="big">📊</div>Belum ada data trade untuk digambar.</div>';return;}
   let cum=0; const pts=[0];
   closed.forEach(t=>{cum+=t.pnl; pts.push(cum);});
@@ -1145,13 +1093,10 @@ function renderChart(trades){
   </svg>`;
 }
 
-// ======================= WATCHLIST (READ-ONLY) =======================
-// Panel ini MURNI MEMANTAU dan tidak mengirim perintah ke bot.
 
-// Volume ditulis ringkas supaya kolomnya tidak melebar: 1,2 jt / 340 rb.
 function wlVol(v){
   if(v===null||v===undefined||isNaN(v)) return '-';
-  if(v>=1e9) return fmt(v/1e9,2)+' M';   // miliar
+  if(v>=1e9) return fmt(v/1e9,2)+' M';
   if(v>=1e6) return fmt(v/1e6,2)+' jt';
   if(v>=1e3) return fmt(v/1e3,0)+' rb';
   return fmt(v,0);
@@ -1297,8 +1242,6 @@ function renderWatchlist(w){
   document.getElementById('wlCount').textContent =
     items.length ? `${items.length} simbol dipantau` : '';
 
-  // Ringkasan status. "LIKUID" ditonjolkan karena hanya simbol likuid yang
-  // bisa masuk semesta kandidat bot.
   const chipOrder=[['LIKUID','siap'],['TIPIS',''],['TIDAK ADA DATA','']];
   let chips=chipOrder.filter(([k])=>counts[k])
     .map(([k,c])=>`<span class="wl-chip ${c}">${k} <b>${fmt(counts[k],0)}</b></span>`).join('');
@@ -1329,8 +1272,6 @@ function renderWatchlist(w){
     const st=r.status||'TIDAK ADA DATA';
     const rowCls=(st==='LIKUID')?' class="siap"':'';
 
-    // Bar progres menuju ambang VOLUME. Penuh berarti gerbang likuiditas
-    // sudah terlewati; angka di bawahnya menyebut sisa jaraknya.
     let bar='<span class="mut">-</span>';
     if(r.quote_volume_24h!==null&&r.quote_volume_24h!==undefined&&cfg.min_quote_volume_24h){
       const ratio=Math.max(0,Math.min(1,r.quote_volume_24h/cfg.min_quote_volume_24h));
@@ -1392,7 +1333,6 @@ async function refresh(){
 refresh();
 setInterval(refresh, 1000);
 
-// ============================ KONTROL BOT ============================
 const esc = v => String(v===null||v===undefined?'':v).replace(/[&<>"']/g, c=>({
   '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
 }[c]));
@@ -1549,8 +1489,6 @@ function resetSettingsGroup(group){
   _settingsFields.filter(x=>x.group===group&&!x.read_only).forEach(f=>{_settingsValues[f.key]=JSON.parse(JSON.stringify(_settingsDefaults[f.key]));});
   renderSettingsFields();_settingsFields.filter(x=>x.group===group&&!x.read_only).forEach(f=>markSettingDirty(f.key,_settingsValues[f.key]));
 }
-/* Editor watchlist manual dihapus 2026-09-27: field config "WATCHLIST"
-   tidak ada lagi; panel watchlist menyusun daftarnya otomatis. */
 function renderSettingsFields(){
   const container=document.getElementById('settingsContainer');container.textContent='';
   const groups=[...new Set(_settingsFields.map(f=>f.group))];
@@ -1637,7 +1575,6 @@ window.addEventListener('beforeunload',e=>{if(_settingsDirtyKeys.size){e.prevent
 loadControlStatus();loadCredentialStatus();loadModeChecklist();loadSettings();loadHistory();loadPaperResetStatus();
 setInterval(loadControlStatus,4000);
 
-// ============================ BACKTEST ============================
 let btPolling = null;
 
 function btUpdateExitMode(){
@@ -1652,14 +1589,11 @@ async function loadBacktestDefaults(){
     const r = await fetch('/api/backtest/defaults');
     const d = await r.json();
     if(!r.ok){
-      // Paling mungkin HTTP 403 karena backtest dimatikan di mode LIVE.
-      // Izinkan percobaan ulang nanti bila status berubah.
       _btDefaultsLoaded = false;
       if(d && d.backtest_disabled) applyBacktestVisibility(false);
       return;
     }
     document.getElementById('btDays').value = d.default_days;
-    // Tidak ada batas maksimum hari yang dipaksakan (rentang backtest bebas).
     document.getElementById('btExitMode').value = d.USE_ATR_EXIT ? 'atr' : 'fixed';
     document.getElementById('btAtrPeriod').value = d.ATR_PERIOD;
     document.getElementById('btAtrSl').value = d.ATR_MULT_SL;
@@ -1678,7 +1612,7 @@ async function loadBacktestDefaults(){
     if(d.default_days) document.getElementById('btDays').value = d.default_days;
     if(d.default_max_symbols) document.getElementById('btMaxSymbols').value = d.default_max_symbols;
     btUpdateEstimate();
-  }catch(e){ /* form tetap kosong, tidak fatal */ }
+  }catch(e){ }
 }
 
 function btShowError(msg){
@@ -1696,7 +1630,6 @@ function btBusy(busy){
   if(cancel && !busy) cancel.style.display = 'none';
 }
 
-// ID job yang sedang berjalan, dipakai tombol Batal.
 let _btJobId = null;
 
 async function cancelBacktest(){
@@ -1713,21 +1646,16 @@ async function cancelBacktest(){
   }
 }
 
-// Perkiraan beban unduhan. Angkanya kasar tetapi cukup untuk mencegah
-// pengguna tidak sengaja meminta puluhan ribu request, dan memberi
-// gambaran jujur bahwa backtest portofolio memang butuh waktu.
 function btUpdateEstimate(){
   const el = document.getElementById('btEstimate');
   if(!el) return;
   const days = parseInt(document.getElementById('btDays').value || '0', 10);
   const sym = parseInt(document.getElementById('btMaxSymbols').value || '0', 10);
   if(!(days >= 2) || !(sym >= 2)){ el.textContent = ''; return; }
-  const barsPerSym = (days + 1) * 288;          // 288 bar 5 menit per hari + warmup
+  const barsPerSym = (days + 1) * 288;
   const reqPerSym = Math.ceil(barsPerSym / 1000);
   const totalReq = sym * reqPerSym;
-  const weight = totalReq * 2;                   // bobot /api/v3/klines = 2
-  // Binance mengizinkan 6000 bobot per menit per IP. Diasumsikan hanya
-  // separuh jatah yang dipakai supaya bot tetap punya ruang bernapas.
+  const weight = totalReq * 2;
   const mins = weight / 3000;
   const warn = totalReq > 20000
     ? ' <b style="color:#f43f5e">Melebihi batas 20.000 request, kurangi simbol atau hari.</b>'
@@ -1741,9 +1669,6 @@ function btUpdateEstimate(){
 
 async function startBacktest(){
   btShowError('');
-  // Jaga-jaga kalau fungsi ini terpanggil saat fitur sedang dimatikan
-  // (misalnya dari konsol browser, atau status berubah setelah halaman
-  // dimuat). Server tetap menolak sendiri, ini hanya agar pesannya jelas.
   if(_btVisibility === false){
     btShowError('Fitur backtest sedang dinonaktifkan karena bot berjalan di mode LIVE.');
     return;
@@ -1886,10 +1811,6 @@ function renderSymbolBreakdown(s){
   const max = Math.max(...top.map(x=>Math.abs(Number(x.pnl_pct))), 1);
   box.innerHTML = top.map(x=>{
     const pnl = Number(x.pnl_pct);
-    // Lebar bar sengaja dipaksa menjadi angka lalu dibatasi 0 sampai 100.
-    // Nama variabel satu huruf dihindari di dalam template string supaya
-    // penjaga XSS di test_dashboard_security bisa membedakan interpolasi
-    // angka yang aman dari interpolasi teks mentah yang berbahaya.
     const lebarBar = Math.min(100, Math.max(2, Math.abs(pnl)/max*100)).toFixed(1);
     const col = pnl>=0 ? 'var(--green)' : 'var(--red)';
     return `<div style="margin-bottom:9px">
@@ -1933,7 +1854,6 @@ function btReasonLabel(r){
   return esc(map[key] || key);
 }
 
-// Kontribusi PnL per simbol, diurutkan dari penyumbang terbesar.
 function renderBacktestResult(res){
   const s = res.summary;
   document.getElementById('btResult').style.display = 'block';
@@ -1957,7 +1877,6 @@ function renderBacktestResult(res){
       <div class="sub">tidak ada simulasi order</div></div>`;
   document.getElementById('btCards').innerHTML = cardsHtml;
 
-  // info box
   const p = res.params_used;
   let reasonRows = Object.entries(s.reason_counts||{}).map(([k,v])=>
     `<div class="posrow"><span class="k">${btReasonLabel(k)}</span><span class="v mono">${fmt(v,0)}x</span></div>`).join('');
@@ -1982,9 +1901,6 @@ function renderBacktestResult(res){
 
   document.getElementById('btLimitList').innerHTML = (res.limitations||[]).map(l=>`<li>${esc(l)}</li>`).join('');
 
-  // Riwayat trade. Elemen btTradeCount sempat hilang dari HTML sementara baris
-  // ini tetap ada, sehingga getElementById mengembalikan null dan panel hasil
-  // gagal dirender seluruhnya. Sekarang keduanya kembali sepasang.
   const trades = res.trades || [];
   document.getElementById('btTradeCount').textContent = trades.length ? '('+trades.length+' trade)' : '';
   const tb = document.getElementById('btTradeBody');
@@ -2009,7 +1925,6 @@ function renderBacktestResult(res){
   renderSkipped(res);
 
 
-  // chart return kumulatif
   const wrap = document.getElementById('btChartWrap');
   const pts = s.equity_curve || [0];
   if(pts.length < 2){
@@ -2039,11 +1954,6 @@ function renderBacktestResult(res){
   }
 }
 
-// loadBacktestDefaults() TIDAK dipanggil di sini. Pemanggilannya ditunda
-// sampai renderStatus() memastikan backtest memang aktif untuk mode yang
-// sedang berjalan -- lihat applyBacktestVisibility(). Tanpa penundaan ini,
-// permintaan pertama ke /api/backtest/defaults akan selalu kena HTTP 403
-// saat mode LIVE dengan backtest dimatikan.
 </script>
 </body>
 </html>

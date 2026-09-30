@@ -19,9 +19,6 @@ from trading import pump_scanner_bot as bot
 from trading.clients.binance_client import BinanceSpotClient
 
 
-# ---------------------------------------------------------------------------
-# KRITIS-01: proteksi akun tidak boleh diam-diam mati di LIVE
-# ---------------------------------------------------------------------------
 
 def _state_with_position() -> dict:
     st = dict(bot.DEFAULT_STATE)
@@ -35,11 +32,6 @@ def _state_with_position() -> dict:
 
 
 def test_default_config_mengaktifkan_minimal_satu_rem_akun():
-    """Default repo tidak boleh dikirim dengan DD stop DAN daily stop mati.
-
-    Dengan keduanya mati, CLOSE_ALL_AT_LIMIT tidak pernah terpicu sehingga
-    tidak ada satu pun rem kerugian tingkat akun.
-    """
     cfg = config_mod.PUMP_CONFIG
     assert cfg.get("USE_EQUITY_STOP") or cfg.get("USE_DAILY_STOP"), (
         "USE_EQUITY_STOP dan USE_DAILY_STOP dua-duanya False pada default config: "
@@ -48,12 +40,11 @@ def test_default_config_mengaktifkan_minimal_satu_rem_akun():
 
 
 def test_close_all_at_limit_bekerja_pada_default_config():
-    """Bukti end-to-end: equity anjlok harus benar-benar menutup posisi."""
     cfg = dict(config_mod.PUMP_CONFIG)
     cfg["CLOSE_ALL_AT_LIMIT"] = True
     st = _state_with_position()
 
-    paused = bot.update_equity_controls(st, 100.0, cfg)  # -90% dari peak
+    paused = bot.update_equity_controls(st, 100.0, cfg)
     assert paused, "kill switch tidak aktif meski equity turun 90%"
 
     calls = []
@@ -64,7 +55,6 @@ def test_close_all_at_limit_bekerja_pada_default_config():
 
 
 def test_live_tanpa_rem_akun_ditolak_start():
-    """LIVE dengan kedua rem mati harus BERHENTI, bukan sekadar mencatat warning."""
     cfg = dict(config_mod.PUMP_CONFIG)
     cfg["MODE"] = "LIVE"
     cfg["USE_EQUITY_STOP"] = False
@@ -84,7 +74,6 @@ def test_live_dengan_satu_rem_aktif_boleh_jalan():
 
 
 def test_paper_tanpa_rem_akun_tetap_boleh_jalan():
-    """Mode PAPER tidak memakai uang asli, jadi gate tidak boleh memblokirnya."""
     cfg = dict(config_mod.PUMP_CONFIG)
     cfg["MODE"] = "PAPER"
     cfg["USE_EQUITY_STOP"] = False
@@ -103,20 +92,11 @@ def test_gate_bisa_dilewati_dengan_override_eksplisit(monkeypatch):
     assert ok is True, "override eksplisit operator harus dihormati"
 
 
-# ---------------------------------------------------------------------------
-# TINGGI-01: mode exit yang dilaporkan harus sama dengan yang dieksekusi
-# ---------------------------------------------------------------------------
 
 def test_deskripsi_mode_exit_sesuai_yang_benar_benar_dipakai():
-    """USE_ATR_EXIT=True tidak berarti runtime memakai ATR.
-
-    Level ATR hanya dipakai bila state posisi punya exit_source == "ATR".
-    Tanpa jalur entry, state itu tidak pernah terisi sehingga runtime SELALU
-    memakai SL_PCT/TP_PCT. Log startup tidak boleh mengklaim sebaliknya.
-    """
     cfg = dict(config_mod.PUMP_CONFIG)
     cfg["USE_ATR_EXIT"] = True
-    st = dict(bot.DEFAULT_STATE)  # exit_source == ""
+    st = dict(bot.DEFAULT_STATE)
 
     desc = bot.describe_exit_mode(cfg, st)
     assert "ATR" not in desc.upper() or "tidak aktif" in desc.lower(), (
@@ -135,12 +115,8 @@ def test_deskripsi_mode_exit_atr_saat_state_memang_atr():
     assert "ATR" in desc.upper()
 
 
-# ---------------------------------------------------------------------------
-# TINGGI-02: dd_stopped tidak boleh mengunci bot selamanya
-# ---------------------------------------------------------------------------
 
 def test_dd_stopped_lama_dilepas_saat_equity_stop_dimatikan():
-    """State lama dd_stopped=True + dd_stop_until=0 = bot terkunci permanen."""
     st = dict(bot.DEFAULT_STATE)
     st["dd_stopped"] = True
     st["dd_stop_until"] = 0
@@ -149,7 +125,7 @@ def test_dd_stopped_lama_dilepas_saat_equity_stop_dimatikan():
     st["day_start_date"] = state_mod.today_str()
 
     cfg = dict(config_mod.PUMP_CONFIG)
-    cfg["USE_EQUITY_STOP"] = False  # operator sengaja melepas rem
+    cfg["USE_EQUITY_STOP"] = False
 
     paused = bot.update_equity_controls(st, 1000.0, cfg)
     assert paused is False, "dd_stopped tetap menyala padahal USE_EQUITY_STOP sudah mati"
@@ -157,7 +133,6 @@ def test_dd_stopped_lama_dilepas_saat_equity_stop_dimatikan():
 
 
 def test_dd_stop_until_hilang_diperlakukan_sebagai_kedaluwarsa():
-    """dd_stopped=True tanpa dd_stop_until harus punya jalan keluar."""
     st = dict(bot.DEFAULT_STATE)
     st["dd_stopped"] = True
     st["dd_stop_until"] = 0
@@ -187,9 +162,6 @@ def test_dd_cooldown_yang_masih_berjalan_tetap_dihormati():
     assert paused is True and st["dd_stopped"] is True
 
 
-# ---------------------------------------------------------------------------
-# TINGGI-03: signature HMAC tidak boleh bocor ke log
-# ---------------------------------------------------------------------------
 
 def test_signature_tidak_bocor_ke_log_saat_error_jaringan():
     client = BinanceSpotClient("KEY_AAA", "SECRET_BBB", "https://api.binance.com",
@@ -220,8 +192,6 @@ def test_signature_tidak_bocor_ke_log_saat_error_jaringan():
         root.setLevel(previous)
 
     output = buf.getvalue()
-    # Yang dilarang adalah NILAI signature (hex HMAC), bukan nama parameternya.
-    # Nama parameter sengaja dipertahankan agar log tetap bisa didiagnosis.
     import re as _re
     assert not _re.search(r"signature=[0-9a-fA-F]{16,}", output), \
         "nilai signature HMAC bocor ke log"
@@ -250,9 +220,6 @@ def test_redaksi_juga_menutup_parameter_rahasia_lain():
         assert bocor not in safe, f"parameter rahasia masih bocor: {raw}"
 
 
-# ---------------------------------------------------------------------------
-# TINGGI-04: handler logging tidak boleh menumpuk
-# ---------------------------------------------------------------------------
 
 def test_setup_logging_tidak_menggandakan_handler(tmp_path):
     cfg = {"LOG_FILE": str(tmp_path / "bot.log")}
@@ -276,9 +243,6 @@ def test_setup_logging_tidak_menggandakan_handler(tmp_path):
         root.handlers = saved
 
 
-# ---------------------------------------------------------------------------
-# KRITIS-01 (lanjutan): lapisan validasi settings harus ikut memperingatkan
-# ---------------------------------------------------------------------------
 
 def _kandidat_settings(**override) -> dict:
     from config import settings_schema

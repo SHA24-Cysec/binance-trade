@@ -34,15 +34,12 @@ def test_open_position_blocks_mode_change_in_both_directions(client, monkeypatch
 
 
 def _siapkan_live_siap(monkeypatch):
-    """Kondisi di mana perpindahan ke LIVE seharusnya lolos semua gerbang."""
     monkeypatch.setitem(dashboard.PUMP_CONFIG, "MODE", "PAPER")
     monkeypatch.setitem(dashboard.PUMP_CONFIG, "API_KEY", "key")
     monkeypatch.setitem(dashboard.PUMP_CONFIG, "API_SECRET", "secret")
     monkeypatch.setattr(dashboard._process_manager, "status", lambda mode=None: {"status": "STOPPED"})
     monkeypatch.setattr(dashboard._process_manager, "position", lambda mode=None: {"has_position": False})
     monkeypatch.setattr(dashboard, "_credentials_tested_for_active_values", lambda: True)
-    # Gerbang audit 2026-09-30 (temuan TINGGI-05): key wajib terbukti tidak
-    # punya izin penarikan dana.
     monkeypatch.setattr(dashboard, "_withdrawal_permission_safe", lambda: True)
 
 
@@ -57,7 +54,6 @@ def test_live_commit_requires_exact_live_phrase(client, monkeypatch):
 
 
 def test_live_ditolak_bila_api_key_masih_boleh_menarik_dana(client, monkeypatch):
-    """Temuan TINGGI-05: key dengan izin withdrawal tidak boleh dipakai LIVE."""
     _siapkan_live_siap(monkeypatch)
     monkeypatch.setattr(dashboard, "_withdrawal_permission_safe", lambda: False)
     response = client.post("/api/mode/prepare", json={"target": "LIVE"}, headers=headers())
@@ -66,7 +62,6 @@ def test_live_ditolak_bila_api_key_masih_boleh_menarik_dana(client, monkeypatch)
 
 
 def test_live_ditolak_bila_kedua_rem_akun_mati(client, monkeypatch):
-    """Temuan KRITIS-01: LIVE tanpa DD stop dan daily stop harus diblokir."""
     _siapkan_live_siap(monkeypatch)
 
     asli = dashboard.config_mod.build_config_for_mode
@@ -94,14 +89,12 @@ def test_checklist_menampilkan_gerbang_baru(client, monkeypatch):
 
 
 def test_withdrawal_gate_fail_closed_tanpa_uji_koneksi(monkeypatch):
-    """Selama Uji Koneksi belum jalan, status penarikan dianggap TIDAK aman."""
     monkeypatch.delenv("ALLOW_LIVE_WITHDRAWAL_KEY", raising=False)
     monkeypatch.setattr(dashboard, "_credentials_tested_for_active_values", lambda: False)
     assert dashboard._withdrawal_permission_safe() is False
 
 
 def test_withdrawal_gate_menolak_hasil_uji_versi_lama(monkeypatch):
-    """Hasil uji lama tanpa field can_withdraw tidak boleh dianggap aman."""
     monkeypatch.delenv("ALLOW_LIVE_WITHDRAWAL_KEY", raising=False)
     monkeypatch.setattr(dashboard, "_credentials_tested_for_active_values", lambda: True)
     with dashboard._credential_lock:

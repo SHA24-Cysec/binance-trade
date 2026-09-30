@@ -12,9 +12,6 @@ from strategy.indicators import Kline
 
 
 def config_uji(**override) -> dict:
-    # Sejak simulasi trading dipulihkan (1 Oktober 2026), run_backtest butuh
-    # kunci config yang sama dengan bot live. Dipakai PUMP_CONFIG sebagai dasar
-    # supaya test tidak perlu menduplikasi 100 kunci dan tidak gampang basi.
     from config.config import PUMP_CONFIG
     cfg = dict(PUMP_CONFIG)
     cfg.update({
@@ -62,13 +59,6 @@ class KlienPalsu:
 
 
 def test_portfolio_memuat_bar_dan_tidak_lagi_stub():
-    """Backtest portofolio benar-benar memproses bar, bukan stub.
-
-    Menggantikan test_portfolio_selalu_tanpa_trade yang mengunci perilaku
-    rusak setelah commit 0b6ca1d. Data dua simbol di sini memang tidak
-    membentuk setup entry, jadi jumlah trade boleh nol. Yang penting,
-    mesinnya harus benar-benar menelusuri timeline.
-    """
     data = data_dua_simbol()
     with KlineStore.from_klines(data, harian_dari(data)) as store:
         result = pbt.run_portfolio_backtest(store, config_uji(), "5m")
@@ -81,13 +71,6 @@ def test_portfolio_memuat_bar_dan_tidak_lagi_stub():
 
 
 def test_backtest_satu_simbol_benar_benar_mensimulasikan():
-    """Simulasi trading dipulihkan pada 1 Oktober 2026.
-
-    Test ini menggantikan test lama yang justru MENGUNCI perilaku rusak
-    ("selalu tanpa trade"). Commit 0b6ca1d melucuti run_backtest menjadi
-    stub yang mengembalikan nol untuk semua metrik, dan test lama membuat
-    kerusakan itu terlihat seperti perilaku yang disengaja.
-    """
     from backtesting.synthetic_data import (
         cfg_gerbang_pump_nonaktif, riwayat_harian, seri_banyak_setup,
     )
@@ -103,11 +86,6 @@ def test_backtest_satu_simbol_benar_benar_mensimulasikan():
 
 
 def test_hasil_backtest_berubah_saat_parameter_berubah():
-    """Inti dari sebuah backtest: parameter berbeda harus memberi hasil berbeda.
-
-    Kalau test ini gagal, mesin backtest kembali menjadi stub dan setiap
-    fitur optimasi parameter di atasnya menjadi tidak bermakna.
-    """
     from backtesting.synthetic_data import (
         cfg_gerbang_pump_nonaktif, riwayat_harian, seri_banyak_setup,
     )

@@ -32,30 +32,16 @@ logger = logging.getLogger("exchange_client")
 
 
 class ExchangeClient(ABC):
-    """Kontrak yang dipenuhi LiveClient dan PaperClient.
 
-    Bentuk argumen dan bentuk respons dibuat identik dengan REST Binance Spot
-    asli, supaya kode strategi tidak perlu cabang khusus per mode.
-    """
-
-    #: "PAPER" atau "LIVE". Diisi oleh subclass.
     mode: str = "?"
 
-    # ------------------------------------------------------------------
-    # Infrastruktur
-    # ------------------------------------------------------------------
     @abstractmethod
     def sync_time(self) -> None:
-        """Sinkronisasi jam lokal dengan server (relevan untuk request signed)."""
+        pass
 
     def close(self) -> None:
-        """Tutup sumber daya (mis. thread WebSocket). Aman dipanggil berulang.
-        Default no-op; subclass menimpanya bila perlu."""
         return None
 
-    # ------------------------------------------------------------------
-    # Data pasar publik (implementasi sama untuk PAPER & LIVE)
-    # ------------------------------------------------------------------
     @abstractmethod
     def get_exchange_info(self, symbol: Optional[str] = None) -> dict: ...
 
@@ -76,9 +62,6 @@ class ExchangeClient(ABC):
     @abstractmethod
     def get_depth(self, symbol: str, limit: int = 100) -> dict: ...
 
-    # ------------------------------------------------------------------
-    # Akun & order (berbeda antara PAPER dan LIVE)
-    # ------------------------------------------------------------------
     @abstractmethod
     def get_account(self) -> dict: ...
 
@@ -96,17 +79,11 @@ class ExchangeClient(ABC):
                   time_in_force: Optional[str] = None,
                   quote_order_qty: Optional[float] = None,
                   new_client_order_id: Optional[str] = None) -> dict:
-        """Order generik (LIMIT/STOP_LOSS/TAKE_PROFIT/...).
-
-        Bot pump saat ini HANYA memakai new_market_order, tetapi mesin
-        simulasi mendukung tipe order penuh untuk pengujian & kesiapan masa
-        depan. LiveClient meneruskannya ke POST /api/v3/order.
-        """
+        pass
 
     def place_native_stop_loss(self, symbol: str, quantity: float,
                                stop_price: float,
                                new_client_order_id: str) -> dict:
-        """Pasang proteksi exchange-side bila implementation mendukungnya."""
         raise NotImplementedError("native stop loss tidak tersedia pada client ini")
 
     def place_native_oco(self, symbol: str, quantity: float,
@@ -115,7 +92,6 @@ class ExchangeClient(ABC):
                         list_client_order_id: str,
                         above_client_order_id: str,
                         below_client_order_id: str) -> dict:
-        """Pasang OCO SELL exchange-side bila implementation mendukungnya."""
         raise NotImplementedError("native OCO tidak tersedia pada client ini")
 
     @abstractmethod
@@ -128,13 +104,11 @@ class ExchangeClient(ABC):
 
     def get_order_list(self, order_list_id: Optional[int] = None,
                        list_client_order_id: Optional[str] = None) -> dict:
-        """Ambil status order list OCO untuk rekonsiliasi."""
         raise NotImplementedError("query order list tidak tersedia pada client ini")
 
     def cancel_order_list(self, symbol: str,
                           order_list_id: Optional[int] = None,
                           list_client_order_id: Optional[str] = None) -> dict:
-        """Batalkan OCO sebelum exit manual bila implementation mendukungnya."""
         raise NotImplementedError("cancel order list tidak tersedia pada client ini")
 
     @abstractmethod
@@ -142,46 +116,21 @@ class ExchangeClient(ABC):
 
     @abstractmethod
     def get_dust_convertible(self, account_type: str = "SPOT") -> dict:
-        """Hanya bermakna di LIVE. Di PAPER melempar SignedEndpointBlockedError
-        (konversi dust bukan bagian dari simulasi eksekusi)."""
+        pass
 
     @abstractmethod
     def convert_dust(self, assets: list, account_type: str = "SPOT") -> dict:
-        """Hanya bermakna di LIVE. Di PAPER melempar SignedEndpointBlockedError."""
+        pass
 
 
 def create_exchange_client(config: dict) -> ExchangeClient:
-    """Buat implementasi ExchangeClient sesuai MODE di config.
+    from config.config import require_valid_mode
 
-    - "PAPER" -> PaperClient (simulasi lokal, data pasar publik).
-    - "LIVE"  -> LiveClient  (order & saldo asli bertanda tangan).
-    - selain itu -> config.require_valid_mode() melempar InvalidModeError,
-      sehingga pemanggil berhenti keras. TIDAK PERNAH jatuh diam-diam ke LIVE.
-
-    Import subclass dilakukan di dalam fungsi (lazy) untuk menghindari
-    ketergantungan melingkar saat modul-modul saling meng-import.
-    """
-    from config.config import require_valid_mode  # lokal: hindari circular import
-
-    mode = require_valid_mode(config)  # melempar bila tidak valid
+    mode = require_valid_mode(config)
     if mode == "LIVE":
         from trading.clients.live_client import LiveClient
         logger.info("Membuat LiveClient (MODE=LIVE): order & saldo SUNGGUHAN.")
         return LiveClient(config)
-    # mode == "PAPER"
     from trading.clients.paper_client import PaperClient
     logger.info("Membuat PaperClient (MODE=PAPER): eksekusi & saldo DISIMULASIKAN lokal.")
     return PaperClient(config)
-
-
-# ==== RINGKASAN AUDIT (exchange_client.py) ==============================
-# Sintaks/tipe: ABC dengan @abstractmethod; type hints lengkap; Python 3.10+.
-# Edge case MODE: create_exchange_client memakai require_valid_mode() yang
-#   melempar InvalidModeError untuk nilai tak dikenal/kosong -> tidak ada
-#   jalur diam-diam ke LIVE. Diuji di tests/test_mode_and_guard.py.
-# Circular import: import LiveClient/PaperClient + require_valid_mode dilakukan
-#   lazy di dalam fungsi; hanya BinanceAPIError/SignedEndpointBlockedError yang
-#   di-import di tingkat modul (aman, binance_client tidak meng-import file ini).
-# Kebocoran rahasia: tidak ada; file ini tidak menyentuh API key.
-# Race condition: tidak ada state bersama di tingkat modul.
-# =======================================================================

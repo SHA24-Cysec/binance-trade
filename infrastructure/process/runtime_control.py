@@ -78,7 +78,6 @@ def lock_owner(mode: str) -> dict:
 
 
 class BotModeLock:
-    """Lock file O_EXCL per mode dengan verifikasi PID dan waktu proses."""
 
     def __init__(self, mode: str):
         self.mode = _mode(mode)
@@ -111,9 +110,6 @@ class BotModeLock:
                         f"Bot mode {self.mode} sudah berjalan dengan PID {pid}."
                     )
 
-                # File baru dapat terlihat sesaat sebelum payload selesai
-                # ditulis. Jangan menganggap lock kosong itu stale selama
-                # grace period, karena hal itu dapat menghasilkan dua bot.
                 if not pid or not token:
                     try:
                         age = max(0.0, time.time() - self.path.stat().st_mtime)
@@ -123,9 +119,6 @@ class BotModeLock:
                         time.sleep(0.02)
                         continue
 
-                # Hanya satu proses boleh merebut lock stale. Setelah claim
-                # didapat, baca ulang dan cocokkan token agar lock owner baru
-                # tidak pernah dipindahkan karena hasil baca lama (TOCTOU).
                 try:
                     reclaim_fd = os.open(
                         reclaim_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
@@ -183,7 +176,6 @@ class BotModeLock:
 
 
 class BotLifecycle:
-    """Penulis status proses dari dalam proses bot."""
 
     def __init__(self, mode: str, managed: bool | None = None):
         self.mode = _mode(mode)
@@ -219,7 +211,6 @@ class BotLifecycle:
 
 
 class BotRuntime:
-    """Context proses bot yang memastikan lock dan status selalu diperbarui."""
 
     def __init__(self, mode: str):
         self.mode = _mode(mode)
@@ -251,7 +242,6 @@ class BotRuntime:
 
 
 class BotProcessManager:
-    """Satu pemilik subprocess bot di dalam proses dashboard."""
 
     def __init__(self):
         self._lock = threading.RLock()
@@ -314,12 +304,6 @@ class BotProcessManager:
             self._schedule_auto_restart_locked(mode)
 
     def _watchdog_loop(self) -> None:
-        """Pantau child tanpa menunggu request dashboard berikutnya.
-
-        Restart hanya untuk crash tidak terduga, memakai exponential backoff
-        dan budget per window agar exception deterministik tidak menjadi loop
-        restart tanpa akhir.
-        """
         while not self._watchdog_stop.wait(0.25):
             restart = False
             with self._lock:
@@ -461,8 +445,6 @@ class BotProcessManager:
             state_mod.clear_stop_request(cfgmod.PUMP_CONFIG["CONTROL_FILE"])
             env = os.environ.copy()
             env["PUMP_BOT_MANAGED"] = "1"
-            # Entry point root dipertahankan sebagai shim kompatibilitas agar
-            # subprocess selalu memiliki package root pada sys.path.
             proc, tree = procctl.spawn_python(
                 ROOT / "pump_scanner_bot.py", cwd=ROOT, env=env,
             )
@@ -555,8 +537,6 @@ class BotProcessManager:
                 self._finish_stop(mode)
                 return self.status(mode)
 
-            # Cek identitas tepat sebelum sinyal agar PID yang sudah didaur
-            # ulang tidak pernah menerima sinyal milik bot lama.
             if expected_identity and not procctl.is_process_alive(pid, expected_identity):
                 self._finish_stop(mode)
                 return self.status(mode)
@@ -582,7 +562,6 @@ class BotProcessManager:
 
     def _wait_dead(self, pid: int, timeout: float,
                    expected_identity: str | None = None) -> bool:
-        """Tunggu proses mati dan reap child milik dashboard lewat poll()."""
         deadline = time.monotonic() + max(0.0, timeout)
         while time.monotonic() < deadline:
             if self._proc is not None and self._proc.pid == pid:
@@ -616,13 +595,11 @@ class BotProcessManager:
 
     def restart(self, *, position_policy: str = "REQUIRE_EMPTY") -> dict:
         self.stop(position_policy=position_policy)
-        # Muat ulang override setelah proses lama benar-benar berhenti.
         cfgmod = self._config()
         cfgmod.reload_config()
         return self.start()
 
     def shutdown_dashboard(self) -> None:
-        """Hentikan child yang dikelola saat dashboard keluar normal."""
         self._watchdog_stop.set()
         with self._lock:
             self._intentional_stop = True

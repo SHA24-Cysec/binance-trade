@@ -32,20 +32,16 @@ class LiveClient(ExchangeClient):
         self.config = config
         api_key = config.get("API_KEY", "")
         api_secret = config.get("API_SECRET", "")
-        # Klien bertanda tangan untuk order & akun (uang asli).
         self.signed = BinanceSpotClient(
             api_key, api_secret, get_base_url(config), allow_signed=True,
             rate_limit_state_file=config.get("RATE_LIMIT_STATE_FILE"),
             rate_limit_limit=int(config.get("RATE_LIMIT_WEIGHT_LIMIT", 6000) or 6000),
             rate_limit_safety_margin=int(config.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100),
         )
-        # Data pasar bersama (WS + REST keyless), sumber sama seperti PAPER.
         self.market = MarketDataProvider(config)
         logger.info("LiveClient siap (UANG ASLI). endpoint=%s", get_base_url(config))
 
-    # --- Infrastruktur / data pasar ---
     def sync_time(self) -> None:
-        # Sinkronisasi jam pada klien bertanda tangan (yang butuh timestamp).
         self.signed.sync_time()
         self.market.sync_time()
 
@@ -72,7 +68,6 @@ class LiveClient(ExchangeClient):
     def get_depth(self, symbol: str, limit: int = 100) -> dict:
         return self.market.get_depth(symbol, limit=limit)
 
-    # --- Akun & order (SUNGGUHAN, bertanda tangan) ---
     def get_account(self) -> dict:
         return self.signed.get_account()
 
@@ -93,11 +88,6 @@ class LiveClient(ExchangeClient):
                   quote_order_qty: Optional[float] = None,
                   new_client_order_id: Optional[str] = None) -> dict:
         params = {"symbol": symbol, "side": side, "type": order_type}
-        # Perbaikan audit 2026-09-27 (temuan SEDANG-03): angka WAJIB melewati
-        # _fmt_num seperti di jalur order lain (new_market_order, stop, OCO).
-        # Float mentah bisa dirender Python sebagai notasi ilmiah (mis.
-        # 0.00001 -> "1e-05") yang ditolak Binance dengan -1100, dan _fmt_num
-        # juga menolak NaN/inf sebelum request terkirim.
         if quantity is not None:
             params["quantity"] = _fmt_num(quantity)
         if quote_order_qty is not None:
@@ -110,8 +100,6 @@ class LiveClient(ExchangeClient):
             params["timeInForce"] = time_in_force
         if new_client_order_id is not None:
             params["newClientOrderId"] = new_client_order_id
-        # POST order non-idempotent. Status jaringan UNKNOWN harus
-        # direkonsiliasi memakai clientOrderId, bukan diulang otomatis.
         return self.signed._request("POST", "/api/v3/order", params,
                                     signed=True, max_retries=1)
 
@@ -180,15 +168,3 @@ class LiveClient(ExchangeClient):
 
     def convert_dust(self, assets: list, account_type: str = "SPOT") -> dict:
         return self.signed.convert_dust(assets, account_type)
-
-
-# ==== RINGKASAN AUDIT (live_client.py) =================================
-# Sintaks/tipe: mematuhi ABC ExchangeClient penuh; type hints lengkap.
-# Pemisahan: signed client (order/akun) terpisah dari market (data publik);
-#   data pasar identik dengan PAPER (satu MarketDataProvider).
-# Keamanan: API key hanya dipakai untuk klien signed; dipanggil hanya di LIVE.
-# new_order/get_order/cancel_order/get_open_orders meneruskan ke endpoint resmi
-#   Binance (bertanda tangan). new_market_order tetap lewat helper yang sudah
-#   teruji di binance_client (format qty via _fmt_num).
-# Kebocoran rahasia: API key tidak pernah dicetak ke log.
-# =======================================================================

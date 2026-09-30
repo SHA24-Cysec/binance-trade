@@ -17,7 +17,6 @@ import sys
 
 
 def _safe_console() -> None:
-    """Hindari UnicodeEncodeError pada console Windows lama."""
     for stream_name in ("stdout", "stderr"):
         stream = getattr(sys, stream_name, None)
         reconfigure = getattr(stream, "reconfigure", None)

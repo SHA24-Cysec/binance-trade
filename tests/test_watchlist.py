@@ -28,13 +28,6 @@ from strategy.indicators import Kline
 
 
 def _harian_pump(_symbol: str, quote_volume: float = 1_000_000.0) -> list:
-    """Tujuh candle harian penuh bervolume kecil.
-
-    Dipakai tes yang menguji saringan STRUKTURAL (stablecoin, leveraged
-    token, watchlist). Gerbang pump tetap berjalan pada tes-tes itu, jadi
-    sumber candle harian wajib ada; volumenya dibuat kecil supaya simbol yang
-    memang seharusnya lolos tidak tersandung syarat volume.
-    """
     hari = 86_400_000
     return [Kline(open_time=i * hari, open=1.0, high=1.0, low=1.0, close=1.0,
                   close_time=(i + 1) * hari - 1, volume=quote_volume,
@@ -43,14 +36,8 @@ def _harian_pump(_symbol: str, quote_volume: float = 1_000_000.0) -> list:
 
 
 def _ref_ms() -> int:
-    """Waktu acuan sesudah candle harian _harian_pump() tertutup."""
     return 7 * 86_400_000 + 1
 
-# Pengujian dashboard butuh Flask. Kalau dependensi belum dipasang, lebih
-# baik pengujian itu DILEWATI dengan pesan yang jelas daripada memuntahkan
-# belasan traceback ModuleNotFoundError yang menyesatkan -- kesalahannya ada
-# di lingkungan, bukan di kode. Pengujian lain (config, scanner, template)
-# tidak butuh Flask dan tetap berjalan normal.
 try:
     from web import dashboard as _dash_mod
     _HAS_FLASK = True
@@ -68,7 +55,6 @@ _BUTUH_FLASK = unittest.skipUnless(
 
 
 def K(o, h, l, c, v=1000.0, qv=None, t=0):
-    """Bantu bikin Kline; quote_volume default konsisten dengan close."""
     return Kline(open_time=t, open=o, high=h, low=l, close=c, volume=v,
                  close_time=t + 299_999, quote_volume=qv if qv is not None else v * c)
 
@@ -76,10 +62,8 @@ def K(o, h, l, c, v=1000.0, qv=None, t=0):
 
 
 class TestConfigHelper(unittest.TestCase):
-    """Helper config panel watchlist (daftar manual sudah dihapus 2026-09-27)."""
 
     def test_daftar_manual_benar_benar_hilang(self):
-        """Kunci WATCHLIST dan get_watchlist() tidak boleh hidup lagi diam-diam."""
         self.assertNotIn("WATCHLIST", cfg_mod.PUMP_CONFIG)
         self.assertFalse(hasattr(cfg_mod, "get_watchlist"))
 
@@ -93,12 +77,10 @@ class TestConfigHelper(unittest.TestCase):
             self.assertTrue(cfg_mod.watchlist_enabled({"WATCHLIST_ENABLED": val}), val)
         for val in (False, "false", "0", "tidak", "", None, "mungkin", 999):
             self.assertFalse(cfg_mod.watchlist_enabled({"WATCHLIST_ENABLED": val}), val)
-        # kunci hilang sama sekali -> default aman False
         self.assertFalse(cfg_mod.watchlist_enabled({}))
 
 
 class TestTidakMenyentuhTrading(unittest.TestCase):
-    """Jaminan inti: watchlist murni kosmetik bagi mesin trading."""
 
     def test_modul_trading_tidak_membaca_watchlist(self):
         import inspect
@@ -121,15 +103,7 @@ class TestTidakMenyentuhTrading(unittest.TestCase):
              "quoteVolume": "5000000", "lastPrice": "3.0"},
         ]
         base = dict(cfg_mod.PUMP_CONFIG)
-        # PERBAIKAN AUDIT 2026-09-30 (temuan TINGGI-06): ambang volume dipatok
-        # eksplisit. Sebelumnya test ini memakai MIN_QUOTE_VOLUME_USDT_24H dari
-        # config global, jadi ia pecah begitu operator menaikkan ambang itu
-        # (commit fb980d0: 3,1 juta -> 10 juta) walau logika ranking tidak
-        # berubah sama sekali. Test harus menguji logika, bukan nilai kenop.
         base["MIN_QUOTE_VOLUME_USDT_24H"] = 1_000_000
-        # Panel kini otomatis; satu-satunya kenop yang tersisa adalah
-        # WATCHLIST_ENABLED, dan menyalakan/mematikannya TIDAK boleh
-        # mengubah ranking kandidat scanner sedikit pun.
         tanpa = dict(base); tanpa["WATCHLIST_ENABLED"] = False
         dengan = dict(base); dengan["WATCHLIST_ENABLED"] = True
 
@@ -138,17 +112,13 @@ class TestTidakMenyentuhTrading(unittest.TestCase):
         r2 = [c.symbol for c in scanner.filter_and_rank_candidates(
             tickers, dengan, get_daily_klines_fn=_harian_pump, reference_ms=_ref_ms())]
         self.assertEqual(r1, r2, "watchlist mengubah ranking kandidat")
-        # Urutan semesta kini murni berdasarkan volume kuotasi 24 jam, bukan
-        # kenaikan harga. BBB naik paling tinggi tetapi volumenya lebih kecil
-        # dari AAA, jadi AAA tetap di atas.
         self.assertEqual(r1, ["AAAUSDT", "BBBUSDT", "ZECUSDT"])
 
     def test_koin_di_luar_watchlist_tetap_boleh_masuk(self):
-        """Ini yang membedakan mode pantau dari whitelist keras."""
         tickers = [{"symbol": "TIDAKADADIDAFTARUSDT", "priceChangePercent": "30.0",
                     "quoteVolume": "9000000", "lastPrice": "1.0"}]
         cfg = dict(cfg_mod.PUMP_CONFIG)
-        cfg["MIN_QUOTE_VOLUME_USDT_24H"] = 1_000_000  # lihat catatan TINGGI-06
+        cfg["MIN_QUOTE_VOLUME_USDT_24H"] = 1_000_000
         ranked = scanner.filter_and_rank_candidates(
             tickers, cfg,
             get_daily_klines_fn=_harian_pump, reference_ms=_ref_ms())
@@ -180,7 +150,6 @@ class TestStablecoinBaru(unittest.TestCase):
 
 @_BUTUH_FLASK
 class TestBuildWatchlist(unittest.TestCase):
-    """Uji builder dashboard dengan klien Binance palsu."""
 
     def setUp(self):
         dashboard = _dash_mod
@@ -210,20 +179,11 @@ class TestBuildWatchlist(unittest.TestCase):
         r = w["items"][0]
         self.assertEqual(r["status"], "LIKUID")
         self.assertTrue(r["pass_volume"])
-        # Panel watchlist hanya menilai likuiditas dan struktur; gerbang pump
-        # ditegakkan di market_scanner saat scan, bukan di payload panel ini,
-        # jadi kunci lama pass_pump/pump_gap tidak boleh muncul lagi.
         self.assertNotIn("pass_pump", r)
         self.assertNotIn("pump_gap", r)
-        # posisi range: (10-8)/(11-8) = 0,667
         self.assertAlmostEqual(r["range_position"], 0.667, places=2)
 
     def test_koin_turun_tetap_likuid_asal_volumenya_cukup(self):
-        """Status LIKUID pada panel watchlist hanya soal volume.
-
-        Penilaian naik atau turun 24 jam dilakukan gerbang pump di
-        market_scanner saat scan, bukan oleh label likuiditas panel ini.
-        """
         t = [{"symbol": "AAAUSDT", "lastPrice": "10", "priceChangePercent": "-25",
               "quoteVolume": "5000000", "highPrice": "13", "lowPrice": "9", "count": 100}]
         with self._patch(t):
@@ -231,16 +191,12 @@ class TestBuildWatchlist(unittest.TestCase):
         self.assertEqual(w["items"][0]["status"], "LIKUID")
 
     def test_volume_di_bawah_ambang_tidak_masuk_panel(self):
-        """Panel otomatis HANYA memuat pair yang lolos gerbang volume scanner."""
         cases = [
-            ("5", "5000000", 1),     # likuid meski naiknya kecil -> tampil
-            ("20", "500000", 0),     # volume kurang -> tidak masuk daftar
-            ("2", "500000", 0),      # volume kurang -> tidak masuk daftar
+            ("5", "5000000", 1),
+            ("20", "500000", 0),
+            ("2", "500000", 0),
         ]
         for chg, vol, expect_n in cases:
-            # Cache menyimpan SATU snapshot seluruh pasar dan berlaku 20 detik.
-            # Di dalam loop uji ini cache dikosongkan tiap iterasi agar yang
-            # diuji memang logika seleksi, bukan snapshot kasus sebelumnya.
             self.dash._watchlist_cache.update({"data": None, "ts": 0, "error": None})
             t = [{"symbol": "AAAUSDT", "lastPrice": "10", "priceChangePercent": chg,
                   "quoteVolume": vol, "highPrice": "11", "lowPrice": "9", "count": 5}]
@@ -251,7 +207,6 @@ class TestBuildWatchlist(unittest.TestCase):
                 self.assertEqual(w["items"][0]["status"], "LIKUID")
 
     def test_ambang_tepat_di_batas_dihitung_lolos(self):
-        """Scanner memakai >=, panel harus memakai perbandingan yang sama."""
         t = [{"symbol": "AAAUSDT", "lastPrice": "10", "priceChangePercent": "13.0",
               "quoteVolume": "2000000", "highPrice": "10", "lowPrice": "10", "count": 1}]
         with self._patch(t):
@@ -265,8 +220,6 @@ class TestBuildWatchlist(unittest.TestCase):
         self.assertTrue(w["enabled"])
 
     def test_harga_nol_tidak_bikin_bagi_nol(self):
-        # Ticker dengan lastPrice 0 dibuang dari seleksi otomatis, bukan
-        # dipaksa tampil dengan pembagian nol.
         t = [{"symbol": "AAAUSDT", "lastPrice": "0", "priceChangePercent": "50",
               "quoteVolume": "9000000", "highPrice": "0", "lowPrice": "0", "count": 0}]
         with self._patch(t):
@@ -301,13 +254,11 @@ class TestBuildWatchlist(unittest.TestCase):
         self.assertEqual(w["items"], [])
 
     def test_cache_dipakai_saat_request_kedua_gagal(self):
-        """Data lama harus bertahan supaya panel tidak berkedip kosong."""
         t = [{"symbol": "AAAUSDT", "lastPrice": "10", "priceChangePercent": "20",
               "quoteVolume": "9000000", "highPrice": "11", "lowPrice": "9", "count": 1}]
         with self._patch(t):
             w1 = self.dash.build_watchlist()
         self.assertEqual(w1["items"][0]["status"], "LIKUID")
-        # paksa cache kedaluwarsa, lalu buat panggilan berikutnya gagal
         self.dash._watchlist_cache["ts"] = 0
         with self._patch([], client_raises=True):
             w2 = self.dash.build_watchlist()
@@ -325,10 +276,6 @@ class TestBuildWatchlist(unittest.TestCase):
         ]
         with self._patch(t):
             w = self.dash.build_watchlist()
-        # TIPISUSDT tersingkir walau naik 30%: volume 100 < ambang 2 juta
-        # (gerbang volume tetap berlaku). Sisanya urut KENAIKAN 24 jam
-        # terbesar (SEDANG +2% di atas BESAR +1%), karena perubahan pasar belum
-        # terhitung (klien palsu tidak punya get_klines).
         self.assertEqual([r["symbol"] for r in w["items"]],
                          ["SEDANGUSDT", "BESARUSDT"])
 
@@ -339,7 +286,6 @@ class TestBuildWatchlist(unittest.TestCase):
         with self._patch(t, top_n=5):
             w = self.dash.build_watchlist()
         self.assertEqual(len(w["items"]), 5)
-        # Yang terpilih harus 5 dengan KENAIKAN 24 jam terbesar.
         self.assertEqual([r["symbol"] for r in w["items"]],
                          [f"S{i:02d}USDT" for i in (29, 28, 27, 26, 25)])
 
@@ -355,7 +301,6 @@ class TestBuildWatchlist(unittest.TestCase):
         self.assertEqual([r["symbol"] for r in w["items"]], ["BESARUSDT"])
 
     def test_stablecoin_dan_leveraged_tidak_ikut_panel(self):
-        """Semesta panel = semesta scanner: saringan struktural yang sama."""
         t = [
             {"symbol": "USDCUSDT", "lastPrice": "1", "priceChangePercent": "0",
              "quoteVolume": "900000000", "highPrice": "1", "lowPrice": "1", "count": 1},
@@ -383,10 +328,9 @@ class TestBuildWatchlist(unittest.TestCase):
               "quoteVolume": "9000000", "highPrice": "11", "lowPrice": "9", "count": 7}]
         with self._patch(t):
             w = self.dash.build_watchlist()
-        json.dumps(w)  # harus tidak melempar
+        json.dumps(w)
 
     def test_satu_panggilan_api_untuk_seluruh_seleksi(self):
-        """Seleksi simbol memakai SATU snapshot ticker, bukan satu call per pair."""
         calls = []
 
         class Counting:
@@ -429,7 +373,6 @@ class TestEndpointFlask(unittest.TestCase):
 
 
 class TestTemplate(unittest.TestCase):
-    """Cegah panel rusak karena id HTML dan JS tidak sinkron."""
 
     def setUp(self):
         import os
@@ -460,19 +403,12 @@ class TestTemplate(unittest.TestCase):
             self.assertIn(f".tag.{c}", self.html, f"kelas CSS .tag.{c} belum ada")
 
     def test_tidak_ada_resource_eksternal_baru(self):
-        """Preview dashboard berjalan tanpa jaringan; aset harus lokal."""
-        blok = self.html.split("watchlist (panel pantau")[1][:4000]
+        blok = self.html.split(".wl-head")[1][:4000]
         for bad in ("http://", "https://", "cdn."):
             self.assertNotIn(bad, blok, f"blok watchlist memuat resource eksternal: {bad}")
 
 
 class TestRateLimitClient(unittest.TestCase):
-    """Penanganan 429/418 harus menghormati Retry-After, bukan spam ulang.
-
-    Ini kritis: dokumen resmi Binance menyatakan ban IP meningkat "from 2
-    minutes to 3 days" bagi yang terus mengirim setelah kena 429. Kalau
-    penyegar otomatis memicu itu, bot bisa gagal menutup posisi.
-    """
 
     def setUp(self):
         try:
@@ -500,18 +436,16 @@ class TestRateLimitClient(unittest.TestCase):
         c = self._client()
         c._record_used_weight({"x-mbx-used-weight-1m": "1234"})
         self.assertEqual(c.used_weight_1m, 1234)
-        # 1234 dari 6000 -> sisa sekitar 79%
         self.assertAlmostEqual(c.weight_headroom(6000), 1 - 1234 / 6000, places=3)
 
     def test_header_rusak_tidak_bikin_crash(self):
         c = self._client()
         for bad in ({}, {"x-mbx-used-weight-1m": "abc"},
                     {"x-mbx-used-weight-1m": None}):
-            c._record_used_weight(bad)   # tidak boleh melempar
+            c._record_used_weight(bad)
         self.assertEqual(c.weight_headroom(6000), 1.0)
 
     def test_headroom_penuh_kalau_data_basi(self):
-        """Data lebih dari semenit tidak boleh dipakai menahan bot."""
         c = self._client()
         c._record_used_weight({"x-mbx-used-weight-1m": "5900"})
         c.used_weight_ts = time.time() - 120
@@ -535,16 +469,10 @@ class TestRateLimitClient(unittest.TestCase):
             with self.assertRaises(self.bc.BinanceRateLimitError) as cm:
                 c._request("GET", "/api/v3/ping", max_retries=2)
         self.assertEqual(cm.exception.retry_after, 3)
-        # harus tidur sesuai Retry-After, bukan backoff tebakan 2-10 detik --
-        # dengan LANTAI 5 detik di titik sleep (perbaikan S-09): ada laporan
-        # Retry-After bernilai 0/1, dan retry secepat itu justru mempercepat
-        # eskalasi ke ban IP 418. Parser (diuji terpisah di atas) tetap setia
-        # pada nilai header asli.
         self.assertIn(5.0, tidur)
         self.assertNotIn(3, tidur)
 
     def test_418_tidak_dicoba_ulang(self):
-        """IP sudah diblokir; mencoba lagi hanya memperpanjang hukuman."""
         c = self._client()
         resp = self._resp(418, {"Retry-After": "120"}, {"code": -1003, "msg": "banned"})
         panggilan = []
@@ -567,7 +495,6 @@ class TestRateLimitClient(unittest.TestCase):
         self.assertFalse(c.is_rate_limited())
 
     def test_error_biasa_tetap_perilaku_lama(self):
-        """Perbaikan ini tidak boleh mengubah penanganan error non-rate-limit."""
         c = self._client()
         resp = self._resp(400, {}, {"code": -1121, "msg": "Invalid symbol"})
         with mock.patch.object(c.session, "request", return_value=resp), \
@@ -579,7 +506,6 @@ class TestRateLimitClient(unittest.TestCase):
 
 
 class TestAutoRefreshKeamanan(unittest.TestCase):
-    """Rem keamanan penyegar otomatis. Ini yang melindungi posisi Anda."""
 
     def setUp(self):
         try:
@@ -589,7 +515,6 @@ class TestAutoRefreshKeamanan(unittest.TestCase):
         self.wa = watchlist_auto
 
     def test_dilewati_saat_ada_posisi_terbuka(self):
-        """REM UTAMA: jangan bersaing dengan bot yang sedang pegang uang."""
         dipanggil = []
 
         class Klien:
@@ -627,7 +552,7 @@ class TestAutoRefreshKeamanan(unittest.TestCase):
                 return False
 
             def weight_headroom(self, limit=6000):
-                return 0.10          # sisa 10%, di bawah ambang 50%
+                return 0.10
 
         b = self.wa.Budget(Klien(), max_weight=900, pace_seconds=0,
                            min_headroom=0.5)
@@ -642,7 +567,6 @@ class TestAutoRefreshKeamanan(unittest.TestCase):
         self.assertIn("anggaran weight", b.stopped_reason)
 
     def test_anggaran_default_jauh_di_bawah_batas_binance(self):
-        """Fitur penyegar otomatis dihapus, config tidak lagi memuat kuota auto."""
         self.assertNotIn("WATCHLIST_AUTO_MAX_WEIGHT", cfg_mod.PUMP_CONFIG)
 
     def test_file_hasil_terpisah_per_mode(self):
@@ -659,10 +583,10 @@ class TestAutoRefreshKeamanan(unittest.TestCase):
         try:
             os.chdir(d)
             c = dict(cfg_mod.PUMP_CONFIG)
-            self.assertIsNone(self.wa.load_result(c))      # belum ada file
+            self.assertIsNone(self.wa.load_result(c))
             with open(self.wa._auto_file(c), "w") as f:
                 f.write("{bukan json")
-            self.assertIsNone(self.wa.load_result(c))      # rusak, bukan crash
+            self.assertIsNone(self.wa.load_result(c))
         finally:
             os.chdir(cwd)
 
@@ -683,9 +607,9 @@ class TestAutoRefreshKeamanan(unittest.TestCase):
 
     def test_to_klines_buang_baris_rusak(self):
         raw = [
-            [1, "1", "2", "0.5", "1.5", "10", 2, "15"],   # valid
-            [1, "x", "2", "0.5", "1.5", "10", 2, "15"],   # harga rusak
-            [1, "1"],                                      # kolom kurang
+            [1, "1", "2", "0.5", "1.5", "10", 2, "15"],
+            [1, "x", "2", "0.5", "1.5", "10", 2, "15"],
+            [1, "1"],
         ]
         self.assertEqual(len(self.wa.to_klines(raw)), 1)
 
@@ -697,7 +621,6 @@ class TestAutoRefreshKeamanan(unittest.TestCase):
         self.assertNotIn("WATCHLIST", src)
 
     def test_helper_config_auto(self):
-        """Penyegar otomatis sudah dinonaktifkan penuh."""
         self.assertFalse(cfg_mod.watchlist_auto_enabled())
 
 @_BUTUH_FLASK
@@ -707,10 +630,6 @@ class TestDashboardAutoIntegrasi(unittest.TestCase):
         self.dash._watchlist_cache.update({"data": None, "ts": 0, "error": None})
 
     def test_rem_posisi_terbuka_terbaca_dari_state(self):
-        # Skema state yang BENAR (ditulis pump_scanner_bot.DEFAULT_STATE):
-        # kunci top-level current_symbol + qty. Versi uji sebelumnya memakai
-        # {"position": {"symbol": ...}} -- skema yang tidak pernah ditulis
-        # bot -- sehingga uji mengunci bug, bukan perilaku benar (temuan T-02).
         with mock.patch.object(self.dash, "load_state",
                                lambda: {"current_symbol": "ARBUSDT", "qty": 1.0}):
             self.assertTrue(self.dash._bot_has_open_position())
@@ -722,14 +641,11 @@ class TestDashboardAutoIntegrasi(unittest.TestCase):
             self.assertFalse(self.dash._bot_has_open_position())
         with mock.patch.object(self.dash, "load_state", lambda: {}):
             self.assertFalse(self.dash._bot_has_open_position())
-        # Skema LAMA yang keliru (position.symbol) tidak boleh dianggap
-        # posisi terbuka -- kunci itu tidak pernah ditulis bot.
         with mock.patch.object(self.dash, "load_state",
                                lambda: {"position": {"symbol": "ARBUSDT"}}):
             self.assertFalse(self.dash._bot_has_open_position())
 
     def test_state_rusak_dianggap_ada_posisi(self):
-        """Sikap aman: ragu berarti jangan ganggu bot."""
         def meledak():
             raise OSError("file rusak")
         with mock.patch.object(self.dash, "load_state", meledak):
@@ -738,7 +654,6 @@ class TestDashboardAutoIntegrasi(unittest.TestCase):
             self.assertTrue(self.dash._bot_has_open_position())
 
     def test_panel_terisi_otomatis_tanpa_daftar_manual(self):
-        """Bukti inti penyederhanaan: simbol muncul TANPA konfigurasi apa pun."""
         t = [{"symbol": "ZECUSDT", "lastPrice": "10", "priceChangePercent": "1",
               "quoteVolume": "9000000", "highPrice": "11", "lowPrice": "9", "count": 1}]
 
@@ -748,12 +663,11 @@ class TestDashboardAutoIntegrasi(unittest.TestCase):
 
         base = dict(self.dash.PUMP_CONFIG)
         base["WATCHLIST_ENABLED"] = True
-        base["MIN_QUOTE_VOLUME_USDT_24H"] = 1_000_000  # lihat catatan TINGGI-06
+        base["MIN_QUOTE_VOLUME_USDT_24H"] = 1_000_000
         with mock.patch.multiple(self.dash, PUMP_CONFIG=base,
                                  get_client=lambda: FakeClient()):
             w = self.dash.build_watchlist()
         self.assertEqual([r["symbol"] for r in w["items"]], ["ZECUSDT"])
-        # Payload lama fitur auto-refresh/daftar manual tidak boleh muncul lagi.
         self.assertNotIn("source", w)
         self.assertNotIn("auto", w)
         for kunci_lama in ("tier", "note"):

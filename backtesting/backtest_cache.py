@@ -60,9 +60,6 @@ from strategy.indicators import Kline
 logger = logging.getLogger(__name__)
 
 
-# Versi skema cache. Kalau bentuk tabel berubah di masa depan, angka ini
-# dinaikkan dan isi cache lama dibuang otomatis, bukan dipakai setengah-
-# setengah dengan skema baru.
 CACHE_SCHEMA_VERSION = 1
 
 DEFAULT_FRESH_HOURS = 24
@@ -70,13 +67,9 @@ DEFAULT_TTL_DAYS = 30
 
 _INSERT_BATCH = 2_000
 
-# Kolom candle, satu-satunya kontrak antara tabel dan NamedTuple Kline.
 _KLINE_COLUMNS = "open_time, open, high, low, close, close_time, volume, quote_volume"
 _KLINE_PLACEHOLDERS = "?, ?, ?, ?, ?, ?, ?, ?"
 
-# Statemen SQL dirakit sekali dari konstanta di atas memakai penggabungan
-# string biasa, bukan f-string di dalam execute(), supaya mudah dibuktikan
-# bahwa tidak ada nilai runtime yang pernah menjadi bagian teks SQL.
 _SQL_INSERT_KLINE = ("INSERT OR REPLACE INTO cached_klines (symbol, interval, "
                      + _KLINE_COLUMNS + ") VALUES (?, ?, " + _KLINE_PLACEHOLDERS + ")")
 _SQL_SELECT_KLINE = ("SELECT " + _KLINE_COLUMNS + " FROM cached_klines "
@@ -115,15 +108,11 @@ CREATE TABLE IF NOT EXISTS meta (
 
 
 class CacheError(RuntimeError):
-    """Kesalahan cache candle backtest."""
+    pass
 
 
-# ======================================================================
-# Aritmetika rentang waktu (murni, mudah diuji, tanpa I/O)
-# ======================================================================
 
 def merge_ranges(ranges: Iterable[tuple[int, int]]) -> list[tuple[int, int]]:
-    """Gabungkan rentang [start, end] inklusif yang tumpang tindih/berdempetan."""
     bersih = sorted((int(a), int(b)) for a, b in ranges if int(b) >= int(a))
     hasil: list[tuple[int, int]] = []
     for awal, akhir in bersih:
@@ -137,7 +126,6 @@ def merge_ranges(ranges: Iterable[tuple[int, int]]) -> list[tuple[int, int]]:
 
 def subtract_ranges(awal: int, akhir: int,
                     dikurangi: Iterable[tuple[int, int]]) -> list[tuple[int, int]]:
-    """Bagian dari [awal, akhir] yang TIDAK tertutup oleh rentang ``dikurangi``."""
     awal, akhir = int(awal), int(akhir)
     if akhir < awal:
         return []
@@ -158,25 +146,8 @@ def subtract_ranges(awal: int, akhir: int,
     return sisa
 
 
-# ======================================================================
-# Cache
-# ======================================================================
 
 class KlineCache:
-    """File SQLite permanen berisi candle yang pernah diunduh backtest.
-
-    Dipakai HANYA oleh jalur backtest. Bot live, paper engine, dan scanner
-    tidak menyentuhnya sama sekali, supaya keputusan trading sungguhan tidak
-    pernah dibuat dari data yang mungkin sudah basi.
-
-    Thread-safety: koneksi dibuka ``check_same_thread=False`` dengan seluruh
-    akses diserialisasi RLock milik objek ini, plus ``busy_timeout`` untuk
-    menahan proses lain yang kebetulan menulis file yang sama (dua job
-    backtest paralel, atau dashboard dan skrip manual). Mode WAL dipilih
-    supaya pembaca tidak terblokir penulis; ini KEBALIKAN dari store
-    sementara yang memakai journal_mode=OFF, karena file ini permanen
-    sehingga ketahanan datanya memang berarti.
-    """
 
     def __init__(self, path: str, *, fresh_hours: float = DEFAULT_FRESH_HOURS,
                  ttl_days: float = DEFAULT_TTL_DAYS) -> None:
@@ -185,7 +156,6 @@ class KlineCache:
         self.ttl_ms = max(0, int(float(ttl_days) * 86_400_000))
         self._lock = threading.RLock()
         self._closed = False
-        # Statistik untuk pelaporan dan tes (bukan untuk logika apa pun).
         self.rows_served = 0
         self.rows_downloaded = 0
         self.ranges_downloaded = 0
@@ -201,9 +171,7 @@ class KlineCache:
             self._conn.commit()
             self._enforce_schema_version()
 
-    # -- siklus hidup --------------------------------------------------
     def _enforce_schema_version(self) -> None:
-        """Buang isi cache kalau versi skemanya berbeda dari versi modul."""
         cur = self._conn.execute("SELECT value FROM meta WHERE key = ?",
                                  ("schema_version",))
         row = cur.fetchone()
@@ -227,14 +195,13 @@ class KlineCache:
         self.close()
 
     def close(self) -> None:
-        """Tutup koneksi. File SENGAJA tidak dihapus, itu inti cache ini."""
         with self._lock:
             if self._closed:
                 return
             self._closed = True
             try:
                 self._conn.close()
-            except sqlite3.Error as exc:  # noqa: BLE001 - penutupan tidak boleh menggagalkan job
+            except sqlite3.Error as exc:  # noqa: BLE001
                 logger.warning("Gagal menutup cache backtest: %s", exc)
 
     @property
@@ -245,9 +212,7 @@ class KlineCache:
         if self._closed:
             raise CacheError("Cache backtest sudah ditutup.")
 
-    # -- cakupan -------------------------------------------------------
     def coverage(self, symbol: str, interval: str) -> list[tuple[int, int]]:
-        """Rentang waktu yang sudah pernah diunduh untuk simbol dan interval ini."""
         with self._lock:
             self._require_open()
             cur = self._conn.execute(
@@ -257,19 +222,12 @@ class KlineCache:
             return [(int(a), int(b)) for a, b in cur.fetchall()]
 
     def trusted_until(self, now_ms: Optional[int] = None) -> int:
-        """Batas waktu terakhir yang isi cache-nya masih boleh dipercaya."""
         sekarang = int(now_ms if now_ms is not None else time.time() * 1000)
         return sekarang - self.fresh_ms
 
     def missing_ranges(self, symbol: str, interval: str, start_ms: int,
                        end_ms: int, now_ms: Optional[int] = None,
                        ) -> list[tuple[int, int]]:
-        """Bagian [start_ms, end_ms] yang masih harus diunduh dari Binance.
-
-        Cakupan yang tercatat hanya dihitung sampai :meth:`trusted_until`,
-        sehingga jendela segar (bawaan 24 jam terakhir) SELALU ikut diunduh
-        ulang walaupun datanya sudah ada di cache.
-        """
         batas = self.trusted_until(now_ms)
         dipercaya = [(a, min(b, batas)) for a, b in self.coverage(symbol, interval)
                      if a <= batas]
@@ -277,7 +235,6 @@ class KlineCache:
 
     def _record_coverage(self, symbol: str, interval: str, start_ms: int,
                          end_ms: int) -> None:
-        """Catat satu rentang selesai unduh, digabung dengan cakupan lama."""
         sym, itv = str(symbol), str(interval)
         gabungan = merge_ranges(self.coverage(sym, itv) + [(int(start_ms), int(end_ms))])
         sekarang = int(time.time() * 1000)
@@ -288,15 +245,8 @@ class KlineCache:
             "updated_ms) VALUES (?, ?, ?, ?, ?)",
             [(sym, itv, a, b, sekarang) for a, b in gabungan])
 
-    # -- tulis & baca --------------------------------------------------
     def put(self, symbol: str, interval: str, klines: Sequence[Kline],
             range_start_ms: int, range_end_ms: int) -> int:
-        """Simpan hasil unduhan satu rentang, lalu catat cakupannya.
-
-        Cakupan dicatat walaupun ``klines`` kosong. Rentang yang memang tidak
-        punya candle (koin belum listing, pasar dihentikan) tetap dianggap
-        selesai supaya tidak diminta ulang ke Binance setiap job.
-        """
         sym, itv = str(symbol), str(interval)
         rows = [(sym, itv, int(k.open_time), float(k.open), float(k.high),
                  float(k.low), float(k.close), int(k.close_time),
@@ -314,7 +264,6 @@ class KlineCache:
 
     def read(self, symbol: str, interval: str, start_ms: int,
              end_ms: int) -> list[Kline]:
-        """Candle tersimpan untuk rentang ini, urut kronologis."""
         with self._lock:
             self._require_open()
             cur = self._conn.execute(_SQL_SELECT_KLINE,
@@ -327,15 +276,7 @@ class KlineCache:
         self.rows_served += len(hasil)
         return hasil
 
-    # -- perawatan -----------------------------------------------------
     def prune(self, now_ms: Optional[int] = None) -> int:
-        """Buang data simbol yang sudah lama tidak dipakai. Return jumlah pasangan.
-
-        TTL nol berarti cache tidak pernah dipangkas otomatis. Pemangkasan
-        memakai waktu PEMAKAIAN terakhir (kolom updated_ms pada cakupan),
-        bukan umur candle, supaya data lama yang masih sering dipakai untuk
-        backtest periode panjang tidak ikut terbuang.
-        """
         if self.ttl_ms <= 0:
             return 0
         sekarang = int(now_ms if now_ms is not None else time.time() * 1000)
@@ -362,7 +303,6 @@ class KlineCache:
         return len(basi)
 
     def clear(self) -> None:
-        """Kosongkan seluruh cache (tombol 'paksa unduh ulang' yang manual)."""
         with self._lock:
             self._require_open()
             self._conn.execute("DELETE FROM cached_klines")
@@ -379,7 +319,6 @@ class KlineCache:
         return total
 
     def stats(self) -> dict:
-        """Ringkasan isi cache untuk logging dan tes."""
         with self._lock:
             self._require_open()
             baris = self._conn.execute("SELECT COUNT(*) FROM cached_klines").fetchone()
@@ -394,42 +333,3 @@ class KlineCache:
             "rows_served": self.rows_served,
             "ranges_downloaded": self.ranges_downloaded,
         }
-
-
-# ==== RINGKASAN AUDIT (backtest_cache.py) =============================
-# Lingkup: modul BARU. Pemanggilnya hanya portfolio_backtest.open_kline_cache()
-#   dan fetch_universe_klines(); dashboard.py memakainya lewat dua fungsi itu.
-#   Grep seluruh repo untuk "backtest_cache" (2026-09-26): tidak ada modul
-#   live (pump_scanner_bot.py, live_client.py, paper_engine.py, market_*.py)
-#   yang menyentuhnya, dan itu disengaja -- keputusan trading sungguhan tidak
-#   boleh dibuat dari candle yang mungkin sudah basi.
-# Sintaks/tipe: type hints lengkap; docstring Bahasa Indonesia; fungsi
-#   aritmetika rentang (merge_ranges/subtract_ranges) murni tanpa I/O
-#   sehingga bisa diuji langsung. Tidak ada print()/TODO/kode sisa.
-# Keamanan SQL: seluruh nilai lewat placeholder "?"; teks SQL hanya dirakit
-#   sekali di konstanta modul dari daftar kolom literal. Tidak ada f-string
-#   atau .format() di dalam execute()/executemany(). Dijaga otomatis oleh
-#   tests/test_backtest_cache.py.
-# Keamanan berkas: path berasal dari config (BACKTEST_CACHE_FILE) yang
-#   di-absolutkan config._runtime_path() ke folder repo; direktori induk
-#   dibuat dengan mkdir(parents=True) sehingga tidak menulis ke lokasi acak.
-#   File cache masuk .gitignore agar tidak pernah ter-commit.
-# Race condition: dua job backtest paralel boleh memakai file yang sama.
-#   journal_mode=WAL membuat pembaca tidak terblokir penulis, busy_timeout
-#   30 detik menahan penulis kedua alih-alih melempar "database is locked",
-#   dan seluruh akses koneksi milik satu objek diserialisasi RLock. Kasus
-#   terburuk dua job mengunduh simbol yang sama bersamaan hanyalah pekerjaan
-#   ganda, bukan data rusak, karena penulisan memakai INSERT OR REPLACE dan
-#   cakupan ditulis ulang sebagai hasil merge.
-# Kesegaran data: cakupan hanya dipercaya sampai now - fresh_ms (bawaan 24
-#   jam) sehingga candle yang belum tertutup dan revisi bursa selalu tertimpa
-#   unduhan baru. Versi skema disimpan di tabel meta; kalau formatnya berubah
-#   isi cache lama dibuang, bukan dipakai setengah-setengah.
-# Konsistensi hasil: cache hanya mengubah ASAL baris candle, bukan isinya.
-#   Paritas hasil simulasi dengan dan tanpa cache diuji di
-#   tests/test_backtest_cache.py::test_hasil_simulasi_sama_dengan_dan_tanpa_cache.
-# Catatan terbuka: pemangkasan memakai DELETE tanpa VACUUM, jadi ukuran file
-#   tidak langsung menyusut setelah prune (ruangnya dipakai ulang oleh data
-#   berikutnya). VACUUM sengaja dihindari karena mengunci file lama untuk
-#   cache berukuran ratusan MB.
-# =======================================================================

@@ -27,13 +27,11 @@ MS_PER_5M = 5 * 60 * 1000
 
 
 class KlienBinancePalsu:
-    """Membangkitkan candle deterministik untuk rentang waktu apa pun."""
 
     def __init__(self, symbols: list[str]) -> None:
         self.symbols = list(symbols)
         self.jumlah_request = 0
 
-    # -- endpoint pasar ------------------------------------------------
     def get_ticker_24hr_all(self) -> list:
         return [{"symbol": sym, "priceChangePercent": "5.0",
                  "quoteVolume": str(9_000_000 - 1000 * i), "lastPrice": "100.0"}
@@ -68,23 +66,12 @@ class KlienBinancePalsu:
 
 @pytest.fixture
 def job_palsu(monkeypatch, tmp_path):
-    """Siapkan dashboard dengan klien palsu dan satu job kosong.
-
-    Cache candle diarahkan ke tmp_path supaya tes tidak pernah menulis ke
-    folder repo (bawaannya Data/backtest_cache.sqlite3).
-    """
     klien = KlienBinancePalsu(["AAAUSDT", "BBBUSDT", "CCCUSDT"])
     monkeypatch.setattr(dashboard, "_HAS_CLIENT", True, raising=False)
     monkeypatch.setattr(dashboard, "BinanceSpotClient",
                         lambda *args, **kwargs: klien, raising=False)
     monkeypatch.setitem(dashboard.PUMP_CONFIG, "BACKTEST_CACHE_FILE",
                         str(tmp_path / "backtest_cache.sqlite3"))
-    # PERBAIKAN AUDIT 2026-09-30 (temuan TINGGI-06): ambang volume dipatok
-    # eksplisit agar fixture tidak ikut pecah setiap kali operator mengubah
-    # MIN_QUOTE_VOLUME_USDT_24H di config. Ticker palsu di atas memakai
-    # quoteVolume sekitar 9 juta; ketika default config naik ke 10 juta,
-    # seluruh simbol tersaring habis dan ketiga test ini gagal dengan
-    # "Tidak ada simbol yang lolos saringan pasar" walau alur job-nya sehat.
     monkeypatch.setitem(dashboard.PUMP_CONFIG, "MIN_QUOTE_VOLUME_USDT_24H",
                         1_000_000)
 
@@ -98,7 +85,6 @@ def job_palsu(monkeypatch, tmp_path):
 
 
 def _rekam_store(monkeypatch) -> list:
-    """Catat path setiap store yang dibuat job supaya bisa dicek kebersihannya."""
     dibuat: list = []
     asli = pbt.new_backtest_store
 
@@ -124,9 +110,6 @@ def test_job_backtest_portofolio_selesai_dan_membersihkan_file(job_palsu, monkey
     assert payload["mode"] == "portfolio"
     assert payload["universe_with_data"] == 3
     assert payload["symbols_failed_count"] == 0
-    # Sebelum simulasi dipulihkan (1 Oktober 2026), nilai ini selalu 0 karena
-    # run_portfolio_backtest hanyalah stub. Sekarang mesin benar benar
-    # menelusuri timeline, jadi harus lebih dari nol.
     assert payload["bars_total"] > 0
     assert "summary" in payload and "trades" in payload
     assert klien.jumlah_request > 0
@@ -139,13 +122,9 @@ def test_job_backtest_portofolio_selesai_dan_membersihkan_file(job_palsu, monkey
 
 
 def test_job_yang_dibatalkan_tetap_menghapus_file_temporary(job_palsu, monkeypatch):
-    """Pembatalan dari thread lain harus tetap menghapus file temporary."""
     job_id, _klien = job_palsu
     dibuat = _rekam_store(monkeypatch)
 
-    # Tombol batal ditekan saat unduhan simbol pertama sudah jalan, yaitu
-    # setelah store SQLite dibuat. Ini jalur yang paling rawan meninggalkan
-    # file yatim kalau blok finally hilang.
     asli_fetch = pbt.fetch_universe_klines
 
     def fetch_lalu_batal(client, symbols, interval, start_ms, end_ms, store,
@@ -177,7 +156,6 @@ def test_job_yang_dibatalkan_tetap_menghapus_file_temporary(job_palsu, monkeypat
 
 
 def test_job_kedua_memakai_cache_dan_jauh_lebih_sedikit_request(job_palsu, monkeypatch):
-    """Backtest ulang tidak boleh mengunduh candle historis dari nol lagi."""
     job_id, klien = job_palsu
 
     dashboard._bt_run_job(job_id, days=5, overrides={}, max_symbols=3)
@@ -197,26 +175,5 @@ def test_job_kedua_memakai_cache_dan_jauh_lebih_sedikit_request(job_palsu, monke
     request_kedua = klien.jumlah_request
 
     assert request_kedua < request_pertama, (request_pertama, request_kedua)
-    # Hasil simulasi harus tetap sama persis walau sumber candle-nya cache.
     assert job_kedua["result"]["summary"] == job_pertama["result"]["summary"]
     assert job_kedua["result"]["trades"] == job_pertama["result"]["trades"]
-
-
-# ==== RINGKASAN AUDIT (tests/test_dashboard_backtest_job.py) ==========
-# Lingkup: berkas tes BARU untuk alur _bt_run_job end-to-end.
-# Cakupan: job sukses (status done, payload lengkap termasuk ringkasan cache,
-#   file temporary terhapus), job dibatalkan saat unduhan berjalan (status
-#   error "dibatalkan", file temporary tetap terhapus), dan job kedua yang
-#   memakai cache candle sehingga jumlah request turun sementara hasil
-#   simulasinya sama persis dengan job pertama.
-# Sintaks/tipe: tanpa jaringan; BinanceSpotClient di dashboard di-monkeypatch
-#   dengan klien palsu yang juga meniru paging 1.000 candle.
-# Keamanan: tidak menyentuh kredensial. BACKTEST_CACHE_FILE diarahkan ke
-#   tmp_path lewat monkeypatch.setitem, jadi tes tidak pernah menulis ke
-#   folder repo (bawaan produksi Data/backtest_cache.sqlite3).
-# Race condition: pembatalan disuntikkan lewat progress_cb sehingga terjadi
-#   SETELAH store dibuat, yaitu titik paling rawan meninggalkan file yatim;
-#   deterministik, tanpa sleep-race.
-# Kebersihan: entri _bt_jobs dibuang lagi oleh fixture supaya tes lain tidak
-#   melihat sisa job; store dan cache ditutup oleh kode produksi di finally.
-# =======================================================================

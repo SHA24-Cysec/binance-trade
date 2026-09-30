@@ -37,7 +37,7 @@ def test_partially_written_live_lock_is_not_stolen(tmp_path, monkeypatch):
     def contender():
         try:
             rc.BotModeLock("PAPER").acquire()
-        except Exception as exc:  # hasil diperiksa di thread utama
+        except Exception as exc:
             result.append(exc)
 
     thread = threading.Thread(target=contender)

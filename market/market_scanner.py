@@ -20,37 +20,21 @@ from strategy.indicators import Kline
 
 logger = logging.getLogger(__name__)
 
-# Jumlah candle harian PENUH yang wajib tersedia sebelum sebuah simbol boleh
-# dinilai oleh gerbang volume. Koin yang baru listing dan belum punya tujuh
-# hari riwayat DITOLAK (fail closed), bukan diloloskan diam-diam.
 PUMP_GATE_DAILY_CANDLES = 7
 
 MS_PER_DAY = 86_400_000
 
-# Stablecoin/aset yang bukan target trading struktural (kalau jadi base asset,
-# pair-nya seperti USDCUSDT yang praktis tidak bergerak).
 STABLE_BASE_ASSETS = {
     "USDC", "BUSD", "TUSD", "FDUSD", "DAI", "USDP", "EUR", "GBP", "TRY",
     "BRL", "AEUR", "USTC", "USDD", "PYUSD", "USDE",
-    # Ditambahkan 2026-09-24 setelah pemeriksaan ticker 24 jam Binance Spot:
-    # USD1USDT dan RLUSDUSDT aktif diperdagangkan dengan volume besar
-    # (219 juta dan 88 juta USDT) namun perubahan 24 jamnya praktis 0,00%,
-    # karena keduanya stablecoin yang dipatok ke USD. Breakout struktural
-    # pada pair seperti ini hampir selalu noise tick size, bukan pergerakan
-    # yang bisa diperdagangkan.
     "USD1", "RLUSD",
 }
 
-# CATATAN AUDIT 2026-09-24: Binance telah menghapus SEMUA leveraged token
-# (BTCUP, ETHDOWN, dsb) per 3 April 2024, jadi daftar ini kini murni pagar
-# pengaman. Kalau suatu hari Binance menghidupkan produk serupa, suffix ini
-# kembali relevan.
 LEVERAGED_TOKEN_SUFFIXES = ("UP", "DOWN", "BULL", "BEAR")
 
 
 @dataclass
 class Candidate:
-    """Simbol yang lolos filter pasar untuk monitoring."""
     symbol: str
     base_asset: str
     price_change_pct: float
@@ -58,19 +42,10 @@ class Candidate:
     last_price: float
     confirmed: bool = False
     confirm_reason: str = ""
-    # Diisi setelah konfirmasi setup. Dipakai untuk mengurutkan kandidat dan
-    # untuk mengunci level invalidasi di state posisi saat entry.
     setup: "Optional[SetupResult]" = None
 
 
 def _looks_leveraged(base_asset: str) -> bool:
-    """Deteksi leveraged token Binance lama (BTCUP, ETHDOWN, dsb).
-
-    Binance sudah menghapus SEMUA leveraged token per 3 April 2024, jadi
-    fungsi ini kini murni pagar pengaman. Syarat awalan minimal 2 huruf
-    mencegah koin SAH seperti JUP (awalan 'J' hanya 1 huruf) ikut tertolak,
-    sebelum perbaikan audit 2026-09-24 JUPUSDT salah ditolak oleh heuristik ini.
-    """
     for sfx in LEVERAGED_TOKEN_SUFFIXES:
         if base_asset.endswith(sfx) and len(base_asset) - len(sfx) >= 2:
             return True
@@ -79,12 +54,6 @@ def _looks_leveraged(base_asset: str) -> bool:
 
 def is_structurally_allowed_symbol(symbol: str, config: dict,
                                    tradable_symbols: "set | None" = None) -> bool:
-    """Gerbang statis semesta yang dapat dipakai ulang oleh semua jalur.
-
-    Tidak memerlukan ticker historis, sehingga backtest satu simbol dapat
-    menolak stablecoin, leveraged token, blacklist, quote salah, dan simbol
-    non-TRADING dengan policy yang sama seperti scanner live.
-    """
     quote_asset = str(config.get("QUOTE_ASSET", ""))
     if not quote_asset or not symbol.endswith(quote_asset):
         return False
@@ -98,23 +67,12 @@ def is_structurally_allowed_symbol(symbol: str, config: dict,
 
 
 def spread_pct_from_book(bid: float, ask: float) -> float:
-    """Spread persen canonical terhadap mid-price untuk seluruh pemakai."""
     mid = (float(bid) + float(ask)) / 2.0
     return ((float(ask) - float(bid)) / mid * 100.0) if mid > 0 else float("inf")
 
 
-# ======================================================================
-# Gerbang pump: naik 24 jam DAN volume sedang naik
-# ======================================================================
 
 def _angka_wajar(nilai) -> bool:
-    """True hanya untuk angka hingga dan tidak negatif.
-
-    Mengikuti pola penjagaan di strategy.parse_klines(): NaN tidak boleh
-    lolos diam-diam sampai ke perbandingan numerik, karena SETIAP
-    perbandingan dengan NaN menghasilkan False. Kalau NaN dibiarkan, sebuah
-    simbol bisa lolos atau gagal gerbang tanpa alasan yang bisa dijelaskan.
-    """
     try:
         angka = float(nilai)
     except (TypeError, ValueError):
@@ -125,14 +83,6 @@ def _angka_wajar(nilai) -> bool:
 
 
 def aggregate_to_daily(klines: list[Kline]) -> list[Kline]:
-    """Gabungkan candle intraday menjadi candle harian UTC.
-
-    Dipakai jalur backtest sebagai sumber cadangan ketika pemanggil tidak
-    menyediakan candle 1d hasil unduhan terpisah. Pengelompokan memakai
-    open_time // 86.400.000 sehingga batas harinya sama persis dengan candle
-    1d Binance (UTC). Field quote_volume dijumlahkan, itulah satu-satunya
-    field yang dipakai gerbang volume.
-    """
     ember: dict[int, list[Kline]] = {}
     for k in klines:
         ember.setdefault(int(k.open_time) // MS_PER_DAY, []).append(k)
@@ -158,18 +108,6 @@ def average_prior_daily_quote_volume(
     reference_ms: int,
     need: int = PUMP_GATE_DAILY_CANDLES,
 ) -> tuple[Optional[float], str]:
-    """Rata-rata quote_volume dari ``need`` candle harian PENUH terakhir.
-
-    Yang diperhitungkan hanya candle harian yang close_time-nya sudah lewat
-    pada ``reference_ms``. Inilah yang membuat perhitungan identik di live dan
-    di backtest sekaligus bebas look-ahead: di live ``reference_ms`` adalah
-    waktu sekarang sehingga candle hari ini yang belum tertutup terbuang, di
-    backtest ``reference_ms`` adalah waktu bar yang sedang diuji sehingga
-    volume hari-hari SESUDAHNYA tidak pernah ikut terhitung.
-
-    Return (rata_rata, alasan). rata_rata None berarti data tidak memenuhi
-    syarat, dan ``alasan`` menjelaskan kenapa.
-    """
     if not daily_klines:
         return None, "tidak ada candle harian"
 
@@ -192,18 +130,6 @@ def average_prior_daily_quote_volume(
 def evaluate_pump_gate(price_change_pct, quote_volume,
                        avg_daily_quote_volume: Optional[float],
                        config: dict, btc_drop_pct: float | None = None) -> tuple[bool, str]:
-    """Inti gerbang pump, MURNI dan tanpa jaringan.
-
-    Dipakai bersama oleh jalur live dan seluruh jalur backtest supaya tidak
-    pernah ada dua definisi "sedang pump" yang bisa berbeda diam-diam.
-
-      Syarat 1: price_change_pct >= PUMP_MIN_24H_CHANGE_PCT
-      Syarat 2: quote_volume >= PUMP_VOLUME_SURGE_MULT x rata-rata volume
-                kuotasi 7 hari penuh sebelumnya
-
-    ``avg_daily_quote_volume`` None berarti riwayat harian tidak memenuhi
-    syarat, dan hasilnya DITOLAK (fail closed).
-    """
     min_change = float(config.get("PUMP_MIN_24H_CHANGE_PCT", 10.0) or 0.0)
     surge_mult = float(config.get("PUMP_VOLUME_SURGE_MULT", 1.5) or 0.0)
 
@@ -213,9 +139,6 @@ def evaluate_pump_gate(price_change_pct, quote_volume,
         if btc_drop_pct is None:
             if config.get("_btc_filter_fail_closed", False):
                 return False, "data filter BTC tidak tersedia, simbol ditolak (fail closed)"
-            # Pemanggil murni/backtest lama boleh tidak mengaktifkan filter
-            # BTC karena tidak membawa deret BTC historis. Jalur LIVE selalu
-            # mengatur _btc_filter_fail_closed=True secara eksplisit.
         else:
             max_drop = abs(float(config.get("BTC_MAX_DROP_PCT", 5.0) or 0.0))
             if float(btc_drop_pct) <= -max_drop:
@@ -257,22 +180,6 @@ def is_pumping_today(symbol: str, price_change_pct, quote_volume,
                      get_daily_klines_fn: "Optional[Callable[[str], list[Kline]]]",
                      config: dict,
                      reference_ms: "int | None" = None) -> tuple[bool, str]:
-    """Gerbang pump untuk SATU simbol, termasuk pengambilan candle harian.
-
-    ``get_daily_klines_fn`` diinjeksikan supaya fungsi ini tetap mudah diuji
-    tanpa jaringan, dan supaya jalur backtest dapat memberi candle harian
-    historis. Fungsi itu harus mengembalikan list[Kline] harian kronologis;
-    candle hari berjalan boleh ikut, nanti dibuang oleh
-    average_prior_daily_quote_volume() berdasarkan ``reference_ms``.
-
-    Syarat 1 diperiksa LEBIH DULU karena datanya sudah ada di ticker 24 jam
-    yang diambil sekali untuk seluruh pasar. Request candle harian (bobot IP
-    2) hanya terjadi untuk simbol yang sudah lolos syarat 1, yaitu subset
-    kecil, sehingga beban rate limit tetap ringan.
-
-    Kegagalan request untuk satu simbol (timeout, simbol didelisting di tengah
-    scan) TIDAK melempar keluar: simbol itu ditolak dan scan lanjut.
-    """
     min_change = float(config.get("PUMP_MIN_24H_CHANGE_PCT", 10.0) or 0.0)
     try:
         change = float(price_change_pct)
@@ -284,16 +191,13 @@ def is_pumping_today(symbol: str, price_change_pct, quote_volume,
         return False, f"kenaikan 24 jam {change:.2f}% di bawah ambang {min_change:g}%"
 
     if get_daily_klines_fn is None:
-        # FAIL CLOSED. Tanpa sumber candle harian, syarat volume tidak bisa
-        # dibuktikan, dan gerbang ini WAJIB. Meloloskan simbol di sini sama
-        # saja menghidupkan kembali perilaku lama tanpa gerbang.
         return False, "sumber candle harian tidak tersedia, simbol ditolak (fail closed)"
 
     ref = int(reference_ms) if reference_ms is not None else int(time.time() * 1000)
 
     try:
         harian = get_daily_klines_fn(symbol)
-    except Exception as exc:  # noqa: BLE001 - satu simbol gagal tidak boleh menghentikan scan
+    except Exception as exc:  # noqa: BLE001
         return False, f"gagal mengambil candle harian: {str(exc)[:160]}"
 
     rata, alasan = average_prior_daily_quote_volume(harian, ref)
@@ -304,13 +208,6 @@ def is_pumping_today(symbol: str, price_change_pct, quote_volume,
 
 def pump_gate_ok_at(daily_klines: "list[Kline] | None", reference_ms: int,
                     price_change_pct, quote_volume, config: dict) -> bool:
-    """Gerbang pump untuk satu TITIK WAKTU historis (jalur backtest).
-
-    Bentuk ringkas dari is_pumping_today() untuk pemanggil yang sudah punya
-    candle harian di tangan dan tidak perlu request apa pun. Logika keputusan
-    tetap satu, yaitu evaluate_pump_gate(), supaya live dan backtest tidak
-    bisa berbeda diam-diam.
-    """
     rata, _alasan = average_prior_daily_quote_volume(daily_klines, reference_ms)
     ok, _r = evaluate_pump_gate(price_change_pct, quote_volume, rata, config)
     return ok
@@ -319,16 +216,6 @@ def pump_gate_ok_at(daily_klines: "list[Kline] | None", reference_ms: int,
 def make_daily_klines_fetcher(client, *, limit: int = PUMP_GATE_DAILY_CANDLES + 1,
                               end_time_ms: "int | None" = None,
                               cache: "dict | None" = None):
-    """Pembuat fungsi pengambil candle 1d untuk gerbang pump.
-
-    ``limit`` default 8 = 7 candle harian penuh + kemungkinan candle hari
-    berjalan yang nanti dibuang berdasarkan waktu acuan.
-
-    ``cache`` opsional: dict yang dipakai ulang selama SATU siklus scan supaya
-    simbol yang sama tidak diminta dua kali (misalnya saat dipanggil dari
-    filter_and_rank_candidates lalu dari jalur lain di siklus yang sama).
-    Jangan dipakai lintas siklus, datanya akan basi.
-    """
     def _fetch(symbol: str) -> list[Kline]:
         if cache is not None and symbol in cache:
             return cache[symbol]
@@ -348,44 +235,6 @@ def filter_and_rank_candidates(tickers: list, config: dict,
                                get_daily_klines_fn: "Optional[Callable[[str], list[Kline]]]" = None,
                                reference_ms: "int | None" = None,
                                apply_pump_gate: bool = True) -> list[Candidate]:
-    """Saring semesta pair lalu urutkan dari volume kuotasi 24 jam tertinggi.
-
-    Ada DUA lapis saringan.
-
-      1. Struktural dan likuiditas: quote asset, stablecoin, leveraged token,
-         blacklist, status TRADING, dan MIN_QUOTE_VOLUME_USDT_24H.
-      2. GERBANG PUMP (wajib, lihat is_pumping_today): naik minimal
-         PUMP_MIN_24H_CHANGE_PCT dalam 24 jam DAN volume kuotasi 24 jam
-         minimal PUMP_VOLUME_SURGE_MULT kali rata-rata volume kuotasi 7 hari
-         penuh sebelumnya.
-
-    CATATAN REVISI: sebelumnya di sini tertulis bahwa gerbang kenaikan 24 jam
-    "sudah DIHAPUS". Keputusan itu TIDAK berlaku lagi. Koin yang sedang turun
-    24 jam, atau yang volumenya tidak sedang naik, tidak akan pernah muncul
-    sebagai kandidat.
-
-    Urutan volume di sini hanya menentukan simbol mana yang candle-nya
-    diunduh lebih dulu saat anggaran request terbatas, BUKAN kandidat mana
-    yang lebih layak dipilih. Pengurutan volume hanya untuk monitoring.
-
-    ``tickers`` adalah hasil mentah GET /api/v3/ticker/24hr untuk seluruh pair
-    (bobot IP 80, dicek 2026-09-25). Field priceChangePercent dan quoteVolume
-    dari respons yang SAMA itu yang dipakai gerbang pump, jadi syarat pertama
-    tidak menambah satu pun request.
-
-    ``tradable_symbols`` opsional: himpunan simbol yang statusnya TRADING
-    menurut exchangeInfo. Kalau diberikan, simbol di luar himpunan itu dibuang.
-    Kalau None, saringan status dilewati (dipakai jalur backtest yang bekerja
-    dari data historis dan tidak punya snapshot exchangeInfo saat itu).
-
-    ``get_daily_klines_fn`` wajib diisi selama ``apply_pump_gate`` True. Kalau
-    tidak diisi, SEMUA simbol ditolak (fail closed), karena syarat volume
-    tidak bisa dibuktikan.
-
-    ``apply_pump_gate=False`` HANYA untuk pemilihan semesta unduhan backtest
-    portofolio, di mana gerbang harus dievaluasi per titik waktu historis di
-    dalam simulasi, bukan dari ticker hari ini. Jangan dipakai di jalur live.
-    """
     quote_asset = config["QUOTE_ASSET"]
     min_vol = float(config.get("MIN_QUOTE_VOLUME_USDT_24H", 0) or 0)
 
@@ -437,9 +286,6 @@ def filter_and_rank_candidates(tickers: list, config: dict,
             logger.info("Gerbang pump: %d kandidat lolos dari %d simbol yang lolos "
                         "saringan likuiditas.", len(out), lolos_struktural)
         else:
-            # Sengaja eksplisit: dengan ambang +%s dan volume naik, pasar sepi
-            # bisa membuat hasilnya nol untuk waktu lama. Diam di log membuat
-            # kondisi ini tampak seperti bot macet.
             logger.info("Gerbang pump: 0 kandidat lolos gerbang pump (dari %d simbol "
                         "yang lolos saringan likuiditas). Ambang: naik >= %g%% "
                         "dan volume >= %gx rata-rata 7 hari.",
@@ -450,7 +296,6 @@ def filter_and_rank_candidates(tickers: list, config: dict,
 
 
 class EntrySignalScore(NamedTuple):
-    """Skor panel dari kondisi candle tertutup, bukan keputusan trading."""
     score: float
     status: str
     disqualified: Optional[str]
@@ -458,7 +303,6 @@ class EntrySignalScore(NamedTuple):
     reason: str
 
 def score_entry_signal(klines: list[Kline], config: dict, meta=None) -> EntrySignalScore:
-    """Hitung kedekatan setup entry dengan helper strategi yang sama dengan bot."""
     zero = {"ema": 0.0, "rsi": 0.0, "macd": 0.0, "higher_low": 0.0}
     passed, detail = _rolling_volume_confirmation(klines, config)
     if not passed:
@@ -473,7 +317,7 @@ def score_entry_signal(klines: list[Kline], config: dict, meta=None) -> EntrySig
     ema9, ema21 = strategy.ema(closes, 9), strategy.ema(closes, 21)
     cross = ema9[-2] <= ema21[-2] and ema9[-1] > ema21[-1]
     if cross: ema_credit = w["ema"]
-    elif ema9[-1] > ema21[-1]: ema_credit = w["ema"] * 0.6  # tren mendukung, momen cross lewat
+    elif ema9[-1] > ema21[-1]: ema_credit = w["ema"] * 0.6
     else:
         gap = float(config.get("WATCH" + "LIST_ENTRY_EMA_GAP_PCT", 1.0))
         rel = (ema21[-1] - ema9[-1]) / ema21[-1] * 100
@@ -498,12 +342,6 @@ def score_entry_signal(klines: list[Kline], config: dict, meta=None) -> EntrySig
 
 @dataclass
 class SetupResult:
-    """Hasil evaluasi satu jendela candle terhadap aturan pullback retest.
-
-    ``ok`` True hanya kalau candle terakhir yang tertutup adalah candle
-    konfirmasi retest. Field lain tetap diisi sebisanya walaupun ok False,
-    supaya log bisa menjelaskan setup sampai mana prosesnya.
-    """
     ok: bool
     reason: str
     breakout_level: Optional[float] = None
@@ -514,7 +352,6 @@ class SetupResult:
     atr_value: Optional[float] = None
 
 def _pivot_low_indexes(klines: list[Kline], wing: int) -> list[int]:
-    """Cari pivot low dengan sayap kanan yang sudah tertutup."""
     if wing < 1 or len(klines) < 2 * wing + 1:
         return []
     return [p for p in range(wing, len(klines) - wing)
@@ -522,19 +359,10 @@ def _pivot_low_indexes(klines: list[Kline], wing: int) -> list[int]:
             and all(klines[p].low < klines[j].low for j in range(p+1, p+wing+1))]
 
 def _higher_low_confirmed(klines: list[Kline], wing: int) -> bool:
-    """True bila pivot low terakhir lebih tinggi dari pivot low sebelumnya."""
     pivots = _pivot_low_indexes(klines, wing)
     return len(pivots) >= 2 and klines[pivots[-1]].low > klines[pivots[-2]].low
 
 def _rolling_volume_confirmation(klines: list[Kline], config: dict) -> tuple[bool, str]:
-    """Validasi lonjakan volume pada candle konfirmasi yang sudah close.
-
-    Candle keputusan terakhir tidak pernah masuk ke rata-rata pembandingnya.
-    Dengan begitu, sinyal tidak dapat meloloskan diri hanya karena volume
-    candle yang sedang diuji ikut menaikkan rata-rata. Quote volume dipakai
-    bila tersedia karena satuannya langsung mengikuti asset kuotasi; volume
-    dasar menjadi fallback untuk fixture lama yang belum memilikinya.
-    """
     if not bool(config.get("ROLLING_VOLUME_FILTER_ENABLED", True)):
         return True, "rolling volume nonaktif"
 
@@ -576,22 +404,6 @@ def _rolling_volume_confirmation(klines: list[Kline], config: dict) -> tuple[boo
     return ok, detail
 
 def detect_pullback_retest(klines: list[Kline], config: dict) -> SetupResult:
-    """Deteksi momentum pump dengan minimal tiga dari empat konfirmasi.
-
-    Semua indikator hanya membaca candle dalam ``klines`` yang diasumsikan
-    sudah close dan kronologis. Konfirmasi terdiri dari EMA cross, RSI sehat,
-    MACD histogram menguat, dan higher low setelah pump awal. Tidak ada candle
-    yang belum close atau data masa depan yang digunakan.
-
-    CATATAN NAMA (audit 2026-09-27, temuan RENDAH-05): nama fungsi
-    dipertahankan demi kompatibilitas pemanggil lama (backtest.py,
-    portfolio_backtest.py, watchlist_auto.py), tetapi strategi ini SUDAH
-    BUKAN pullback-retest sungguhan. Tidak ada verifikasi harga kembali
-    menguji level breakout: ``breakout_level`` diisi close candle terakhir
-    sebagai referensi harga entry, dan ``retest_touches`` selalu 0 (field
-    warisan skema SetupResult lama). Jangan menganggap ada filter retest
-    yang menyaring false breakout.
-    """
     n = len(klines)
     period = 14
     wing = max(1, int(config.get("SWING_PIVOT_WING_BARS", 2) or 2))
@@ -620,9 +432,6 @@ def detect_pullback_retest(klines: list[Kline], config: dict) -> SetupResult:
                f"({confirmations}/4), {volume_detail}")
     if confirmations < 3:
         return SetupResult(False, f"konfirmasi entry kurang dari 3/4: {details}")
-    # breakout_level = close terakhir (referensi harga entry, BUKAN level
-    # retest) dan retest_touches = 0 adalah field warisan; lihat catatan
-    # nama pada docstring di atas.
     return SetupResult(True, f"momentum pump sah: {details}",
                        breakout_level=klines[-1].close,
                        zone_low=klines[-1].low, zone_high=klines[-1].high,
@@ -630,46 +439,16 @@ def detect_pullback_retest(klines: list[Kline], config: dict) -> SetupResult:
                        atr_value=strategy.atr(klines, int(config.get("ATR_PERIOD", 14) or 14)))
 
 def confirm_entry(klines: list[Kline], config: dict) -> tuple[bool, str]:
-    """Konfirmasi entry dengan alasan yang dapat dicatat ke log.
-
-    Signature-nya sengaja dipertahankan (bool, str) supaya seluruh pemanggil
-    lama, yaitu backtest.py, portfolio_backtest.py, dan watchlist_auto.py,
-    tidak perlu diubah bentuk panggilannya. Pemanggil yang butuh level dan
-    zona memakai detect_pullback_retest() langsung.
-    """
     hasil = detect_pullback_retest(klines, config)
     return hasil.ok, hasil.reason
 
 def setup_quality_key(setup: SetupResult, candidate: Candidate) -> tuple:
-    """Kunci pengurutan kandidat setelah setup lolos.
-
-    Setelah filter berbasis volatilitas dihapus, pemutus urutan yang tersisa
-    adalah likuiditas 24 jam. Volume kuotasi lebih besar didahulukan.
-    """
     return (-float(candidate.quote_volume),)
 
 def find_best_candidate(tickers: list, klines_fetcher, config: dict,
                         tradable_symbols: "set | None" = None,
                         daily_klines_fetcher=None,
                         reference_ms: "int | None" = None) -> Optional[Candidate]:
-    """Kembalikan kandidat dengan setup pullback retest TERBAIK pada scan ini.
-
-    Bukan lagi "gainer tertinggi yang lolos konfirmasi". Alurnya sekarang:
-
-      1. Saring semesta (filter_and_rank_candidates), termasuk GERBANG PUMP
-         yang wajib, lalu urut volume kuotasi.
-      2. Ambil TOP_N_CANDIDATES_TO_CONFIRM teratas saja. Batas ini yang
-         menjaga rate limit: setiap simbol butuh satu panggilan klines dengan
-         bobot IP 2, sedangkan plafon REQUEST_WEIGHT adalah 6000 per menit per
-         IP (dicek 2026-09-25 dari /api/v3/exchangeInfo). Dengan default 10
-         simbol per scan, biaya klines hanya 20 bobot per scan ditambah 80
-         bobot untuk ticker 24 jam seluruh pasar.
-      3. Evaluasi setup untuk setiap simbol, kumpulkan yang lolos, lalu urut
-         dengan setup_quality_key().
-
-    ``klines_fetcher`` sengaja diinjeksikan agar fungsi tetap murni dan mudah
-    diuji tanpa jaringan. Ia wajib mengembalikan candle TERTUTUP saja.
-    """
     ranked = filter_and_rank_candidates(
         tickers, config, tradable_symbols,
         get_daily_klines_fn=daily_klines_fetcher, reference_ms=reference_ms)
@@ -679,7 +458,7 @@ def find_best_candidate(tickers: list, klines_fetcher, config: dict,
     for cand in top_n:
         try:
             klines = klines_fetcher(cand.symbol)
-        except Exception as exc:  # noqa: BLE001 - satu simbol gagal tidak boleh menghentikan scan
+        except Exception as exc:  # noqa: BLE001
             cand.confirmed = False
             cand.confirm_reason = f"gagal mengambil candle: {exc}"
             continue

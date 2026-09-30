@@ -60,24 +60,13 @@ from config.settings_schema import (
 try:
     from trading.clients.binance_client import BinanceAPIError, BinanceSpotClient
     _HAS_CLIENT = True
-except Exception:  # pragma: no cover - kalau requests tidak ada, tetap jalan tanpa live
+except Exception:  # pragma: no cover
     _HAS_CLIENT = False
 
-# Logger modul. Dipakai antara lain oleh handler kegagalan metadata backtest
-# portofolio; tanpa ini cabang except malah melempar NameError (temuan audit
-# B-04) dan membatalkan job yang seharusnya tetap berjalan.
 logger = logging.getLogger(__name__)
 
 
 class _PaperDashboardClient:
-    """Klien READ-ONLY untuk dashboard saat MODE=PAPER.
-
-    Dashboard adalah proses TERPISAH dari bot. Untuk menghindari balapan tulis
-    pada file state PAPER, klien ini TIDAK memakai PaperStore/engine (yang
-    menulis) dan TIDAK membuka WebSocket kedua. Saldo virtual dibaca langsung
-    dari file state (read-only), sedangkan harga/ticker diambil dari REST
-    publik keyless (allow_signed=False) -- mustahil menyentuh endpoint signed.
-    """
 
     def __init__(self) -> None:
         self._market = BinanceSpotClient(
@@ -96,7 +85,6 @@ class _PaperDashboardClient:
         return self._market.get_ticker_24hr_all()
 
     def get_klines(self, symbol, interval, limit=500, start_time_ms=None, end_time_ms=None):
-        """Ambil candle publik untuk skor panel tanpa endpoint signed."""
         return self._market.get_klines(symbol, interval, limit=limit,
                                        start_time_ms=start_time_ms,
                                        end_time_ms=end_time_ms)
@@ -116,37 +104,17 @@ from backtesting import portfolio_backtest as pbt
 
 app = Flask(__name__, template_folder=str(PROJECT_ROOT / "templates"))
 
-# Nama file state/log/kontrol sudah otomatis mengandung akhiran mode aktif
-# (mis. pump_bot_state_paper.json), dihitung sekali di config.py saat
-# di-import. Fallback get_state_file() dst. hanya terpakai kalau kunci config
-# hilang, dan tetap mode-aware supaya dashboard tidak diam-diam membaca file
-# mode yang salah.
 STATE_FILE = PUMP_CONFIG.get("STATE_FILE") or get_state_file()
 LOG_FILE = PUMP_CONFIG.get("LOG_FILE") or get_log_file()
 CONTROL_FILE = PUMP_CONFIG.get("CONTROL_FILE") or get_control_file()
 QUOTE = PUMP_CONFIG.get("QUOTE_ASSET", "USDT")
 
-# Jarak minimum antar-klik tombol "Jual Sekarang" -- mencegah dobel-klik
-# tak sengaja menumpuk banyak perintah sekaligus di control file (walau
-# toh cuma file terakhir yang dibaca bot, ini juga mencegah spam UI).
 _MANUAL_CLOSE_COOLDOWN_SECONDS = 5.0
 _last_manual_close_request = {"ts": 0.0}
-# Perbaikan audit 2026-09-27 (temuan RENDAH-01): check-then-set timestamp
-# cooldown harus atomik. Tanpa lock, dua request paralel bisa sama-sama lolos
-# pemeriksaan sebelum salah satunya menulis timestamp.
 _manual_close_lock = threading.Lock()
 
-# Token acak PER PROSES untuk melindungi endpoint POST /api/manual/close dari
-# CSRF (perbaikan audit 2026-09-24, temuan S-05). Tanpa ini, situs jahat yang
-# kebetulan dibuka di browser yang sama bisa mengirim POST ke
-# 127.0.0.1:8080 dan menutup posisi Anda. Token dibuat ulang setiap
-# dashboard dinyalakan dan hanya diketahu halaman dashboard itu sendiri
-# (disisipkan ke template), lalu wajib dikirim balik lewat header
-# X-Admin-Token. Permintaan cross-site dari situs lain tidak membawa token
-# ini, sehingga ditolak 403.
 _ADMIN_TOKEN = secrets.token_urlsafe(32)
 
-# Dashboard adalah satu-satunya pemilik proses bot yang dimulainya.
 _process_manager = BotProcessManager()
 _runtime_lock = threading.RLock()
 _cache_lock = threading.RLock()
@@ -179,9 +147,6 @@ def _bind_is_loopback() -> bool:
 
 def _expected_hosts() -> set[str]:
     expected = {f"127.0.0.1:{_DASHBOARD_PORT}", f"localhost:{_DASHBOARD_PORT}"}
-    # Bila operator memilih alamat jaringan yang spesifik, alamat itu boleh
-    # menampilkan UI read-only. Wildcard 0.0.0.0 tidak pernah dipercaya
-    # sebagai Host karena bukan alamat tujuan browser yang nyata.
     if not _bind_is_loopback() and _DASHBOARD_HOST not in ("0.0.0.0", "::"):
         expected.add(f"{_DASHBOARD_HOST.lower()}:{_DASHBOARD_PORT}")
     return expected
@@ -210,10 +175,8 @@ def _remote_is_loopback() -> bool:
 
 @app.before_request
 def _security_gate():
-    """Host, origin, token, dan mode read-only untuk semua endpoint."""
     host = (request.host or "").lower()
     expected = _expected_hosts()
-    # Flask test_client memakai Host localhost tanpa port secara default.
     if app.config.get("TESTING"):
         expected.update({"localhost", "127.0.0.1"})
     if host not in expected:
@@ -228,8 +191,6 @@ def _security_gate():
             return jsonify({"error": "Request kontrol harus berasal dari alamat loopback."}), 403
         if not _request_origin_is_local():
             return jsonify({"error": "Origin atau Referer tidak valid."}), 403
-        # Batas global mencakup token salah, sedangkan endpoint berbahaya
-        # tetap memiliki cooldown khusus yang lebih ketat.
         now = time.monotonic()
         rate_key = request.remote_addr or "test-client"
         with _rate_lock:
@@ -284,26 +245,19 @@ def _take_confirmation(token: str, kind: str) -> dict | None:
     return item.get("payload") or {}
 
 
-# --- Cache klien & harga supaya tidak spam Binance tiap refresh ---
 _client = None
-_price_cache: dict = {}          # {symbol: (price, ts)}
+_price_cache: dict = {}
 _balance_cache: dict = {"data": None, "ts": 0}
 _watchlist_cache: dict = {"data": None, "ts": 0, "error": None}
 
-_auto_refresher = None           # diisi start_auto_refresher() saat dashboard start
-PRICE_TTL = 5.0                  # detik
-BALANCE_TTL = 30.0              # detik
+_auto_refresher = None
+PRICE_TTL = 5.0
+BALANCE_TTL = 30.0
 
-# Watchlist memakai SATU panggilan ticker/24hr untuk SELURUH pasar, bukan
-# satu panggilan per simbol. Dengan cache 20 detik, panel ini menambah
-# paling banyak 3 request per menit ke Binance berapa pun panjang daftarnya.
-# Ini penting karena bot berbagi jatah rate-limit IP yang sama; panel pantau
-# tidak boleh sampai mengganggu kemampuan bot menutup posisi tepat waktu.
-WATCHLIST_TTL = 20.0            # detik
+WATCHLIST_TTL = 20.0
 
 
 def _refresh_runtime_globals() -> None:
-    """Segarkan path dan cache setelah override atau mode berubah."""
     global STATE_FILE, LOG_FILE, CONTROL_FILE, QUOTE, _client, _auto_refresher
     with _runtime_lock:
         old_client = _client
@@ -340,11 +294,8 @@ def get_client():
         if _client is None:
             try:
                 if is_paper(PUMP_CONFIG):
-                    # PAPER: klien read-only (saldo virtual dari file, market data
-                    # REST publik keyless). Tidak pernah menyentuh endpoint signed.
                     _client = _PaperDashboardClient()
                 else:
-                    # LIVE: klien bertanda tangan untuk menampilkan saldo asli.
                     _client = BinanceSpotClient(
                         PUMP_CONFIG.get("API_KEY", ""),
                         PUMP_CONFIG.get("API_SECRET", ""),
@@ -369,7 +320,6 @@ def load_state() -> dict:
 
 
 def get_live_price(symbol: str):
-    """Harga live dengan cache pendek. Return None kalau gagal."""
     if not symbol:
         return None
     now = time.time()
@@ -390,7 +340,6 @@ def get_live_price(symbol: str):
 
 
 def get_live_balance():
-    """Saldo akun (butuh API key). Return dict {asset: free} atau None."""
     now = time.time()
     with _cache_lock:
         cached_data = _balance_cache["data"]
@@ -417,7 +366,6 @@ def get_live_balance():
             return _balance_cache["data"]
 
 
-# --- Parsing log untuk riwayat trade & event ---
 _RE_BUY = re.compile(
     r"^(?P<ts>[\d\-]+ [\d:]+).*?BUY FILLED (?P<sym>\w+): qty=(?P<qty>[\d.]+) @ avg (?P<price>[\d.]+)"
     r".*?24h=(?P<pct>[+\-\d.]+)%"
@@ -429,8 +377,6 @@ _RE_SELL = re.compile(
 
 
 def parse_log(max_lines: int = 4000):
-    """Kembalikan (trades, events, level). Trades = pasangan buy/sell yang
-    terdeteksi; events = baris log terbaru; level = ringkasan level log."""
     if not os.path.exists(LOG_FILE):
         return [], [], {}
     try:
@@ -440,7 +386,7 @@ def parse_log(max_lines: int = 4000):
         return [], [], {}
 
     trades = []
-    open_pos = None  # trade yang belum ditutup
+    open_pos = None
     level_count = {"INFO": 0, "WARNING": 0, "ERROR": 0, "CRITICAL": 0}
     events = []
 
@@ -495,7 +441,7 @@ def parse_log(max_lines: int = 4000):
                 break
         events.append({"raw": ln, "level": lvl})
 
-    trades.reverse()  # terbaru dulu
+    trades.reverse()
     events.reverse()
     return trades, events, level_count
 
@@ -535,9 +481,6 @@ def build_status():
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
         "mode": get_mode(PUMP_CONFIG),
         "paper": is_paper(PUMP_CONFIG),
-        # Dipakai dashboard untuk menyembunyikan tab Backtest. Ini hanya
-        # petunjuk untuk UI -- penegakan sebenarnya ada di endpoint
-        # /api/backtest/* lewat _reject_if_backtest_disabled().
         "backtest_enabled": backtest_enabled(PUMP_CONFIG),
         "live_connected": live_price is not None or balances is not None,
         "bot_alive": process_status["status"] in ("STARTING", "RUNNING", "STOPPING"),
@@ -573,23 +516,15 @@ def build_status():
             "daily_stopped": bool(state.get("daily_stopped")),
         },
         "config": {
-            # Kalau ada posisi terbuka, tampilkan level yang benar-benar
-            # berlaku untuk posisi itu, bukan nilai config statis.
             "sl_pct": (
                 (state.get("sl_pct") or PUMP_CONFIG.get("SL_PCT"))
                 if PUMP_CONFIG.get("USE_STOP_LOSS") else None
             ),
             "tp_pct": state.get("tp_pct") or PUMP_CONFIG.get("TP_PCT"),
             "exit_source": state.get("exit_source") or "FIXED",
-            # CATATAN BUG (diperbaiki): dulu "be_trigger_pct" ditulis dua
-            # kali di dict yang sama. Python diam-diam memakai yang terakhir,
-            # yaitu nilai config statis. Jangan menambahkan kunci dengan nama
-            # sama lagi di sini.
             "be_trigger_pct": state.get("be_trigger_pct") or PUMP_CONFIG.get("BE_TRIGGER_PCT"),
             "trail_start_pct": state.get("trail_start_pct") or PUMP_CONFIG.get("TRAILING_START_PCT"),
             "trail_step_pct": state.get("trail_step_pct") or PUMP_CONFIG.get("TRAILING_STEP_PCT"),
-            # Alias lama yang dipakai template. Ikut mengambil nilai posisi
-            # supaya angka di layar konsisten dengan kunci di atas.
             "trailing_start_pct": state.get("trail_start_pct") or PUMP_CONFIG.get("TRAILING_START_PCT"),
         },
     }
@@ -619,26 +554,8 @@ def build_trade_summary(trades):
     }
 
 
-# ======================================================================
-# Backtest (uji parameter pada data historis, dijalankan atas permintaan)
-# ======================================================================
-# Catatan penting: backtest TETAP read-only terhadap bot (tidak menyentuh
-# state/posisi bot yang sedang berjalan) -- ia hanya membaca data historis
-# candle dari Binance lalu mensimulasikan di memori. Job berjalan di thread
-# terpisah karena bisa memakan waktu (mengambil ribuan candle dengan paging).
 
 def _reject_if_backtest_disabled():
-    """Penjaga untuk semua endpoint /api/backtest/*.
-
-    Kembalikan response penolakan (tuple Flask) kalau backtest sedang
-    dimatikan, atau None kalau boleh lanjut. Dicek ULANG di setiap
-    permintaan, bukan sekali saat startup, supaya perubahan config saat
-    proses direstart langsung berlaku.
-
-    Penegakan diletakkan di server, bukan cuma menyembunyikan tab di
-    dashboard, karena menyembunyikan elemen HTML sama sekali bukan
-    pengamanan -- endpoint-nya masih bisa dipanggil langsung dengan curl.
-    """
     if backtest_enabled(PUMP_CONFIG):
         return None
     return jsonify({
@@ -658,7 +575,7 @@ BT_PARAM_KEYS = (
 
 _bt_jobs: dict = {}
 _bt_jobs_lock = threading.Lock()
-BT_JOB_TTL_SECONDS = 3600  # buang hasil job lama dari memori setelah 1 jam
+BT_JOB_TTL_SECONDS = 3600
 
 
 def _bt_cleanup_old_jobs():
@@ -670,12 +587,6 @@ def _bt_cleanup_old_jobs():
 
 
 def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
-    """Jalankan backtest PORTOFOLIO di thread terpisah.
-
-    Alurnya meniru bot live: pindai seluruh pasar, ranking per bar, ambil
-    satu kandidat terbaik, pegang satu posisi. Lihat portfolio_backtest.py
-    untuk penjelasan lengkap dan daftar keterbatasan.
-    """
     def set_progress(frac, stage=""):
         with _bt_jobs_lock:
             if job_id in _bt_jobs:
@@ -689,14 +600,7 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
             job = _bt_jobs.get(job_id)
             return bool(job and job.get("cancel"))
 
-    # Candle backtest disimpan di satu file SQLite temporary milik job ini,
-    # bukan di dict RAM (lihat portfolio_backtest.py). Store dibuat dan
-    # dipakai HANYA di thread job ini, lalu dihapus di blok finally supaya
-    # file temporary tidak tertinggal, termasuk saat error atau dibatalkan.
     store = None
-    # Cache candle lintas job (file permanen, lihat backtest_cache.py).
-    # Hanya ditutup di finally, TIDAK dihapus: isinya memang untuk dipakai
-    # ulang oleh job berikutnya supaya tidak mengunduh dari nol.
     kline_cache = None
 
     try:
@@ -704,30 +608,14 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
         bt.validate_params(cfg)
 
         interval = cfg.get("MARKET_DATA_INTERVAL", "5m")
-        # Validasi interval. Ini WAJIB dipanggil walau hasilnya tidak
-        # dipakai: bars_per_day() melempar BacktestError untuk interval
-        # yang tidak didukung, sedangkan baris bar_ms di bawah memakai
-        # .get(interval, 5) yang diam-diam jatuh ke 5 menit. Tanpa cek
-        # ini, MARKET_DATA_INTERVAL yang salah ketik di config.py (misalnya
-        # "7m") akan menghasilkan backtest yang berjalan mulus tetapi
-        # seluruh perhitungan waktunya meleset tanpa peringatan.
         bt.bars_per_day(interval)
         bar_ms = bt.INTERVAL_MINUTES[interval] * 60_000
-        # Warmup: 24 jam penuh untuk statistik bergulir, ditambah jendela
-        # konfirmasi. Tanpa ini bar-bar awal tidak punya pct24h sama sekali.
         warmup_ms = bt.MS_PER_DAY + 30 * bar_ms
 
         end_ms = int(time.time() * 1000)
         start_ms = end_ms - days * bt.MS_PER_DAY
         fetch_start_ms = start_ms - warmup_ms
 
-        # Sumber data backtest (perbaikan audit 2026-09-24, temuan S-04):
-        # SELALU endpoint publik produksi (api.binance.com), TIDAK PERNAH
-        # Backtest SELALU memakai data historis PRODUKSI publik (bukan sumber
-        # lain), supaya kalibrasi parameter benar-benar relevan untuk LIVE.
-        # Endpoint market data bersifat publik sehingga tidak butuh API key,
-        # dan client ini sengaja dipisah dari client dashboard (yang ikut MODE
-        # aktif) serta dibuat keyless (allow_signed=False).
         if not _HAS_CLIENT:
             raise bt.BacktestError(
                 "Klien Binance tidak tersedia (modul 'requests' tidak termuat). "
@@ -740,7 +628,6 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
             rate_limit_safety_margin=int(PUMP_CONFIG.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100),
         )
 
-        # --- Tahap 1: tentukan semesta simbol -------------------------
         set_progress(0.01, "mengambil daftar pasar...")
         try:
             tickers = client.get_ticker_24hr_all()
@@ -749,9 +636,6 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 f"Gagal mengambil daftar pasar dari Binance: {exc}"
             ) from exc
 
-        # Metadata exchange saat ini memberi parity status TRADING dengan
-        # scanner live. Binance tidak menyediakan snapshot status historis,
-        # sehingga run_portfolio_backtest tetap menandainya sebagai batasan.
         tradable_now = None
         try:
             exchange_info = client.get_exchange_info()
@@ -778,8 +662,6 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
             if job_id in _bt_jobs:
                 _bt_jobs[job_id]["universe_size"] = len(universe)
 
-        # --- Tahap 2: unduh candle semua simbol -----------------------
-        # Bagian terberat, diberi porsi progres paling besar (0.03 - 0.80).
         set_progress(0.03, f"mengunduh data {len(universe)} simbol...")
 
         def dl_progress(frac, sym):
@@ -798,11 +680,6 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "Periksa koneksi ke Binance."
             )
 
-        # --- Tahap 2b: candle harian untuk gerbang pump ---------------
-        # Gerbang pump membandingkan volume 24 jam berjalan dengan rata-rata
-        # 7 hari penuh sebelumnya. Candle 1d diunduh terpisah (bobot IP 2 per
-        # simbol) supaya angka rata-ratanya sama dengan yang dibaca bot live,
-        # dan dimundurkan 8 hari agar bar paling awal pun punya riwayat penuh.
         set_progress(0.80, "mengunduh volume harian untuk gerbang pump...")
         pbt.fetch_universe_daily_klines(
             client, symbols_with_data,
@@ -812,7 +689,6 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
             cancel_cb=cancelled,
         )
 
-        # --- Tahap 3: simulasi ----------------------------------------
         set_progress(0.82, "menjalankan simulasi portofolio...")
         result = pbt.run_portfolio_backtest(
             store, cfg, interval, warmup_ms=warmup_ms,
@@ -905,12 +781,9 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
             if job_id in _bt_jobs:
                 _bt_jobs[job_id].update({"status": "error", "error": f"Error tak terduga: {exc}"})
     finally:
-        # Wajib dijalankan pada SEMUA jalur: selesai, error, maupun
-        # pembatalan lewat cancel_cb (yang melempar BacktestError).
         if store is not None:
             store.cleanup()
         if kline_cache is not None:
-            # Ditutup, bukan dihapus. File cache sengaja bertahan lintas job.
             kline_cache.close()
 
 
@@ -927,8 +800,6 @@ def api_backtest_start():
     except (TypeError, ValueError):
         return jsonify({"error": "Jumlah hari tidak valid."}), 400
     if days < 2:
-        # Minimal 2 hari: satu hari penuh habis untuk warmup statistik 24 jam,
-        # jadi rentang 1 hari tidak menyisakan bar yang bisa ditradingkan.
         return jsonify({"error": "Jumlah hari minimal 2 (satu hari pertama dipakai warmup statistik 24 jam)."}), 400
 
     try:
@@ -940,10 +811,6 @@ def api_backtest_start():
     if max_symbols > 600:
         return jsonify({"error": "Jumlah simbol maksimal 600."}), 400
 
-    # Perlindungan dari permintaan yang tidak realistis. Setiap simbol butuh
-    # sekitar satu request per 1000 candle, jadi beban total tumbuh sebagai
-    # perkalian simbol x hari. Batas ini mencegah satu klik tak sengaja
-    # memicu puluhan ribu request ke Binance.
     est_requests = max_symbols * max(1, -(-(days + 1) * 288 // 1000))
     if est_requests > 20000:
         return jsonify({
@@ -958,9 +825,6 @@ def api_backtest_start():
     except bt.BacktestError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    # Backtest portofolio jauh lebih berat dari versi satu simbol, jadi hanya
-    # SATU yang boleh berjalan pada satu waktu. Dua job paralel akan saling
-    # berebut jatah rate-limit Binance dan justru memperlambat keduanya.
     with _bt_jobs_lock:
         running = sum(1 for j in _bt_jobs.values() if j["status"] == "running")
         if running >= 1:
@@ -991,11 +855,6 @@ def api_backtest_status(job_id):
             return jsonify({"error": "Job backtest tidak ditemukan (mungkin sudah kedaluwarsa)."}), 404
         out = dict(job)
 
-    # Estimasi sisa waktu dihitung dari kecepatan progres NYATA sejauh ini
-    # (elapsed / progress * sisa), bukan angka tebakan tetap -- supaya makin
-    # akurat semakin lama job berjalan. Sengaja tidak dihitung kalau progress
-    # masih sangat kecil (<2%) karena elapsed/progress akan sangat tidak
-    # stabil di awal (estimasi bisa melonjak liar).
     started_at = out.get("started_at")
     progress = out.get("progress", 0.0) or 0.0
     if out.get("status") == "running" and started_at and progress >= 0.02:
@@ -1015,15 +874,6 @@ def api_backtest_status(job_id):
 
 @app.route("/api/backtest/cancel/<job_id>", methods=["POST"])
 def api_backtest_cancel(job_id):
-    """Batalkan job yang sedang berjalan.
-
-    Backtest portofolio bisa berjalan belasan menit, jadi pengguna harus
-    bisa menghentikannya. Pembatalan bersifat kooperatif: flag diset di
-    sini, lalu thread pekerja memeriksanya di sela pengunduhan tiap simbol
-    dan tiap 200 bar simulasi. Thread TIDAK dibunuh paksa, karena
-    menghentikan thread di tengah request HTTP bisa meninggalkan koneksi
-    menggantung.
-    """
     blocked = _reject_if_backtest_disabled()
     if blocked is not None:
         return blocked
@@ -1039,16 +889,11 @@ def api_backtest_cancel(job_id):
 
 @app.route("/api/backtest/defaults")
 def api_backtest_defaults():
-    """Nilai default form backtest, diambil langsung dari config.py yang
-    sedang dipakai bot supaya form selalu mencerminkan konfigurasi terkini."""
     blocked = _reject_if_backtest_disabled()
     if blocked is not None:
         return blocked
     out = {k: PUMP_CONFIG.get(k) for k in BT_PARAM_KEYS}
     out["quote_asset"] = QUOTE
-    # Default sengaja jauh lebih kecil dari versi satu simbol dulu (90 hari),
-    # karena backtest portofolio mengunduh ratusan simbol sekaligus. 30 hari
-    # x 150 simbol sudah memberi gambaran yang layak dalam beberapa menit.
     out["default_days"] = 30
     out["default_max_symbols"] = 150
     out["mode"] = "portfolio"
@@ -1062,17 +907,6 @@ def index():
 
 
 def build_watchlist() -> dict:
-    """Panel watchlist otomatis untuk monitoring pasar.
-
-    Panel ini sepenuhnya read-only dan tidak memengaruhi bot. Simbol dipilih
-    dari ticker 24 jam memakai filter semesta scanner, lalu ditampilkan dengan
-    harga, perubahan 24 jam, volume, dan posisi range. Panel tidak menghitung
-    metrik pembukaan posisi.
-
-    Degradasi anggun: kalau Binance tidak terjangkau, panel memakai snapshot
-    ticker terakhir dari cache; tanpa cache sama sekali, daftar kosong plus
-    pesan error, bukan exception yang mematikan dashboard.
-    """
     if not watchlist_enabled(PUMP_CONFIG):
         return {"enabled": False, "items": [], "summary": {}, "error": None}
 
@@ -1100,8 +934,6 @@ def build_watchlist() -> dict:
                     _watchlist_cache["error"] = None
                 error = None
             except Exception as exc:  # noqa: BLE001
-                # Pakai data lama kalau ada, supaya panel tidak berkedip
-                # kosong setiap kali ada satu request gagal.
                 error = f"Gagal mengambil data pasar: {str(exc)[:120]}"
                 with _cache_lock:
                     tickers = _watchlist_cache["data"]
@@ -1113,13 +945,6 @@ def build_watchlist() -> dict:
     except (TypeError, ValueError):
         top_n = 15
 
-    # ------------------------------------------------------------------
-    # Pilih simbol OTOMATIS dari semesta scanner (perubahan 2026-09-27):
-    # gerbang struktural dan likuiditas, lalu urut perubahan 24 jam terbesar
-    # dan potong top-N. Volume dipakai sebagai pemecah seri.
-    # Baris ticker yang angkanya rusak dibuang diam-diam -- panel tidak
-    # boleh crash karena satu baris aneh.
-    # ------------------------------------------------------------------
     selected: list[tuple[float, float, str, dict]] = []
     for sym, t in (tickers or {}).items():
         if not scanner.is_structurally_allowed_symbol(str(sym), PUMP_CONFIG):
@@ -1136,7 +961,6 @@ def build_watchlist() -> dict:
     selected.sort(key=lambda x: (-x[0], -x[1]))
     selected = selected[:top_n]
 
-    # Panel hanya menampilkan data monitoring pasar.
     items = []
     for _chg, qv, sym, t in selected:
         try:
@@ -1147,8 +971,6 @@ def build_watchlist() -> dict:
         except (TypeError, ValueError):
             price = chg = hi = lo = 0.0
 
-        # Posisi harga dalam rentang 24 jam: 1,0 berarti di puncak hari
-        # ini, 0,0 di dasar.
         rng = hi - lo
         rpos = ((price - lo) / rng) if rng > 0 else None
 
@@ -1159,13 +981,11 @@ def build_watchlist() -> dict:
             "price": price, "change_24h": chg, "quote_volume_24h": qv,
             "high_24h": hi, "low_24h": lo,
             "trades_24h": int(t.get("count", 0) or 0),
-            # Semua simbol terpilih sudah lolos filter likuiditas.
             "pass_volume": True,
             "status": "LIKUID",
             "range_position": round(rpos, 3) if rpos is not None else None,
         })
 
-    # Urutkan berdasarkan perubahan 24 jam lalu volume.
     items.sort(key=lambda r: (-r["change_24h"], -r["quote_volume_24h"]))
 
     counts = {}
@@ -1186,7 +1006,6 @@ def build_watchlist() -> dict:
 
 
 def _watchlist_config() -> dict:
-    """Ambang yang dipakai panel, ditampilkan supaya angkanya tidak misterius."""
     return {
         "min_quote_volume_24h": PUMP_CONFIG.get("MIN_QUOTE_VOLUME_USDT_24H"),
         "quote_asset": PUMP_CONFIG.get("QUOTE_ASSET", "USDT"),
@@ -1195,28 +1014,12 @@ def _watchlist_config() -> dict:
 
 
 def _bot_has_open_position() -> bool:
-    """REM KEAMANAN: apakah bot sedang memegang posisi terbuka.
-
-    Dibaca dari file state bot. Saat ada posisi terbuka, bot harus bisa
-    mengirim order jual kapan saja (Stop Loss/TP/trailing), jadi penyegaran
-    watchlist WAJIB mengalah dan tidak ikut memakan jatah rate-limit IP
-    yang sama.
-
-    Kalau file state tidak terbaca karena alasan apa pun, fungsi ini
-    mengembalikan True (anggap ada posisi). Sikap aman: lebih baik
-    penyegaran tertunda daripada mengganggu bot yang sedang pegang uang.
-    """
     try:
         st = load_state()
     except Exception:  # noqa: BLE001
         return True
     if not isinstance(st, dict):
         return True
-    # Skema yang BENAR adalah kunci top-level "current_symbol" + "qty",
-    # persis seperti yang ditulis DEFAULT_STATE di pump_scanner_bot.py.
-    # Versi lama fungsi ini membaca "position.symbol" -- kunci yang TIDAK
-    # PERNAH ditulis bot -- sehingga rem keamanan ini selalu bernilai False
-    # dan tidak pernah benar-benar aktif (temuan audit T-02, 2026-09-24).
     try:
         qty = float(st.get("qty", 0) or 0)
     except (TypeError, ValueError):
@@ -1225,7 +1028,6 @@ def _bot_has_open_position() -> bool:
 
 
 def start_auto_refresher() -> None:
-    """No-op: fitur penyegar otomatis watchlist telah dihapus penuh."""
     pass
 
 
@@ -1256,7 +1058,6 @@ def api_logs():
 
 
 def _bot_looks_alive() -> bool:
-    """Status proses berbasis PID/lock; umur state hanya cadangan terakhir."""
     try:
         status = _process_manager.status(get_mode(PUMP_CONFIG))
         if status["status"] in ("STARTING", "RUNNING", "STOPPING"):
@@ -1277,31 +1078,16 @@ def _bot_looks_alive() -> bool:
 
 @app.route("/api/manual/close", methods=["POST"])
 def api_manual_close():
-    """Tombol "Jual Sekarang" di dashboard -- TIDAK mengirim order langsung
-    dari dashboard (dashboard sengaja tidak menyimpan/menggunakan API
-    secret untuk order, hanya untuk baca saldo & harga). Sebagai gantinya,
-    dashboard menulis "perintah" ke CONTROL_FILE, lalu proses bot
-    (pump_scanner_bot.py, terpisah) yang membaca & mengeksekusinya lewat
-    jalur close_position() yang SAMA PERSIS dipakai Stop Loss/Take Profit,
-    supaya perilakunya konsisten (update cooldown, dst)."""
-    # Anti-CSRF (temuan S-05): perintah jual hanya diterima kalau request
-    # membawa header X-Admin-Token yang cocok dengan token acak per proses
-    # yang disisipkan ke halaman dashboard. compare_digest dipakai supaya
-    # perbandingan tidak bocor lewat timing.
     if not compare_digest(request.headers.get("X-Admin-Token", ""), _ADMIN_TOKEN):
         return jsonify({"error": "Token admin tidak valid atau tidak ada."}), 403
 
     now = time.time()
-    # Reservasi slot cooldown secara ATOMIK (check dan set dalam satu lock)
-    # supaya dobel-klik/permintaan paralel tidak bisa lolos berbarengan.
     with _manual_close_lock:
         if now - _last_manual_close_request["ts"] < _MANUAL_CLOSE_COOLDOWN_SECONDS:
             return jsonify({"error": "Tunggu sebentar, permintaan sebelumnya baru saja dikirim."}), 429
         _last_manual_close_request["ts"] = now
 
     def _release_cooldown() -> None:
-        # Validasi gagal = tidak ada perintah terkirim; slot dikembalikan
-        # supaya operator tidak menunggu 5 detik hanya karena salah simbol.
         with _manual_close_lock:
             if _last_manual_close_request["ts"] == now:
                 _last_manual_close_request["ts"] = 0.0
@@ -1348,8 +1134,6 @@ def api_manual_close():
 
 @app.route("/api/manual/close/status")
 def api_manual_close_status():
-    """Dipakai dashboard untuk polling apakah perintah "Jual Sekarang" yang
-    baru dikirim sudah dieksekusi bot (posisi sudah tertutup) atau belum."""
     pending = state_mod.load_control(CONTROL_FILE)
     state = load_state()
     return jsonify({
@@ -1363,7 +1147,6 @@ def api_manual_close_status():
 
 @app.route("/api/all")
 def api_all():
-    """Satu panggilan untuk semua data (mengurangi jumlah request)."""
     trades, events, level_count = parse_log()
     return jsonify({
         "status": build_status(),
@@ -1375,9 +1158,6 @@ def api_all():
     })
 
 
-# ======================================================================
-# Kontrol proses, settings, mode, kredensial, dan reset PAPER
-# ======================================================================
 def _config_pair(mode: str) -> tuple[dict, dict, list[str]]:
     raw = str(mode).strip().upper()
     if raw not in config_mod.VALID_MODES:
@@ -1416,16 +1196,6 @@ def _credentials_tested_for_active_values() -> bool:
 
 
 def _withdrawal_permission_safe() -> bool:
-    """True bila key yang sudah diuji terbukti TIDAK punya izin penarikan.
-
-    PERBAIKAN AUDIT 2026-09-30 (temuan TINGGI-05).
-
-    Nilai ini fail-closed: selama Uji Koneksi belum dijalankan untuk nilai
-    kredensial yang aktif, hasilnya False. Dengan begitu perpindahan ke LIVE
-    tidak pernah lolos hanya karena status penarikan belum pernah diperiksa.
-    Operator yang sadar risiko dapat melewatinya lewat environment
-    ALLOW_LIVE_WITHDRAWAL_KEY=1.
-    """
     if str(os.environ.get("ALLOW_LIVE_WITHDRAWAL_KEY", "")).strip().lower() in (
         "1", "true", "yes", "on"
     ):
@@ -1435,8 +1205,6 @@ def _withdrawal_permission_safe() -> bool:
     with _credential_lock:
         account = _credential_test_state.get("account") or {}
     if "can_withdraw" not in account:
-        # Hasil uji dari versi lama tidak merekam field ini. Jangan
-        # menyimpulkan aman; minta operator menjalankan Uji Koneksi lagi.
         return False
     return not bool(account.get("can_withdraw"))
 
@@ -1601,8 +1369,6 @@ def api_settings_preview():
 
     baseline_overrides = compute_overrides(defaults, current)
     overrides = compute_overrides(defaults, cleaned)
-    # Saldo awal dikelola panel reset, tetapi override itu tidak boleh hilang
-    # hanya karena pengguna menyimpan parameter strategi lain.
     if current.get("PAPER_INITIAL_BALANCES") != defaults.get("PAPER_INITIAL_BALANCES"):
         baseline_overrides["PAPER_INITIAL_BALANCES"] = deepcopy(current.get("PAPER_INITIAL_BALANCES"))
         overrides["PAPER_INITIAL_BALANCES"] = deepcopy(current.get("PAPER_INITIAL_BALANCES"))
@@ -1704,9 +1470,7 @@ def api_mode_checklist():
         "no_open_position": not position["has_position"],
         "credentials_complete": target != "LIVE" or creds_complete,
         "connection_tested": target != "LIVE" or tested,
-        # Temuan TINGGI-05: key LIVE tidak boleh punya izin penarikan dana.
         "withdrawal_disabled": target != "LIVE" or _withdrawal_permission_safe(),
-        # Temuan KRITIS-01: minimal satu rem kerugian tingkat akun wajib aktif.
         "account_stop_enabled": target != "LIVE" or bool(
             target_cfg.get("USE_EQUITY_STOP") or target_cfg.get("USE_DAILY_STOP")
         ),
@@ -1730,7 +1494,6 @@ def api_mode_prepare():
     target = str(data.get("target", "")).strip().upper()
     if target not in config_mod.VALID_MODES:
         return jsonify({"error": "Target mode tidak valid."}), 400
-    # Hitung ulang tanpa memanggil endpoint melalui HTTP.
     target_cfg, target_errors = config_mod.build_config_for_mode(target)
     process = _process_manager.status(get_mode(PUMP_CONFIG))
     position = _process_manager.position()
@@ -1748,14 +1511,12 @@ def api_mode_prepare():
             return jsonify({"error": "API key dan secret belum lengkap."}), 409
         if not _credentials_tested_for_active_values():
             return jsonify({"error": "Kredensial tersimpan belum lulus Uji Koneksi pada sesi ini."}), 409
-        # Temuan TINGGI-05: blokir key yang masih boleh menarik dana.
         if not _withdrawal_permission_safe():
             return jsonify({
                 "error": "API key masih mengizinkan penarikan dana, atau status itu belum "
                          "diverifikasi lewat Uji Koneksi. Matikan permission Enable "
                          "Withdrawals di Binance lalu jalankan Uji Koneksi ulang."
             }), 409
-        # Temuan KRITIS-01: jangan izinkan LIVE tanpa rem kerugian akun.
         if not (target_cfg.get("USE_EQUITY_STOP") or target_cfg.get("USE_DAILY_STOP")):
             return jsonify({
                 "error": "USE_EQUITY_STOP dan USE_DAILY_STOP dua-duanya nonaktif. "
@@ -1790,8 +1551,6 @@ def api_mode_commit():
         return jsonify({"error": "Konfigurasi target berubah sejak konfirmasi."}), 409
     if target == "LIVE" and not _credentials_tested_for_active_values():
         return jsonify({"error": "Status uji kredensial tidak lagi valid."}), 409
-    # Gerbang yang sama diperiksa ULANG saat commit (temuan TINGGI-05 dan
-    # KRITIS-01): kondisi bisa berubah di antara prepare dan commit.
     if target == "LIVE" and not _withdrawal_permission_safe():
         return jsonify({"error": "API key masih mengizinkan penarikan dana."}), 409
     if target == "LIVE" and not (target_cfg.get("USE_EQUITY_STOP")
@@ -1907,11 +1666,6 @@ def api_credentials_test():
         }), 400
     except Exception:
         return jsonify({"error": "Uji koneksi gagal karena jaringan atau layanan Binance tidak tersedia."}), 502
-    # PERBAIKAN AUDIT 2026-09-30 (temuan TINGGI-05): canWithdraw ikut dibaca
-    # dan disimpan. Sebelumnya respons /api/v3/account sudah memuat field ini
-    # tetapi dibuang, sehingga rekomendasi "gunakan key tanpa izin withdrawal"
-    # tidak pernah diverifikasi oleh apa pun. Key dengan izin penarikan yang
-    # bocor berarti dana bisa dikuras, bukan sekadar disalahtradingkan.
     tested_account = {"account_type": account.get("accountType"),
                       "can_trade": bool(account.get("canTrade")),
                       "can_withdraw": bool(account.get("canWithdraw")),
@@ -2003,7 +1757,6 @@ def api_paper_reset_commit():
 
     defaults, current, errors = _config_pair("PAPER")
     if errors:
-        # Kembalikan file karena settings tidak aman untuk diperbarui.
         for source, backup in reversed(moved):
             try:
                 replace_with_retry(backup, source)
@@ -2019,7 +1772,6 @@ def api_paper_reset_commit():
         config_mod.reload_config()
         _refresh_runtime_globals()
     except (OSError, ValueError) as exc:
-        # Kembalikan settings dan kedua file supaya reset tidak setengah jadi.
         try:
             save_mode_override("PAPER", previous_overrides)
             config_mod.reload_config()
@@ -2046,19 +1798,9 @@ def api_paper_reset_commit():
 
 
 def main(*, auto_start_bot: bool = False) -> int:
-    """Jalankan dashboard.
-
-    Default auto_start_bot=False: dashboard menyala tanpa menjalankan bot,
-    sehingga status bot tetap STOPPED sampai pengguna menekan Start di
-    dashboard. run.py juga memanggil dengan auto_start_bot=False. Nilai True
-    hanya untuk pemanggil khusus yang memang ingin bot langsung hidup, dan
-    tetap dipaksa False bila DASHBOARD_HOST bukan loopback.
-    """
     start_auto_refresher()
 
     if not _bind_is_loopback():
-        # Agar halaman peringatan read-only dapat dibuka pada bind yang
-        # dipilih eksplisit, host itu dipercaya untuk request baca saja.
         trusted = list(app.config.get("TRUSTED_HOSTS") or [])
         if _DASHBOARD_HOST not in ("0.0.0.0", "::"):
             trusted.append(_DASHBOARD_HOST)
@@ -2092,38 +1834,3 @@ def main(*, auto_start_bot: bool = False) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main(auto_start_bot=False))
-
-
-# ==== RINGKASAN AUDIT (dashboard.py, bagian backtest portofolio) ======
-# Lingkup perubahan: HANYA _bt_run_job(). Tidak ada endpoint, kebijakan
-#   keamanan, atau alur bot/paper/live yang disentuh. Diff-nya 20 baris
-#   tambah, 8 baris hapus, semuanya di sekitar pemanggilan portfolio_backtest.
-# Apa yang berubah: candle backtest tidak lagi ditampung dict RAM. Job
-#   membuat satu store SQLite temporary lewat pbt.new_backtest_store(cfg),
-#   meneruskannya ke fetch_universe_klines()/fetch_universe_daily_klines()/
-#   run_portfolio_backtest(), lalu menghapusnya di blok finally.
-# Pemanggil: _bt_run_job hanya dipanggil dari /api/backtest/start lewat
-#   threading.Thread (grep seluruh repo, 2026-09-26). Tidak ada pemanggil
-#   lain, termasuk di tests/; tes baru memanggilnya langsung di
-#   tests/test_dashboard_backtest_job.py.
-# Sintaks/tipe: variabel `data`/`daily_data` yang sudah tidak ada diganti
-#   `symbols_with_data` (list[str]) dan dipakai konsisten di payload
-#   ("universe_with_data"). Komentar tahap 2b tetap akurat karena candle 1d
-#   memang masih diunduh terpisah, hanya tujuan simpannya yang berubah.
-# Keamanan: tidak ada SQL di file ini; path file temporary dibuat
-#   tempfile.mkdtemp() di dalam backtest_storage, bukan path tetap milik
-#   dashboard, sehingga tidak ada penulisan ke direktori aplikasi.
-# Race condition: store dibuat DAN dipakai di thread job yang sama; hanya
-#   cleanup() yang boleh datang dari jalur lain dan itu dijaga lock internal
-#   store. Dua job backtest paralel memakai dua direktori temporary berbeda.
-#   Pembacaan progress/cancel tetap lewat _bt_jobs_lock seperti sebelumnya.
-# Kebocoran sumber daya: blok finally menjamin file terhapus pada jalur
-#   sukses, BacktestError (termasuk pembatalan), maupun exception tak terduga;
-#   diuji tests/test_dashboard_backtest_job.py.
-# Cache candle lintas job: kline_cache dibuka pbt.open_kline_cache(cfg) dan di
-#   finally hanya DITUTUP, tidak dihapus, karena isinya memang untuk job
-#   berikutnya. Bedakan dengan store sementara yang selalu dihapus. Ringkasan
-#   isi cache ikut dilaporkan di payload["cache"] supaya pengguna tahu berapa
-#   baris yang dipakai ulang, bukan menebak. Kalau cache gagal dibuka,
-#   nilainya None dan job berjalan seperti sebelum ada cache.
-# =======================================================================

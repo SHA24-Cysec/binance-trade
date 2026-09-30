@@ -57,54 +57,42 @@ from typing import Callable, Optional, Sequence
 from backtesting import backtest as bt
 from strategy.indicators import Kline
 
-# Parameter yang hanya berlaku pada mode ATR.
 _KUNCI_ATR = (
     "ATR_PERIOD", "ATR_MULT_SL", "ATR_MULT_TP", "ATR_MULT_BE_TRIGGER",
     "ATR_MULT_BE_LOCK", "ATR_MULT_TRAIL_START", "ATR_MULT_TRAIL",
 )
-# Parameter yang hanya berlaku pada mode persen tetap.
 _KUNCI_PERSEN = (
     "SL_PCT", "TP_PCT", "BE_TRIGGER_PCT", "BE_LOCK_PCT",
     "TRAILING_START_PCT", "TRAILING_STEP_PCT",
 )
 
-# Batas keras jumlah kombinasi. Setiap kombinasi berarti satu kali penelusuran
-# penuh seluruh candle, jadi grid yang tidak dibatasi bisa berjalan berjam jam
-# dan membuat dashboard tampak menggantung.
 MAX_KOMBINASI = 2000
 
 METRIK_TERSEDIA = (
-    "total_return_pct",     # return bersih setelah fee
-    "profit_factor",        # total profit dibagi total loss
-    "return_per_drawdown",  # return dibagi max drawdown, ukuran ketahanan
+    "total_return_pct",
+    "profit_factor",
+    "return_per_drawdown",
     "win_rate",
 )
 
 
 class GridSearchError(Exception):
-    """Kesalahan yang layak ditampilkan langsung ke pengguna."""
+    pass
 
 
 @dataclass
 class HasilKombinasi:
-    """Satu kombinasi parameter beserta hasilnya di dua periode."""
 
     params: dict
-    latih: dict                      # ringkasan periode in-sample
-    uji: Optional[dict] = None       # ringkasan periode out-of-sample
+    latih: dict
+    uji: Optional[dict] = None
     skor_latih: float = 0.0
     skor_uji: Optional[float] = None
-    andal: bool = True               # False bila jumlah trade terlalu sedikit
+    andal: bool = True
     catatan: str = ""
 
     @property
     def degradasi(self) -> Optional[float]:
-        """Selisih skor latih dan skor uji.
-
-        Nilai positif besar berarti performa jatuh pada data yang belum
-        pernah dilihat, yaitu gejala khas overfitting. None bila tidak ada
-        periode uji.
-        """
         if self.skor_uji is None:
             return None
         return self.skor_latih - self.skor_uji
@@ -124,18 +112,8 @@ class HasilGridSearch:
     dibatalkan: bool = False
 
 
-# ---------------------------------------------------------------------
-# Penyusunan grid
-# ---------------------------------------------------------------------
 def buat_rentang(mulai: float, sampai: float, langkah: float,
                  bulatkan: int = 6) -> list[float]:
-    """Deret nilai inklusif dari `mulai` sampai `sampai`.
-
-    Memakai perkalian indeks, bukan penjumlahan berulang, supaya galat
-    pembulatan float tidak menumpuk. Penjumlahan berulang membuat
-    0.1 + 0.1 + 0.1 menjadi 0.30000000000000004 dan nilai terakhir bisa
-    hilang dari deret.
-    """
     if langkah <= 0:
         raise GridSearchError("Langkah rentang harus lebih besar dari nol.")
     if sampai < mulai:
@@ -145,12 +123,6 @@ def buat_rentang(mulai: float, sampai: float, langkah: float,
 
 
 def _normalkan_spec(spec: dict) -> dict[str, list]:
-    """Ubah spesifikasi grid menjadi dict kunci -> daftar nilai.
-
-    Dua bentuk diterima untuk tiap kunci:
-      daftar eksplisit : {"SL_PCT": [1.0, 2.0, 3.0]}
-      rentang          : {"SL_PCT": {"mulai": 1.0, "sampai": 3.0, "langkah": 0.5}}
-    """
     keluar: dict[str, list] = {}
     for kunci, nilai in spec.items():
         if isinstance(nilai, dict):
@@ -172,13 +144,6 @@ def _normalkan_spec(spec: dict) -> dict[str, list]:
 
 
 def expand_grid(spec: dict) -> tuple[list[dict], int]:
-    """Kembalikan (daftar kombinasi unik, jumlah yang dipangkas).
-
-    Pemangkasan membuang kombinasi yang secara perilaku identik. Contoh:
-    bila USE_ATR_EXIT bernilai True, nilai SL_PCT tidak pernah dibaca oleh
-    mesin backtest, jadi (ATR, SL_PCT=1) dan (ATR, SL_PCT=9) akan memberi
-    hasil yang sama persis. Cukup satu yang dijalankan.
-    """
     dinormalkan = _normalkan_spec(spec)
     kunci = list(dinormalkan)
     total_mentah = 1
@@ -196,7 +161,6 @@ def expand_grid(spec: dict) -> tuple[list[dict], int]:
     for nilai in itertools.product(*(dinormalkan[k] for k in kunci)):
         calon = dict(zip(kunci, nilai))
         pakai_atr = bool(calon.get("USE_ATR_EXIT", False))
-        # Sidik jari hanya memuat parameter yang benar benar berpengaruh.
         relevan = {k: v for k, v in calon.items()
                    if not (pakai_atr and k in _KUNCI_PERSEN)
                    and not (not pakai_atr and k in _KUNCI_ATR)}
@@ -214,15 +178,7 @@ def expand_grid(spec: dict) -> tuple[list[dict], int]:
     return kombinasi, dipangkas
 
 
-# ---------------------------------------------------------------------
-# Skor
-# ---------------------------------------------------------------------
 def hitung_skor(ringkas: dict, metrik: str) -> float:
-    """Ubah ringkasan backtest menjadi satu angka untuk diperingkat.
-
-    Nilai tak hingga dinetralkan supaya pengurutan tidak didominasi oleh
-    kombinasi yang kebetulan tidak pernah rugi (profit factor tak hingga).
-    """
     if metrik == "total_return_pct":
         nilai = float(ringkas.get("total_return_pct", 0.0))
     elif metrik == "profit_factor":
@@ -232,8 +188,6 @@ def hitung_skor(ringkas: dict, metrik: str) -> float:
     elif metrik == "return_per_drawdown":
         dd = abs(float(ringkas.get("max_drawdown_pct", 0.0)))
         ret = float(ringkas.get("total_return_pct", 0.0))
-        # Drawdown nol biasanya berarti sampel terlalu kecil, bukan strategi
-        # sempurna. Dipakai lantai 1 persen supaya tidak meledak jadi tak hingga.
         nilai = ret / max(dd, 1.0)
     else:
         raise GridSearchError(
@@ -245,9 +199,6 @@ def hitung_skor(ringkas: dict, metrik: str) -> float:
     return nilai
 
 
-# ---------------------------------------------------------------------
-# Eksekusi
-# ---------------------------------------------------------------------
 def run_grid_search(
     klines: Sequence[Kline],
     base_config: dict,
@@ -260,15 +211,6 @@ def run_grid_search(
     progress_cb: Optional[Callable[[float], None]] = None,
     cancel_cb: Optional[Callable[[], bool]] = None,
 ) -> HasilGridSearch:
-    """Jalankan grid search dengan pemisahan periode latih dan uji.
-
-    rasio_latih : porsi data untuk periode latih. 0.7 berarti 70 persen awal
-                  dipakai memilih parameter, 30 persen sisanya hanya dipakai
-                  memverifikasi. Nilai 1.0 mematikan pemisahan, dan modul akan
-                  menambahkan peringatan eksplisit karena hasilnya tidak bisa
-                  divalidasi.
-    min_trades  : di bawah jumlah ini hasil ditandai tidak andal.
-    """
     if metrik not in METRIK_TERSEDIA:
         raise GridSearchError(
             f"Metrik '{metrik}' tidak dikenal. Pilihan: {', '.join(METRIK_TERSEDIA)}.")
@@ -285,8 +227,6 @@ def run_grid_search(
     hasil_grid = HasilGridSearch(
         total_kombinasi=len(kombinasi), dipangkas=dipangkas, metrik=metrik)
 
-    # Pemisahan dilakukan pada sumbu waktu, bukan acak. Data harga bersifat
-    # berurutan, jadi pengacakan akan membocorkan masa depan ke periode latih.
     if rasio_latih >= 1.0:
         potong = n
         kl_latih, kl_uji = klines, []
@@ -296,9 +236,6 @@ def run_grid_search(
     else:
         potong = warmup_bars + int((n - warmup_bars) * rasio_latih)
         kl_latih = klines[:potong]
-        # Periode uji ikut membawa warmup di depannya supaya statistik 24 jam
-        # dan ATR tetap punya sejarah yang cukup. Tanpa ini, bar bar awal
-        # periode uji akan ditolak karena warmup belum terpenuhi.
         awal_uji = max(0, potong - warmup_bars)
         kl_uji = klines[awal_uji:]
 
@@ -311,11 +248,6 @@ def run_grid_search(
             f"memvalidasi apa pun. Perpanjang rentang hari atau turunkan rasio_latih.")
 
     def _harian_untuk(potongan: Sequence[Kline]) -> Optional[list[Kline]]:
-        """Saring candle harian agar tidak melampaui periode yang diuji.
-
-        Tanpa penyaringan ini, periode latih akan melihat candle harian dari
-        masa depan dan gerbang pump menjadi bocor (look-ahead bias).
-        """
         if not daily_klines or not potongan:
             return None
         batas = potongan[-1].close_time
@@ -335,8 +267,6 @@ def run_grid_search(
             cfg = bt.apply_overrides(base_config, params)
             bt.validate_params(cfg)
         except bt.BacktestError:
-            # Kombinasi tidak valid, misalnya nilai di luar rentang wajar.
-            # Dilewati diam diam, bukan menggagalkan seluruh grid.
             dilewati += 1
             continue
 
@@ -377,10 +307,6 @@ def run_grid_search(
     if progress_cb:
         progress_cb(1.0)
 
-    # Diurutkan berdasarkan skor LATIH, karena periode uji tidak boleh ikut
-    # menentukan pilihan. Kalau periode uji dipakai untuk memilih, ia berhenti
-    # menjadi data yang belum pernah dilihat dan validasinya kehilangan makna.
-    # Hasil yang tidak andal selalu ditaruh di bawah.
     hasil_grid.hasil.sort(key=lambda h: (h.andal, h.skor_latih), reverse=True)
     hasil_grid.dilewati = dilewati
     hasil_grid.detik = time.time() - mulai
@@ -399,7 +325,6 @@ def run_grid_search(
 
 
 def ringkas_untuk_tabel(hasil: HasilGridSearch, top_n: int = 20) -> list[dict]:
-    """Bentuk data siap tampil untuk dashboard atau terminal."""
     baris = []
     for h in hasil.hasil[:top_n]:
         b = {
@@ -426,7 +351,6 @@ def ringkas_untuk_tabel(hasil: HasilGridSearch, top_n: int = 20) -> list[dict]:
 
 
 def cetak_tabel(hasil: HasilGridSearch, top_n: int = 15) -> None:
-    """Cetak hasil ke terminal dengan format yang mudah dibaca."""
     print(f"\n{'='*104}")
     print(f"HASIL GRID SEARCH  (metrik: {hasil.metrik})")
     print(f"{'='*104}")
@@ -470,12 +394,6 @@ def cetak_tabel(hasil: HasilGridSearch, top_n: int = 15) -> None:
         print("  data baru, yaitu tanda overfitting. Pilih yang ret.UJI-nya tetap wajar.")
 
 
-# ---------------------------------------------------------------------
-# Parser spesifikasi untuk baris perintah
-# ---------------------------------------------------------------------
-# Kunci boolean perlu penanganan khusus: string "False" bernilai True kalau
-# hanya dicek kebenarannya, dan kesalahan seperti ini sulit terlihat karena
-# grid tetap berjalan dan hanya memberi hasil yang salah diam diam.
 _KUNCI_BOOL = ("USE_ATR_EXIT",)
 _KUNCI_INT = ("ATR_PERIOD",)
 
@@ -496,17 +414,6 @@ def _konversi_nilai(kunci: str, teks: str):
 
 
 def parse_spec_cli(teks: str) -> dict:
-    """Ubah spesifikasi ringkas dari baris perintah menjadi dict grid.
-
-    Dua bentuk yang diterima, dipisah koma antar parameter:
-
-        SL_PCT=1:4:0.5      rentang mulai:sampai:langkah
-        TP_PCT=2|4|6        daftar nilai eksplisit
-        USE_ATR_EXIT=false  nilai tunggal
-
-    Contoh lengkap:
-        "USE_ATR_EXIT=false,SL_PCT=1:4:0.5,TP_PCT=2|4|6"
-    """
     if not teks or not teks.strip():
         raise GridSearchError("Spesifikasi grid kosong.")
 

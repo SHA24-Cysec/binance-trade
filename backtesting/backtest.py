@@ -20,8 +20,6 @@ from market import market_scanner as scanner
 MS_PER_MIN = 60_000
 MS_PER_DAY = 24 * 60 * MS_PER_MIN
 
-# Satu sumber kebenaran ada di strategy.py supaya bot live, backtest satu
-# simbol, dan backtest portofolio tidak pernah memakai tabel yang berbeda.
 INTERVAL_MINUTES = strategy.INTERVAL_MINUTES
 
 
@@ -72,11 +70,6 @@ def bars_per_day(interval: str) -> int:
 
 
 def initial_backtest_equity(config: dict) -> float:
-    """Equity quote awal untuk simulasi sizing sequential.
-
-    Nilai eksplisit BACKTEST_INITIAL_EQUITY_USDT diutamakan. Fallback menjaga
-    kompatibilitas config lama dengan saldo PAPER awal, lalu 10.000 USDT.
-    """
     fallback = (config.get("PAPER_INITIAL_BALANCES", {}) or {}).get(
         config.get("QUOTE_ASSET", "USDT"), 10_000.0)
     value = float(config.get("BACKTEST_INITIAL_EQUITY_USDT", fallback) or 0.0)
@@ -84,22 +77,17 @@ def initial_backtest_equity(config: dict) -> float:
 
 
 def compute_rolling_24h_stats(klines: list[Kline], window: int) -> list[Optional[dict]]:
-    """Untuk tiap index i, hitung (price_change_pct_24h, quote_volume_24h)
-    berdasarkan window candle terakhir (termasuk candle i). None kalau
-    riwayat belum cukup (i < window - 1) -- konsisten dengan bot asli yang
-    baru mempertimbangkan simbol setelah ada histori 24 jam penuh."""
     n = len(klines)
     out: list[Optional[dict]] = [None] * n
     if n == 0:
         return out
-    # Rolling sum volume pakai sliding window supaya O(n), bukan O(n*window).
     vol_sum = 0.0
     for i in range(n):
         vol_sum += klines[i].quote_volume
         if i >= window:
             vol_sum -= klines[i - window].quote_volume
         if i >= window - 1:
-            ref_close = klines[i - window + 1].open  # harga acuan "24 jam lalu"
+            ref_close = klines[i - window + 1].open
             if ref_close > 0:
                 pct = (klines[i].close / ref_close - 1.0) * 100.0
                 out[i] = {"pct24h": pct, "vol24h": vol_sum}
@@ -115,8 +103,6 @@ def fetch_full_klines(
     progress_cb: Optional[Callable[[float], None]] = None,
     sleep_between_calls: float = 0.25,
 ) -> list[Kline]:
-    """Ambil semua candle dalam rentang [start_ms, end_ms] dengan paging
-    (endpoint Binance maksimal 1000 candle per panggilan)."""
     from strategy.indicators import parse_klines
 
     all_rows: list = []
@@ -125,7 +111,7 @@ def fetch_full_klines(
     step_ms = minutes * MS_PER_MIN
     total_span = max(1, end_ms - start_ms)
     guard = 0
-    guard_limit = 5000  # jaga-jaga supaya tidak infinite loop kalau API aneh
+    guard_limit = 5000
 
     while cursor < end_ms:
         guard += 1
@@ -149,7 +135,6 @@ def fetch_full_klines(
             time.sleep(sleep_between_calls)
 
     klines = parse_klines(all_rows)
-    # Buang duplikat (batas antar-halaman kadang tumpang tindih) & urutkan.
     seen = set()
     unique = []
     for k in klines:
@@ -164,31 +149,11 @@ def fetch_full_klines(
 def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
                   progress_cb: Optional[Callable[[float], None]] = None,
                   daily_klines: Optional[list[Kline]] = None) -> BacktestResult:
-    """klines: candle SUDAH termasuk periode warmup di depan (dipakai untuk
-    hitung 24h stats & deteksi setup), sepanjang `warmup_bars` candle
-    pertama tidak akan dipakai sebagai titik entry, hanya sebagai referensi.
-
-    config: dict gabungan PUMP_CONFIG + override parameter dari form (lihat
-    apply_overrides()).
-
-    daily_klines: candle 1d simbol yang sama, dipakai gerbang pump untuk
-    menghitung rata-rata volume kuotasi 7 hari penuh SEBELUM tiap bar yang
-    diuji. Kalau None, deret harian dibangun dengan menjumlahkan candle
-    intraday yang sudah ada (scanner.aggregate_to_daily), jadi gerbangnya
-    tetap berlaku tanpa request tambahan. Perlu dicatat: hari pertama pada
-    data intraday biasanya tidak lengkap sehingga volumenya lebih kecil dari
-    volume harian sebenarnya. Pemanggil yang butuh presisi penuh (dashboard)
-    sebaiknya mengunduh candle 1d asli dan mengoperkannya lewat parameter ini.
-
-    Gerbang pump dievaluasi PER BAR memakai fungsi yang sama dengan bot live
-    (market_scanner.evaluate_pump_gate), dan hanya memakai candle harian yang
-    sudah tertutup pada bar tersebut, jadi tidak ada look-ahead."""
     interval = config.get("CONFIRM_INTERVAL", "5m")
     window = bars_per_day(interval)
     stats = compute_rolling_24h_stats(klines, window)
     daily_series = daily_klines if daily_klines else scanner.aggregate_to_daily(klines)
 
-    # Jendela konfirmasi memakai fungsi bersama, sama dengan bot live.
     lookback = strategy.confirm_window_bars(config)
     min_vol = config["MIN_QUOTE_VOLUME_USDT_24H"]
     cooldown_ms = config["COOLDOWN_MINUTES_AFTER_CLOSE"] * MS_PER_MIN
@@ -219,7 +184,6 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
     trailing_stop = 0.0
     next_entry_allowed_at = 0
 
-    # Biaya per putaran: fee taker dibayar saat BUY dan saat SELL.
     try:
         from config.config import get_taker_fee_pct as _fee_fn
         fee_round_trip_pct = _fee_fn(config) * 2.0
@@ -249,18 +213,10 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
 
         if not in_position:
             st = stats[i]
-            # Dua gerbang semesta, sama persis dengan bot live: likuiditas
-            # lebih dulu (murah), lalu gerbang pump (naik 24 jam dan volume
-            # naik). Rata-rata 7 hari dihitung hanya dari candle harian yang
-            # sudah tertutup pada bar ini, bukan dari data hari ini.
             if st is not None and st["vol24h"] >= min_vol \
                     and candle.open_time >= next_entry_allowed_at \
                     and scanner.pump_gate_ok_at(daily_series, candle.close_time,
                                                 st["pct24h"], st["vol24h"], config):
-                # Pada index i candle sudah dianggap selesai. Fungsi yang sama
-                # dipakai bot live setelah ia membuang candle yang masih
-                # berjalan, jadi aturan entry tidak berbeda antara live dan
-                # backtest.
                 window_klines = klines[max(0, i - lookback + 1): i + 1]
                 setup = scanner.detect_pullback_retest(window_klines, config)
                 if setup.ok:
@@ -270,8 +226,6 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
                         i += 1
                         continue
                     sizing = strategy.resolve_position_notional(config, equity)
-                    # Sama seperti live: posisi fixed yang lebih besar dari
-                    # saldo tidak boleh "terisi" secara ajaib di backtest.
                     if sizing["notional"] <= 0 or sizing["notional"] > equity:
                         i += 1
                         continue
@@ -294,9 +248,6 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
                     trailing_active = False
                     be_stop = 0.0
                     trailing_stop = 0.0
-                    # Level exit dikunci saat sinyal entry memakai fungsi yang
-                    # sama dengan bot live. Eksekusi baru terjadi setelah
-                    # latency bar, pada ask adverse bar berikutnya.
                     level_cfg = dict(config)
                     level_cfg["_atr_value"] = strategy.atr(klines[:i + 1], int(config.get("ATR_PERIOD", 14) or 14))
                     lv = strategy.resolve_exit_levels(level_cfg)
@@ -312,7 +263,6 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
             i += 1
             continue
 
-        # --- sudah dalam posisi: evaluasi candle demi candle ---
         pnl_high = (candle.high / entry_price - 1.0) * 100.0
         pnl_low = (candle.low / entry_price - 1.0) * 100.0
         hold_minutes = (candle.close_time - entry_time) / 60000.0
@@ -335,20 +285,6 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
         exit_reason = None
         exit_price = None
 
-        # Prioritas SENGAJA dibuat KONSERVATIF: Stop Loss dicek PALING AWAL
-        # (pakai harga TERENDAH candle). Kalau dalam satu candle 5 menit yang
-        # sama harga sempat menyentuh level SL maupun level TP/BE/Trailing
-        # (candle sangat fluktuatif), backtest ini menganggap SL kena LEBIH
-        # DULU -- supaya hasil backtest tidak melebih-lebihkan profit dan
-        # tetap jujur soal risiko, sesuai keputusan yang diminta saat
-        # menambahkan fitur ini. Baru setelah itu TAKE_PROFIT (harga
-        # TERTINGGI candle), lalu BREAKEVEN/TRAILING_STOP (harga TERENDAH).
-        #
-        # Fill GAP-AWARE (perbaikan audit B-06): kalau candle DIBUKA sudah
-        # menembus level (gap), harga exit realistis adalah harga pembukaan,
-        # bukan level stopnya -- konsisten dengan paper_engine yang mengisi
-        # stop pada harga book pasca-gap. Tanpa ini backtest terlalu optimis
-        # pada pair yang sering gap.
         sl_triggered = (candle.low <= sl_price if atr_mode else pnl_low <= -cur_sl)
         if config["USE_STOP_LOSS"] and sl_triggered:
             exit_reason = "STOP_LOSS"
@@ -376,13 +312,7 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
             raw_exit_price = exit_price
             exit_price = strategy.backtest_sell_execution_price(
                 raw_exit_price, execution_spread_pct, execution_slippage_pct)
-            # PnL KOTOR (belum dipotong biaya), setelah adverse spread/slippage.
             gross_pct = (exit_price / entry_price - 1.0) * 100.0
-            # PnL BERSIH: fee taker dibayar DUA KALI (saat beli dan saat jual).
-            # Ini bukan detail kosmetik -- pada strategi dengan TP 4% dan
-            # banyak trade, biaya 0,2% pulang-pergi memakan bagian nyata dari
-            # hasil. Backtest yang mengabaikannya akan terlihat jauh lebih
-            # bagus daripada kenyataan.
             pnl_pct = gross_pct - fee_round_trip_pct
             pnl_quote = position_notional * pnl_pct / 100.0
             equity_after = max(0.0, equity + pnl_quote)
@@ -425,10 +355,6 @@ def summarize(result: BacktestResult) -> dict:
     losses = [t for t in trades if t.pnl_pct <= 0]
     win_rate = (len(wins) / total * 100.0) if total else 0.0
 
-    # Equity curve memakai hasil nominal yang benar-benar disimulasikan oleh
-    # run_backtest, bukan mengompound pnl% seolah setiap entry memakai 100%
-    # akun. Untuk objek lama/manual tanpa nominal, fallback menjaga fungsi
-    # tetap dapat dipakai dengan modal konfigurasi saat ini.
     initial = result.initial_equity or initial_backtest_equity(result.params)
     equity = initial
     gross_equity = initial
@@ -487,11 +413,7 @@ def summarize(result: BacktestResult) -> dict:
     }
 
 def apply_overrides(base_config: dict, overrides: dict) -> dict:
-    """Gabungkan PUMP_CONFIG asli dengan override dari form backtest.
-    Hanya key yang dikenal (whitelist) yang boleh menimpa -- ini mencegah
-    input form sembarangan mengubah field lain yang tidak dimaksudkan."""
     def _as_bool(v):
-        """Terima True/False asli, juga string 'true'/'1'/'on' dari form web."""
         if isinstance(v, bool):
             return v
         if isinstance(v, (int, float)):
@@ -518,7 +440,6 @@ def apply_overrides(base_config: dict, overrides: dict) -> dict:
         "BE_LOCK_PCT": float,
         "TRAILING_START_PCT": float,
         "TRAILING_STEP_PCT": float,
-        # Parameter setup pullback retest yang boleh diuji dari form backtest.
         "MAX_BARS_BREAKOUT_TO_RETEST": int,
     }
     cfg = copy.deepcopy(base_config)
@@ -566,10 +487,6 @@ def validate_params(cfg: dict) -> None:
         )
 
 
-# ---------------------------------------------------------------------
-# Selftest -- murni logika, TANPA jaringan (pola sama seperti
-# pump_scanner_bot.py --selftest).
-# ---------------------------------------------------------------------
 def _make_candle(t, o, h, l, c, vol=1_000_000.0, qvol=None):
     if qvol is None:
         qvol = vol * ((o + c) / 2.0)
@@ -602,8 +519,6 @@ def selftest():
     )
     cfg = cfg_gerbang_pump_nonaktif(PUMP_CONFIG)
     cfg["MIN_QUOTE_VOLUME_USDT_24H"] = 1_000_000
-    # Selftest menguji logika setup dengan data sintetis yang berakhir tepat
-    # pada sinyal, bukan model latency historis.
     cfg["BACKTEST_ENTRY_DELAY_BARS"] = 0
     cfg["BACKTEST_ENTRY_SPREAD_PCT"] = 0.0
     cfg["BACKTEST_SLIPPAGE_PCT"] = 0.0
@@ -732,7 +647,6 @@ def main():
     parser.add_argument("--symbol", default="BTCUSDT", help="Simbol, mis. SOLUSDT")
     parser.add_argument("--days", type=int, default=30, help="Jumlah hari data historis")
     parser.add_argument("--interval", default=None, help="Interval candle, default dari config")
-    # --- grid search (ditambahkan 1 Oktober 2026) ---
     parser.add_argument("--grid", metavar="SPEC", default=None,
                          help="Jalankan grid search. Format: "
                               "\"SL_PCT=1:4:0.5,TP_PCT=2:8:1\" untuk rentang, atau "

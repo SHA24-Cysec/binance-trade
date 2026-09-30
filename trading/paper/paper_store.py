@@ -49,20 +49,12 @@ _ZERO = Decimal("0")
 
 
 def _d(value: Any) -> Decimal:
-    """Konversi aman ke Decimal (lewat str agar tidak menyerap galat float)."""
     if isinstance(value, Decimal):
         return value
     return Decimal(str(value))
 
 
 def load_account_snapshot(path: str) -> dict:
-    """Baca file state PAPER secara READ-ONLY dan kembalikan bentuk seperti
-    GET /api/v3/account, TANPA membuat/menulis file apa pun.
-
-    Dipakai proses DASHBOARD (terpisah dari bot) agar bisa menampilkan saldo
-    virtual tanpa risiko balapan tulis dengan proses bot yang memegang file
-    yang sama. Bila file belum ada / rusak, kembalikan akun kosong.
-    """
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -88,7 +80,6 @@ def load_account_snapshot(path: str) -> dict:
 
 
 class PaperStore:
-    """State akun simulasi PAPER yang persisten dan aman-thread."""
 
     def __init__(self, path: str, initial_balances: Optional[dict] = None) -> None:
         self.path = path
@@ -97,9 +88,6 @@ class PaperStore:
         self.state: dict[str, Any] = {}
         self._load_or_init()
 
-    # ------------------------------------------------------------------
-    # Muat / inisialisasi
-    # ------------------------------------------------------------------
     def _default_state(self) -> dict[str, Any]:
         balances = {}
         for asset, amount in self.initial_balances.items():
@@ -161,17 +149,12 @@ class PaperStore:
                 raise KeyError(f"kunci wajib '{key}' hilang di state")
         if not isinstance(data["balances"], dict):
             raise ValueError("balances harus objek")
-        # Validasi nilai saldo bisa diparse jadi Decimal.
         for asset, bal in data["balances"].items():
             _d(bal.get("free", 0))
             _d(bal.get("locked", 0))
 
-    # ------------------------------------------------------------------
-    # Migrasi skema
-    # ------------------------------------------------------------------
     def _migrate(self, data: dict) -> dict:
         version = int(data.get("schema_version", 0))
-        # Registry migrasi: fungsi yang menaikkan versi N -> N+1.
         migrations: dict[int, Callable[[dict], dict]] = {
             0: self._migrate_0_to_1,
         }
@@ -186,16 +169,11 @@ class PaperStore:
         return data
 
     def _migrate_0_to_1(self, data: dict) -> dict:
-        """Versi 0 (tanpa nomor) -> 1: lengkapi kunci yang hilang dengan default.
-        Contoh migrasi sederhana; tambah handler baru bila skema berkembang."""
         base = self._default_state()
         base.update({k: v for k, v in data.items() if k != "schema_version"})
         base["schema_version"] = 1
         return base
 
-    # ------------------------------------------------------------------
-    # Penyimpanan atomik
-    # ------------------------------------------------------------------
     def _save_locked(self) -> None:
         atomic_write_json(self.path, self.state)
 
@@ -203,9 +181,6 @@ class PaperStore:
         with self.lock:
             self._save_locked()
 
-    # ------------------------------------------------------------------
-    # Operasi saldo (semua di bawah lock)
-    # ------------------------------------------------------------------
     def _bal(self, asset: str) -> dict:
         a = asset.upper()
         b = self.state["balances"].get(a)
@@ -223,13 +198,11 @@ class PaperStore:
             return _d(self._bal(asset)["locked"])
 
     def credit(self, asset: str, amount: Decimal) -> None:
-        """Tambah saldo free."""
         with self.lock:
             b = self._bal(asset)
             b["free"] = str(_d(b["free"]) + _d(amount))
 
     def debit(self, asset: str, amount: Decimal) -> None:
-        """Kurangi saldo free. Melempar bila tidak cukup (proteksi konsistensi)."""
         with self.lock:
             b = self._bal(asset)
             free = _d(b["free"])
@@ -256,7 +229,6 @@ class PaperStore:
             b["free"] = str(_d(b["free"]) + take)
 
     def consume_locked(self, asset: str, amount: Decimal) -> None:
-        """Ambil dari saldo locked (mis. saat limit order terisi)."""
         with self.lock:
             b = self._bal(asset)
             locked = _d(b["locked"]); amt = _d(amount)
@@ -269,9 +241,6 @@ class PaperStore:
             cur = _d(self.state["total_fees"].get(asset.upper(), 0))
             self.state["total_fees"][asset.upper()] = str(cur + _d(amount))
 
-    # ------------------------------------------------------------------
-    # Order & trade
-    # ------------------------------------------------------------------
     def next_order_id(self) -> int:
         with self.lock:
             oid = int(self.state["next_order_id"])
@@ -290,7 +259,6 @@ class PaperStore:
         with self.lock:
             seen = self.state["seen_client_order_ids"]
             seen.append(coid)
-            # Batasi pertumbuhan tak terbatas: simpan 5000 terakhir.
             if len(seen) > 5000:
                 del seen[: len(seen) - 5000]
 
@@ -344,9 +312,6 @@ class PaperStore:
             if len(self.state["trade_history"]) > 20000:
                 del self.state["trade_history"][: len(self.state["trade_history"]) - 20000]
 
-    # ------------------------------------------------------------------
-    # Bentuk respons akun (seperti GET /api/v3/account)
-    # ------------------------------------------------------------------
     def account_snapshot(self) -> dict:
         with self.lock:
             balances = []
@@ -367,19 +332,3 @@ class PaperStore:
                 "permissions": ["SPOT"],
                 "updateTime": int(time.time() * 1000),
             }
-
-
-# ==== RINGKASAN AUDIT (paper_store.py) =================================
-# Sintaks/tipe: type hints lengkap; Decimal via _d() (selalu lewat str).
-# Atomik: _save_locked menulis .tmp + fsync + os.replace -> tidak pernah
-#   setengah-tertulis. save() memegang lock.
-# Korupsi: load rusak -> backup *.corrupt-<ts> via os.replace lalu reset ke
-#   saldo awal; TIDAK menimpa diam-diam. Diuji di tests/test_store.py.
-# Migrasi: registry per-versi; _migrate menaikkan bertahap sampai SCHEMA_VERSION;
-#   jalur hilang -> error jelas (bukan data korup diam-diam).
-# Race condition: SATU RLock membungkus semua baca/tulis state; operasi majemuk
-#   di PaperClient membungkus beberapa panggilan dalam `with store.lock`.
-# Konsistensi saldo: debit/consume_locked melempar bila tidak cukup -> bug di
-#   hulu ketahuan, bukan saldo negatif diam-diam.
-# Kebocoran rahasia: tidak menyimpan API key/secret sama sekali.
-# =======================================================================

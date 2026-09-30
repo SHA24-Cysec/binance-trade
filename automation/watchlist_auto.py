@@ -69,7 +69,6 @@ from strategy.indicators import Kline
 
 logger = logging.getLogger("watchlist_auto")
 
-# Weight resmi tiap endpoint (dicek 2026-09-24).
 WEIGHT_TICKER_ALL = 80
 WEIGHT_BOOK_ALL = 4
 WEIGHT_KLINES = 2
@@ -78,22 +77,13 @@ DEFAULT_WEIGHT_LIMIT = 6000
 KLINE_PAGE = 1000
 
 
-# ======================================================================
-# Utilitas
-# ======================================================================
 def _auto_file(config: dict) -> str:
-    """Nama file hasil, dipisah per mode supaya PAPER dan LIVE tidak campur."""
     from config import config as cfg_mod
     mode = cfg_mod.get_mode(config).lower()
     return f"watchlist_auto_{mode}.json"
 
 
 def to_klines(raw: list, now_ms: Optional[int] = None) -> list:
-    """Parse hanya candle yang sudah tertutup, seperti scanner live.
-
-    Candle berjalan berubah setiap detik. Memasukkannya ke statistik 24 jam
-    atau data candle berjalan membuat watchlist tidak stabil.
-    """
     now_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
     out = []
     for k in raw:
@@ -112,11 +102,6 @@ def to_klines(raw: list, now_ms: Optional[int] = None) -> list:
 
 
 class Budget:
-    """Penjaga anggaran weight dengan jeda antar panggilan.
-
-    Tujuannya bukan sekadar menghitung, tapi memastikan penyegaran BERHENTI
-    sendiri sebelum mengganggu bot, bukan setelah.
-    """
 
     def __init__(self, client, max_weight: int, pace_seconds: float,
                  min_headroom: float, weight_limit: int = DEFAULT_WEIGHT_LIMIT):
@@ -155,20 +140,14 @@ class Budget:
             time.sleep(self.pace)
 
 
-# ======================================================================
-# Pengambilan data
-# ======================================================================
 def fetch_klines_paged(client, symbol: str, interval: str, bars: int,
                        budget: Budget) -> list:
-    """Ambil candle dengan paging mundur, berhenti kalau anggaran habis."""
     out: list = []
     end = None
     while len(out) < bars:
         if not budget.can_spend(WEIGHT_KLINES):
             break
         need = min(KLINE_PAGE, bars - len(out))
-        # Perhatikan nama parameternya: klien repo ini memakai end_time_ms
-        # (snake_case), bukan endTime seperti nama field mentah Binance.
         chunk = client.get_klines(symbol, interval, limit=need, end_time_ms=end)
         budget.spend(WEIGHT_KLINES)
         if not chunk:
@@ -183,15 +162,11 @@ def fetch_klines_paged(client, symbol: str, interval: str, bars: int,
     return out
 
 
-# ======================================================================
-# Penilaian monitoring
-# ======================================================================
 MONITORING_SPREAD_LIMIT_PCT = 0.25
 MONITORING_LOOKBACK_BARS = 30
 
 
 def evaluate_symbol(sym: str, kl: list, meta: dict, config: dict) -> Optional[dict]:
-    """Hitung metrik monitoring likuiditas tanpa indikator pembukaan posisi."""
     interval = str(config.get("MARKET_DATA_INTERVAL", "5m"))
     interval_ms = strategy.interval_to_ms(interval)
     bars_per_day = max(1, round(24 * 60 * 60 * 1000 / interval_ms))
@@ -270,17 +245,9 @@ def evaluate_symbol(sym: str, kl: list, meta: dict, config: dict) -> Optional[di
     }
 
 
-# Siklus penyegaran
-# ======================================================================
 def refresh_once(client, config: dict,
                  has_open_position: Optional[Callable[[], bool]] = None,
                  progress_cb: Optional[Callable[[str, float], None]] = None) -> dict:
-    """Jalankan SATU siklus penyegaran. Return ringkasan hasil.
-
-    Tidak pernah melempar exception ke pemanggil: semua kegagalan
-    dikembalikan sebagai dict berisi "error", karena ini proses latar
-    yang tidak boleh menjatuhkan dashboard.
-    """
     started = time.time()
 
     def prog(msg, frac):
@@ -290,7 +257,6 @@ def refresh_once(client, config: dict,
             except Exception:  # noqa: BLE001
                 pass
 
-    # --- REM 1: jangan pernah bersaing dengan bot yang sedang pegang posisi ---
     if has_open_position is not None:
         try:
             if has_open_position():
@@ -313,7 +279,6 @@ def refresh_once(client, config: dict,
 
     budget = Budget(client, max_weight, pace, min_headroom)
 
-    # --- Tahap 1: ticker + bookTicker (2 panggilan untuk seluruh pasar) ---
     try:
         if not budget.can_spend(WEIGHT_TICKER_ALL):
             return {"ok": False, "error": budget.stopped_reason or "anggaran habis"}
@@ -327,26 +292,18 @@ def refresh_once(client, config: dict,
     try:
         if budget.can_spend(WEIGHT_BOOK_ALL):
             prog("mengambil spread bid-ask...", 0.05)
-            # Metadata dipanggil lewat metode PUBLIK klien (perbaikan audit
-            # temuan R-06): memanggil _request (API privat) dari modul lain
-            # membuat watchlist rawan patah diam-diam kalau internal klien
-            # berubah.
             books = client.get_book_ticker_all()
             budget.spend(WEIGHT_BOOK_ALL)
             for b in books if isinstance(books, list) else []:
                 try:
                     bid, ask = float(b["bidPrice"]), float(b["askPrice"])
                     if bid > 0 and ask > 0:
-                        # Canonical formula mid-price, sama dengan live.
                         spreads[b["symbol"]] = scanner.spread_pct_from_book(bid, ask)
                 except (KeyError, TypeError, ValueError):
                     continue
     except Exception as exc:  # noqa: BLE001
         logger.warning("bookTicker gagal, spread diabaikan: %s", exc)
 
-    # --- Tahap 2: pilih kandidat paling likuid ---
-    # Saringan semesta memakai filter struktural dan kondisi pasar monitoring.
-    # Data candle harian dibebankan ke anggaran request yang sama.
     _daily_cache: dict = {}
     _daily_raw = scanner.make_daily_klines_fetcher(client, cache=_daily_cache)
 
@@ -368,13 +325,11 @@ def refresh_once(client, config: dict,
                 "error": "tidak ada simbol lolos filter struktural dan gerbang pump "
                          "(naik 24 jam dan volume naik)"}
 
-    # --- Tahap 3: unduh candle & nilai ---
     interval = str(config.get("MARKET_DATA_INTERVAL", "5m"))
     if interval not in strategy.INTERVAL_MINUTES:
         return {"ok": False, "error": f"interval watchlist tidak didukung: {interval}"}
     interval_ms = strategy.interval_to_ms(interval)
     bars_per_day = max(1, round(86_400_000 / interval_ms))
-    # Tambah ruang untuk metrik monitoring dan satu candle yang sedang berjalan.
     bars = days * bars_per_day + MONITORING_LOOKBACK_BARS + 2
     evaluated: list = []
     failed = 0
@@ -408,7 +363,6 @@ def refresh_once(client, config: dict,
     ok_rows = [r for r in evaluated if not r["disqualified"]]
     ok_rows.sort(key=lambda r: r.get("monitoring_score", 0.0), reverse=True)
 
-    # Jaga komposisi tier supaya panel tidak didominasi satu jenis koin.
     inti = [r for r in ok_rows if r["tier"] == "INTI"][:12]
     aktif = [r for r in ok_rows if r["tier"] == "AKTIF"][:8]
     spek = [r for r in ok_rows if r["tier"] == "SPEKULATIF"][:6]
@@ -436,7 +390,6 @@ def refresh_once(client, config: dict,
 
 
 def save_result(result: dict, config: dict) -> Optional[str]:
-    """Tulis hasil ke file JSON secara atomik (tulis sementara lalu rename)."""
     try:
         path = _auto_file(config)
         tmp = f"{path}.tmp"
@@ -450,11 +403,6 @@ def save_result(result: dict, config: dict) -> Optional[str]:
 
 
 def load_result(config: dict) -> Optional[dict]:
-    """Baca hasil terakhir. Return None kalau belum ada atau rusak.
-
-    Nama tier lama dimigrasikan saat dibaca, bukan saat ditulis, supaya file
-    yang sudah ada di disk tetap bisa dipakai tanpa perlu penyegaran ulang.
-    """
     path = _auto_file(config)
     if not os.path.exists(path):
         return None
@@ -463,8 +411,6 @@ def load_result(config: dict) -> Optional[dict]:
             data = json.load(f)
         if not (isinstance(data, dict) and data.get("items")):
             return None
-        # Hasil lama dapat memuat skor dan field generator posisi. Jangan
-        # tampilkan atau teruskan field tersebut ke dashboard.
         for row in data.get("items", []) + data.get("detail", []):
             if isinstance(row, dict):
                 row.pop("score", None)
@@ -475,15 +421,7 @@ def load_result(config: dict) -> Optional[dict]:
         return None
 
 
-# ======================================================================
-# Penjadwal latar
-# ======================================================================
 class AutoRefresher:
-    """Menjalankan refresh_once() berkala di thread latar (daemon).
-
-    Thread daemon dipilih supaya menutup dashboard tidak pernah tertahan
-    menunggu siklus selesai.
-    """
 
     def __init__(self, client_getter: Callable, config: dict,
                  has_open_position: Optional[Callable[[], bool]] = None):
@@ -520,8 +458,6 @@ class AutoRefresher:
         interval = max(1, int(self.config.get("WATCHLIST_AUTO_INTERVAL_HOURS", 6))) * 3600
         delay = max(0, int(self.config.get("WATCHLIST_AUTO_STARTUP_DELAY_SECONDS", 60)))
 
-        # Jeda awal: jangan menambah beban tepat saat dashboard dan bot
-        # sama-sama baru dinyalakan.
         prev = load_result(self.config)
         if prev:
             age = time.time() - prev.get("generated_at", 0)

@@ -48,19 +48,11 @@ def test_atr_exit_menerapkan_invariant_dan_fallback():
 
 
 def test_atr_mengembalikan_none_bila_data_kurang():
-    """ATR tidak boleh mengarang angka dari sampel yang terlalu pendek."""
     assert strategy.atr(candles([100.0] * 3), 14) is None
     assert strategy.atr([], 14) is None
 
 
 def test_atr_menolak_harga_datar_sempurna():
-    """ATR nol harus dilaporkan None, bukan 0.0.
-
-    Ini perilaku yang BENAR dan disengaja: ATR bernilai 0 akan menghasilkan
-    jarak stop nol, artinya SL persis di harga entry dan posisi langsung
-    tereksekusi. Mengembalikan None memaksa pemanggil jatuh ke fallback
-    persen. Diuji supaya perilaku aman ini tidak hilang tanpa sengaja.
-    """
     flat = [strategy.Kline(i * 300000, 100.0, 100.0, 100.0, 100.0,
                            i * 300000 + 299999, 1000.0, 100000.0)
             for i in range(30)]
@@ -68,7 +60,6 @@ def test_atr_menolak_harga_datar_sempurna():
 
 
 def test_invariant_trailing_tidak_pernah_melebihi_stop_loss():
-    """Trailing step yang lebih longgar dari SL akan membuat SL tidak berguna."""
     levels = strategy.resolve_exit_levels({
         "USE_ATR_EXIT": False, "SL_PCT": 2, "TP_PCT": 10,
         "BE_TRIGGER_PCT": 1, "BE_LOCK_PCT": 0.5,

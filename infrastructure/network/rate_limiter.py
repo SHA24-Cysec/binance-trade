@@ -19,23 +19,15 @@ from typing import Iterator
 
 logger = logging.getLogger("rate_limiter")
 
-# Primitif lock file dipakai bersama dengan atomic_io supaya hanya ada satu
-# implementasi yang perlu dijaga kebenarannya lintas platform
-# (perbaikan audit 2026-09-30, temuan KRITIS-02).
 from infrastructure.storage.atomic_io import (  # noqa: E402
     _acquire_lock,
     _open_lock_fd,
     _release_lock,
 )
 
-# fcntl dan msvcrt sengaja TIDAK diimpor di sini lagi. Modul ini dulu punya
-# salinan sendiri dari logika lock per platform, dan salinan itulah yang ikut
-# membawa bug offset msvcrt (audit 2026-09-30, temuan KRITIS-02). Seluruh
-# detail per platform sekarang tinggal di satu tempat: atomic_io.
 
 
 class RateLimitBlockedError(RuntimeError):
-    """Dilempar ketika proses masih berada dalam jeda 429/418 bersama."""
 
     def __init__(self, retry_after: float):
         self.retry_after = max(1.0, float(retry_after))
@@ -43,12 +35,6 @@ class RateLimitBlockedError(RuntimeError):
 
 
 class SharedRequestWeightLimiter:
-    """Reservasi bobot request secara atomic di dalam satu host.
-
-    ``state_file=None`` membuat limiter lokal per instance, cocok untuk client
-    utility dan unit test. Production clients diberi file path dari config agar
-    lintas proses pada host yang sama berbagi window dan status block.
-    """
 
     _memory_lock = threading.RLock()
 
@@ -61,9 +47,6 @@ class SharedRequestWeightLimiter:
             os.path.abspath(os.path.expanduser(state_file))
             if state_file else None
         )
-        # Client test/utility yang tidak diberi file tidak boleh mewarisi
-        # status block client lain. Production selalu memberi state_file dari
-        # config agar koordinasi lintas proses tetap aktif.
         self._memory_state: dict | None = None
 
     @staticmethod
@@ -142,11 +125,6 @@ class SharedRequestWeightLimiter:
         lock_path = self.state_file + ".lock"
         parent = os.path.dirname(lock_path) or "."
         os.makedirs(parent, mode=0o700, exist_ok=True)
-        # PERBAIKAN AUDIT 2026-09-30 (temuan KRITIS-02): blok ini dulu
-        # menyalin pola lock msvcrt yang salah offset dari atomic_io dan
-        # membawa bug PermissionError yang sama persis. Sekarang memakai
-        # primitif bersama yang sudah benar, sehingga hanya ada SATU
-        # implementasi lock file di repo ini.
         fd = _open_lock_fd(lock_path)
         try:
             _acquire_lock(fd)
@@ -160,7 +138,6 @@ class SharedRequestWeightLimiter:
             os.close(fd)
 
     def reserve(self, weight: int, ignore_block: bool = False) -> None:
-        """Tunggu sampai bobot aman untuk window saat ini, lalu reservasi."""
         requested = max(1, int(weight))
         effective_limit = max(1, self.limit - self.safety_margin)
         while True:
@@ -170,10 +147,6 @@ class SharedRequestWeightLimiter:
                 if state["blocked_until"] > now and not ignore_block:
                     raise RateLimitBlockedError(state["blocked_until"] - now)
                 if state["used"] + requested <= effective_limit or state["used"] == 0:
-                    # Klausa used == 0 sengaja meloloskan request tunggal yang
-                    # bobotnya melebihi limit efektif agar tidak deadlock.
-                    # Perbaikan audit 2026-09-27 (temuan RENDAH-02): kejadian
-                    # langka ini dicatat supaya anomali weight terlihat di log.
                     if state["used"] == 0 and requested > effective_limit:
                         logger.warning(
                             "Rate limiter meloloskan satu request berbobot %d "
@@ -186,7 +159,6 @@ class SharedRequestWeightLimiter:
             time.sleep(wait)
 
     def observe_server_weight(self, used_weight: int) -> None:
-        """Sinkronkan ledger dengan header absolut Binance."""
         try:
             used = max(0, int(used_weight))
         except (TypeError, ValueError):
@@ -195,13 +167,6 @@ class SharedRequestWeightLimiter:
             state["used"] = max(int(state.get("used", 0)), used)
 
     def record_retry_after_server_wait(self, weight: int) -> None:
-        """Catat retry yang sudah menunggu Retry-After tanpa sleep kedua.
-
-        Respons 429 dapat mengirim header weight pada atau di atas plafon.
-        Retry internal tetap mengikuti kontrak server, tetapi tidak boleh
-        kehilangan bobot dari ledger atau terjebak menunggu window lokal
-        kedua. Request baru setelahnya tetap akan ditahan oleh ``reserve``.
-        """
         requested = max(1, int(weight))
         with self._locked_state() as state:
             state["used"] = int(state.get("used", 0)) + requested

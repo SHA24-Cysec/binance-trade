@@ -61,5 +61,4 @@ def test_dashboard_manager_start_restart_stop_paper_without_live_orders(tmp_path
     assert stopped["status"] == "STOPPED"
     assert stopped["exit_code"] == 0
     assert manager._proc is None
-    # Pengujian tidak pernah membangun konfigurasi LIVE atau mengirim order.
     assert cfg.PUMP_CONFIG["MODE"] == "PAPER"

@@ -18,17 +18,10 @@ class Kline(NamedTuple):
     low: float
     close: float
     close_time: int
-    # Dua field di bawah ditambahkan untuk kebutuhan fitur backtest, yaitu
-    # menghitung volume 24 jam bergulir tanpa perlu memanggil ulang ticker/24hr
-    # per bar. Nilai default 0.0 menjaga pemanggilan lama tetap berjalan.
     volume: float = 0.0
     quote_volume: float = 0.0
 
 
-# Panjang interval candle dalam menit. Dipakai bersama oleh bot live,
-# backtest satu simbol, dan backtest portofolio supaya tidak ada dua tabel
-# yang bisa berbeda diam-diam. Nilai enum interval mengikuti dokumentasi
-# endpoint klines Binance.
 INTERVAL_MINUTES = {
     "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
     "1h": 60, "2h": 120, "4h": 240, "6h": 360, "8h": 480, "12h": 720,
@@ -37,17 +30,10 @@ INTERVAL_MINUTES = {
 
 
 def interval_to_ms(interval: str, default_minutes: int = 5) -> int:
-    """Panjang satu candle dalam milidetik, jatuh ke default bila tidak dikenal."""
     return int(INTERVAL_MINUTES.get(str(interval), default_minutes)) * 60_000
 
 
 def parse_klines(raw: list) -> list[Kline]:
-    """raw = hasil GET /api/v3/klines, urutan kronologis.
-
-    Indeks array mentah sesuai dokumentasi resmi Binance:
-    0=openTime 1=open 2=high 3=low 4=close 5=volume 6=closeTime
-    7=quoteAssetVolume ...
-    """
     out = []
     for idx, row in enumerate(raw):
         o = float(row[1])
@@ -55,8 +41,6 @@ def parse_klines(raw: list) -> list[Kline]:
         low_ = float(row[3])
         c = float(row[4])
 
-        # Penjagaan data rusak. NaN membuat setiap perbandingan harga bernilai
-        # False, termasuk cek Stop Loss, jadi data seperti itu wajib ditolak.
         for nama, nilai in (("open", o), ("high", h), ("low", low_), ("close", c)):
             if nilai != nilai:
                 raise ValueError(
@@ -90,32 +74,16 @@ def parse_klines(raw: list) -> list[Kline]:
     return out
 
 
-# ---------------------------------------------------------------------
-# Exit calculations
-# ---------------------------------------------------------------------
 def required_lookback_bars(config: dict) -> int:
-    """Jumlah candle minimum untuk indikator momentum dan volume rolling.
-
-    EMA, RSI, MACD, ATR, pivot low, serta rata-rata volume rolling hanya
-    boleh memakai candle yang sudah close. Angka ini dipakai bersama oleh
-    bot live, backtest, dan watchlist agar jendelanya konsisten.
-    """
     rolling_lookback = int(config.get("ROLLING_VOLUME_LOOKBACK_BARS", 20) or 20)
     confirmation_bars = int(config.get("ROLLING_VOLUME_CONFIRMATION_BARS", 1) or 1)
     return max(30, rolling_lookback + max(1, confirmation_bars))
 
 def confirm_window_bars(config: dict) -> int:
-    """Jumlah candle tertutup yang harus diambil untuk satu keputusan entry.
-
-    Sama dengan CONFIRM_LOOKBACK_BARS, tetapi tidak pernah lebih kecil dari
-    required_lookback_bars(). Ini yang dipakai pengambil klines di bot live,
-    dashboard, dan watchlist supaya ketiganya melihat jendela yang identik.
-    """
     lookback = int(config.get("CONFIRM_LOOKBACK_BARS", 48) or 48)
     return max(1, min(1000, max(lookback, required_lookback_bars(config))))
 
 def resolve_position_notional(config: dict, quote_free: float) -> dict:
-    """Tentukan nominal entry dari saldo quote dengan policy yang dipakai live."""
     free = max(0.0, float(quote_free or 0.0))
     use_percent = bool(config.get("USE_RISK_PERCENT"))
     buffer_pct = max(0.0, float(config.get("BALANCE_BUFFER_PCT", 0.5) or 0.0))
@@ -150,28 +118,17 @@ def resolve_position_notional(config: dict, quote_free: float) -> dict:
 
 def backtest_buy_execution_price(open_price: float, spread_pct: float = 0.0,
                                   slippage_pct: float = 0.0) -> float:
-    """Perkiraan harga ask adverse untuk entry backtest.
-
-    ``spread_pct`` adalah spread total bid-ask. Separuh spread dibebankan ke
-    sisi BUY, lalu slippage tambahan dibebankan sebagai adverse movement.
-    """
     price = float(open_price)
     adverse = max(0.0, float(spread_pct)) / 200.0 + max(0.0, float(slippage_pct)) / 100.0
     return price * (1.0 + adverse)
 
 def backtest_sell_execution_price(price: float, spread_pct: float = 0.0,
                                   slippage_pct: float = 0.0) -> float:
-    """Perkiraan harga bid adverse untuk exit backtest."""
     raw = max(0.0, float(price))
     adverse = max(0.0, float(spread_pct)) / 200.0 + max(0.0, float(slippage_pct)) / 100.0
     return raw * max(0.0, 1.0 - adverse)
 
 def ema(closes: list[float], period: int) -> list[float]:
-    """Hitung EMA kronologis dan mengembalikan seluruh deret EMA.
-
-    Candle pada indeks 0 adalah candle paling lama. Nilai awal memakai close
-    pertama, sehingga tidak ada data masa depan yang masuk ke perhitungan.
-    """
     period = int(period)
     values = [float(x) for x in closes]
     if period <= 0:
@@ -185,7 +142,6 @@ def ema(closes: list[float], period: int) -> list[float]:
     return out
 
 def rsi(closes: list[float], period: int = 14) -> list[float]:
-    """Hitung RSI Wilder kronologis; nilai yang belum matang bernilai 50.0."""
     period = int(period)
     values = [float(x) for x in closes]
     if period <= 0:
@@ -212,7 +168,6 @@ def rsi(closes: list[float], period: int = 14) -> list[float]:
 
 def macd(closes: list[float], fast: int = 12, slow: int = 26,
          signal: int = 9) -> tuple[list[float], list[float], list[float]]:
-    """Hitung MACD line, signal line, dan histogram secara kronologis."""
     fast_line = ema(closes, fast)
     slow_line = ema(closes, slow)
     line = [a - b for a, b in zip(fast_line, slow_line)]
@@ -222,7 +177,6 @@ def macd(closes: list[float], fast: int = 12, slow: int = 26,
 
 
 def atr(klines: list[Kline], period: int = 14) -> float | None:
-    """Kembalikan ATR Wilder terakhir dari candle yang sudah tertutup."""
     period = int(period)
     if period <= 0 or not klines:
         return None
@@ -241,12 +195,6 @@ def atr(klines: list[Kline], period: int = 14) -> float | None:
 
 
 def resolve_exit_levels(config: dict) -> dict:
-    """Tentukan level exit ATR atau fallback persen lama.
-
-    Pada mode ATR, nilai jarak dikembalikan sebagai jarak harga absolut.
-    Field level dipertahankan agar state, backtest, dan dashboard tetap
-    kompatibel. Nilai ATR opsional untuk posisi yang sudah ada.
-    """
     use_atr = bool(config.get("USE_ATR_EXIT", False))
     if use_atr:
         period = max(1, int(config.get("ATR_PERIOD", 14) or 14))

@@ -30,9 +30,6 @@ import inspect
 import pytest
 
 
-# =====================================================================
-# 1. Jalur entry harus ada
-# =====================================================================
 def test_open_position_ada_dan_mengirim_buy():
     import trading.pump_scanner_bot as bot
 
@@ -42,7 +39,6 @@ def test_open_position_ada_dan_mengirim_buy():
 
 
 def test_run_benar_benar_memanggil_open_position():
-    """Fungsi yang ada tapi tidak pernah dipanggil sama saja dengan tidak ada."""
     import trading.pump_scanner_bot as bot
 
     src = inspect.getsource(bot.run)
@@ -83,7 +79,6 @@ def test_kunci_config_jalur_entry_tersedia():
 
 
 def test_setiap_kunci_config_punya_entri_schema():
-    """Tanpa entri schema, parameter tidak bisa diatur dari dashboard."""
     import config.settings_schema as ss
     from config.config import PUMP_CONFIG
 
@@ -91,9 +86,6 @@ def test_setiap_kunci_config_punya_entri_schema():
     assert not hilang, f"kunci tanpa entri schema: {hilang}"
 
 
-# =====================================================================
-# 2. Backtest harus benar benar mensimulasikan
-# =====================================================================
 @pytest.fixture()
 def data_backtest():
     from backtesting.synthetic_data import (
@@ -120,7 +112,6 @@ def test_backtest_menghasilkan_trade(data_backtest):
 
 
 def test_metrik_backtest_tidak_semuanya_nol(data_backtest):
-    """Stub lama mengembalikan nol yang ditulis mati untuk SEMUA metrik."""
     from backtesting import backtest as bt
 
     kl, daily, cfg = data_backtest
@@ -132,7 +123,6 @@ def test_metrik_backtest_tidak_semuanya_nol(data_backtest):
 
 
 def test_parameter_berbeda_memberi_hasil_berbeda(data_backtest):
-    """Syarat minimum sebuah backtest yang bermakna."""
     from backtesting import backtest as bt
 
     kl, daily, cfg = data_backtest
@@ -148,25 +138,15 @@ def test_parameter_berbeda_memberi_hasil_berbeda(data_backtest):
 
 
 def test_ringkasan_tidak_memakai_nol_yang_ditulis_mati():
-    """Menangkap persis bentuk regresi yang terjadi pada commit 0b6ca1d.
-
-    Saat itu summarize() mengembalikan literal 0.0 untuk setiap metrik tanpa
-    membaca isi result sama sekali.
-    """
     from backtesting import backtest as bt
 
     src = inspect.getsource(bt.summarize)
-    # Sebuah ringkasan yang benar wajib membaca result.trades.
     assert "trades" in src
     assert src.count('"total_trades": 0') == 0, \
         "summarize() menulis nol secara harfiah, mesin kembali menjadi stub"
 
 
-# =====================================================================
-# 3. Gerbang keselamatan audit 30 September 2026 harus tetap berlaku
-# =====================================================================
 def test_gerbang_risiko_akun_memblokir_live_tanpa_rem():
-    """KRITIS-01. Ini pengaman paling penting sekarang bot bisa membeli."""
     import trading.pump_scanner_bot as bot
     from config.config import PUMP_CONFIG
 
@@ -192,12 +172,10 @@ def test_gerbang_risiko_meloloskan_live_dengan_rem_aktif():
 
 
 def test_run_memeriksa_gerbang_risiko_sebelum_membeli():
-    """Gerbang harus dipanggil di run(), bukan sekadar tersedia."""
     import trading.pump_scanner_bot as bot
 
     src = inspect.getsource(bot.run)
     assert "account_risk_gate(" in src
-    # Gerbang wajib dievaluasi SEBELUM titik pembukaan posisi.
     assert src.index("account_risk_gate(") < src.index("open_position("), \
         "gerbang risiko dievaluasi setelah bot sempat membeli"
 
@@ -218,7 +196,6 @@ def test_entry_diblokir_saat_rekonsiliasi_atau_order_menggantung():
 
 
 def test_batas_chase_dan_spread_ditegakkan():
-    """Tanpa keduanya bot bisa mengejar harga yang sudah terbang."""
     import trading.pump_scanner_bot as bot
 
     src = inspect.getsource(bot.run)
@@ -234,7 +211,6 @@ def test_filter_usia_listing_ditegakkan():
 
 
 def test_paper_dan_live_memakai_client_berbeda():
-    """Isolasi PAPER dijaga lewat kelas terpisah, bukan sekadar flag."""
     import trading.pump_scanner_bot as bot
 
     src = inspect.getsource(bot.create_exchange_client)
@@ -243,17 +219,14 @@ def test_paper_dan_live_memakai_client_berbeda():
 
 
 def test_mode_exit_dilaporkan_dari_state_bukan_config():
-    """TINGGI-01. Log tidak boleh mengklaim mode yang tidak dipakai runtime."""
     import trading.pump_scanner_bot as bot
 
     src = inspect.getsource(bot.run)
     assert "describe_exit_mode(" in src
-    # Dipanggil setelah state dimuat, kalau tidak nilainya belum ada.
     assert src.index("load_pump_state(") < src.index("describe_exit_mode(")
 
 
 def test_perbaikan_lock_windows_tidak_ikut_hilang():
-    """KRITIS-02 tidak boleh tergerus oleh pemulihan besar ini."""
     import infrastructure.network.rate_limiter as rl
     import infrastructure.storage.atomic_io as aio
 
@@ -261,8 +234,6 @@ def test_perbaikan_lock_windows_tidak_ikut_hilang():
         assert hasattr(aio, nama)
         assert getattr(rl, nama).__module__ == "infrastructure.storage.atomic_io"
 
-    # Diperiksa lewat AST, bukan pencarian teks, supaya komentar dan docstring
-    # yang menyebut O_APPEND tidak ikut terhitung sebagai pemakaian.
     import ast
     import textwrap
 
