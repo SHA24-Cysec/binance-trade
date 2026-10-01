@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-Backtest portofolio data-only.
+Backtest portofolio multi-simbol dengan simulasi eksekusi.
 
-Modul ini mengunduh, menyimpan, dan memvalidasi candle multi-simbol untuk
-monitoring. Ia tidak memiliki generator sinyal atau simulasi pembukaan posisi.
+Modul ini mengunduh dan menyimpan candle multi-simbol, memilih semesta
+berdasarkan filter pasar, lalu menyimulasikan bot satu posisi berurutan:
+kandidat setup bersaing via kualitas setup, entry disimulasikan dengan
+latency, spread/slippage, fee, cooldown, dan level exit FIXED/ATR. Tidak
+ada order nyata yang dikirim.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ from backtesting.backtest import (
     MS_PER_MIN,
     bars_per_day,
     compute_rolling_24h_stats,
+    entry_execution_params,
     fetch_full_klines,
     initial_backtest_equity,
 )
@@ -338,9 +342,7 @@ def run_portfolio_backtest(
     except ImportError:
         fee_round_trip = float(config.get("TAKER_FEE_PCT", 0.1)) * 2.0
 
-    execution_spread_pct = max(0.0, float(config.get("BACKTEST_ENTRY_SPREAD_PCT", 0.10) or 0.0))
-    execution_slippage_pct = max(0.0, float(config.get("BACKTEST_SLIPPAGE_PCT", 0.05) or 0.0))
-    entry_delay_bars = max(0, int(config.get("BACKTEST_ENTRY_DELAY_BARS", 0) or 0))
+    execution_spread_pct, execution_slippage_pct, entry_delay_bars = entry_execution_params(config)
 
     trades: list = []
     skipped: list = []
@@ -536,6 +538,28 @@ def run_portfolio_backtest(
             entry_candle = kl[entry_idx]
             raw_entry_price = entry_candle.open
             entry_time_value = entry_candle.open_time
+        # Paritas open_position(): kunci level exit SEBELUM posisi dibuka,
+        # dan tolak entry yang akan ditolak bot live.
+        level_cfg = dict(config)
+        if bool(config.get("USE_ATR_EXIT", False)):
+            atr_val = strategy.atr(kl[:i + 1], int(config.get("ATR_PERIOD", 14) or 14))
+            if atr_val is None:
+                warnings.append(
+                    f"Entry {sym} bar {i} dilewati: USE_ATR_EXIT aktif tetapi "
+                    "nilai ATR tidak tersedia, level exit tidak dapat dikunci "
+                    "dengan aman (paritas open_position).")
+                continue
+            level_cfg["_atr_value"] = atr_val
+        lv = strategy.resolve_exit_levels(level_cfg)
+        if str(lv.get("source", "")).upper() == "ATR" and not (
+            0.0 < float(lv.get("sl_pct") or 0.0) < raw_entry_price
+        ):
+            warnings.append(
+                f"Entry {sym} bar {i} dilewati: jarak SL ATR "
+                f"{float(lv.get('sl_pct') or 0.0):.10g} tidak masuk akal "
+                f"terhadap harga acuan {raw_entry_price:.10g} "
+                "(paritas open_position). Cek ATR_MULT_SL/ATR.")
+            continue
         holding = sym
         position_notional = sizing["notional"]
         equity_before_entry = equity
@@ -550,9 +574,6 @@ def run_portfolio_backtest(
         pct24h_at_entry = pct
         cands_at_entry = len(eligible)
 
-        level_cfg = dict(config)
-        level_cfg["_atr_value"] = strategy.atr(kl[:i + 1], int(config.get("ATR_PERIOD", 14) or 14))
-        lv = strategy.resolve_exit_levels(level_cfg)
         cur = {
             "sl": lv["sl_pct"], "tp": lv["tp_pct"],
             "be_trig": lv["be_trigger_pct"], "be_lock": lv["be_lock_pct"],

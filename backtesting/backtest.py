@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-Backtest data dan ringkasan tanpa pembukaan posisi.
+Backtest simbol tunggal dengan simulasi eksekusi penuh.
 
-Backtest hanya memuat, memvalidasi, dan merangkum data historis. Ia tidak
-memiliki generator pembukaan posisi atau simulasi BUY.
+run_backtest() mengevaluasi sinyal entry (deteksi pullback-retest, gerbang
+pump, likuiditas) lalu menyimulasikan siklus BUY/SELL: latency entry (OPEN
+bar berikutnya secara default), spread/slippage eksekusi, fee, cooldown
+setelah close, dan level exit FIXED/ATR. Tidak ada order nyata yang
+dikirim; semua berbasis data historis.
 """
 
 from __future__ import annotations
@@ -74,6 +77,27 @@ def initial_backtest_equity(config: dict) -> float:
         config.get("QUOTE_ASSET", "USDT"), 10_000.0)
     value = float(config.get("BACKTEST_INITIAL_EQUITY_USDT", fallback) or 0.0)
     return max(0.0, value)
+
+
+def entry_execution_params(config: dict) -> tuple:
+    """Parameter simulasi eksekusi entry (spread, slippage, delay bar).
+
+    Fallback SATU sumber kebenaran: bila kunci tidak ada di config (misalnya
+    config parsial dari grid search), pakai PUMP_DEFAULTS, bukan angka lokal,
+    supaya default backtest identik dengan default bot di config.py.
+    """
+    try:
+        from config.config import PUMP_DEFAULTS
+        d_spread = PUMP_DEFAULTS.get("BACKTEST_ENTRY_SPREAD_PCT", 0.10)
+        d_slip = PUMP_DEFAULTS.get("BACKTEST_SLIPPAGE_PCT", 0.05)
+        d_delay = PUMP_DEFAULTS.get("BACKTEST_ENTRY_DELAY_BARS", 1)
+    except ImportError:  # config tidak tersedia (misal dipakai sebagai pustaka)
+        d_spread, d_slip, d_delay = 0.10, 0.05, 1
+
+    spread = max(0.0, float(config.get("BACKTEST_ENTRY_SPREAD_PCT", d_spread) or 0.0))
+    slippage = max(0.0, float(config.get("BACKTEST_SLIPPAGE_PCT", d_slip) or 0.0))
+    delay = max(0, int(config.get("BACKTEST_ENTRY_DELAY_BARS", d_delay) or 0))
+    return spread, slippage, delay
 
 
 def compute_rolling_24h_stats(klines: list[Kline], window: int) -> list[Optional[dict]]:
@@ -190,9 +214,7 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
     except ImportError:
         fee_round_trip_pct = float(config.get("TAKER_FEE_PCT", 0.1)) * 2.0
 
-    execution_spread_pct = max(0.0, float(config.get("BACKTEST_ENTRY_SPREAD_PCT", 0.10) or 0.0))
-    execution_slippage_pct = max(0.0, float(config.get("BACKTEST_SLIPPAGE_PCT", 0.05) or 0.0))
-    entry_delay_bars = max(0, int(config.get("BACKTEST_ENTRY_DELAY_BARS", 0) or 0))
+    execution_spread_pct, execution_slippage_pct, entry_delay_bars = entry_execution_params(config)
 
     cur_sl = abs(float(config.get("SL_PCT", 1.8)))
     cur_tp = abs(float(config.get("TP_PCT", 4.0)))
@@ -238,6 +260,31 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
                         raw_entry_price = entry_candle.open
                         entry_time_value = entry_candle.open_time
                         next_index = entry_idx + 1
+                    # Paritas open_position(): kunci level exit SEBELUM posisi
+                    # dibuka, dan tolak entry yang akan ditolak bot live.
+                    level_cfg = dict(config)
+                    if bool(config.get("USE_ATR_EXIT", False)):
+                        atr_val = strategy.atr(
+                            klines[:i + 1], int(config.get("ATR_PERIOD", 14) or 14))
+                        if atr_val is None:
+                            warnings.append(
+                                f"Entry bar {i} dilewati: USE_ATR_EXIT aktif tetapi "
+                                "nilai ATR tidak tersedia, level exit tidak dapat "
+                                "dikunci dengan aman (paritas open_position).")
+                            i += 1
+                            continue
+                        level_cfg["_atr_value"] = atr_val
+                    lv = strategy.resolve_exit_levels(level_cfg)
+                    if str(lv.get("source", "")).upper() == "ATR" and not (
+                        0.0 < float(lv.get("sl_pct") or 0.0) < raw_entry_price
+                    ):
+                        warnings.append(
+                            f"Entry bar {i} dilewati: jarak SL ATR "
+                            f"{float(lv.get('sl_pct') or 0.0):.10g} tidak masuk akal "
+                            f"terhadap harga acuan {raw_entry_price:.10g} "
+                            "(paritas open_position). Cek ATR_MULT_SL/ATR.")
+                        i += 1
+                        continue
                     in_position = True
                     position_notional = sizing["notional"]
                     equity_before_entry = equity
@@ -248,9 +295,6 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
                     trailing_active = False
                     be_stop = 0.0
                     trailing_stop = 0.0
-                    level_cfg = dict(config)
-                    level_cfg["_atr_value"] = strategy.atr(klines[:i + 1], int(config.get("ATR_PERIOD", 14) or 14))
-                    lv = strategy.resolve_exit_levels(level_cfg)
                     cur_sl = lv["sl_pct"]
                     cur_tp = lv["tp_pct"]
                     cur_be_trig = lv["be_trigger_pct"]

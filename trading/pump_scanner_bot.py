@@ -361,6 +361,22 @@ def reconcile_state_with_exchange(client: ExchangeClient, config: dict, state: d
                 state["pending_order"] = None
                 changed = True
             elif _order_status_is_terminal(status):
+                if side == "SELL" and executed_qty > 0:
+                    qty_state_sell = float(state.get("qty") or 0.0)
+                    if qty_state_sell > 0 and executed_qty >= qty_state_sell - 1e-12:
+                        # Paritas close_position(): posisi baru saja tertutup
+                        # oleh SELL yang terkonfirmasi terisi. Tanpa ini, bot
+                        # bisa langsung entry ulang di siklus scan berikutnya
+                        # karena jalur rekonsiliasi tidak pernah menyentuh
+                        # cooldown_until/last_trade_time.
+                        menit = int(config.get("COOLDOWN_MINUTES_AFTER_CLOSE", 0) or 0)
+                        state["cooldown_until"] = state_mod.now_ms() + menit * 60 * 1000
+                        state["last_trade_time"] = state_mod.now_ms()
+                        logger.info(
+                            "REKONSILIASI: intent SELL %s terisi penuh "
+                            "(qty=%.8f); cooldown %s menit diterapkan seperti "
+                            "close_position.", symbol, executed_qty, menit,
+                        )
                 state["pending_order"] = None
                 changed = True
             else:

@@ -188,14 +188,14 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "TOP_N_CANDIDATES_TO_CONFIRM": _field("Scan", "Jumlah kandidat konfirmasi", "Berapa kandidat teratas yang diperiksa.", "int", minimum=1, maximum=1000),
     "USE_RISK_PERCENT": _field("Ukuran Posisi", "Gunakan persen risiko", "Ukuran posisi dihitung dari saldo bebas.", "bool", dangerous=True),
     "VWAP_MIN_BARS_AFTER_ANCHOR": _field("Legacy", "Parameter setup lama", "Disimpan untuk membaca konfigurasi lama. Tidak dipakai oleh strategi momentum baru.", "int", minimum=1, maximum=200, unit="candle", read_only=True),
-    "WATCHLIST_ENTRY_EMA_GAP_PCT": _field("Watchlist", "Jarak EMA", "Ambang EMA dekat.", "float", minimum=0.01, maximum=100),
-    "WATCHLIST_ENTRY_MIN_HEADROOM": _field("Watchlist", "Headroom skor", "Sisa kuota minimum.", "float", minimum=0, maximum=1),
-    "WATCHLIST_ENTRY_RSI_DECAY_PTS": _field("Watchlist", "Decay RSI", "Lebar decay RSI.", "float", minimum=1, maximum=100),
-    "WATCHLIST_ENTRY_SCORE_TTL_SECONDS": _field("Watchlist", "TTL skor entry", "Cache skor candle.", "int", minimum=1, maximum=86400, unit="detik"),
-    "WATCHLIST_ENTRY_WEIGHT_EMA": _field("Watchlist", "Bobot EMA", "Bobot skor entry.", "float", minimum=0, maximum=100),
-    "WATCHLIST_ENTRY_WEIGHT_HL": _field("Watchlist", "Bobot higher low", "Bobot skor entry.", "float", minimum=0, maximum=100),
-    "WATCHLIST_ENTRY_WEIGHT_MACD": _field("Watchlist", "Bobot MACD", "Bobot skor entry.", "float", minimum=0, maximum=100),
-    "WATCHLIST_ENTRY_WEIGHT_RSI": _field("Watchlist", "Bobot RSI", "Bobot skor entry.", "float", minimum=0, maximum=100),
+    "WATCHLIST_ENTRY_EMA_GAP_PCT": _field("Watchlist", "Jarak EMA", "Ambang EMA dekat untuk skor entry watchlist. Tidak memengaruhi keputusan entry bot.", "float", minimum=0.01, maximum=100),
+    "WATCHLIST_ENTRY_MIN_HEADROOM": _field("Watchlist", "Headroom skor", "Sisa kuota minimum skor watchlist. Tidak memengaruhi keputusan entry bot.", "float", minimum=0, maximum=1),
+    "WATCHLIST_ENTRY_RSI_DECAY_PTS": _field("Watchlist", "Decay RSI", "Lebar decay RSI untuk skor watchlist. Tidak memengaruhi keputusan entry bot.", "float", minimum=1, maximum=100),
+    "WATCHLIST_ENTRY_SCORE_TTL_SECONDS": _field("Watchlist", "TTL skor entry", "Cache skor candle untuk skor watchlist. Tidak memengaruhi keputusan entry bot.", "int", minimum=1, maximum=86400, unit="detik"),
+    "WATCHLIST_ENTRY_WEIGHT_EMA": _field("Watchlist", "Bobot EMA", "Bobot EMA untuk skor entry watchlist. Tidak memengaruhi keputusan entry bot.", "float", minimum=0, maximum=100),
+    "WATCHLIST_ENTRY_WEIGHT_HL": _field("Watchlist", "Bobot higher low", "Bobot higher low untuk skor entry watchlist. Tidak memengaruhi keputusan entry bot.", "float", minimum=0, maximum=100),
+    "WATCHLIST_ENTRY_WEIGHT_MACD": _field("Watchlist", "Bobot MACD", "Bobot MACD untuk skor entry watchlist. Tidak memengaruhi keputusan entry bot.", "float", minimum=0, maximum=100),
+    "WATCHLIST_ENTRY_WEIGHT_RSI": _field("Watchlist", "Bobot RSI", "Bobot RSI untuk skor entry watchlist. Tidak memengaruhi keputusan entry bot.", "float", minimum=0, maximum=100),
 }
 
 

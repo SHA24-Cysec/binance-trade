@@ -592,9 +592,29 @@ def _bt_cleanup_old_jobs():
             _bt_jobs.pop(jid, None)
 
 
+def _bt_simulation_interval(cfg: dict) -> str:
+    """Interval candle simulasi backtest portofolio.
+
+    Harus sama dengan interval konfirmasi bot (CONFIRM_INTERVAL) supaya
+    jendela setup yang dievaluasi backtest identik dengan bot; lihat
+    pump_scanner_bot (get_klines pakai CONFIRM_INTERVAL) dan backtest CLI
+    (backtest.py juga CONFIRM_INTERVAL). MARKET_DATA_INTERVAL hanya mengatur
+    monitoring pasar, bukan simulasi.
+    """
+    return str(cfg.get("CONFIRM_INTERVAL", "5m") or "5m")
+
+
+def _bt_estimate_requests(days: int, max_symbols: int, cfg: dict) -> int:
+    """Perkiraan jumlah request unduh klines: simbol x halaman (1000 bar)."""
+    interval = _bt_simulation_interval(cfg)
+    bars_per_hari = 1440 // bt.INTERVAL_MINUTES.get(interval, 5)
+    halaman = max(1, -(-(days + 1) * bars_per_hari // 1000))
+    return max_symbols * halaman
+
+
 def _bt_prepare_universe(job_id: str, cfg: dict, days: int, max_symbols: int,
                          set_progress, cancelled) -> dict:
-    interval = cfg.get("MARKET_DATA_INTERVAL", "5m")
+    interval = _bt_simulation_interval(cfg)
     bt.bars_per_day(interval)
     bar_ms = bt.INTERVAL_MINUTES[interval] * 60_000
     warmup_ms = bt.MS_PER_DAY + 30 * bar_ms
@@ -796,6 +816,10 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "(BACKTEST_SLIPPAGE_PCT), dan jeda eksekusi (BACKTEST_ENTRY_DELAY_BARS). "
                 "Fee taker beli dan jual sudah dipotong. Yang belum dimodelkan adalah "
                 "kedalaman order book, jadi order besar di koin tipis akan lebih buruk dari ini.",
+                "Rem tingkat akun (USE_EQUITY_STOP, USE_DAILY_STOP) dan gerbang eksekusi "
+                "live (MAX_SPREAD_PCT, MAX_CHASE_PCT, MIN_SECONDS_BETWEEN_TRADES) tidak "
+                "disimulasikan, jadi backtest bisa tampak lebih aktif daripada bot asli. "
+                "COOLDOWN_MINUTES_AFTER_CLOSE sudah disimulasikan.",
                 "Volume 24 jam direkonstruksi dari penjumlahan quote volume candle, "
                 "sehingga bisa sedikit berbeda dari field quoteVolume di ticker.",
             ],
@@ -914,6 +938,10 @@ def _bt_run_grid_job(job_id: str, days: int, max_symbols: int, spec: dict,
                 "Fill memodelkan spread, slippage, dan fee taker dua sisi. Kedalaman "
                 "order book TIDAK dimodelkan, jadi order besar di koin tipis akan "
                 "lebih buruk dari hasil di sini.",
+                "Rem tingkat akun (USE_EQUITY_STOP, USE_DAILY_STOP) dan gerbang eksekusi "
+                "live (MAX_SPREAD_PCT, MAX_CHASE_PCT, MIN_SECONDS_BETWEEN_TRADES) tidak "
+                "disimulasikan, jadi hasil grid bisa tampak lebih aktif daripada bot asli. "
+                "COOLDOWN_MINUTES_AFTER_CLOSE sudah disimulasikan.",
             ],
         }
 
@@ -962,7 +990,7 @@ def api_backtest_start():
     if max_symbols > 600:
         return jsonify({"error": "Jumlah simbol maksimal 600."}), 400
 
-    est_requests = max_symbols * max(1, -(-(days + 1) * 288 // 1000))
+    est_requests = _bt_estimate_requests(days, max_symbols, PUMP_CONFIG)
     if est_requests > 20000:
         return jsonify({
             "error": f"Permintaan terlalu besar (perkiraan {est_requests:,} request ke Binance). "
@@ -1017,7 +1045,7 @@ def api_backtest_grid_start():
     if max_symbols < 2 or max_symbols > 600:
         return jsonify({"error": "Jumlah simbol harus di antara 2 dan 600."}), 400
 
-    est_requests = max_symbols * max(1, -(-(days + 1) * 288 // 1000))
+    est_requests = _bt_estimate_requests(days, max_symbols, PUMP_CONFIG)
     if est_requests > 20000:
         return jsonify({
             "error": f"Permintaan terlalu besar (perkiraan {est_requests:,} request ke Binance). "

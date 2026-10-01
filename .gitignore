@@ -11,6 +11,7 @@ credentials.json
 # Folder khusus artefak runtime (lihat infrastructure/paths.py).
 logs/
 data/
+tests/
 # Folder lokal warisan versi lama, tetap diabaikan kalau masih ada.
 Data/
 *.json

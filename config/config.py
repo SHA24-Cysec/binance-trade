@@ -1,9 +1,10 @@
 """
 Konfigurasi bot Binance Spot.
 
-Bot hanya mengelola posisi yang sudah ada. Jalur pembukaan posisi baru telah
-dihapus, sementara filter monitoring pasar, proteksi risiko, dan logika exit
-tetap tersedia.
+Bot memindai pasar, membuka posisi baru saat setup pullback-retest lolos
+semua filter (gerbang pump, likuiditas, spread, usia listing, rem risiko),
+lalu mengelola exit (SL/TP/BE/trailing, mode FIXED atau ATR). Mode PAPER
+dan LIVE dipisah per file state.
 
 Semua artefak runtime ditulis ke dua folder khusus (definisi ada di
 infrastructure/paths.py): file log ke logs/, file state/kontrol/settings ke
@@ -200,7 +201,10 @@ def _load_runtime_layers(explicit_mode: str | None = None) -> None:
 _load_runtime_layers()
 
 
-VALID_MODES = ("PAPER", "LIVE")
+# Satu sumber kebenaran: didefinisikan di settings_schema (dipakai UI dan
+# validasi override) dan diimpor di sini supaya get_mode/require_valid_mode
+# tidak punya salinan sendiri yang bisa berbeda diam-diam.
+from config.settings_schema import VALID_MODES  # noqa: E402
 
 
 class InvalidModeError(ValueError):

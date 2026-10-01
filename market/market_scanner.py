@@ -1,9 +1,8 @@
 """Scanner pasar dan filter operasional Binance Spot.
 
 Modul ini menyediakan filter semesta, gerbang pump, likuiditas, spread, usia
-listing, dan korelasi BTC untuk monitoring pasar. Jalur pembukaan posisi baru
-telah dihapus. Modul trading hanya mempertahankan pengelolaan posisi yang
-sudah ada dan fungsi exit.
+listing, dan korelasi BTC, serta deteksi setup entry (pullback-retest) dan
+skor kualitas setup yang dipakai bot dan backtest untuk membuka posisi baru.
 """
 
 from __future__ import annotations

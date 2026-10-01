@@ -126,7 +126,10 @@ class BinanceSpotClient:
         if path == "/api/v3/ticker/24hr":
             return 2 if params.get("symbol") else 80
         if path == "/api/v3/exchangeInfo":
-            return 20 if not params.get("symbol") else 1
+            # Docs resmi Binance (General endpoints, akses 2026-10-01):
+            # bobot 20 untuk SEMUA kombinasi parameter, termasuk saat
+            # difilter per symbol (sejak 2023-08-25, naik dari 10 ke 20).
+            return 20
         if path == "/api/v3/klines":
             return 2
         if path == "/api/v3/depth":

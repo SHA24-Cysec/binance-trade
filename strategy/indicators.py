@@ -1,6 +1,8 @@
 """
 Struktur candle, parser klines, interval pasar, ATR, dan level exit.
-Modul ini tidak menghitung metrik pembukaan posisi.
+Modul ini juga menyediakan indikator setup entry (EMA, RSI, MACD), sizing
+posisi, dan model harga eksekusi backtest yang dipakai jalur pembukaan
+posisi bot maupun backtest.
 
 Array candle memakai urutan kronologis, index 0 adalah candle paling lama.
 """
