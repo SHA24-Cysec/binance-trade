@@ -1019,12 +1019,28 @@ function renderStatus(s){
   }
 
   const c=s.config;
+  const exitAtr=c.exit_source==='ATR';
+  const satuan=exitAtr?' harga':'%';
+  const fb=(!exitAtr && c.use_atr_exit && !p.has_position)?' (fallback)':'';
+  let modeTxt, noteTxt='';
+  if(exitAtr){
+    modeTxt='ATR';
+  }else if(c.use_atr_exit){
+    modeTxt=p.has_position?'PERSEN LAMA (posisi ini)':'ATR (belum ada posisi)';
+    noteTxt=p.has_position
+      ?'Posisi ini dibuka sebelum ATR aktif sehingga levelnya terkunci persen tetap. Posisi berikutnya memakai ATR mult SL '+esc(c.atr_mult_sl)+' / TP '+esc(c.atr_mult_tp)+'.'
+      :'USE_ATR_EXIT aktif: posisi berikutnya memakai ATR mult SL '+esc(c.atr_mult_sl)+' / TP '+esc(c.atr_mult_tp)+'. Persen di bawah hanya fallback bila ATR mati.';
+  }else{
+    modeTxt='PERSEN LAMA';
+  }
+  const noteHtml=noteTxt?'<div class="posrow"><span class="k">Info</span><span class="v" style="font-size:11.5px;line-height:1.45">'+noteTxt+'</span></div>':'';
   document.getElementById('configBox').innerHTML=`
-    <div class="posrow"><span class="k">Mode exit</span><span class="v mono">${c.exit_source==='ATR'?'ATR':'PERSEN LAMA'}</span></div>
-    <div class="posrow"><span class="k">Stop Loss</span><span class="v mono">${c.sl_pct!=null? esc(c.sl_pct)+(c.exit_source==='ATR'?' harga':'%') : 'nonaktif'}</span></div>
-    <div class="posrow"><span class="k">Take Profit</span><span class="v mono">${esc(c.tp_pct)}${c.exit_source==='ATR'?' harga':'%'}</span></div>
-    <div class="posrow"><span class="k">Trigger Breakeven</span><span class="v mono">${esc(c.be_trigger_pct)}%</span></div>
-    <div class="posrow"><span class="k">Mulai Trailing</span><span class="v mono">${esc(c.trailing_start_pct)}%</span></div>
+    <div class="posrow"><span class="k">Mode exit</span><span class="v mono">${modeTxt}</span></div>
+    <div class="posrow"><span class="k">Stop Loss</span><span class="v mono">${c.sl_pct!=null? esc(c.sl_pct)+satuan+fb : 'nonaktif'}</span></div>
+    <div class="posrow"><span class="k">Take Profit</span><span class="v mono">${esc(c.tp_pct)}${satuan}${fb}</span></div>
+    <div class="posrow"><span class="k">Trigger Breakeven</span><span class="v mono">${esc(c.be_trigger_pct)}${satuan}${fb}</span></div>
+    <div class="posrow"><span class="k">Mulai Trailing</span><span class="v mono">${esc(c.trailing_start_pct)}${satuan}${fb}</span></div>
+    ${noteHtml}
     `;
 }
 

@@ -38,7 +38,7 @@ class PaperClient(ExchangeClient):
         self.quote_asset = str(config.get("QUOTE_ASSET", "USDT")).upper()
 
         self.market = MarketDataProvider(config)
-        state_file = config.get("PAPER_ACCOUNT_STATE_FILE", "pump_paper_account_paper.json")
+        state_file = config.get("PAPER_ACCOUNT_STATE_FILE", "data/pump_paper_account_paper.json")
         self.store = PaperStore(state_file, config.get("PAPER_INITIAL_BALANCES"))
 
         self._filters_cache: dict[str, SymbolFilters] = {}

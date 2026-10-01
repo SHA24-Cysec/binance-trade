@@ -3,8 +3,8 @@ Persistensi state akun simulasi PAPER.
 
 Menyimpan saldo virtual per aset, order terbuka, riwayat order, riwayat trade,
 total fee, dan versi skema ke satu file JSON. Dipisah dari file state posisi bot
-(pump_bot_state_*.json) dan TIDAK pernah dipakai di LIVE, sehingga data PAPER
-dan LIVE tidak mungkin tercampur.
+(data/pump_bot_state_*.json) dan TIDAK pernah dipakai di LIVE, sehingga data
+PAPER dan LIVE tidak mungkin tercampur.
 
 Kenapa JSON, bukan SQLite?
 - Konsisten dengan state.py yang sudah memakai JSON atomik.

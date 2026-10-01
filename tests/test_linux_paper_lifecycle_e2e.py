@@ -41,7 +41,7 @@ def test_dashboard_manager_start_restart_stop_paper_without_live_orders(tmp_path
                                 start_new_session=True)
         return proc, procctl.ProcessTreeHandle(proc)
 
-    monkeypatch.setattr(rc, "ROOT", tmp_path)
+    monkeypatch.setattr(rc, "DATA_DIR", tmp_path)
     monkeypatch.setattr(rc.procctl, "spawn_python", fake_spawn)
     manager = rc.BotProcessManager()
     monkeypatch.setattr(manager, "_config", lambda: cfg)

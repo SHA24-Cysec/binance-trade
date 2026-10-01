@@ -576,24 +576,25 @@ class TestAutoRefreshKeamanan(unittest.TestCase):
 
     def test_load_result_tahan_file_rusak(self):
         import tempfile
-        d = tempfile.mkdtemp()
-        cwd = os.getcwd()
+        from pathlib import Path
+        d = Path(tempfile.mkdtemp())
+        lama = self.wa.DATA_DIR
+        self.wa.DATA_DIR = d
         try:
-            os.chdir(d)
             c = dict(cfg_mod.PUMP_CONFIG)
             self.assertIsNone(self.wa.load_result(c))
-            with open(self.wa._auto_file(c), "w") as f:
-                f.write("{bukan json")
+            Path(self.wa._auto_file(c)).write_text("{bukan json", encoding="utf-8")
             self.assertIsNone(self.wa.load_result(c))
         finally:
-            os.chdir(cwd)
+            self.wa.DATA_DIR = lama
 
     def test_simpan_lalu_baca_ulang(self):
         import tempfile
-        d = tempfile.mkdtemp()
-        cwd = os.getcwd()
+        from pathlib import Path
+        d = Path(tempfile.mkdtemp())
+        lama = self.wa.DATA_DIR
+        self.wa.DATA_DIR = d
         try:
-            os.chdir(d)
             c = dict(cfg_mod.PUMP_CONFIG)
             data = {"items": [{"symbol": "ARBUSDT", "tier": "INTI", "monitoring_score": 90.0}],
                     "generated_at": 123}
@@ -601,7 +602,7 @@ class TestAutoRefreshKeamanan(unittest.TestCase):
             got = self.wa.load_result(c)
             self.assertEqual(got["items"][0]["symbol"], "ARBUSDT")
         finally:
-            os.chdir(cwd)
+            self.wa.DATA_DIR = lama
 
     def test_to_klines_buang_baris_rusak(self):
         raw = [

@@ -25,13 +25,14 @@ MODE RUNTIME:
                produksi publik (REST + WebSocket), tanpa API key. Saldo/order
                virtual disimpan ke file. (default, aman)
     "LIVE"  -> order sungguhan ke Binance produksi (uang asli)
-Mode dipilih lewat tab Kontrol dan disimpan di pump_bot_runtime.json. Nilai
+Mode dipilih lewat tab Kontrol dan disimpan di data/settings.json. Nilai
 config.py tetap menjadi default immutable.
 Keduanya memakai jalur LOGIKA STRATEGI yang SAMA PERSIS lewat antarmuka
 ExchangeClient; yang berbeda hanya lapisan eksekusi order dan sumber saldo.
 
-File state, log, dan kontrol otomatis DIPISAH per mode (contoh:
-pump_bot_state_paper.json vs pump_bot_state_live.json), dihitung di
+File state, log, dan kontrol otomatis DIPISAH per mode di folder khusus
+(contoh: data/pump_bot_state_paper.json vs data/pump_bot_state_live.json,
+logs/pump_bot_paper.log vs logs/pump_bot_live.log), dihitung di
 config.py, jadi data posisi/riwayat PAPER dan LIVE tidak pernah tercampur.
 """
 
@@ -46,6 +47,7 @@ import sys
 import threading
 import time
 import uuid
+from pathlib import Path
 
 from trading.clients.binance_client import (
     BinanceAPIError, BinanceRateLimitError, SymbolFilters, build_filters_cache,
@@ -123,6 +125,9 @@ def setup_logging(config: dict) -> None:
     console.setFormatter(fmt)
     setattr(console, _LOGGING_MARKER, True)
     root.addHandler(console)
+    # RotatingFileHandler tidak membuat folder induk sendiri, jadi pastikan
+    # folder logs/ (atau folder induk path LOG_FILE kustom) sudah ada.
+    Path(str(config["LOG_FILE"])).parent.mkdir(parents=True, exist_ok=True)
     file_handler = logging.handlers.RotatingFileHandler(
         config["LOG_FILE"], maxBytes=5_000_000, backupCount=5, encoding="utf-8"
     )

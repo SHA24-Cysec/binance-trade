@@ -8,6 +8,11 @@ secrets.json
 credentials.json
 
 # === State & log runtime bot ===
+# Folder khusus artefak runtime (lihat infrastructure/paths.py).
+logs/
+data/
+# Folder lokal warisan versi lama, tetap diabaikan kalau masih ada.
+Data/
 *.json
 *.json.*
 *.log

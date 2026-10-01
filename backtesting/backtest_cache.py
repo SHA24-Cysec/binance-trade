@@ -11,7 +11,7 @@ exit yang berbeda di atas DATA YANG SAMA. Untuk 150 simbol x 30 hari itu
 berarti sekitar 1.350 request identik setiap kali tombol ditekan.
 
 Modul ini menyimpan candle yang sudah pernah diunduh ke satu file SQLite
-PERMANEN (default ``Data/backtest_cache.sqlite3`` di folder repo), lalu job
+PERMANEN (default ``data/backtest_cache.sqlite3`` di folder repo), lalu job
 berikutnya hanya mengunduh bagian yang BELUM ada. Bedakan dengan
 backtest_storage.KlineStore yang tetap sekali pakai dan tetap dihapus setiap
 job selesai; cache ini hanya sumber data untuk mengisi store itu.

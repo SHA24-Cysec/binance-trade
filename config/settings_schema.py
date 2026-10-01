@@ -1,4 +1,22 @@
-"""Skema, validasi, dan penyimpanan override konfigurasi dashboard.
+"""Skema, validasi, dan penyimpanan konfigurasi runtime dashboard.
+
+Seluruh konfigurasi runtime tersimpan dalam SATU file ``data/settings.json``
+dengan struktur:
+
+    {
+      "active_mode": "PAPER",
+      "overrides": {
+        "PAPER": {"LOOP_INTERVAL_SECONDS": 9},
+        "LIVE": {}
+      }
+    }
+
+Sebelumnya mode dan override per mode tersebar di tiga file terpisah di
+akar repo; sekarang cukup satu file sehingga mudah diperiksa, dicadangkan,
+dan dipindah.
+File yang rusak diarsipkan sebagai ``settings.json.corrupt-<ts>`` lalu ditandai
+di ``settings.error.json``; bot selalu jatuh ke default aman (PAPER) dan tidak
+pernah menimpa file rusak secara diam-diam.
 
 Modul ini tidak meng-from config import config.py agar config.py dapat memakainya saat
 proses import tanpa circular import. Semua path runtime berakar di folder repo.
@@ -22,13 +40,12 @@ from infrastructure.storage.atomic_io import (
     interprocess_lock,
     read_json,
 )
-from infrastructure.paths import PROJECT_ROOT
+from infrastructure.paths import DATA_DIR, LOGS_DIR
 
 
-ROOT = PROJECT_ROOT
-RUNTIME_FILE = ROOT / "pump_bot_runtime.json"
-RUNTIME_ERROR_FILE = ROOT / "pump_bot_runtime.error.json"
-AUDIT_FILE = ROOT / "pump_bot_settings_audit.log"
+SETTINGS_FILE = DATA_DIR / "settings.json"
+SETTINGS_ERROR_FILE = DATA_DIR / "settings.error.json"
+AUDIT_FILE = LOGS_DIR / "settings_audit.log"
 VALID_MODES = ("PAPER", "LIVE")
 _WRITE_LOCK = threading.RLock()
 
@@ -39,14 +56,6 @@ class ConcurrentSettingsError(RuntimeError):
 
 _SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,40}$")
 _ASSET_RE = re.compile(r"^[A-Z0-9]{2,12}$")
-
-
-def settings_file(mode: str) -> Path:
-    return ROOT / f"pump_bot_settings_{str(mode).lower()}.json"
-
-
-def settings_error_file(mode: str) -> Path:
-    return ROOT / f"pump_bot_settings_{str(mode).lower()}.error.json"
 
 
 def _field(group: str, label: str, description: str, kind: str,
@@ -198,83 +207,110 @@ def _error_marker(path: Path, message: str, backup: Path | None = None) -> None:
     })
 
 
-def load_runtime_mode(default: str = "PAPER") -> tuple[str, list[str]]:
-    errors: list[str] = []
-    if RUNTIME_ERROR_FILE.exists():
-        marker = read_json(RUNTIME_ERROR_FILE, {}) or {}
-        errors.append(str(marker.get("error") or "File runtime mode sebelumnya rusak."))
-    if not RUNTIME_FILE.exists():
-        return default, errors
+def _clear_error_marker() -> None:
     try:
-        with open(RUNTIME_FILE, "r", encoding="utf-8") as handle:
+        SETTINGS_ERROR_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _read_doc_unlocked() -> tuple[dict, list[str]]:
+    """Baca dokumen settings gabungan. WAJIB dipanggil di dalam lock file.
+
+    Return (doc, errors). doc kosong berarti file belum ada atau rusak, sehingga
+    pemanggil wajib memakai nilai default. Setiap kegagalan struktur mengarsipkan
+    file ke settings.json.corrupt-<ts> supaya tidak ada data hilang diam-diam.
+    """
+    errors: list[str] = []
+    if SETTINGS_ERROR_FILE.exists():
+        marker = read_json(SETTINGS_ERROR_FILE, {}) or {}
+        errors.append(str(marker.get("error") or "File settings runtime sebelumnya rusak."))
+    if not SETTINGS_FILE.exists():
+        return {}, errors
+    try:
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as handle:
             data = json.load(handle)
-        if not isinstance(data, dict) or "active_mode" not in data:
-            raise ValueError("root harus object dan memiliki active_mode")
-        return str(data["active_mode"]), errors
+        if not isinstance(data, dict):
+            raise ValueError("root settings harus object JSON")
+        unknown_root = sorted(set(data) - {"active_mode", "overrides"})
+        if unknown_root:
+            raise ValueError("kunci root tidak dikenal: " + ", ".join(unknown_root))
+        if "active_mode" not in data or not isinstance(data["active_mode"], str):
+            raise ValueError("active_mode wajib ada dan berupa string")
+        overrides = data.get("overrides")
+        if overrides is None:
+            overrides = {}
+        if not isinstance(overrides, dict):
+            raise ValueError("overrides harus object")
+        bad_modes = sorted(str(m) for m in overrides if m not in VALID_MODES)
+        if bad_modes:
+            raise ValueError("mode override tidak dikenal: " + ", ".join(bad_modes))
+        for mode, payload in overrides.items():
+            if not isinstance(payload, dict):
+                raise ValueError(f"override {mode} harus object")
+        data["overrides"] = overrides
+        return data, errors
     except (json.JSONDecodeError, OSError, ValueError, TypeError) as exc:
-        backup = archive_corrupt(RUNTIME_FILE)
-        message = f"File mode runtime rusak: {exc}. Cadangan: {backup}"
-        _error_marker(RUNTIME_ERROR_FILE, message, backup)
-        errors.append(message)
+        backup = archive_corrupt(SETTINGS_FILE)
+        message = f"File settings runtime rusak: {exc}. Cadangan: {backup}"
+        _error_marker(SETTINGS_ERROR_FILE, message, backup)
+        return {}, errors + [message]
+
+
+def _validate_override_payload(payload: dict) -> None:
+    unknown = sorted(set(payload) - set(PARAMETER_SCHEMA))
+    if unknown:
+        raise ValueError("kunci override tidak dikenal: " + ", ".join(unknown))
+    forbidden = [k for k in payload if PARAMETER_SCHEMA[k]["read_only"]]
+    forbidden = [k for k in forbidden if k != "PAPER_INITIAL_BALANCES"]
+    if forbidden:
+        raise ValueError("override memuat kunci read-only: " + ", ".join(forbidden))
+
+
+def load_runtime_mode(default: str = "PAPER") -> tuple[str, list[str]]:
+    with interprocess_lock(SETTINGS_FILE):
+        doc, errors = _read_doc_unlocked()
+    if not doc:
         return default, errors
+    return str(doc["active_mode"]), errors
 
 
 def save_runtime_mode(mode: str, *, expected_current: str | None = None) -> None:
     raw = str(mode).strip().upper()
     if raw not in VALID_MODES:
         raise ValueError(f"Mode tidak valid: {mode!r}")
-    with _WRITE_LOCK, interprocess_lock(RUNTIME_FILE):
+    with _WRITE_LOCK, interprocess_lock(SETTINGS_FILE):
+        doc, load_errors = _read_doc_unlocked()
         if expected_current is not None:
-            current, load_errors = load_runtime_mode()
-            current = str(current).strip().upper()
+            current = str(doc.get("active_mode") or "PAPER").strip().upper()
             if load_errors or current != str(expected_current).strip().upper():
                 raise ConcurrentSettingsError(
                     "Mode runtime berubah setelah checklist; ulangi perpindahan mode."
                 )
-        atomic_write_json(RUNTIME_FILE, {"active_mode": raw})
-        try:
-            RUNTIME_ERROR_FILE.unlink(missing_ok=True)
-        except OSError:
-            pass
-
-
-def _load_mode_override_unlocked(mode: str) -> tuple[dict, list[str]]:
-    raw_mode = str(mode).strip().upper()
-    path = settings_file(raw_mode)
-    marker_path = settings_error_file(raw_mode)
-    errors: list[str] = []
-    if marker_path.exists():
-        marker = read_json(marker_path, {}) or {}
-        errors.append(str(marker.get("error") or f"Override {raw_mode} sebelumnya rusak."))
-    if not path.exists():
-        return {}, errors
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            data = json.load(handle)
-        if not isinstance(data, dict):
-            raise ValueError("root override harus object JSON")
-        unknown = sorted(set(data) - set(PARAMETER_SCHEMA))
-        if unknown:
-            raise ValueError("kunci override tidak dikenal: " + ", ".join(unknown))
-        forbidden = [k for k in data if PARAMETER_SCHEMA[k]["read_only"]]
-        forbidden = [k for k in forbidden if k != "PAPER_INITIAL_BALANCES"]
-        if forbidden:
-            raise ValueError("override memuat kunci read-only: " + ", ".join(forbidden))
-        return data, errors
-    except (json.JSONDecodeError, OSError, ValueError, TypeError) as exc:
-        backup = archive_corrupt(path)
-        message = f"Override {raw_mode} rusak: {exc}. Cadangan: {backup}"
-        _error_marker(marker_path, message, backup)
-        errors.append(message)
-        return {}, errors
+        atomic_write_json(SETTINGS_FILE, {
+            "active_mode": raw,
+            "overrides": doc.get("overrides", {}),
+        })
+        _clear_error_marker()
 
 
 def load_mode_override(mode: str) -> tuple[dict, list[str]]:
     raw_mode = str(mode).strip().upper()
     if raw_mode not in VALID_MODES:
         raise ValueError("Mode override tidak valid.")
-    with interprocess_lock(settings_file(raw_mode)):
-        return _load_mode_override_unlocked(raw_mode)
+    with interprocess_lock(SETTINGS_FILE):
+        doc, errors = _read_doc_unlocked()
+        payload = doc.get("overrides", {}).get(raw_mode)
+        if payload is None:
+            return {}, errors
+        try:
+            _validate_override_payload(payload)
+        except ValueError as exc:
+            backup = archive_corrupt(SETTINGS_FILE)
+            message = f"Override {raw_mode} rusak: {exc}. Cadangan: {backup}"
+            _error_marker(SETTINGS_ERROR_FILE, message, backup)
+            return {}, errors + [message]
+        return dict(payload), errors
 
 
 def save_mode_override(mode: str, overrides: dict,
@@ -282,19 +318,22 @@ def save_mode_override(mode: str, overrides: dict,
     raw_mode = str(mode).strip().upper()
     if raw_mode not in VALID_MODES:
         raise ValueError("Mode override tidak valid.")
-    path = settings_file(raw_mode)
-    with _WRITE_LOCK, interprocess_lock(path):
+    with _WRITE_LOCK, interprocess_lock(SETTINGS_FILE):
+        doc, load_errors = _read_doc_unlocked()
         if expected_existing is not None:
-            existing, load_errors = _load_mode_override_unlocked(raw_mode)
+            existing = doc.get("overrides", {}).get(raw_mode, {})
             if load_errors or existing != expected_existing:
                 raise ConcurrentSettingsError(
                     "Override settings berubah setelah preview; ulangi preview terlebih dahulu."
                 )
-        atomic_write_json(path, overrides)
-        try:
-            settings_error_file(raw_mode).unlink(missing_ok=True)
-        except OSError:
-            pass
+        _validate_override_payload(overrides)
+        merged_overrides = dict(doc.get("overrides", {}))
+        merged_overrides[raw_mode] = overrides
+        atomic_write_json(SETTINGS_FILE, {
+            "active_mode": doc.get("active_mode", "PAPER"),
+            "overrides": merged_overrides,
+        })
+        _clear_error_marker()
 
 
 def _coerce_bool(value: Any) -> bool:

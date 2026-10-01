@@ -77,7 +77,7 @@ class _PaperDashboardClient:
             rate_limit_safety_margin=int(PUMP_CONFIG.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100),
         )
         self._account_file = PUMP_CONFIG.get("PAPER_ACCOUNT_STATE_FILE",
-                                             "pump_paper_account_paper.json")
+                                             "data/pump_paper_account_paper.json")
 
     def get_price(self, symbol, max_retries: int = 3):
         return self._market.get_price(symbol, max_retries=max_retries)
@@ -528,6 +528,9 @@ def build_status():
             "trail_start_pct": state.get("trail_start_pct") or PUMP_CONFIG.get("TRAILING_START_PCT"),
             "trail_step_pct": state.get("trail_step_pct") or PUMP_CONFIG.get("TRAILING_STEP_PCT"),
             "trailing_start_pct": state.get("trail_start_pct") or PUMP_CONFIG.get("TRAILING_START_PCT"),
+            "use_atr_exit": bool(PUMP_CONFIG.get("USE_ATR_EXIT")),
+            "atr_mult_sl": PUMP_CONFIG.get("ATR_MULT_SL"),
+            "atr_mult_tp": PUMP_CONFIG.get("ATR_MULT_TP"),
         },
     }
 
@@ -1483,17 +1486,28 @@ def _withdrawal_permission_safe() -> bool:
 
 
 def _risk_summary(config: dict) -> dict:
-    return {
+    use_atr = bool(config.get("USE_ATR_EXIT"))
+    summary: dict = {
+        "USE_ATR_EXIT": use_atr,
         "USE_STOP_LOSS": config.get("USE_STOP_LOSS"),
-        "SL_PCT": config.get("SL_PCT"),
         "USE_TP": config.get("USE_TP"),
-        "TP_PCT": config.get("TP_PCT"),
         "USE_EQUITY_STOP": config.get("USE_EQUITY_STOP"),
         "MAX_DRAWDOWN_PERCENT": config.get("MAX_DRAWDOWN_PERCENT"),
         "USE_DAILY_STOP": config.get("USE_DAILY_STOP"),
         "MAX_DAILY_LOSS_PERCENT": config.get("MAX_DAILY_LOSS_PERCENT"),
         "CLOSE_ALL_AT_LIMIT": config.get("CLOSE_ALL_AT_LIMIT"),
     }
+    if use_atr:
+        # Saat ATR aktif, SL_PCT/TP_PCT hanyalah fallback bila ATR mati;
+        # beri label eksplisit supaya tidak disangka level yang sedang dipakai.
+        summary["ATR_MULT_SL"] = config.get("ATR_MULT_SL")
+        summary["ATR_MULT_TP"] = config.get("ATR_MULT_TP")
+        summary["SL_PCT (fallback)"] = config.get("SL_PCT")
+        summary["TP_PCT (fallback)"] = config.get("TP_PCT")
+    else:
+        summary["SL_PCT"] = config.get("SL_PCT")
+        summary["TP_PCT"] = config.get("TP_PCT")
+    return summary
 
 
 @app.route("/api/control/status")

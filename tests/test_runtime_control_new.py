@@ -16,7 +16,7 @@ from trading import pump_scanner_bot as pump_bot
 
 
 def test_per_mode_lock_rejects_duplicate_live_owner(tmp_path, monkeypatch):
-    monkeypatch.setattr(rc, "ROOT", tmp_path)
+    monkeypatch.setattr(rc, "DATA_DIR", tmp_path)
     first = rc.BotModeLock("PAPER")
     second = rc.BotModeLock("PAPER")
     first.acquire()
@@ -29,7 +29,7 @@ def test_per_mode_lock_rejects_duplicate_live_owner(tmp_path, monkeypatch):
 
 
 def test_partially_written_live_lock_is_not_stolen(tmp_path, monkeypatch):
-    monkeypatch.setattr(rc, "ROOT", tmp_path)
+    monkeypatch.setattr(rc, "DATA_DIR", tmp_path)
     path = rc.lock_file("PAPER")
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     result = []
@@ -61,7 +61,7 @@ def test_partially_written_live_lock_is_not_stolen(tmp_path, monkeypatch):
 
 
 def test_stale_lock_is_archived_and_replaced(tmp_path, monkeypatch):
-    monkeypatch.setattr(rc, "ROOT", tmp_path)
+    monkeypatch.setattr(rc, "DATA_DIR", tmp_path)
     lock_path = rc.lock_file("LIVE")
     lock_path.write_text(json.dumps({"pid": 99999999, "process_identity": "lama", "token": "stale-token"}), encoding="utf-8")
     monkeypatch.setattr(rc.procctl, "is_process_alive", lambda pid, identity=None: False)
@@ -75,7 +75,7 @@ def test_stale_lock_is_archived_and_replaced(tmp_path, monkeypatch):
 
 
 def test_lifecycle_marks_exception_as_crashed(tmp_path, monkeypatch):
-    monkeypatch.setattr(rc, "ROOT", tmp_path)
+    monkeypatch.setattr(rc, "DATA_DIR", tmp_path)
     monkeypatch.setattr(rc.procctl, "process_identity", lambda pid: "test-identity")
     with pytest.raises(RuntimeError):
         with rc.BotRuntime("PAPER"):

@@ -13,8 +13,8 @@ Modul ini TIDAK PERNAH memengaruhi keputusan trading. Ia hanya mengganti
 isi panel pantau di dashboard. Bot tetap memindai SELURUH pair USDT.
 Tidak ada fungsi di sini yang dipanggil oleh pump_scanner_bot.py.
 
-Hasilnya ditulis ke file terpisah (watchlist_auto_<mode>.json), TIDAK
-PERNAH menimpa config.py. Daftar manual di config.py tetap utuh sebagai
+Hasilnya ditulis ke file terpisah di folder data/ (data/watchlist_auto_<mode>.json),
+TIDAK PERNAH menimpa config.py. Daftar manual di config.py tetap utuh sebagai
 cadangan kalau penyegaran gagal atau dimatikan.
 
 ================================================================
@@ -65,6 +65,7 @@ from typing import Callable, Optional
 from market import market_scanner as scanner
 from strategy import indicators as strategy
 from strategy.indicators import Kline
+from infrastructure.paths import DATA_DIR
 
 logger = logging.getLogger("watchlist_auto")
 
@@ -79,7 +80,7 @@ KLINE_PAGE = 1000
 def _auto_file(config: dict) -> str:
     from config import config as cfg_mod
     mode = cfg_mod.get_mode(config).lower()
-    return f"watchlist_auto_{mode}.json"
+    return str(DATA_DIR / f"watchlist_auto_{mode}.json")
 
 
 def to_klines(raw: list, now_ms: Optional[int] = None) -> list:
@@ -391,6 +392,8 @@ def refresh_once(client, config: dict,
 def save_result(result: dict, config: dict) -> Optional[str]:
     try:
         path = _auto_file(config)
+        parent = os.path.dirname(path) or "."
+        os.makedirs(parent, exist_ok=True)
         tmp = f"{path}.tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=False, indent=1)

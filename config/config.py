@@ -4,6 +4,11 @@ Konfigurasi bot Binance Spot.
 Bot hanya mengelola posisi yang sudah ada. Jalur pembukaan posisi baru telah
 dihapus, sementara filter monitoring pasar, proteksi risiko, dan logika exit
 tetap tersedia.
+
+Semua artefak runtime ditulis ke dua folder khusus (definisi ada di
+infrastructure/paths.py): file log ke logs/, file state/kontrol/settings ke
+data/. Nama file per mode (mis. pump_bot_state_paper.json) tetap dipisah
+supaya data PAPER dan LIVE tidak pernah tercampur.
 """
 
 import os
@@ -26,14 +31,14 @@ PUMP_CONFIG = {
     "SHOW_BACKTEST_IN_LIVE": False,
 
     "LIVE_BASE_URL": "https://api.binance.com",
-    "RATE_LIMIT_STATE_FILE": "binance_rate_limit_state.json",
+    "RATE_LIMIT_STATE_FILE": "data/binance_rate_limit_state.json",
     "RATE_LIMIT_WEIGHT_LIMIT": 6000,
     "RATE_LIMIT_SAFETY_MARGIN": 100,
     "API_KEY": os.environ.get("BINANCE_API_KEY", ""),
     "API_SECRET": os.environ.get("BINANCE_API_SECRET", ""),
 
     "PAPER_INITIAL_BALANCES": {"USDT": 1000.0},
-    "PAPER_ACCOUNT_STATE_FILE": "pump_paper_account.json",
+    "PAPER_ACCOUNT_STATE_FILE": "data/pump_paper_account.json",
     "PAPER_DEPTH_LIMIT": 100,
     "PAPER_LIMIT_ORDER_TIMEOUT_SECONDS": 60,
 
@@ -70,7 +75,7 @@ PUMP_CONFIG = {
 
     "BACKTEST_INITIAL_EQUITY_USDT": 10_000.0,
     "BACKTEST_CACHE_ENABLED": True,
-    "BACKTEST_CACHE_FILE": "Data/backtest_cache.sqlite3",
+    "BACKTEST_CACHE_FILE": "data/backtest_cache.sqlite3",
     "BACKTEST_CACHE_FRESH_HOURS": 24,
     "BACKTEST_CACHE_TTL_DAYS": 30,
 
@@ -106,10 +111,10 @@ PUMP_CONFIG = {
     "SUPERVISOR_RESTART_WINDOW_SECONDS": 300,
     "SUPERVISOR_RESTART_BACKOFF_SECONDS": 5,
 
-    "STATE_FILE": "pump_bot_state.json",
-    "LOG_FILE": "pump_bot.log",
+    "STATE_FILE": "data/pump_bot_state.json",
+    "LOG_FILE": "logs/pump_bot.log",
     "HEARTBEAT_INTERVAL_SECONDS": 300,
-    "CONTROL_FILE": "pump_bot_control.json",
+    "CONTROL_FILE": "data/pump_bot_control.json",
 
     "USE_DUST_SWEEP": True,
 
@@ -186,7 +191,10 @@ def _load_runtime_layers(explicit_mode: str | None = None) -> None:
     PUMP_CONFIG.clear()
     PUMP_CONFIG.update(cfg)
     CONFIG_LOAD_ERRORS.clear()
-    CONFIG_LOAD_ERRORS.extend(errors)
+    # Marker error yang sama bisa dilaporkan oleh load_runtime_mode dan
+    # load_mode_override karena keduanya kini membaca satu file settings;
+    # hapus duplikat supaya pesan di dashboard tidak dobel.
+    CONFIG_LOAD_ERRORS.extend(dict.fromkeys(errors))
 
 
 _load_runtime_layers()
@@ -212,7 +220,7 @@ def require_valid_mode(config: dict = None) -> str:
     if mode not in VALID_MODES:
         raise InvalidModeError(
             f"MODE tidak valid: {raw!r}. Nilai yang diizinkan hanya "
-            f"{', '.join(VALID_MODES)}. Perbaiki pump_bot_runtime.json atau "
+            f"{', '.join(VALID_MODES)}. Perbaiki data/settings.json atau "
             "hapus file itu agar default PAPER dipakai. Bot TIDAK akan berjalan "
             "dengan mode yang tidak dikenal demi keamanan."
         )
@@ -249,7 +257,7 @@ def use_websocket(config: dict = None) -> bool:
 def get_paper_account_file(config: dict = None) -> str:
     cfg = PUMP_CONFIG if config is None else config
     return _mode_filename(
-        str(cfg.get("PAPER_ACCOUNT_STATE_FILE", "pump_paper_account.json")),
+        str(cfg.get("PAPER_ACCOUNT_STATE_FILE", "data/pump_paper_account.json")),
         get_mode(cfg),
     )
 
@@ -268,17 +276,17 @@ def _mode_filename(base: str, mode: str) -> str:
 
 def get_state_file(config: dict = None) -> str:
     cfg = PUMP_CONFIG if config is None else config
-    return _mode_filename(str(cfg.get("STATE_FILE", "pump_bot_state.json")), get_mode(cfg))
+    return _mode_filename(str(cfg.get("STATE_FILE", "data/pump_bot_state.json")), get_mode(cfg))
 
 
 def get_log_file(config: dict = None) -> str:
     cfg = PUMP_CONFIG if config is None else config
-    return _mode_filename(str(cfg.get("LOG_FILE", "pump_bot.log")), get_mode(cfg))
+    return _mode_filename(str(cfg.get("LOG_FILE", "logs/pump_bot.log")), get_mode(cfg))
 
 
 def get_control_file(config: dict = None) -> str:
     cfg = PUMP_CONFIG if config is None else config
-    return _mode_filename(str(cfg.get("CONTROL_FILE", "pump_bot_control.json")), get_mode(cfg))
+    return _mode_filename(str(cfg.get("CONTROL_FILE", "data/pump_bot_control.json")), get_mode(cfg))
 
 
 _PROJECT_ROOT = str(PROJECT_ROOT)
@@ -295,10 +303,10 @@ def _finalize_config_dict(cfg: dict) -> dict:
     cfg["CONTROL_FILE"] = _runtime_path(get_control_file(cfg))
     cfg["PAPER_ACCOUNT_STATE_FILE"] = _runtime_path(get_paper_account_file(cfg))
     cfg["RATE_LIMIT_STATE_FILE"] = _runtime_path(
-        str(cfg.get("RATE_LIMIT_STATE_FILE", "binance_rate_limit_state.json"))
+        str(cfg.get("RATE_LIMIT_STATE_FILE", "data/binance_rate_limit_state.json"))
     )
     cfg["BACKTEST_CACHE_FILE"] = _runtime_path(
-        str(cfg.get("BACKTEST_CACHE_FILE", "Data/backtest_cache.sqlite3"))
+        str(cfg.get("BACKTEST_CACHE_FILE", "data/backtest_cache.sqlite3"))
     )
     return cfg
 

@@ -13,10 +13,7 @@ from typing import Any
 from infrastructure.storage.atomic_io import atomic_write_json, read_json, replace_with_retry, timestamp_tag
 from infrastructure.process import procctl
 from infrastructure.storage import state as state_mod
-from infrastructure.paths import PROJECT_ROOT
-
-
-ROOT = PROJECT_ROOT
+from infrastructure.paths import DATA_DIR, PROJECT_ROOT
 
 
 class BotAlreadyRunningError(RuntimeError):
@@ -35,15 +32,15 @@ def _mode(mode: str) -> str:
 
 
 def lock_file(mode: str) -> Path:
-    return ROOT / f"pump_bot_lock_{_mode(mode).lower()}.json"
+    return DATA_DIR / f"pump_bot_lock_{_mode(mode).lower()}.json"
 
 
 def process_file(mode: str) -> Path:
-    return ROOT / f"pump_bot_process_{_mode(mode).lower()}.json"
+    return DATA_DIR / f"pump_bot_process_{_mode(mode).lower()}.json"
 
 
 def reclaim_lock_file(mode: str) -> Path:
-    return ROOT / f"pump_bot_lock_{_mode(mode).lower()}.reclaim"
+    return DATA_DIR / f"pump_bot_lock_{_mode(mode).lower()}.reclaim"
 
 
 def _read_dict(path: Path) -> dict:
@@ -82,6 +79,7 @@ class BotModeLock:
     def __init__(self, mode: str):
         self.mode = _mode(mode)
         self.path = lock_file(self.mode)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         self.token = uuid.uuid4().hex
         self.acquired = False
 
@@ -446,7 +444,7 @@ class BotProcessManager:
             env = os.environ.copy()
             env["PUMP_BOT_MANAGED"] = "1"
             proc, tree = procctl.spawn_python(
-                ROOT / "pump_scanner_bot.py", cwd=ROOT, env=env,
+                PROJECT_ROOT / "pump_scanner_bot.py", cwd=PROJECT_ROOT, env=env,
             )
             self._proc = proc
             self._tree = tree
