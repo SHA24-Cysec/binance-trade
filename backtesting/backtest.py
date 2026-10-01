@@ -447,8 +447,8 @@ def apply_overrides(base_config: dict, overrides: dict) -> dict:
         if key in overrides and overrides[key] is not None and overrides[key] != "":
             try:
                 cfg[key] = caster(overrides[key])
-            except (TypeError, ValueError):
-                raise BacktestError(f"Nilai parameter '{key}' tidak valid: {overrides[key]!r}")
+            except (TypeError, ValueError) as exc:
+                raise BacktestError(f"Nilai parameter '{key}' tidak valid: {overrides[key]!r}") from exc
     return cfg
 
 
@@ -711,7 +711,7 @@ def main():
             spec = parse_spec_cli(args.grid)
         except GridSearchError as exc:
             print(f"Spesifikasi grid tidak valid: {exc}")
-            raise SystemExit(2)
+            raise SystemExit(2) from exc
 
         jumlah = 1
         for nilai in spec.values():
@@ -729,7 +729,7 @@ def main():
                 min_trades=args.grid_min_trades, progress_cb=_progress)
         except GridSearchError as exc:
             print(f"\nGrid search gagal: {exc}")
-            raise SystemExit(2)
+            raise SystemExit(2) from exc
         print()
         cetak_tabel(hasil, top_n=args.grid_top)
         return

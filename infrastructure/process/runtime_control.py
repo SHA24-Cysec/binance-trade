@@ -108,7 +108,7 @@ class BotModeLock:
                 if pid and procctl.is_process_alive(pid, existing.get("process_identity")):
                     raise BotAlreadyRunningError(
                         f"Bot mode {self.mode} sudah berjalan dengan PID {pid}."
-                    )
+                    ) from None
 
                 if not pid or not token:
                     try:

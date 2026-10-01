@@ -119,10 +119,18 @@ class BinanceSpotClient:
         return int(time.time() * 1000) + self._time_offset_ms
 
     @staticmethod
-    def _estimate_request_weight(path: str, params: dict | None = None) -> int:
+    def _estimate_request_weight(method: str, path: str,
+                                 params: dict | None = None) -> int:
+        # Bobot mengikuti dokumentasi resmi Binance Spot (diakses 2026-10-01):
+        # https://developers.binance.com/docs/binance-spot-api-docs/rest-api
+        # (market-data-endpoints, account-endpoints, trading-endpoints) dan
+        # CHANGELOG resmi 2023-08-25 (account 10->20, order 2->4,
+        # orderList 2->4, openOrders 3->6 / 40->80):
+        # https://github.com/binance/binance-spot-api-docs/blob/master/CHANGELOG.md
+        method = str(method or "GET").upper()
         params = params or {}
-        if path == "/api/v3/ticker/24hr" and not params.get("symbol"):
-            return 80
+        if path == "/api/v3/ticker/24hr":
+            return 2 if params.get("symbol") else 80
         if path == "/api/v3/exchangeInfo":
             return 20 if not params.get("symbol") else 1
         if path == "/api/v3/klines":
@@ -134,6 +142,14 @@ class BinanceSpotClient:
             return 4 if not params.get("symbol") else 2
         if path in ("/api/v3/ticker/price", "/api/v3/time"):
             return 2
+        if path == "/api/v3/account" and method == "GET":
+            return 20
+        if path == "/api/v3/order" and method == "GET":
+            return 4
+        if path == "/api/v3/orderList" and method == "GET":
+            return 4
+        if path == "/api/v3/openOrders" and method == "GET":
+            return 6 if params.get("symbol") else 80
         return 1
 
     def _request(
@@ -166,7 +182,7 @@ class BinanceSpotClient:
             u = f"{self.base_url}{path}"
             return f"{u}?{q}" if q else u
 
-        request_weight = self._estimate_request_weight(path, base_params)
+        request_weight = self._estimate_request_weight(method, path, base_params)
         last_exc = None
         skip_shared_block = False
         for attempt in range(1, max_retries + 1):

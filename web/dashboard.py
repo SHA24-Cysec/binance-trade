@@ -21,6 +21,7 @@ import hashlib
 import ipaddress
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -100,6 +101,7 @@ class _PaperDashboardClient:
         return load_account_snapshot(self._account_file)
 
 from backtesting import backtest as bt
+from backtesting import grid_search as gs
 from backtesting import portfolio_backtest as pbt
 
 app = Flask(__name__, template_folder=str(PROJECT_ROOT / "templates"))
@@ -573,6 +575,11 @@ BT_PARAM_KEYS = (
     "TRAILING_START_PCT", "TRAILING_STEP_PCT",
 )
 
+# Parameter yang boleh di-grid lewat dashboard: parameter exit numerik saja.
+# USE_ATR_EXIT (boolean) sengaja tidak bisa di-grid: itu pilihan mode, bukan
+# nilai yang disapu; grid lintas mode akan membandingkan apel dengan jeruk.
+GRID_PARAM_KEYS = tuple(k for k in BT_PARAM_KEYS if k != "USE_ATR_EXIT")
+
 _bt_jobs: dict = {}
 _bt_jobs_lock = threading.Lock()
 BT_JOB_TTL_SECONDS = 3600
@@ -584,6 +591,118 @@ def _bt_cleanup_old_jobs():
         stale = [jid for jid, j in _bt_jobs.items() if now - j.get("created_at", now) > BT_JOB_TTL_SECONDS]
         for jid in stale:
             _bt_jobs.pop(jid, None)
+
+
+def _bt_prepare_universe(job_id: str, cfg: dict, days: int, max_symbols: int,
+                         set_progress, cancelled) -> dict:
+    """Siapkan semesta data (ticker, klines, volume harian) untuk simulasi.
+
+    Dipakai bersama oleh job backtest portofolio dan job grid search.
+    Pemanggil WAJIB menutup store dan kline_cache pada finally.
+    """
+    interval = cfg.get("MARKET_DATA_INTERVAL", "5m")
+    bt.bars_per_day(interval)
+    bar_ms = bt.INTERVAL_MINUTES[interval] * 60_000
+    warmup_ms = bt.MS_PER_DAY + 30 * bar_ms
+
+    end_ms = int(time.time() * 1000)
+    start_ms = end_ms - days * bt.MS_PER_DAY
+    fetch_start_ms = start_ms - warmup_ms
+
+    if not _HAS_CLIENT:
+        raise bt.BacktestError(
+            "Klien Binance tidak tersedia (modul 'requests' tidak termuat). "
+            "Backtest butuh akses ke data historis publik Binance."
+        )
+    client = BinanceSpotClient(
+        "", "", PUMP_CONFIG["LIVE_BASE_URL"], allow_signed=False,
+        rate_limit_state_file=PUMP_CONFIG.get("RATE_LIMIT_STATE_FILE"),
+        rate_limit_limit=int(PUMP_CONFIG.get("RATE_LIMIT_WEIGHT_LIMIT", 6000) or 6000),
+        rate_limit_safety_margin=int(PUMP_CONFIG.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100),
+    )
+
+    set_progress(0.01, "mengambil daftar pasar...")
+    try:
+        tickers = client.get_ticker_24hr_all()
+    except Exception as exc:  # noqa: BLE001
+        raise bt.BacktestError(
+            f"Gagal mengambil daftar pasar dari Binance: {exc}"
+        ) from exc
+
+    tradable_now = None
+    try:
+        exchange_info = client.get_exchange_info()
+        tradable_now = {
+            s.get("symbol") for s in exchange_info.get("symbols", [])
+            if s.get("symbol") and s.get("status") == "TRADING"
+            and s.get("isSpotTradingAllowed", True)
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Metadata status pair tidak tersedia untuk portfolio backtest: %s", exc)
+    if tradable_now is not None:
+        cfg["_historical_tradable_symbols"] = tradable_now
+        cfg["_tradable_status_is_current_snapshot"] = True
+
+    universe = pbt.select_universe(tickers, cfg, max_symbols=max_symbols,
+                                   tradable_symbols=tradable_now)
+    if not universe:
+        raise bt.BacktestError(
+            "Tidak ada simbol yang lolos saringan pasar. Periksa QUOTE_ASSET "
+            "dan MIN_QUOTE_VOLUME_USDT_24H di config.py."
+        )
+
+    with _bt_jobs_lock:
+        if job_id in _bt_jobs:
+            _bt_jobs[job_id]["universe_size"] = len(universe)
+
+    set_progress(0.03, f"mengunduh data {len(universe)} simbol...")
+
+    def dl_progress(frac, sym):
+        set_progress(0.03 + frac * 0.77,
+                     f"mengunduh {sym} ({int(frac * len(universe))}/{len(universe)})")
+
+    store = None
+    kline_cache = None
+    try:
+        store = pbt.new_backtest_store(cfg)
+        kline_cache = pbt.open_kline_cache(cfg)
+        symbols_with_data, failed = pbt.fetch_universe_klines(
+            client, universe, interval, fetch_start_ms, end_ms, store,
+            progress_cb=dl_progress, cancel_cb=cancelled, cache=kline_cache,
+        )
+        if not symbols_with_data:
+            raise bt.BacktestError(
+                "Tidak ada satu pun simbol yang berhasil diunduh datanya. "
+                "Periksa koneksi ke Binance."
+            )
+
+        set_progress(0.80, "mengunduh volume harian untuk gerbang pump...")
+        pbt.fetch_universe_daily_klines(
+            client, symbols_with_data,
+            fetch_start_ms - 8 * bt.MS_PER_DAY, end_ms, store,
+            progress_cb=lambda frac, sym: set_progress(
+                0.80 + frac * 0.02, f"volume harian {sym}"),
+            cancel_cb=cancelled,
+        )
+    except Exception:
+        # Pemanggil hanya menutup store yang berhasil dikembalikan; bila gagal
+        # di tengah unduhan (termasuk pembatalan), tanggung jawab bersih ada di sini.
+        if store is not None:
+            store.cleanup()
+        if kline_cache is not None:
+            kline_cache.close()
+        raise
+
+    return {
+        "store": store,
+        "kline_cache": kline_cache,
+        "universe": universe,
+        "symbols_with_data": symbols_with_data,
+        "failed": failed,
+        "interval": interval,
+        "warmup_ms": warmup_ms,
+        "end_ms": end_ms,
+    }
 
 
 def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
@@ -607,91 +726,14 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
         cfg = bt.apply_overrides(PUMP_CONFIG, overrides)
         bt.validate_params(cfg)
 
-        interval = cfg.get("MARKET_DATA_INTERVAL", "5m")
-        bt.bars_per_day(interval)
-        bar_ms = bt.INTERVAL_MINUTES[interval] * 60_000
-        warmup_ms = bt.MS_PER_DAY + 30 * bar_ms
-
-        end_ms = int(time.time() * 1000)
-        start_ms = end_ms - days * bt.MS_PER_DAY
-        fetch_start_ms = start_ms - warmup_ms
-
-        if not _HAS_CLIENT:
-            raise bt.BacktestError(
-                "Klien Binance tidak tersedia (modul 'requests' tidak termuat). "
-                "Backtest butuh akses ke data historis publik Binance."
-            )
-        client = BinanceSpotClient(
-            "", "", PUMP_CONFIG["LIVE_BASE_URL"], allow_signed=False,
-            rate_limit_state_file=PUMP_CONFIG.get("RATE_LIMIT_STATE_FILE"),
-            rate_limit_limit=int(PUMP_CONFIG.get("RATE_LIMIT_WEIGHT_LIMIT", 6000) or 6000),
-            rate_limit_safety_margin=int(PUMP_CONFIG.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100),
-        )
-
-        set_progress(0.01, "mengambil daftar pasar...")
-        try:
-            tickers = client.get_ticker_24hr_all()
-        except Exception as exc:  # noqa: BLE001
-            raise bt.BacktestError(
-                f"Gagal mengambil daftar pasar dari Binance: {exc}"
-            ) from exc
-
-        tradable_now = None
-        try:
-            exchange_info = client.get_exchange_info()
-            tradable_now = {
-                s.get("symbol") for s in exchange_info.get("symbols", [])
-                if s.get("symbol") and s.get("status") == "TRADING"
-                and s.get("isSpotTradingAllowed", True)
-            }
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Metadata status pair tidak tersedia untuk portfolio backtest: %s", exc)
-        if tradable_now is not None:
-            cfg["_historical_tradable_symbols"] = tradable_now
-            cfg["_tradable_status_is_current_snapshot"] = True
-
-        universe = pbt.select_universe(tickers, cfg, max_symbols=max_symbols,
-                                       tradable_symbols=tradable_now)
-        if not universe:
-            raise bt.BacktestError(
-                "Tidak ada simbol yang lolos saringan pasar. Periksa QUOTE_ASSET "
-                "dan MIN_QUOTE_VOLUME_USDT_24H di config.py."
-            )
-
-        with _bt_jobs_lock:
-            if job_id in _bt_jobs:
-                _bt_jobs[job_id]["universe_size"] = len(universe)
-
-        set_progress(0.03, f"mengunduh data {len(universe)} simbol...")
-
-        def dl_progress(frac, sym):
-            set_progress(0.03 + frac * 0.77,
-                         f"mengunduh {sym} ({int(frac * len(universe))}/{len(universe)})")
-
-        store = pbt.new_backtest_store(cfg)
-        kline_cache = pbt.open_kline_cache(cfg)
-        symbols_with_data, failed = pbt.fetch_universe_klines(
-            client, universe, interval, fetch_start_ms, end_ms, store,
-            progress_cb=dl_progress, cancel_cb=cancelled, cache=kline_cache,
-        )
-        if not symbols_with_data:
-            raise bt.BacktestError(
-                "Tidak ada satu pun simbol yang berhasil diunduh datanya. "
-                "Periksa koneksi ke Binance."
-            )
-
-        set_progress(0.80, "mengunduh volume harian untuk gerbang pump...")
-        pbt.fetch_universe_daily_klines(
-            client, symbols_with_data,
-            fetch_start_ms - 8 * bt.MS_PER_DAY, end_ms, store,
-            progress_cb=lambda frac, sym: set_progress(
-                0.80 + frac * 0.02, f"volume harian {sym}"),
-            cancel_cb=cancelled,
-        )
+        prep = _bt_prepare_universe(job_id, cfg, days, max_symbols,
+                                    set_progress, cancelled)
+        store = prep["store"]
+        kline_cache = prep["kline_cache"]
 
         set_progress(0.82, "menjalankan simulasi portofolio...")
         result = pbt.run_portfolio_backtest(
-            store, cfg, interval, warmup_ms=warmup_ms,
+            store, cfg, prep["interval"], warmup_ms=prep["warmup_ms"],
             progress_cb=lambda f: set_progress(0.82 + f * 0.17,
                                                "menjalankan simulasi portofolio..."),
             cancel_cb=cancelled,
@@ -725,12 +767,13 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
 
         payload = {
             "mode": "portfolio",
-            "interval": interval,
+            "kind": "portfolio",
+            "interval": prep["interval"],
             "days": days,
-            "universe_requested": len(universe),
-            "universe_with_data": len(symbols_with_data),
-            "symbols_failed": failed[:50],
-            "symbols_failed_count": len(failed),
+            "universe_requested": len(prep["universe"]),
+            "universe_with_data": len(prep["symbols_with_data"]),
+            "symbols_failed": prep["failed"][:50],
+            "symbols_failed_count": len(prep["failed"]),
             "cache": (kline_cache.stats() if kline_cache is not None else None),
             "bars_total": result.bars_total,
             "start_time": (_ts(result.start_time) or "") + " UTC" if result.start_time else None,
@@ -752,7 +795,7 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "Fill exit memperhitungkan gap: candle yang DIBUKA sudah menembus level "
                 "SL/TP/BE/Trailing diisi pada harga pembukaan candle itu, konsisten dengan "
                 "simulasi PAPER, bukan pada harga levelnya.",
-                "Exit dievaluasi per-candle " + interval + " (bukan tiap "
+                "Exit dievaluasi per-candle " + prep["interval"] + " (bukan tiap "
                 + str(PUMP_CONFIG.get("LOOP_INTERVAL_SECONDS", 15)) + " detik seperti bot asli), "
                 "dengan urutan prioritas konservatif: STOP_LOSS -> TAKE_PROFIT -> BREAKEVEN -> "
                 "TRAILING. Stop Loss dianggap kena lebih dulu kalau ambigu dalam satu candle, "
@@ -773,6 +816,122 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                     "result": payload,
                 })
     except bt.BacktestError as exc:
+        with _bt_jobs_lock:
+            if job_id in _bt_jobs:
+                _bt_jobs[job_id].update({"status": "error", "error": str(exc)})
+    except Exception as exc:  # noqa: BLE001
+        with _bt_jobs_lock:
+            if job_id in _bt_jobs:
+                _bt_jobs[job_id].update({"status": "error", "error": f"Error tak terduga: {exc}"})
+    finally:
+        if store is not None:
+            store.cleanup()
+        if kline_cache is not None:
+            kline_cache.close()
+
+
+def _bt_run_grid_job(job_id: str, days: int, max_symbols: int, spec: dict,
+                     rasio_latih: float, metrik: str, min_trades: int,
+                     total_kombinasi: int):
+    def set_progress(frac, stage=""):
+        with _bt_jobs_lock:
+            if job_id in _bt_jobs:
+                _bt_jobs[job_id]["progress"] = round(float(frac), 3)
+                if stage:
+                    _bt_jobs[job_id]["stage"] = stage
+                _bt_jobs[job_id]["updated_at"] = time.time()
+
+    def cancelled():
+        with _bt_jobs_lock:
+            job = _bt_jobs.get(job_id)
+            return bool(job and job.get("cancel"))
+
+    store = None
+    kline_cache = None
+
+    try:
+        cfg = bt.apply_overrides(PUMP_CONFIG, {})
+        bt.validate_params(cfg)
+
+        prep = _bt_prepare_universe(job_id, cfg, days, max_symbols,
+                                    set_progress, cancelled)
+        store = prep["store"]
+        kline_cache = prep["kline_cache"]
+
+        set_progress(0.30, f"menjalankan grid search ({total_kombinasi} kombinasi)...")
+        hasil = gs.run_portfolio_grid_search(
+            store, cfg, prep["interval"], prep["warmup_ms"], spec,
+            metrik=metrik, rasio_latih=rasio_latih, min_trades=min_trades,
+            progress_cb=lambda f: set_progress(
+                0.30 + f * 0.69,
+                f"grid search {total_kombinasi} kombinasi "
+                f"({int(round(f * total_kombinasi))}/{total_kombinasi})"),
+            cancel_cb=cancelled,
+        )
+        rows = gs.ringkas_untuk_tabel(hasil, top_n=20)
+
+        payload = {
+            "kind": "grid",
+            "mode": "grid",
+            "interval": prep["interval"],
+            "days": days,
+            "universe_requested": len(prep["universe"]),
+            "universe_with_data": len(prep["symbols_with_data"]),
+            "symbols_failed_count": len(prep["failed"]),
+            "cache": (kline_cache.stats() if kline_cache is not None else None),
+            "params_used": {k: cfg.get(k) for k in BT_PARAM_KEYS},
+            "grid": {
+                "total_kombinasi": hasil.total_kombinasi,
+                "dipangkas": hasil.dipangkas,
+                "dilewati": hasil.dilewati,
+                "dibatalkan": hasil.dibatalkan,
+                "metrik": metrik,
+                "rasio_latih": rasio_latih,
+                "min_trades": min_trades,
+                "bar_latih": hasil.bar_latih,
+                "bar_uji": hasil.bar_uji,
+                "peringatan": hasil.peringatan,
+                "detik": round(hasil.detik, 1),
+            },
+            "rows": rows,
+            "warnings": [],
+            "limitations": [
+                "Grid ini berjalan di atas simulasi PORTOFOLIO (satu posisi lintas "
+                "simbol, prioritas volume) dengan parameter exit yang sama seperti "
+                "form backtest, sehingga hasilnya konsisten dengan mode Simulasi "
+                "Portofolio pada data yang sama.",
+                "SURVIVORSHIP BIAS, dan ini tidak bisa diperbaiki: Binance hanya "
+                "menyediakan data historis untuk pair yang MASIH listing hari ini. "
+                "Koin yang sudah didelisting, sering justru yang kolaps setelah "
+                "pump, tidak ada dalam data. Hasil di sini karenanya masih cenderung "
+                "lebih baik daripada kenyataan.",
+                "Peringkat disusun dari skor LATIH, bukan skor uji, agar periode uji "
+                "tetap menjadi data yang belum pernah dilihat. Saat memilih kombinasi, "
+                "utamakan skor uji yang wajar dengan degradasi kecil, bukan skor latih "
+                "tertinggi.",
+                "Setiap kombinasi menguji ULANG data yang sama. Semakin banyak "
+                "kombinasi, semakin besar peluang hasil terbaik muncul karena "
+                "kebetulan; perlakukan hasil grid sebagai kandidat yang harus lolos "
+                "periode uji, bukan janji kinerja.",
+                "Split latih/uji di sini satu kali berdasarkan urutan waktu (bukan "
+                "walk-forward bergulir). Untuk keyakinan lebih, ulangi dengan beberapa "
+                "rasio dan rentang hari yang berbeda.",
+                "Statistik 24 jam DIREKONSTRUKSI dari candle, bukan snapshot "
+                "ticker/24hr historis. Volume itulah yang menentukan simbol mana yang "
+                "masuk top-N kandidat per bar.",
+                "Fill memodelkan spread, slippage, dan fee taker dua sisi. Kedalaman "
+                "order book TIDAK dimodelkan, jadi order besar di koin tipis akan "
+                "lebih buruk dari hasil di sini.",
+            ],
+        }
+
+        with _bt_jobs_lock:
+            if job_id in _bt_jobs:
+                _bt_jobs[job_id].update({
+                    "status": "done", "progress": 1.0, "stage": "selesai",
+                    "result": payload,
+                })
+    except (bt.BacktestError, gs.GridSearchError) as exc:
         with _bt_jobs_lock:
             if job_id in _bt_jobs:
                 _bt_jobs[job_id].update({"status": "error", "error": str(exc)})
@@ -844,6 +1003,128 @@ def api_backtest_start():
     return jsonify({"job_id": job_id})
 
 
+@app.route("/api/backtest/grid/start", methods=["POST"])
+def api_backtest_grid_start():
+    blocked = _reject_if_backtest_disabled()
+    if blocked is not None:
+        return blocked
+    _bt_cleanup_old_jobs()
+    data = request.get_json(force=True, silent=True) or {}
+
+    try:
+        days = int(data.get("days", 30))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Jumlah hari tidak valid."}), 400
+    if days < 2:
+        return jsonify({"error": "Jumlah hari minimal 2 (satu hari pertama dipakai warmup statistik 24 jam)."}), 400
+
+    try:
+        max_symbols = int(data.get("max_symbols", 150))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Jumlah simbol tidak valid."}), 400
+    if max_symbols < 2 or max_symbols > 600:
+        return jsonify({"error": "Jumlah simbol harus di antara 2 dan 600."}), 400
+
+    est_requests = max_symbols * max(1, -(-(days + 1) * 288 // 1000))
+    if est_requests > 20000:
+        return jsonify({
+            "error": f"Permintaan terlalu besar (perkiraan {est_requests:,} request ke Binance). "
+                     f"Kurangi jumlah simbol atau jumlah hari."
+        }), 400
+
+    try:
+        rasio_latih = float(data.get("rasio_latih", 0.7))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Rasio periode latih tidak valid."}), 400
+    if not 0.1 <= rasio_latih <= 1.0:
+        return jsonify({"error": "Rasio periode latih harus di antara 0.1 dan 1.0."}), 400
+
+    metrik = str(data.get("metrik", "total_return_pct"))
+    if metrik not in gs.METRIK_TERSEDIA:
+        return jsonify({"error": f"Metrik '{metrik}' tidak dikenal. "
+                                 f"Pilihan: {', '.join(gs.METRIK_TERSEDIA)}."}), 400
+
+    try:
+        min_trades = int(data.get("min_trades", 5))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Jumlah trade minimal tidak valid."}), 400
+    if min_trades < 1 or min_trades > 1000:
+        return jsonify({"error": "Jumlah trade minimal harus di antara 1 dan 1000."}), 400
+
+    spec_raw = data.get("spec")
+    if not isinstance(spec_raw, dict) or not spec_raw:
+        return jsonify({"error": "Spec grid kosong. Pilih minimal satu parameter "
+                                 "beserta nilai rentangnya."}), 400
+    pakai_atr = bool(PUMP_CONFIG.get("USE_ATR_EXIT", False))
+    spec = {}
+    for key, values in spec_raw.items():
+        if key not in GRID_PARAM_KEYS:
+            return jsonify({"error": f"Parameter '{key}' tidak diperbolehkan untuk grid. "
+                                     f"Pilihan: {', '.join(GRID_PARAM_KEYS)}."}), 400
+        if pakai_atr and key in gs.KUNCI_PERSEN:
+            return jsonify({"error": f"Parameter '{key}' tidak berpengaruh karena exit "
+                                     "ATR sedang aktif (USE_ATR_EXIT=true): mesin "
+                                     "mengabaikan seluruh parameter persen. Matikan "
+                                     "exit ATR di Pengaturan dulu, atau pilih "
+                                     "parameter ATR."}), 400
+        if not pakai_atr and key in gs.KUNCI_ATR:
+            return jsonify({"error": f"Parameter '{key}' tidak berpengaruh karena exit "
+                                     "ATR sedang mati (USE_ATR_EXIT=false): mesin "
+                                     "mengabaikan seluruh parameter ATR. Aktifkan "
+                                     "exit ATR di Pengaturan dulu, atau pilih "
+                                     "parameter persen."}), 400
+        if not isinstance(values, (list, tuple)) or not values:
+            return jsonify({"error": f"Nilai parameter '{key}' harus daftar angka "
+                                     f"yang tidak kosong."}), 400
+        bersih = []
+        for v in values:
+            if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                    or not math.isfinite(float(v)):
+                return jsonify({"error": f"Nilai parameter '{key}' harus angka "
+                                         f"(dapat: {v!r})."}), 400
+            if v not in bersih:
+                bersih.append(v)
+        if not bersih:
+            return jsonify({"error": f"Nilai parameter '{key}' kosong setelah "
+                                     f"duplikat dibuang."}), 400
+        if len(bersih) > 50:
+            return jsonify({"error": f"Parameter '{key}' maksimal 50 nilai."}), 400
+        spec[key] = bersih
+
+    total = 1
+    for values in spec.values():
+        total *= len(values)
+    if total > gs.MAX_KOMBINASI_PORTFOLIO:
+        return jsonify({"error": f"Grid menghasilkan {total} kombinasi, melebihi batas "
+                                 f"{gs.MAX_KOMBINASI_PORTFOLIO} untuk simulasi portofolio. "
+                                 f"Persempit rentang atau perbesar langkah."}), 400
+
+    with _bt_jobs_lock:
+        running = sum(1 for j in _bt_jobs.values() if j["status"] == "running")
+        if running >= 1:
+            return jsonify({"error": "Sudah ada backtest/grid berjalan. "
+                                     "Tunggu selesai atau batalkan dulu."}), 429
+
+        job_id = uuid.uuid4().hex[:12]
+        now = time.time()
+        _bt_jobs[job_id] = {
+            "kind": "grid", "status": "running", "progress": 0.0,
+            "stage": "memulai...", "created_at": now, "started_at": now,
+            "updated_at": now, "days": days, "max_symbols": max_symbols,
+            "grid": {"metrik": metrik, "rasio_latih": rasio_latih,
+                     "min_trades": min_trades, "total_kombinasi": total},
+            "cancel": False,
+        }
+
+    thread = threading.Thread(
+        target=_bt_run_grid_job,
+        args=(job_id, days, max_symbols, spec, rasio_latih, metrik,
+              min_trades, total),
+        daemon=True)
+    thread.start()
+    return jsonify({"job_id": job_id})
+
+
 @app.route("/api/backtest/status/<job_id>")
 def api_backtest_status(job_id):
     blocked = _reject_if_backtest_disabled()
@@ -898,6 +1179,9 @@ def api_backtest_defaults():
     out["default_max_symbols"] = 150
     out["mode"] = "portfolio"
     out["min_quote_volume"] = PUMP_CONFIG.get("MIN_QUOTE_VOLUME_USDT_24H", 0)
+    out["grid_max_kombinasi"] = gs.MAX_KOMBINASI_PORTFOLIO
+    out["grid_metrik"] = list(gs.METRIK_TERSEDIA)
+    out["grid_params"] = list(GRID_PARAM_KEYS)
     return jsonify(out)
 
 

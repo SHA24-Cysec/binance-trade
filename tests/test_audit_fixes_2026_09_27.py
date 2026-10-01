@@ -18,7 +18,6 @@ from decimal import Decimal
 
 from trading.clients.binance_client import BinanceAPIError, SymbolFilters
 from config.config import PUMP_CONFIG
-from market import market_scanner as scanner
 from trading import pump_scanner_bot as bot
 
 

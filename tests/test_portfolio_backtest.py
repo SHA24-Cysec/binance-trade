@@ -3,11 +3,13 @@ from __future__ import annotations
 import os
 import re
 
+import pytest
+
 
 from backtesting import backtest as bt
 from backtesting import portfolio_backtest as pbt
 from backtesting.backtest_storage import KlineStore
-from backtesting.synthetic_data import riwayat_harian, seri_data
+from backtesting.synthetic_data import riwayat_harian, seri_banyak_setup, seri_data
 from strategy.indicators import Kline
 
 
@@ -198,3 +200,81 @@ def test_path_store_dari_tempfile():
         assert store.db_path.startswith(tempfile.gettempdir())
     finally:
         store.cleanup()
+
+
+# ---------------------------------------------------------------------------
+# Batas jendela waktu (start_ms/end_ms): fondasi split latih/uji grid search
+# ---------------------------------------------------------------------------
+
+def _cfg_portfolio_uji() -> dict:
+    from backtesting.synthetic_data import cfg_gerbang_pump_nonaktif
+    cfg = cfg_gerbang_pump_nonaktif(config_uji())
+    cfg["ROLLING_VOLUME_FILTER_ENABLED"] = False
+    cfg["USE_ATR_EXIT"] = False
+    return cfg
+
+
+def _data_portfolio_banyak_setup() -> dict:
+    return {
+        "AUSDT": seri_banyak_setup(harga=100.0, siklus=12, bar_datar=288),
+        "BUSDT": seri_banyak_setup(harga=200.0, siklus=12, bar_datar=288),
+    }
+
+
+def test_jendela_waktu_membatasi_entry_tanpa_menghapus_warmup():
+    data = _data_portfolio_banyak_setup()
+    harian = harian_dari(data)
+    cfg = _cfg_portfolio_uji()
+    interval_ms = 300_000
+    warmup_ms = 288 * interval_ms
+
+    with KlineStore.from_klines(data, harian) as store:
+        penuh = pbt.run_portfolio_backtest(store, cfg, "5m", warmup_ms=warmup_ms)
+        assert penuh.trades, "data uji seharusnya menghasilkan trade pada jalan penuh"
+
+        timeline, _ = pbt.build_timeline(store, "5m")
+        potong_ms = timeline[0] + warmup_ms + int(
+            (timeline[-1] - timeline[0] - warmup_ms) * 0.7)
+
+        latih = pbt.run_portfolio_backtest(
+            store, cfg, "5m", warmup_ms=warmup_ms, end_ms=potong_ms)
+        uji = pbt.run_portfolio_backtest(
+            store, cfg, "5m", warmup_ms=warmup_ms, start_ms=potong_ms - warmup_ms)
+
+        assert latih.trades, "periode latih seharusnya menghasilkan trade"
+        assert all(t.entry_time <= potong_ms for t in latih.trades), \
+            "entry latih tidak boleh melewati titik potong"
+        assert all(t.entry_time >= potong_ms for t in uji.trades), \
+            "entry uji tidak boleh menyusup sebelum titik potong (bocor data latih)"
+        assert all(t.entry_time >= timeline[0] + warmup_ms for t in penuh.trades), \
+            "jalan penuh juga harus menghormati warmup"
+
+
+def test_jendela_waktu_kosong_ditolak_dengan_jelas():
+    data = _data_portfolio_banyak_setup()
+    harian = harian_dari(data)
+    cfg = _cfg_portfolio_uji()
+    with KlineStore.from_klines(data, harian) as store:
+        timeline, _ = pbt.build_timeline(store, "5m")
+        with pytest.raises(pbt.BacktestError, match="tidak memuat satu bar pun"):
+            pbt.run_portfolio_backtest(
+                store, cfg, "5m",
+                start_ms=timeline[-1] + 10 * 86_400_000,
+                end_ms=timeline[-1] + 20 * 86_400_000)
+
+
+def test_prebuilt_menghasilkan_hasil_identik_dan_tidak_dimutasi():
+    data = _data_portfolio_banyak_setup()
+    harian = harian_dari(data)
+    cfg = _cfg_portfolio_uji()
+    with KlineStore.from_klines(data, harian) as store:
+        prebuilt = pbt.build_timeline(store, "5m")
+        pertama = pbt.run_portfolio_backtest(
+            store, cfg, "5m", warmup_ms=288 * 300_000, prebuilt=prebuilt)
+        kedua = pbt.run_portfolio_backtest(
+            store, cfg, "5m", warmup_ms=288 * 300_000, prebuilt=prebuilt)
+        assert len(pertama.trades) == len(kedua.trades), \
+            "prebuilt harus aman dipakai berulang antar kombinasi grid"
+        if pertama.trades:
+            assert [t.entry_time for t in pertama.trades] == \
+                   [t.entry_time for t in kedua.trades]

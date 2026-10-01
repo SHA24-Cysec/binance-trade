@@ -36,11 +36,9 @@ import time
 from typing import Any, Optional
 
 try:
-    import websocket  # type: ignore
     from websocket import WebSocketApp  # type: ignore
     _WS_AVAILABLE = True
 except ImportError:  # pragma: no cover
-    websocket = None  # type: ignore
     WebSocketApp = object  # type: ignore
     _WS_AVAILABLE = False
 

@@ -53,10 +53,10 @@ import sqlite3
 import tempfile
 import threading
 from array import array
-from bisect import bisect_left, bisect_right
+from bisect import bisect_left
 from collections import OrderedDict
 from pathlib import Path
-from typing import Iterator, Mapping, Optional, Sequence
+from typing import Mapping, Optional, Sequence
 
 from strategy.indicators import Kline
 
@@ -219,20 +219,9 @@ class SymbolSeries:
     def open_times(self) -> array:
         return self._open_times
 
-    def closed_daily_count(self, reference_ms: int) -> int:
-        return bisect_right(self._daily_close_times, int(reference_ms))
-
     def board_arrays(self) -> tuple:
         return (self._open_times, self._close_times, self._pct24h,
                 self._vol24h, self._ready, self._daily_close_times)
-
-    def memory_bytes(self) -> int:
-        return (self._open_times.buffer_info()[1] * self._open_times.itemsize
-                + self._close_times.buffer_info()[1] * self._close_times.itemsize
-                + self._pct24h.buffer_info()[1] * self._pct24h.itemsize
-                + self._vol24h.buffer_info()[1] * self._vol24h.itemsize
-                + len(self._ready)
-                + self._daily_close_times.buffer_info()[1] * self._daily_close_times.itemsize)
 
 
 
@@ -249,8 +238,6 @@ class KlineStore:
         self._cache: "OrderedDict[str, list[Kline]]" = OrderedDict()
         self._daily_cache: "OrderedDict[str, list[Kline]]" = OrderedDict()
         self._closed = False
-        self.cache_hits = 0
-        self.cache_misses = 0
 
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         with self._lock:
@@ -341,21 +328,6 @@ class KlineStore:
             cur = self._conn.execute("SELECT symbol FROM symbols ORDER BY seq")
             return [str(row[0]) for row in cur.fetchall()]
 
-    def has_symbol(self, symbol: str) -> bool:
-        with self._lock:
-            self._require_open()
-            cur = self._conn.execute(
-                "SELECT 1 FROM symbols WHERE symbol = ? LIMIT 1", (str(symbol),))
-            return cur.fetchone() is not None
-
-    def bar_count(self, symbol: str) -> int:
-        with self._lock:
-            self._require_open()
-            cur = self._conn.execute(
-                "SELECT COUNT(*) FROM klines WHERE symbol = ?", (str(symbol),))
-            row = cur.fetchone()
-            return int(row[0]) if row else 0
-
     def daily_count(self, symbol: str) -> int:
         with self._lock:
             self._require_open()
@@ -363,21 +335,6 @@ class KlineStore:
                 "SELECT COUNT(*) FROM daily_klines WHERE symbol = ?", (str(symbol),))
             row = cur.fetchone()
             return int(row[0]) if row else 0
-
-    def iter_klines(self, symbol: str, batch_size: int = 1000) -> Iterator[Kline]:
-        sym = str(symbol)
-        size = max(1, int(batch_size))
-        with self._lock:
-            self._require_open()
-            cur = self._conn.execute(_SQL_SELECT_KLINES, (sym,))
-        while True:
-            with self._lock:
-                self._require_open()
-                rows = cur.fetchmany(size)
-            if not rows:
-                return
-            for row in rows:
-                yield _row_to_kline(row)
 
     def load_klines(self, symbol: str) -> list[Kline]:
         sym = str(symbol)
@@ -393,11 +350,9 @@ class KlineStore:
             cached = self._cache.get(sym)
             if cached is not None:
                 self._cache.move_to_end(sym)
-                self.cache_hits += 1
                 return cached
         data = self.load_klines(sym)
         with self._lock:
-            self.cache_misses += 1
             self._cache[sym] = data
             self._cache.move_to_end(sym)
             while len(self._cache) > self._cache_size:

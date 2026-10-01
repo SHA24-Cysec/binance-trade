@@ -15,6 +15,8 @@ yang membuat hasil optimasi bisa dipercaya:
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from backtesting import grid_search as gs
@@ -67,6 +69,54 @@ def test_kedua_mode_tetap_diuji_terpisah():
     assert mode == {True, False}
 
 
+def test_grid_atr_tidak_terpangkas_saat_mode_atr_aktif():
+    """Regresi: dulu spec khusus ATR tanpa USE_ATR_EXIT terpangkas jadi 1 baris
+    karena pemangkas mengira mode persen (semua kunci ATR dianggap mati)."""
+    spec = {"ATR_MULT_SL": [12.0, 24.0], "ATR_MULT_TP": [24.0, 48.0]}
+    komb, dipangkas = gs.expand_grid(spec, pakai_atr=True)
+    assert len(komb) == 4
+    assert dipangkas == 0
+
+
+def test_grid_persen_dipangkas_saat_mode_atr_aktif():
+    spec = {"SL_PCT": [1.0, 2.0], "TP_PCT": [3.0, 4.0]}
+    komb, dipangkas = gs.expand_grid(spec, pakai_atr=True)
+    assert len(komb) == 1, "di mode ATR, parameter persen tidak berpengaruh"
+    assert dipangkas == 3
+
+
+def test_grid_tanpa_mode_diketahui_tidak_memangkas():
+    spec = {"ATR_MULT_SL": [12.0, 24.0], "ATR_MULT_TP": [24.0, 48.0]}
+    komb, dipangkas = gs.expand_grid(spec)
+    assert len(komb) == 4
+    assert dipangkas == 0
+
+
+def test_sapuan_lintas_mode_tetap_dinilai_per_kandidat():
+    spec = {"USE_ATR_EXIT": [False, True],
+            "SL_PCT": [1.0, 2.0], "ATR_MULT_SL": [12.0, 24.0]}
+    komb, dipangkas = gs.expand_grid(spec, pakai_atr=False)
+    assert len(komb) == 4
+    assert dipangkas == 4
+
+
+def test_cek_relasi_exit():
+    dasar = {"USE_ATR_EXIT": True, "ATR_MULT_SL": 12.0, "ATR_MULT_TP": 24.0,
+             "ATR_MULT_TRAIL": 8.0, "ATR_MULT_BE_TRIGGER": 8.0,
+             "ATR_MULT_BE_LOCK": 0.8, "ATR_MULT_TRAIL_START": 12.0}
+    assert gs.cek_relasi_exit(dasar) is None
+    assert "ATR_MULT_TRAIL" in gs.cek_relasi_exit(dict(dasar, ATR_MULT_TRAIL=16.0))
+    assert "ATR_MULT_TP" in gs.cek_relasi_exit(dict(dasar, ATR_MULT_TP=12.0))
+    assert "ATR_MULT_BE_TRIGGER" in gs.cek_relasi_exit(
+        dict(dasar, ATR_MULT_BE_TRIGGER=13.0))
+    assert "ATR_MULT_BE_LOCK" in gs.cek_relasi_exit(
+        dict(dasar, ATR_MULT_BE_LOCK=9.0))
+    persen = {"USE_ATR_EXIT": False, "USE_TP": True, "USE_STOP_LOSS": True,
+              "TP_PCT": 2.0, "SL_PCT": 4.0}
+    assert gs.cek_relasi_exit(persen) is not None
+    assert gs.cek_relasi_exit(dict(persen, TP_PCT=6.0)) is None
+
+
 def test_batas_keras_kombinasi_ditegakkan():
     with pytest.raises(gs.GridSearchError, match="melebihi batas|Terlalu besar"):
         gs.expand_grid({"SL_PCT": gs.buat_rentang(0.1, 60.0, 0.01)})
@@ -104,6 +154,9 @@ def data_uji():
     cfg["_symbol"] = "TESTUSDT"
     cfg["MIN_QUOTE_VOLUME_USDT_24H"] = 1_000_000
     cfg["ROLLING_VOLUME_FILTER_ENABLED"] = False
+    # SL longgar bawaan (28.8%) membuat sapuan TP_PCT 2-12% melanggar relasi
+    # wajib TP > SL; tes memakai konfigurasi persen yang sah secara struktur.
+    cfg["SL_PCT"] = 1.0
     return kl, daily, cfg
 
 
@@ -248,6 +301,44 @@ def test_ringkas_untuk_tabel_membatasi_jumlah_baris(data_uji):
     assert len(baris) == 2
     assert "degradasi" in baris[0]
     assert "params" in baris[0]
+    assert "pf_latih" in baris[0]
+    assert "winrate_latih" in baris[0]
+    # Payload harus JSON standar: Infinity/NaN membuat JSON.parse browser gagal.
+    json.dumps(baris, allow_nan=False)
+
+
+def test_pf_aman_mengubah_nilai_tak_hingga_untuk_json():
+    assert gs._pf_aman(float("inf")) is None
+    assert gs._pf_aman(float("-inf")) is None
+    assert gs._pf_aman(float("nan")) is None
+    assert gs._pf_aman(None) is None
+    assert gs._pf_aman(1.846) == 1.85
+    assert gs._pf_aman("2.4") == 2.4
+
+
+def test_run_grid_search_grid_atr_tidak_terpangkas(data_uji):
+    """Regresi end-to-end: grid khusus ATR di bawah konfigurasi mode ATR."""
+    kl, daily, cfg = data_uji
+    cfg["USE_ATR_EXIT"] = True
+    hasil = gs.run_grid_search(
+        kl, cfg, {"ATR_MULT_SL": [12.0], "ATR_MULT_TP": [24.0, 48.0]},
+        warmup_bars=288, daily_klines=daily, min_trades=1)
+    assert hasil.total_kombinasi == 2
+    assert len(hasil.hasil) == 2
+    assert {h.params["ATR_MULT_TP"] for h in hasil.hasil} == {24.0, 48.0}
+
+
+def test_run_grid_search_melanggar_relasi_dilewati(data_uji):
+    kl, daily, cfg = data_uji
+    cfg["USE_ATR_EXIT"] = True
+    # TRAIL=16 melebihi SL bawaan 12 (melanggar relasi); TRAIL=8 sah.
+    hasil = gs.run_grid_search(
+        kl, cfg, {"ATR_MULT_TRAIL": [8.0, 16.0]},
+        warmup_bars=288, daily_klines=daily, min_trades=1)
+    assert hasil.dilewati == 1
+    assert len(hasil.hasil) == 1
+    assert hasil.hasil[0].params["ATR_MULT_TRAIL"] == 8.0
+    assert any("dilewati" in p for p in hasil.peringatan)
 
 
 def test_candle_harian_periode_latih_tidak_bocor_dari_masa_depan(data_uji):
@@ -321,3 +412,135 @@ def test_parse_spec_atr_period_tetap_integer():
 def test_parse_spec_menolak_masukan_salah(teks):
     with pytest.raises(gs.GridSearchError):
         gs.parse_spec_cli(teks)
+
+
+# ---------------------------------------------------------------------------
+# Grid search versi PORTOFOLIO (multi-simbol, dipakai dashboard).
+# Sifat yang dijaga sama dengan versi simbol tunggal: periode uji terpisah,
+# peringkat dari skor latih, batas kombinasi ditegakkan, pembatalan dihormati.
+# ---------------------------------------------------------------------------
+
+WARMUP_PORTFOLIO_MS = 288 * 300_000  # satu hari candle 5m
+
+
+@pytest.fixture()
+def store_portfolio():
+    from backtesting.backtest_storage import KlineStore
+    # Dua simbol dengan penempatan setup berbeda (BUSDT mulai ~3 hari kemudian)
+    # supaya periode latih DAN periode uji sama-sama memuat trade.
+    data = {
+        "AUSDT": seri_banyak_setup(harga=100.0, siklus=20, bar_datar=288),
+        "BUSDT": seri_banyak_setup(harga=200.0, siklus=20, bar_datar=876),
+    }
+    harian = {sym: riwayat_harian(kl, hari=7) for sym, kl in data.items()}
+    with KlineStore.from_klines(data, harian) as store:
+        yield store
+
+
+@pytest.fixture()
+def cfg_portfolio():
+    from config.config import PUMP_CONFIG
+    cfg = cfg_gerbang_pump_nonaktif(dict(PUMP_CONFIG))
+    cfg["QUOTE_ASSET"] = "USDT"
+    cfg["EXTRA_EXCLUDE_SYMBOLS"] = []
+    cfg["MIN_QUOTE_VOLUME_USDT_24H"] = 0
+    cfg["BACKTEST_INITIAL_EQUITY_USDT"] = 10_000.0
+    cfg["ROLLING_VOLUME_FILTER_ENABLED"] = False
+    cfg["USE_ATR_EXIT"] = False
+    # Sama seperti data_uji: SL bawaan 28.8% membuat sapuan TP 2-12% melanggar
+    # relasi TP > SL, jadi kunci ke nilai yang sah secara struktur.
+    cfg["SL_PCT"] = 1.0
+    return cfg
+
+
+def test_grid_portfolio_menghasilkan_peringkat(store_portfolio, cfg_portfolio):
+    hasil = gs.run_portfolio_grid_search(
+        store_portfolio, cfg_portfolio, "5m", WARMUP_PORTFOLIO_MS,
+        {"USE_ATR_EXIT": [False], "TP_PCT": [2.0, 4.0, 6.0]}, min_trades=1)
+    assert hasil.total_kombinasi == 3
+    assert len(hasil.hasil) == 3
+    assert hasil.bar_latih > 0 and hasil.bar_uji > 0
+    assert any(h.latih.get("total_trades", 0) > 0 for h in hasil.hasil), \
+        "data uji seharusnya menghasilkan trade pada periode latih"
+    for h in hasil.hasil:
+        assert h.uji is not None
+        assert h.degradasi == pytest.approx(h.skor_latih - h.skor_uji)
+    andal = [h for h in hasil.hasil if h.andal]
+    skor = [h.skor_latih for h in andal]
+    assert skor == sorted(skor, reverse=True), "urutan tidak menurun menurut skor latih"
+
+
+def test_grid_portfolio_periode_uji_tidak_bocor(store_portfolio, cfg_portfolio):
+    hasil = gs.run_portfolio_grid_search(
+        store_portfolio, cfg_portfolio, "5m", WARMUP_PORTFOLIO_MS,
+        {"USE_ATR_EXIT": [False], "TP_PCT": [4.0]}, rasio_latih=0.7, min_trades=1)
+    assert hasil.bar_latih > hasil.bar_uji
+    assert hasil.bar_latih + hasil.bar_uji >= 1
+
+
+def test_grid_portfolio_mematikan_periode_uji_memperingatkan(store_portfolio, cfg_portfolio):
+    hasil = gs.run_portfolio_grid_search(
+        store_portfolio, cfg_portfolio, "5m", WARMUP_PORTFOLIO_MS,
+        {"TP_PCT": [4.0]}, rasio_latih=1.0, min_trades=1)
+    assert hasil.bar_uji == 0
+    assert all(h.uji is None and h.skor_uji is None for h in hasil.hasil)
+    assert any("rentan overfitting" in p for p in hasil.peringatan)
+
+
+def test_grid_portfolio_sampel_kecil_ditandai_tidak_andal(store_portfolio, cfg_portfolio):
+    hasil = gs.run_portfolio_grid_search(
+        store_portfolio, cfg_portfolio, "5m", WARMUP_PORTFOLIO_MS,
+        {"TP_PCT": [4.0]}, min_trades=10_000)
+    assert hasil.hasil and all(not h.andal for h in hasil.hasil)
+    assert any("Tidak satu pun kombinasi" in p for p in hasil.peringatan)
+
+
+def test_grid_portfolio_batas_kombinasi_lebih_kecil_ditegakkan():
+    spec = {"SL_PCT": [1.0 * i for i in range(1, 14)],
+            "TP_PCT": [1.0 * i for i in range(1, 14)]}
+    with pytest.raises(gs.GridSearchError, match="169"):
+        gs.expand_grid(spec, max_kombinasi=gs.MAX_KOMBINASI_PORTFOLIO)
+
+
+def test_grid_portfolio_kombinasi_tidak_valid_dilewati(store_portfolio, cfg_portfolio):
+    hasil = gs.run_portfolio_grid_search(
+        store_portfolio, cfg_portfolio, "5m", WARMUP_PORTFOLIO_MS,
+        {"SL_PCT": [0.0], "TP_PCT": [4.0]}, min_trades=1)
+    assert hasil.dilewati == 1
+    assert len(hasil.hasil) == 1
+    assert not hasil.hasil[0].andal
+    assert "tidak valid" in hasil.hasil[0].catatan
+
+
+def test_grid_portfolio_pembatalan_dihormati(store_portfolio, cfg_portfolio):
+    panggilan = {"n": 0}
+
+    def batal():
+        panggilan["n"] += 1
+        return panggilan["n"] > 2
+
+    hasil = gs.run_portfolio_grid_search(
+        store_portfolio, cfg_portfolio, "5m", WARMUP_PORTFOLIO_MS,
+        {"TP_PCT": [2.0, 3.0, 4.0, 5.0, 6.0, 7.0]}, min_trades=1, cancel_cb=batal)
+    assert hasil.dibatalkan
+    assert len(hasil.hasil) < 6
+
+
+def test_grid_portfolio_progress_mencapai_seratus_persen(store_portfolio, cfg_portfolio):
+    jejak: list[float] = []
+    gs.run_portfolio_grid_search(
+        store_portfolio, cfg_portfolio, "5m", WARMUP_PORTFOLIO_MS,
+        {"TP_PCT": [2.0, 4.0]}, min_trades=1, progress_cb=jejak.append)
+    assert jejak and jejak[-1] == 1.0
+    assert all(0.0 <= p <= 1.0001 for p in jejak)
+
+
+def test_grid_portfolio_rasio_dan_metrik_tidak_valid_ditolak(store_portfolio, cfg_portfolio):
+    with pytest.raises(gs.GridSearchError, match="rasio_latih"):
+        gs.run_portfolio_grid_search(
+            store_portfolio, cfg_portfolio, "5m", WARMUP_PORTFOLIO_MS,
+            {"TP_PCT": [4.0]}, rasio_latih=1.5)
+    with pytest.raises(gs.GridSearchError, match="min_trades"):
+        gs.run_portfolio_grid_search(
+            store_portfolio, cfg_portfolio, "5m", WARMUP_PORTFOLIO_MS,
+            {"TP_PCT": [4.0]}, min_trades=0)

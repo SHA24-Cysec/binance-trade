@@ -283,6 +283,9 @@ def run_portfolio_backtest(
     progress_cb: Optional[Callable[[float], None]] = None,
     cancel_cb: Optional[Callable[[], bool]] = None,
     max_skipped_records: int = 400,
+    start_ms: Optional[int] = None,
+    end_ms: Optional[int] = None,
+    prebuilt: Optional[tuple] = None,
 ) -> PortfolioResult:
     semua_simbol = store.symbols()
     if not semua_simbol:
@@ -299,9 +302,19 @@ def run_portfolio_backtest(
     ensure_daily_series(store, symbols)
     gate_averages = _PumpGateAverages(store)
 
-    timeline, series_of = build_timeline(store, interval, symbols)
+    if prebuilt is not None:
+        timeline, series_of = prebuilt
+    else:
+        timeline, series_of = build_timeline(store, interval, symbols)
     if not timeline:
         raise BacktestError("Garis waktu kosong, tidak ada candle yang bisa diproses.")
+    if start_ms is not None or end_ms is not None:
+        timeline = [t for t in timeline
+                    if (start_ms is None or t >= start_ms)
+                    and (end_ms is None or t <= end_ms)]
+        if not timeline:
+            raise BacktestError(
+                "Rentang waktu (start_ms/end_ms) tidak memuat satu bar pun dari data.")
     symbols = [sym for sym in symbols if sym in series_of]
 
     lookback = strategy.confirm_window_bars(config)

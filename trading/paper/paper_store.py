@@ -149,7 +149,7 @@ class PaperStore:
                 raise KeyError(f"kunci wajib '{key}' hilang di state")
         if not isinstance(data["balances"], dict):
             raise ValueError("balances harus objek")
-        for asset, bal in data["balances"].items():
+        for _asset, bal in data["balances"].items():
             _d(bal.get("free", 0))
             _d(bal.get("locked", 0))
 

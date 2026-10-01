@@ -55,12 +55,12 @@ PUMP_CONFIG = {
 
     "USE_ATR_EXIT": True,
     "ATR_PERIOD": 14,
-    "ATR_MULT_SL": 12.0,
-    "ATR_MULT_TP": 24.0,
-    "ATR_MULT_TRAIL": 8.0,
+    "ATR_MULT_SL": 10.0,
+    "ATR_MULT_TP": 20.0,
+    "ATR_MULT_TRAIL": 6.0,
     "ATR_MULT_BE_TRIGGER": 8.0,
     "ATR_MULT_BE_LOCK": 0.8,
-    "ATR_MULT_TRAIL_START": 12.0,
+    "ATR_MULT_TRAIL_START": 6.0,
 
     "EXTRA_EXCLUDE_SYMBOLS": [],
 
@@ -92,9 +92,9 @@ PUMP_CONFIG = {
     "TAKER_FEE_PCT": 0.1,
     "MAKER_FEE_PCT": 0.1,
     "USE_BNB_FEE_DISCOUNT": True,
-    "USE_EQUITY_STOP": False,
+    "USE_EQUITY_STOP": True,
     "MAX_DRAWDOWN_PERCENT": 12.0,
-    "USE_DAILY_STOP": False,
+    "USE_DAILY_STOP": True,
     "MAX_DAILY_LOSS_PERCENT": 5.0,
     "DAILY_PROFIT_TARGET_PERCENT": 15.0,
     "CLOSE_ALL_AT_LIMIT": True,
@@ -342,8 +342,6 @@ def build_config_for_mode(mode: str, *, validate: bool = True) -> tuple[dict, li
 _finalize_config_dict(PUMP_CONFIG)
 PUMP_DEFAULTS["BASE_URL"] = PUMP_DEFAULTS["LIVE_BASE_URL"]
 
-
-VALID_WATCHLIST_TIERS = ("INTI", "AKTIF", "SPEKULATIF")
 
 def watchlist_enabled(config: dict = None) -> bool:
     cfg = PUMP_CONFIG if config is None else config

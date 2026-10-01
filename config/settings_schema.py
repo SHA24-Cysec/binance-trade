@@ -401,7 +401,6 @@ def coerce_field(key: str, value: Any, candidate: dict) -> Any:
 
 
 def validate_candidate(candidate: dict, mode: str) -> tuple[dict, dict[str, str], list[str]]:
-    raw_mode = str(mode).strip().upper()
     cleaned = deepcopy(candidate)
     errors: dict[str, str] = {}
     warnings: list[str] = []

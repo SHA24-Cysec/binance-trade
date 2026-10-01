@@ -751,7 +751,7 @@ def _arm_native_oco(client: ExchangeClient, config: dict,
     intent["order_list_id"] = response.get("orderListId")
     intent["list_status_type"] = str(response.get("listStatusType") or "EXEC_STARTED").upper()
     intent["status"] = str(response.get("listOrderStatus") or "EXECUTING").upper()
-    for leg_name, client_key in (("above", "aboveClientOrderId"), ("below", "belowClientOrderId")):
+    for leg_name, _client_key in (("above", "aboveClientOrderId"), ("below", "belowClientOrderId")):
         leg = intent.get(leg_name)
         if not isinstance(leg, dict):
             continue

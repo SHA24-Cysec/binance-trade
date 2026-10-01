@@ -243,6 +243,30 @@
   .bt-actions button{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#04140a;
     border:none;border-radius:8px;padding:10px 14px;font-size:13px;font-weight:700;cursor:pointer;
     transition:.16s;font-family:inherit}
+  .bt-grid-head,.bt-grid-row{display:grid;grid-template-columns:minmax(150px,1.35fr) 1fr 1fr 1fr 92px 40px;
+    gap:8px;align-items:center}
+  .bt-grid-head span{font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;
+    font-weight:700;padding-left:2px}
+  .bt-grid-row input,.bt-grid-row select{width:100%;max-width:100%;background:rgba(14,17,22,.6);
+    border:1px solid var(--border);border-radius:8px;padding:9px 10px;color:var(--txt);
+    font-size:13px;font-family:var(--mono);transition:border-color .15s,box-shadow .15s}
+  .bt-grid-row input:focus,.bt-grid-row select:focus{outline:none;border-color:var(--accent);
+    box-shadow:0 0 0 3px rgba(74,222,128,.14)}
+  .bt-grid-n{font-size:11px;color:var(--muted);text-align:center;white-space:nowrap;overflow:hidden;
+    text-overflow:ellipsis}
+  .bt-grid-n.ok{color:var(--txt)}
+  .bt-grid-n.buruk{color:var(--amber)}
+  .bt-grid-del{background:transparent;border:1px solid var(--border);border-radius:8px;color:var(--muted);
+    cursor:pointer;padding:9px 0;font-size:13px;line-height:1;transition:.15s;font-family:inherit}
+  .bt-grid-del:hover{color:#fda4af;border-color:rgba(244,63,94,.35);background:rgba(244,63,94,.08)}
+  .bt-grid-add{background:transparent;border:1px dashed var(--border);border-radius:8px;color:var(--muted);
+    padding:8px 14px;font-size:12px;font-weight:600;cursor:pointer;transition:.15s;font-family:inherit}
+  .bt-grid-add:hover{color:var(--txt);border-color:var(--accent)}
+  @media(max-width:760px){
+    .bt-grid-head{display:none}
+    .bt-grid-row{grid-template-columns:1fr 1fr 1fr;row-gap:8px}
+    .bt-grid-row .btGridKey{grid-column:1/-1}
+  }
   .bt-actions button:hover:not(:disabled){box-shadow:0 6px 18px rgba(74,222,128,.28);transform:translateY(-1px)}
   .bt-actions button:disabled{opacity:.45;cursor:not-allowed}
 
@@ -575,6 +599,12 @@
       justru yang kolaps setelah pump, tidak ada dalam data. Hasil di sini tetap cenderung
       lebih baik daripada kenyataan.</span>
     </div>
+    <div id="btModeToggle" style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap">
+      <button type="button" id="btModePortfolio" onclick="btSetMode('portfolio')"
+              style="flex:1;min-width:220px">📊 Simulasi Portofolio</button>
+      <button type="button" id="btModeGrid" onclick="btSetMode('grid')"
+              style="flex:1;min-width:220px">🧮 Grid Search (latih/uji)</button>
+    </div>
     <div id="btForm" class="bt-form">
       <div class="bt-field">
         <label>Jumlah simbol dipindai</label>
@@ -655,10 +685,66 @@
         </div>
       </div>
     </div>
-    <div class="mut" style="font-size:11.5px;margin-top:10px;line-height:1.6">
+    <div id="btFormHint" class="mut" style="font-size:11.5px;margin-top:10px;line-height:1.6">
       Mode ATR memakai multiplier ATR seperti bot live. Mode persentase tetap memakai SL, TP, BE, dan trailing berbasis persen. Pilihan ini hanya berlaku untuk simulasi backtest.
     </div>
     <div id="btEstimate" class="mut" style="font-size:11.5px;margin-top:10px;line-height:1.6"></div>
+
+    <div id="btGridForm" class="bt-form" style="display:none">
+      <div class="bt-field">
+        <label>Jumlah simbol dipindai</label>
+        <input type="number" id="btGridMaxSymbols" min="2" max="600" value="150"
+               title="Semesta simbol yang sama dengan Simulasi Portofolio. Data yang sudah diunduh dipakai ulang dari cache."
+               oninput="btGridUpdateEstimate()">
+      </div>
+      <div class="bt-field">
+        <label>Rentang (hari)</label>
+        <input type="number" id="btGridDays" min="2" value="30"
+               title="Hari pertama dipakai sebagai warmup statistik 24 jam, jadi minimal 2 hari."
+               oninput="btGridUpdateEstimate()">
+      </div>
+      <div class="bt-field">
+        <label>Rasio data latih</label>
+        <input type="number" id="btGridRatio" min="0.1" max="1" step="0.05" value="0.7"
+               title="0.7 berarti 70% awal data dipakai untuk memilih parameter, 30% sisanya dipakai untuk menguji pada data yang belum pernah dilihat.">
+      </div>
+      <div class="bt-field">
+        <label>Metrik peringkat</label>
+        <select id="btGridMetric"
+                title="Skor yang dipakai untuk mengurutkan kombinasi pada data latih.">
+          <option value="total_return_pct" selected>Total return (%)</option>
+          <option value="profit_factor">Profit factor</option>
+          <option value="return_per_drawdown">Return per drawdown</option>
+          <option value="win_rate">Win rate (%)</option>
+        </select>
+      </div>
+      <div class="bt-field">
+        <label>Min. trade latih</label>
+        <input type="number" id="btGridMinTrades" min="1" value="5"
+               title="Kombinasi yang trade-nya lebih sedikit dari ini ditandai tidak andal, karena hasilnya belum bisa disimpulkan.">
+      </div>
+      <div class="bt-field" style="grid-column:1/-1">
+        <label>Parameter yang diuji</label>
+        <div class="bt-grid-head">
+          <span>Parameter</span><span>Awal</span><span>Langkah</span><span>Akhir</span><span>Nilai</span><span></span>
+        </div>
+        <div id="btGridRows" style="display:flex;flex-direction:column;gap:8px"></div>
+        <div><button type="button" class="bt-grid-add" onclick="btGridAddRow()">+ Tambah parameter</button></div>
+        <div class="mut" style="font-size:11.5px;margin-top:8px;line-height:1.6">
+          Rentang nilai dibuat dari awal : langkah : akhir. Contoh 2 : 2 : 6 menghasilkan 2, 4, 6.
+          Semua kombinasi dijalankan pada data yang sama, lalu diuji ulang pada periode uji.
+          Grid berjalan di atas simulasi portofolio, sama seperti mode Simulasi Portofolio.
+        </div>
+      </div>
+      <div class="bt-field bt-actions">
+        <label>&nbsp;</label>
+        <div style="display:flex;gap:8px">
+          <button id="btGridRunBtn" onclick="startGridBacktest()">▶ Jalankan Grid</button>
+          <button id="btGridCancelBtn" onclick="cancelBacktest()" style="display:none;background:rgba(244,63,94,.16);color:#fda4af;border:1px solid rgba(244,63,94,.35)">✕ Batal</button>
+        </div>
+      </div>
+    </div>
+    <div id="btGridEstimate" class="mut" style="font-size:11.5px;margin-top:10px;line-height:1.6;display:none"></div>
 
     <div id="btError" class="banner err" style="margin-top:12px"></div>
     <div id="btProgressWrap" style="display:none;margin-top:14px" class="bt-loading">
@@ -679,7 +765,35 @@
     </div>
     <div id="btResult" style="display:none;margin-top:18px">
       <div class="grid cards" style="margin-bottom:14px" id="btCards"></div>
-      <div class="grid cols" style="margin-bottom:14px">
+      <div id="btGridBox" class="panel" style="background:var(--panel2);margin-bottom:14px;display:none">
+        <h2 style="font-size:13px">🧮 Hasil Grid Search <span class="mut" style="font-weight:400;font-size:11.5px" id="btGridRowCount"></span></h2>
+        <p class="mut" style="font-size:11.5px;margin-bottom:10px;line-height:1.6">
+          Peringkat disusun dari skor <b>latih</b>. Saat memilih kombinasi, utamakan skor uji
+          yang wajar dengan degradasi kecil, bukan skor latih tertinggi.
+        </p>
+        <div id="btGridWarnBox" class="posbox"></div>
+        <div style="overflow-x:auto">
+          <table id="btGridTable" style="min-width:1000px">
+            <thead>
+              <tr>
+                <th>Kombinasi parameter</th>
+                <th>Skor latih</th>
+                <th>Skor uji</th>
+                <th>Degradasi</th>
+                <th>Trade L/U</th>
+                <th>Return L/U</th>
+                <th>MaxDD L/U</th>
+                <th title="Profit factor latih / uji: total keuntungan dibagi total kerugian periode itu. Angka besar berarti kerugian tertutup rapat.">PF L/U</th>
+                <th title="Win rate latih / uji: persentase trade yang untung. Tinggi tidak berarti untung bila kerugian per trade lebih besar dari keuntungannya.">Win rate L/U</th>
+                <th>Status</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="btGridBody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div id="btResultDataPanels" class="grid cols" style="margin-bottom:14px">
         <div class="panel" style="background:var(--panel2)">
           <h2 style="font-size:13px">📈 Status Data Historis</h2>
           <div id="btChartWrap" class="chart-wrap"></div>
@@ -689,7 +803,7 @@
           <div class="posbox" id="btInfoBox"></div>
         </div>
       </div>
-      <div class="grid cols" style="margin-bottom:14px">
+      <div id="btResultSymbolPanels" class="grid cols" style="margin-bottom:14px">
         <div class="panel" style="background:var(--panel2)">
           <h2 style="font-size:13px">🏆 Kontribusi per Simbol</h2>
           <div id="btSymbolBox"></div>
@@ -708,7 +822,7 @@
         <h2 style="font-size:13px">⚠️ Batasan Backtest</h2>
         <ul id="btLimitList" style="padding-left:18px;font-size:12px;color:var(--muted);line-height:1.9"></ul>
       </div>
-      <div class="panel" style="background:var(--panel2)">
+      <div id="btResultTradesPanel" class="panel" style="background:var(--panel2)">
         <h2 style="font-size:13px">🧾 Riwayat Trade Hasil Simulasi <span class="mut" style="font-weight:400" id="btTradeCount"></span></h2>
         <div style="overflow-x:auto">
           <table>
@@ -1628,13 +1742,24 @@ function btBusy(busy){
   run.textContent = busy ? 'Menjalankan…' : '▶ Jalankan';
   const cancel = document.getElementById('btCancelBtn');
   if(cancel && !busy) cancel.style.display = 'none';
+  const gridRun = document.getElementById('btGridRunBtn');
+  if(gridRun){
+    gridRun.disabled = busy;
+    gridRun.textContent = busy ? 'Menjalankan…' : '▶ Jalankan Grid';
+  }
+  const gridCancel = document.getElementById('btGridCancelBtn');
+  if(gridCancel && !busy) gridCancel.style.display = 'none';
+  if(busy){
+    const aktif = (_btMode === 'grid') ? gridCancel : cancel;
+    if(aktif) aktif.style.display = '';
+  }
 }
 
 let _btJobId = null;
 
 async function cancelBacktest(){
   if(!_btJobId) return;
-  const btn = document.getElementById('btCancelBtn');
+  const btn = document.getElementById(_btMode === 'grid' ? 'btGridCancelBtn' : 'btCancelBtn');
   if(btn){ btn.disabled = true; btn.textContent = 'Membatalkan…'; }
   try{
     await adminFetch('/api/backtest/cancel/' + encodeURIComponent(_btJobId), {method:'POST'});
@@ -1743,6 +1868,7 @@ function fmtDuration(sec){
 
 function btStageSub(stage){
   const s = (stage||'').toLowerCase();
+  if(s.includes('grid')) return 'Menjalankan tiap kombinasi pada periode latih lalu mengujinya pada periode uji. Data tidak diunduh ulang…';
   if(s.includes('daftar pasar')) return 'Mengambil statistik 24 jam seluruh pair untuk menentukan semesta simbol…';
   if(s.includes('mengunduh')) return 'Mengunduh candle historis tiap simbol dari Binance. Ini bagian paling lama…';
   if(s.includes('mengambil')) return 'Mengunduh candle historis dari Binance secara bertahap (paging)…';
@@ -1751,6 +1877,367 @@ function btStageSub(stage){
   if(s.includes('selesai')) return 'Selesai, menyusun hasil…';
   return 'Menyiapkan permintaan backtest…';
 }
+
+let _btMode = 'portfolio';
+function btSetMode(mode){
+  _btMode = mode;
+  const isPortfolio = mode === 'portfolio';
+  document.getElementById('btForm').style.display = isPortfolio ? '' : 'none';
+  document.getElementById('btFormHint').style.display = isPortfolio ? '' : 'none';
+  document.getElementById('btEstimate').style.display = isPortfolio ? '' : 'none';
+  document.getElementById('btGridForm').style.display = isPortfolio ? 'none' : '';
+  document.getElementById('btGridEstimate').style.display = isPortfolio ? 'none' : '';
+  document.getElementById('btModePortfolio').style.fontWeight = isPortfolio ? '700' : '400';
+  document.getElementById('btModeGrid').style.fontWeight = isPortfolio ? '400' : '700';
+  document.getElementById('btModePortfolio').style.opacity = isPortfolio ? '1' : '0.65';
+  document.getElementById('btModeGrid').style.opacity = isPortfolio ? '0.65' : '1';
+  if(!isPortfolio) btGridUpdateEstimate();
+}
+
+const BT_GRID_PARAMS_ATR = [
+  ['ATR_PERIOD', 'ATR period'],
+  ['ATR_MULT_SL', 'ATR mult SL'],
+  ['ATR_MULT_TP', 'ATR mult TP'],
+  ['ATR_MULT_BE_TRIGGER', 'ATR mult BE pemicu'],
+  ['ATR_MULT_BE_LOCK', 'ATR mult BE kunci'],
+  ['ATR_MULT_TRAIL_START', 'ATR mult trail mulai'],
+  ['ATR_MULT_TRAIL', 'ATR mult trail langkah'],
+];
+const BT_GRID_PARAMS_PERSEN = [
+  ['SL_PCT', 'SL %'],
+  ['TP_PCT', 'TP %'],
+  ['BE_TRIGGER_PCT', 'BE pemicu %'],
+  ['BE_LOCK_PCT', 'BE kunci %'],
+  ['TRAILING_START_PCT', 'Trailing mulai %'],
+  ['TRAILING_STEP_PCT', 'Trailing langkah %'],
+];
+let _btGridDefaults = null;
+const btGridMaxKombinasi = () =>
+  (_btGridDefaults && _btGridDefaults.grid_max_kombinasi) || 150;
+// Hanya tawarkan parameter yang benar-benar dipakai mesin pada mode exit aktif;
+// parameter mode lain tidak berpengaruh apa pun (grid akan menolaknya).
+const btGridIsAtrMode = () =>
+  !(_btGridDefaults && _btGridDefaults.USE_ATR_EXIT === false);
+const btGridParamsForMode = () =>
+  btGridIsAtrMode() ? BT_GRID_PARAMS_ATR : BT_GRID_PARAMS_PERSEN;
+
+function btGridAddRow(key, awal, langkah, akhir){
+  const wrap = document.getElementById('btGridRows');
+  const row = document.createElement('div');
+  row.className = 'bt-grid-row';
+  const sel = document.createElement('select');
+  sel.className = 'btGridKey';
+  sel.title = 'Parameter exit yang akan disapu nilainya';
+  sel.onchange = btGridUpdateEstimate;
+  const opsi = btGridParamsForMode();
+  for(const [k, label] of opsi){
+    const opt = document.createElement('option');
+    opt.value = k;
+    opt.textContent = label;
+    sel.appendChild(opt);
+  }
+  if(key && opsi.some(([k]) => k === key)) sel.value = key;
+  row.appendChild(sel);
+  const mkInput = (cls, placeholder, val, judul) => {
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.className = cls;
+    input.placeholder = placeholder;
+    input.title = judul;
+    input.step = 'any';
+    input.oninput = btGridUpdateEstimate;
+    if(val !== undefined && val !== '') input.value = val;
+    return input;
+  };
+  row.appendChild(mkInput('btGridAwal', 'mis. 2', awal, 'Nilai awal rentang'));
+  row.appendChild(mkInput('btGridLangkah', 'mis. 2', langkah, 'Jarak antar nilai (harus > 0)'));
+  row.appendChild(mkInput('btGridAkhir', 'mis. 6', akhir, 'Nilai akhir rentang (inklusif)'));
+  const n = document.createElement('span');
+  n.className = 'bt-grid-n';
+  n.textContent = '-';
+  n.title = 'Berapa nilai yang dihasilkan baris ini';
+  row.appendChild(n);
+  const del = document.createElement('button');
+  del.type = 'button';
+  del.className = 'bt-grid-del';
+  del.textContent = '✕';
+  del.title = 'Hapus baris parameter ini';
+  del.onclick = () => { row.remove(); btGridUpdateEstimate(); };
+  row.appendChild(del);
+  wrap.appendChild(row);
+  btGridUpdateEstimate();
+}
+
+function btGridRowsData(){
+  const out = [];
+  document.querySelectorAll('#btGridRows .bt-grid-row').forEach(row => {
+    out.push({
+      key: row.querySelector('.btGridKey').value,
+      awal: parseFloat(row.querySelector('.btGridAwal').value),
+      langkah: parseFloat(row.querySelector('.btGridLangkah').value),
+      akhir: parseFloat(row.querySelector('.btGridAkhir').value),
+    });
+  });
+  return out;
+}
+
+function btGridValuesFor(r){
+  if(isNaN(r.awal) || isNaN(r.langkah) || isNaN(r.akhir)) return null;
+  if(r.langkah <= 0 || r.akhir < r.awal) return null;
+  const n = Math.floor((r.akhir - r.awal) / r.langkah + 1e-9) + 1;
+  if(n < 1 || n > 50) return null;
+  const vals = [];
+  for(let i = 0; i < n; i++){
+    const v = Math.round((r.awal + i * r.langkah) * 1e6) / 1e6;
+    if(!vals.includes(v)) vals.push(v);
+  }
+  return vals;
+}
+
+function btGridUpdateEstimate(){
+  const el = document.getElementById('btGridEstimate');
+  if(!el) return;
+  let total = 1, paramCount = 0, invalid = 0;
+  document.querySelectorAll('#btGridRows .bt-grid-row').forEach(row => {
+    const nEl = row.querySelector('.bt-grid-n');
+    const r = {
+      key: row.querySelector('.btGridKey').value,
+      awal: parseFloat(row.querySelector('.btGridAwal').value),
+      langkah: parseFloat(row.querySelector('.btGridLangkah').value),
+      akhir: parseFloat(row.querySelector('.btGridAkhir').value),
+    };
+    const vals = btGridValuesFor(r);
+    if(nEl){
+      if(vals === null){
+        nEl.className = 'bt-grid-n buruk';
+        nEl.textContent = '?';
+        nEl.title = 'Baris belum valid (awal ≤ akhir, langkah > 0, maks 50 nilai)';
+      } else {
+        nEl.className = 'bt-grid-n ok';
+        nEl.textContent = vals.length + ' nilai';
+        nEl.title = vals.join(', ');
+      }
+    }
+    if(vals === null){ invalid++; return; }
+    paramCount++;
+    total *= vals.length;
+  });
+  const maxK = btGridMaxKombinasi();
+  if(invalid > 0){
+    el.style.color = 'var(--amber)';
+    el.textContent = '⚠ ' + invalid + ' baris parameter belum valid. Isi awal ≤ akhir, langkah > 0, maksimal 50 nilai per parameter.';
+    return;
+  }
+  if(paramCount === 0){
+    el.style.color = 'var(--muted)';
+    el.textContent = 'Tambahkan minimal satu parameter untuk diuji.';
+    return;
+  }
+  if(total > maxK){
+    el.style.color = '#fda4af';
+    el.textContent = total + ' kombinasi dari ' + paramCount + ' parameter. Melebihi batas ' + maxK + ': persempit rentang atau perbesar langkah.';
+  } else {
+    el.style.color = 'var(--muted)';
+    el.textContent = paramCount + ' parameter, ' + total + ' kombinasi (batas ' + maxK + '). Setiap kombinasi dijalankan pada periode latih lalu diuji pada periode uji.';
+  }
+}
+
+async function loadBtGridDefaults(){
+  try{
+    const r = await fetch('/api/backtest/defaults', {cache:'no-store'});
+    if(r.ok) _btGridDefaults = await r.json();
+  }catch(e){ /* tetap pakai default lokal */ }
+  btGridSeedDefaultRow();
+  btGridUpdateEstimate();
+}
+
+// Baris bawaan harus cocok dengan mode exit aktif: memberi baris persen saat
+// exit ATR aktif (atau sebaliknya) sama saja menipu, grid akan menolaknya.
+function btGridSeedDefaultRow(){
+  const wrap = document.getElementById('btGridRows');
+  if(!wrap || wrap.children.length) return;
+  if(btGridIsAtrMode()) btGridAddRow('ATR_MULT_TP', 18, 6, 30);
+  else btGridAddRow('TP_PCT', 2, 2, 6);
+}
+
+async function startGridBacktest(){
+  btShowError('');
+  if(_btVisibility === false){
+    btShowError('Fitur backtest sedang dinonaktifkan karena bot berjalan di mode LIVE.');
+    return;
+  }
+  document.getElementById('btResult').style.display = 'none';
+
+  const days = parseInt(document.getElementById('btGridDays').value || '30', 10);
+  const maxSym = parseInt(document.getElementById('btGridMaxSymbols').value || '150', 10);
+  if(!(days >= 2)){ btShowError('Rentang minimal 2 hari (hari pertama dipakai warmup statistik 24 jam).'); return; }
+  if(!(maxSym >= 2) || maxSym > 600){ btShowError('Jumlah simbol harus 2 sampai 600.'); return; }
+
+  const rows = btGridRowsData();
+  const spec = {};
+  let total = 1;
+  for(const r of rows){
+    const vals = btGridValuesFor(r);
+    if(vals === null){
+      btShowError('Baris parameter ' + esc(r.key) + ' belum valid (awal ≤ akhir, langkah > 0, maksimal 50 nilai).');
+      return;
+    }
+    spec[r.key] = vals;
+    total *= vals.length;
+  }
+  if(!Object.keys(spec).length){
+    btShowError('Tambahkan minimal satu parameter untuk diuji.');
+    return;
+  }
+  const maxK = btGridMaxKombinasi();
+  if(total > maxK){
+    btShowError('Grid menghasilkan ' + total + ' kombinasi, melebihi batas ' + maxK + '. Persempit rentang atau perbesar langkah.');
+    return;
+  }
+
+  const payload = {
+    days: days,
+    max_symbols: maxSym,
+    rasio_latih: document.getElementById('btGridRatio').value || '0.7',
+    metrik: document.getElementById('btGridMetric').value,
+    min_trades: document.getElementById('btGridMinTrades').value || '5',
+    spec: spec,
+  };
+
+  btBusy(true);
+  document.getElementById('btProgressWrap').style.display = 'flex';
+  document.getElementById('btProgressBar').style.width = '2%';
+  document.getElementById('btStage').textContent = 'Mengirim permintaan';
+  document.getElementById('btSubStage').textContent = 'Menghubungi server dashboard…';
+  document.getElementById('btPct').textContent = '0%';
+  document.getElementById('btElapsed').textContent = '0 dtk';
+  document.getElementById('btEta').textContent = 'menghitung…';
+  document.getElementById('btEtaClock').textContent = '-';
+
+  try{
+    const r = await adminFetch('/api/backtest/grid/start', {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload)
+    });
+    const d = await r.json().catch(() => ({}));
+    if(!r.ok){ throw new Error(d.error || 'Gagal memulai grid search.'); }
+    _btJobId = d.job_id;
+    pollBacktest(d.job_id);
+  }catch(e){
+    btBusy(false);
+    btShowError(e.message);
+  }
+}
+
+let _btGridResultRows = [];
+const BT_GRID_PARAM_INPUT = {
+  ATR_PERIOD: 'btAtrPeriod', ATR_MULT_SL: 'btAtrSl', ATR_MULT_TP: 'btAtrTp',
+  ATR_MULT_BE_TRIGGER: 'btAtrBeTrig', ATR_MULT_BE_LOCK: 'btAtrBeLock',
+  ATR_MULT_TRAIL_START: 'btAtrTrStart', ATR_MULT_TRAIL: 'btAtrTrStep',
+  SL_PCT: 'btSl', TP_PCT: 'btTp', BE_TRIGGER_PCT: 'btBeTrig',
+  BE_LOCK_PCT: 'btBeLock', TRAILING_START_PCT: 'btTrStart',
+  TRAILING_STEP_PCT: 'btTrStep',
+};
+
+function btPakaiGridParams(idx){
+  const row = _btGridResultRows[idx];
+  if(!row || !row.params) return;
+  const p = row.params;
+  const pakaiAtr = ('ATR_PERIOD' in p) || ('ATR_MULT_SL' in p) || ('ATR_MULT_TP' in p);
+  const pakaiPersen = ('SL_PCT' in p) || ('TP_PCT' in p);
+  if(pakaiAtr && !pakaiPersen){
+    document.getElementById('btExitMode').value = 'atr';
+  } else if(pakaiPersen && !pakaiAtr){
+    document.getElementById('btExitMode').value = 'fixed';
+  }
+  for(const [k, inputId] of Object.entries(BT_GRID_PARAM_INPUT)){
+    if(k in p) document.getElementById(inputId).value = p[k];
+  }
+  if(typeof btUpdateExitMode === 'function') btUpdateExitMode();
+  btSetMode('portfolio');
+  toast('ok','Parameter dipakai','Kombinasi terpilih sudah diisikan ke form Simulasi Portofolio. Sesuaikan parameter lain bila perlu, lalu jalankan simulasi penuh.');
+}
+
+function renderGridResult(res){
+  document.getElementById('btResult').style.display = 'block';
+  document.getElementById('btGridBox').style.display = 'block';
+  document.getElementById('btResultDataPanels').style.display = 'none';
+  document.getElementById('btResultSymbolPanels').style.display = 'none';
+  document.getElementById('btResultTradesPanel').style.display = 'none';
+
+  const g = res.grid || {};
+  const rows = res.rows || [];
+  _btGridResultRows = rows;
+
+  const metrikLabel = {
+    total_return_pct: 'Total return (%)',
+    profit_factor: 'Profit factor',
+    return_per_drawdown: 'Return per drawdown',
+    win_rate: 'Win rate (%)',
+  }[g.metrik] || esc(g.metrik || '-');
+
+  const cardsHtml = `
+    <div class="card good"><div class="accent-bar"></div>
+      <div class="label">Kombinasi diuji</div>
+      <div class="value mono">${fmt(g.total_kombinasi,0)}</div>
+      <div class="sub">${fmt(g.dipangkas,0)} duplikat dipangkas, ${fmt(g.dilewati,0)} gagal</div></div>
+    <div class="card"><div class="accent-bar"></div>
+      <div class="label">Metrik peringkat</div>
+      <div class="value" style="font-size:14px">${metrikLabel}</div>
+      <div class="sub">rasio latih ${esc(g.rasio_latih)}, min ${fmt(g.min_trades,0)} trade</div></div>
+    <div class="card"><div class="accent-bar"></div>
+      <div class="label">Bar latih / uji</div>
+      <div class="value mono">${fmt(g.bar_latih,0)} / ${fmt(g.bar_uji,0)}</div>
+      <div class="sub">split satu kali berdasarkan waktu</div></div>
+    <div class="card"><div class="accent-bar"></div>
+      <div class="label">Durasi</div>
+      <div class="value mono">${fmt(g.detik,1)} dtk</div>
+      <div class="sub">${g.dibatalkan ? 'dibatalkan pengguna, hasil parsial' : 'selesai penuh'}</div></div>`;
+  document.getElementById('btCards').innerHTML = cardsHtml;
+
+  document.getElementById('btGridWarnBox').innerHTML = (g.peringatan || []).map(w =>
+    `<div class="posrow"><span class="k" style="color:var(--amber)">⚠ ${esc(w)}</span></div>`).join('');
+
+  const pfC = v => (v === undefined) ? '-' : (v === null ? '∞' : fmt(v, 2));
+
+  document.getElementById('btGridRowCount').textContent =
+    rows.length ? '(' + rows.length + ' kombinasi teratas)' : '';
+  const tb = document.getElementById('btGridBody');
+  if(!rows.length){
+    tb.innerHTML = '<tr><td colspan="11" class="empty">Tidak ada kombinasi yang berhasil dijalankan.</td></tr>';
+  } else {
+    tb.innerHTML = rows.map((r, i) => {
+      const paramStr = Object.entries(r.params || {})
+        .filter(([k]) => k !== 'USE_ATR_EXIT')
+        .map(([k, v]) => esc(k) + '=' + esc(v)).join(', ') || '(default)';
+      const deg = (r.degradasi === null || r.degradasi === undefined) ? '-' :
+        fmt(r.degradasi, 3);
+      const skorUji = (r.skor_uji === null || r.skor_uji === undefined) ? '-' : fmt(r.skor_uji, 3);
+      return `
+      <tr>
+        <td class="mono" style="font-size:11.5px">${paramStr}</td>
+        <td class="mono">${fmt(r.skor_latih,3)}</td>
+        <td class="mono">${skorUji}</td>
+        <td class="mono">${deg}</td>
+        <td class="mono mut">${fmt(r.trades_latih,0)} / ${fmt((r.trades_uji===undefined?null:r.trades_uji),0)}</td>
+        <td class="mono">${fmt(r.return_latih,2)}% / ${fmt((r.return_uji===undefined?NaN:r.return_uji),2)}%</td>
+        <td class="mono mut">${fmt(r.maxdd_latih,2)} / ${fmt((r.maxdd_uji===undefined?NaN:r.maxdd_uji),2)}</td>
+        <td class="mono" title="Profit factor latih / uji: total keuntungan dibagi total kerugian. ∞ berarti tidak ada trade rugi.">${pfC(r.pf_latih)} / ${pfC(r.pf_uji)}</td>
+        <td class="mono mut" title="Win rate latih / uji: persentase trade untung.">${fmt(r.winrate_latih,1)}% / ${(r.winrate_uji===undefined)?'-':fmt(r.winrate_uji,1)+'%'}</td>
+        <td>${r.andal
+          ? '<span class="tag" style="background:rgba(34,197,94,.16);color:#86efac">andal</span>'
+          : '<span class="tag" style="background:rgba(245,158,11,.16);color:#fcd34d">sampel kecil</span>'}${r.catatan ? '<div class="mut" style="font-size:10.5px;margin-top:3px">' + esc(r.catatan) + '</div>' : ''}</td>
+        <td><button type="button" onclick="btPakaiGridParams(${i})" title="Salin kombinasi ini ke form Simulasi Portofolio">Pakai</button></td>
+      </tr>`;
+    }).join('');
+  }
+
+  document.getElementById('btLimitList').innerHTML = (res.limitations || []).map(l =>
+    `<li>${esc(l)}</li>`).join('');
+}
+
+loadBtGridDefaults();
+// Baris bawaan ditambahkan oleh btGridSeedDefaultRow() setelah default termuat,
+// supaya parameternya cocok dengan mode exit aktif (ATR atau persen).
 
 function pollBacktest(jobId){
   if(btPolling) clearInterval(btPolling);
@@ -1779,7 +2266,11 @@ function pollBacktest(jobId){
       if(d.status === 'done'){
         clearInterval(btPolling); btPolling = null;
         finishBacktestUI();
-        renderBacktestResult(d.result);
+        if(d.result && d.result.kind === 'grid'){
+          renderGridResult(d.result);
+        } else {
+          renderBacktestResult(d.result);
+        }
         toast('ok','Backtest selesai','Hasil simulasi sudah ditampilkan di bawah form.');
       } else if(d.status === 'error'){
         clearInterval(btPolling); btPolling = null;
@@ -1857,6 +2348,10 @@ function btReasonLabel(r){
 function renderBacktestResult(res){
   const s = res.summary;
   document.getElementById('btResult').style.display = 'block';
+  document.getElementById('btGridBox').style.display = 'none';
+  document.getElementById('btResultDataPanels').style.display = '';
+  document.getElementById('btResultSymbolPanels').style.display = '';
+  document.getElementById('btResultTradesPanel').style.display = '';
 
   const cardsHtml = `
     <div class="card good"><div class="accent-bar"></div>
