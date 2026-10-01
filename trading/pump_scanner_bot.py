@@ -18,15 +18,15 @@ CARA PAKAI (sama seperti bot.py):
     pip install -r requirements.txt
     set BINANCE_API_KEY / BINANCE_API_SECRET (lihat README.md)
     python pump_scanner_bot.py --selftest      # audit logika, tanpa jaringan
-    python pump_scanner_bot.py                 # jalan (MODE="PAPER" dulu, default)
+    python pump_scanner_bot.py                 # jalan (BOT_MODE=PAPER adalah default)
 
 MODE RUNTIME:
     "PAPER" -> simulasi eksekusi lokal penuh; data pasar ASLI dari Binance
                produksi publik (REST + WebSocket), tanpa API key. Saldo/order
                virtual disimpan ke file. (default, aman)
     "LIVE"  -> order sungguhan ke Binance produksi (uang asli)
-Mode dipilih lewat tab Kontrol dan disimpan di data/settings.json. Nilai
-config.py tetap menjadi default immutable.
+Mode dipilih lewat BOT_MODE di file .env dan berlaku setelah dashboard atau
+bot dijalankan ulang. Nilai config.py tetap menjadi default immutable.
 Keduanya memakai jalur LOGIKA STRATEGI yang SAMA PERSIS lewat antarmuka
 ExchangeClient; yang berbeda hanya lapisan eksekusi order dan sumber saldo.
 
@@ -41,19 +41,26 @@ from __future__ import annotations
 import argparse
 import logging
 import logging.handlers
+import math
 import os
 import signal
 import sys
 import threading
 import time
 import uuid
+from decimal import Decimal
 from pathlib import Path
 
 from trading.clients.binance_client import (
     BinanceAPIError, BinanceRateLimitError, SymbolFilters, build_filters_cache,
-    build_trading_symbols,
+    build_trading_symbols, permission_sets_allow,
 )
-from trading.clients.exchange_client import ExchangeClient, create_exchange_client
+from trading.clients.exchange_client import (
+    ACCOUNT_SPOT_PERMISSION_SOURCE,
+    ACCOUNT_SPOT_PERMISSION_VERIFIED,
+    ExchangeClient,
+    create_exchange_client,
+)
 from config.config import (
     PUMP_CONFIG, CONFIG_LOAD_ERRORS, get_base_url, get_control_file, is_paper,
     require_valid_mode,
@@ -100,6 +107,8 @@ DEFAULT_STATE = {
     "_native_stop_exit_blocked": False,
     "reconciliation_required": False,
     "reconciliation_assets": [],
+    "reconciliation_reason": "",
+    "state_integrity_error": "",
 }
 
 
@@ -143,12 +152,100 @@ def _handle_signal(signum, frame):
     _shutdown_event.set()
 
 
-def load_pump_state(path: str) -> dict:
-    if not os.path.exists(path):
-        return dict(DEFAULT_STATE)
-    raw = state_mod.load_state(path)
+def load_pump_state(path: str, *, fail_closed: bool = False) -> dict:
+    raw, valid, load_error = state_mod.load_state_checked(path)
     merged = dict(DEFAULT_STATE)
     merged.update(raw)
+
+    validation_errors: list[str] = []
+    symbol = merged.get("current_symbol")
+    if symbol is not None and (
+        not isinstance(symbol, str)
+        or not symbol
+        or symbol != symbol.strip().upper()
+        or not symbol.isalnum()
+    ):
+        validation_errors.append("current_symbol tidak valid")
+    for key in (
+        "entry_price", "qty", "entry_time", "last_scan_time", "cooldown_until",
+        "last_trade_time", "native_protection_retry_at",
+    ):
+        value = merged.get(key, 0)
+        try:
+            number = float(value or 0)
+        except (TypeError, ValueError):
+            validation_errors.append(f"{key} bukan angka")
+            continue
+        if not math.isfinite(number) or number < 0:
+            validation_errors.append(f"{key} tidak finite/nonnegatif")
+        else:
+            merged[key] = number
+    for key in (
+        "sl_pct", "tp_pct", "be_trigger_pct", "be_lock_pct",
+        "trail_start_pct", "trail_step_pct", "be_stop_price",
+        "trailing_stop_price", "dd_stop_until",
+    ):
+        value = merged.get(key, 0)
+        try:
+            number = float(value or 0)
+        except (TypeError, ValueError):
+            validation_errors.append(f"{key} bukan angka")
+            continue
+        if not math.isfinite(number) or number < 0:
+            validation_errors.append(f"{key} tidak finite/nonnegatif")
+        else:
+            merged[key] = number
+    for key in (
+        "be_active", "trailing_active", "dd_stopped", "daily_stopped",
+        "_limit_close_done", "_native_stop_exit_blocked",
+        "reconciliation_required",
+    ):
+        if not isinstance(merged.get(key), bool):
+            validation_errors.append(f"{key} harus boolean")
+    for key in ("pending_order", "native_stop", "native_oco"):
+        value = merged.get(key)
+        if value is not None and not isinstance(value, dict):
+            validation_errors.append(f"{key} harus object atau null")
+    if not isinstance(merged.get("reconciliation_assets"), list):
+        validation_errors.append("reconciliation_assets harus list")
+    for key in ("day_start_equity", "peak_equity"):
+        value = merged.get(key)
+        if value is None:
+            continue
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            validation_errors.append(f"{key} bukan angka/null")
+            continue
+        if not math.isfinite(number) or number < 0:
+            validation_errors.append(f"{key} tidak finite/nonnegatif")
+        else:
+            merged[key] = number
+    try:
+        sell_fail_count = int(merged.get("sell_fail_count", 0) or 0)
+        if sell_fail_count < 0:
+            raise ValueError
+        merged["sell_fail_count"] = sell_fail_count
+    except (TypeError, ValueError):
+        validation_errors.append("sell_fail_count tidak valid")
+    qty = float(merged.get("qty") or 0.0)
+    entry = float(merged.get("entry_price") or 0.0)
+    if symbol is None and (qty > 0 or entry > 0):
+        validation_errors.append("qty/entry_price ada tanpa current_symbol")
+    if symbol is not None and (qty <= 0 or entry <= 0):
+        validation_errors.append("current_symbol ada tanpa qty/entry_price positif")
+
+    if not valid:
+        validation_errors.append(load_error or "state tidak dapat dibaca")
+    if fail_closed and validation_errors:
+        reason = "; ".join(dict.fromkeys(validation_errors))
+        merged["state_integrity_error"] = reason
+        merged["reconciliation_required"] = True
+        merged["reconciliation_reason"] = "STATE_INTEGRITY_UNVERIFIED"
+        logger.critical(
+            "Integritas state LIVE tidak dapat diverifikasi: %s. Entry baru diblokir ",
+            reason,
+        )
     return merged
 
 
@@ -166,9 +263,122 @@ def get_total_balance(account: dict, asset: str) -> float:
     return 0.0
 
 
+def _mark_reconciliation(state: dict, reason: str,
+                         assets: list[str] | None = None) -> None:
+    state["reconciliation_required"] = True
+    state["reconciliation_reason"] = str(reason or "UNVERIFIED")
+    state["reconciliation_assets"] = sorted({str(x) for x in (assets or []) if x})
+
+
+def _clear_reconciliation(state: dict) -> None:
+    if state.get("state_integrity_error"):
+        _mark_reconciliation(state, "STATE_INTEGRITY_UNVERIFIED")
+        return
+    state["reconciliation_required"] = False
+    state["reconciliation_reason"] = ""
+    state["reconciliation_assets"] = []
+
+
+def _spot_api_key_permission_verified(account: dict) -> bool:
+    return (
+        account.get(ACCOUNT_SPOT_PERMISSION_VERIFIED) is True
+        and str(account.get(ACCOUNT_SPOT_PERMISSION_SOURCE) or "")
+        == "GET /sapi/v1/account/apiRestrictions"
+    )
+
+
+def _effective_account_permissions(account: dict) -> set[str]:
+    """Gabungkan grup akun dengan izin SPOT yang diverifikasi secara resmi."""
+    permissions: set[str] = set()
+    raw = account.get("permissions")
+    if isinstance(raw, list):
+        permissions.update(
+            item.strip().upper()
+            for item in raw
+            if isinstance(item, str) and item.strip()
+        )
+    if (
+        account.get("canTrade") is True
+        and str(account.get("accountType") or "").upper() == "SPOT"
+        and ("SPOT" in permissions or _spot_api_key_permission_verified(account))
+    ):
+        permissions.add("SPOT")
+    return permissions
+
+
+def _validate_live_account_snapshot(account: dict, quote_asset: str) -> None:
+    if not isinstance(account, dict):
+        raise BinanceAPIError(502, None, "respons account bukan object")
+    if account.get("canTrade") is not True:
+        raise BinanceAPIError(403, None, "akun Binance melaporkan canTrade bukan true")
+    account_type = str(account.get("accountType") or "").upper()
+    if account_type != "SPOT":
+        raise BinanceAPIError(403, None, f"accountType bukan SPOT: {account_type or 'kosong'}")
+    permissions = account.get("permissions")
+    api_key_spot_verified = _spot_api_key_permission_verified(account)
+    if permissions is None:
+        if not api_key_spot_verified:
+            raise BinanceAPIError(
+                403, None,
+                "permission SPOT tidak ada pada account dan izin API key belum terverifikasi",
+            )
+    elif not isinstance(permissions, list):
+        raise BinanceAPIError(502, None, "field permissions account bukan list")
+    else:
+        if any(not isinstance(item, str) or not item.strip() for item in permissions):
+            raise BinanceAPIError(502, None, "field permissions account tidak valid")
+        normalized_permissions = {item.strip().upper() for item in permissions}
+        if "SPOT" not in normalized_permissions and not api_key_spot_verified:
+            raise BinanceAPIError(
+                403, None,
+                "permission SPOT account/API key tidak dapat diverifikasi",
+            )
+    if "SPOT" not in _effective_account_permissions(account):
+        raise BinanceAPIError(403, None, "izin efektif SPOT tidak dapat dibentuk")
+    balances = account.get("balances")
+    if not isinstance(balances, list):
+        raise BinanceAPIError(502, None, "balances account tidak tersedia")
+    seen: set[str] = set()
+    for item in balances:
+        if not isinstance(item, dict):
+            raise BinanceAPIError(502, None, "entri balance bukan object")
+        asset = str(item.get("asset") or "")
+        if not asset or asset in seen:
+            raise BinanceAPIError(502, None, f"asset balance kosong/duplikat: {asset!r}")
+        seen.add(asset)
+        try:
+            free = float(item.get("free"))
+            locked = float(item.get("locked"))
+        except (TypeError, ValueError):
+            raise BinanceAPIError(502, None, f"balance {asset} bukan angka") from None
+        if not math.isfinite(free) or not math.isfinite(locked) or free < 0 or locked < 0:
+            raise BinanceAPIError(502, None, f"balance {asset} tidak valid")
+    if quote_asset not in seen:
+        raise BinanceAPIError(502, None, f"balance aset kuotasi {quote_asset} tidak tersedia")
+
+
+def _known_open_order_client_ids(state: dict) -> set[str]:
+    known: set[str] = set()
+    pending = state.get("pending_order")
+    if isinstance(pending, dict) and pending.get("client_order_id"):
+        known.add(str(pending["client_order_id"]))
+    native_stop = state.get("native_stop")
+    if isinstance(native_stop, dict) and native_stop.get("client_order_id"):
+        known.add(str(native_stop["client_order_id"]))
+    native_oco = state.get("native_oco")
+    if isinstance(native_oco, dict):
+        for key in ("above", "below"):
+            leg = native_oco.get(key)
+            if isinstance(leg, dict) and leg.get("client_order_id"):
+                known.add(str(leg["client_order_id"]))
+    return known
+
+
 def get_equity(client: ExchangeClient, config: dict, state: dict,
                position_price: float | None = None) -> "float | None":
     account = client.get_account()
+    if str(config.get("MODE", "PAPER")).upper() == "LIVE":
+        _validate_live_account_snapshot(account, config["QUOTE_ASSET"])
     usdt_free = get_balance(account, config["QUOTE_ASSET"])
     if state["current_symbol"] and state["qty"] > 0:
         if position_price is not None and float(position_price) > 0:
@@ -202,8 +412,8 @@ def account_risk_gate(config: dict) -> "tuple[bool, str]":
     return False, (
         "MODE=LIVE ditolak: USE_EQUITY_STOP dan USE_DAILY_STOP dua-duanya nonaktif. "
         "Tidak ada rem drawdown maupun rem kerugian harian, dan CLOSE_ALL_AT_LIMIT "
-        "tidak akan pernah terpicu. Aktifkan minimal salah satu di Pengaturan, atau "
-        "setel environment ALLOW_LIVE_WITHOUT_ACCOUNT_STOP=1 bila risiko ini memang "
+        "tidak akan pernah terpicu. Aktifkan minimal salah satu melalui override "
+        "konfigurasi, atau setel environment ALLOW_LIVE_WITHOUT_ACCOUNT_STOP=1 bila risiko ini memang "
         "disengaja."
     )
 
@@ -218,10 +428,16 @@ def describe_exit_mode(config: dict, state: dict) -> str:
             f"TP {float(state.get('tp_pct', 0) or 0):.6f} dalam satuan harga)"
         )
     if config.get("USE_ATR_EXIT", False):
+        if not state.get("current_symbol") or float(state.get("qty", 0) or 0) <= 0:
+            return (
+                "ATR aktif untuk posisi berikutnya "
+                f"(period {int(config.get('ATR_PERIOD', 14) or 14)}, "
+                f"mult SL {float(config.get('ATR_MULT_SL', 0) or 0):.4g}, "
+                f"mult TP {float(config.get('ATR_MULT_TP', 0) or 0):.4g})"
+            )
         return (
-            f"persen tetap (SL {sl_pct:.2f}%, TP {tp_pct:.2f}%). "
-            f"USE_ATR_EXIT=True tetapi ATR tidak aktif: posisi tidak membawa "
-            f"exit_source=ATR, sehingga ATR_MULT_SL/ATR_MULT_TP tidak dipakai"
+            f"persen tetap untuk posisi lama (SL {sl_pct:.2f}%, TP {tp_pct:.2f}%). "
+            "Posisi berikutnya memakai ATR karena USE_ATR_EXIT=True"
         )
     return f"persen tetap (SL {sl_pct:.2f}%, TP {tp_pct:.2f}%)"
 
@@ -313,146 +529,278 @@ def maybe_force_close_at_risk_limit(client: ExchangeClient, config: dict,
 
 
 def reconcile_state_with_exchange(client: ExchangeClient, config: dict, state: dict,
-                                  filters_cache: dict | None = None) -> None:
+                                  filters_cache: dict | None = None,
+                                  *, check_open_orders: bool = False) -> bool:
+    """Cocokkan intent, state, saldo, order terbuka, dan proteksi exchange.
+
+    Fungsi mengembalikan True hanya jika seluruh data yang diperlukan berhasil
+    diverifikasi. Setiap ketidakpastian mempertahankan state dan memblokir entry.
+    """
     quote = config["QUOTE_ASSET"]
+    live = str(config.get("MODE", "PAPER")).upper() == "LIVE"
+    issues: list[str] = []
+    issue_assets: set[str] = set()
+    changed = False
+
+    def issue(reason: str, *assets: str) -> None:
+        issues.append(reason)
+        issue_assets.update(str(asset) for asset in assets if asset)
+
     try:
         account = client.get_account()
+        if live:
+            _validate_live_account_snapshot(account, quote)
     except BinanceAPIError as exc:
-        logger.warning(
-            "Rekonsiliasi startup dilewati (gagal ambil saldo: %s). "
-            "State lama dipakai apa adanya; entry baru tidak akan berjalan bila ada intent order.",
-            exc,
+        _mark_reconciliation(state, "ACCOUNT_UNVERIFIED", [quote])
+        state_mod.save_state(config["STATE_FILE"], state)
+        logger.critical(
+            "Rekonsiliasi gagal karena status/saldo akun tidak dapat diverifikasi: %s. "
+            "State dipertahankan dan entry baru diblokir.", exc,
         )
-        return
+        return False
 
-    changed = False
+    held_symbol = str(state.get("current_symbol") or "").upper()
+    if live and held_symbol:
+        held_filters = (filters_cache or {}).get(held_symbol)
+        if held_filters is None:
+            issue("HELD_SYMBOL_FILTERS_UNVERIFIED", held_symbol)
+        elif not getattr(held_filters, "permission_metadata_verified", False):
+            issue("HELD_SYMBOL_PERMISSIONS_UNVERIFIED", held_symbol)
+        elif not permission_sets_allow(
+            held_filters.permission_sets, _effective_account_permissions(account)
+        ):
+            issue("HELD_SYMBOL_PERMISSION_MISMATCH", held_symbol)
+
     pending = state.get("pending_order")
-    if isinstance(pending, dict) and pending.get("client_order_id"):
-        symbol = str(pending.get("symbol") or "")
-        try:
-            order = client.get_order(symbol,
-                                     orig_client_order_id=pending["client_order_id"])
-        except BinanceAPIError as exc:
-            if getattr(exc, "code", None) == -2013:
-                logger.warning("Intent %s untuk %s tidak ditemukan di exchange; dibersihkan.",
-                               pending.get("side"), symbol)
-                state["pending_order"] = None
-                changed = True
-            else:
-                state["reconciliation_required"] = True
-                state["reconciliation_assets"] = [symbol] if symbol else []
-                changed = True
-                logger.critical("Intent order %s belum dapat diverifikasi (%s). Entry baru diblokir.",
-                                symbol, exc)
+    if pending is not None and not isinstance(pending, dict):
+        issue("PENDING_ORDER_MALFORMED")
+    elif isinstance(pending, dict):
+        client_order_id = pending.get("client_order_id")
+        symbol_pending = str(pending.get("symbol") or "")
+        if not client_order_id or not symbol_pending:
+            issue("PENDING_ORDER_MALFORMED", symbol_pending)
         else:
-            side = str(pending.get("side") or order.get("side") or "").upper()
-            status = str(order.get("status") or "").upper()
-            executed_qty = float(order.get("executedQty", 0.0) or 0.0)
-            if side == "BUY" and executed_qty > 0 and (
-                _order_status_is_terminal(status) or not status
-            ):
-                if _restore_pending_buy(config, state, pending, order, account):
-                    logger.critical("BUY %s dipulihkan dari intent/order setelah respons hilang.", symbol)
-                    state["reconciliation_required"] = False
-                    state["reconciliation_assets"] = []
+            try:
+                order = client.get_order(
+                    symbol_pending, orig_client_order_id=str(client_order_id)
+                )
+            except BinanceAPIError as exc:
+                age_ms = state_mod.now_ms() - int(pending.get("created_at") or 0)
+                if _is_order_not_found(exc) and age_ms >= _NOT_FOUND_MIN_INTENT_AGE_MS:
+                    logger.warning(
+                        "Intent %s %s dipastikan tidak ditemukan setelah %.1f detik; intent dibersihkan.",
+                        pending.get("side"), symbol_pending, age_ms / 1000.0,
+                    )
+                    state["pending_order"] = None
+                    changed = True
                 else:
-                    state["reconciliation_required"] = True
-                    state["reconciliation_assets"] = [symbol] if symbol else []
-                state["pending_order"] = None
-                changed = True
-            elif _order_status_is_terminal(status):
-                if side == "SELL" and executed_qty > 0:
-                    qty_state_sell = float(state.get("qty") or 0.0)
-                    if qty_state_sell > 0 and executed_qty >= qty_state_sell - 1e-12:
-                        # Paritas close_position(): posisi baru saja tertutup
-                        # oleh SELL yang terkonfirmasi terisi. Tanpa ini, bot
-                        # bisa langsung entry ulang di siklus scan berikutnya
-                        # karena jalur rekonsiliasi tidak pernah menyentuh
-                        # cooldown_until/last_trade_time.
-                        menit = int(config.get("COOLDOWN_MINUTES_AFTER_CLOSE", 0) or 0)
-                        state["cooldown_until"] = state_mod.now_ms() + menit * 60 * 1000
-                        state["last_trade_time"] = state_mod.now_ms()
-                        logger.info(
-                            "REKONSILIASI: intent SELL %s terisi penuh "
-                            "(qty=%.8f); cooldown %s menit diterapkan seperti "
-                            "close_position.", symbol, executed_qty, menit,
-                        )
-                state["pending_order"] = None
-                changed = True
+                    issue("PENDING_ORDER_UNVERIFIED", symbol_pending)
+                    logger.critical(
+                        "Intent order %s belum dapat diverifikasi (%s). Entry/order duplikat diblokir.",
+                        symbol_pending, exc,
+                    )
             else:
-                pending["last_status"] = status or "UNKNOWN"
-                pending["executed_qty"] = executed_qty
-                state["reconciliation_required"] = True
-                state["reconciliation_assets"] = [symbol] if symbol else []
-                changed = True
+                order_identity_valid = (
+                    isinstance(order, dict)
+                    and str(order.get("symbol") or "").upper() == symbol_pending.upper()
+                    and str(order.get("clientOrderId") or "") == str(client_order_id)
+                    and str(order.get("side") or "").upper()
+                    == str(pending.get("side") or "").upper()
+                    and str(order.get("type") or "").upper() == "MARKET"
+                )
+                if not order_identity_valid:
+                    issue("PENDING_ORDER_IDENTITY_MISMATCH", symbol_pending)
+                    logger.critical(
+                        "Respons query intent %s tidak cocok dengan simbol/client order ID.",
+                        symbol_pending,
+                    )
+                    order = {}
+                side = str(pending.get("side") or order.get("side") or "").upper()
+                status = str(order.get("status") or "").upper()
+                executed_qty = float(order.get("executedQty", 0.0) or 0.0)
+                terminal = _order_status_is_terminal(status)
+
+                if side == "BUY" and executed_qty > 0 and terminal:
+                    try:
+                        refreshed_account = client.get_account()
+                        if live:
+                            _validate_live_account_snapshot(refreshed_account, quote)
+                    except BinanceAPIError as exc:
+                        issue("FILLED_BUY_BALANCE_UNVERIFIED", symbol_pending)
+                        logger.critical(
+                            "BUY %s terisi tetapi saldo setelah fill belum dapat diverifikasi: %s. "
+                            "Intent dipertahankan.", symbol_pending, exc,
+                        )
+                    else:
+                        account = refreshed_account
+                        if _restore_pending_buy(config, state, pending, order, account):
+                            logger.critical(
+                                "BUY %s dipulihkan dari intent/order setelah respons hilang.",
+                                symbol_pending,
+                            )
+                            state["pending_order"] = None
+                            changed = True
+                        else:
+                            issue("FILLED_BUY_STATE_UNRESTORABLE", symbol_pending)
+                elif terminal:
+                    if side == "SELL" and executed_qty > 0:
+                        try:
+                            refreshed_account = client.get_account()
+                            if live:
+                                _validate_live_account_snapshot(refreshed_account, quote)
+                        except BinanceAPIError as exc:
+                            issue("FILLED_SELL_BALANCE_UNVERIFIED", symbol_pending)
+                            logger.critical(
+                                "SELL %s terminal tetapi saldo setelah fill belum dapat diverifikasi: %s. "
+                                "Intent dipertahankan.", symbol_pending, exc,
+                            )
+                        else:
+                            account = refreshed_account
+                            qty_state_sell = float(state.get("qty") or 0.0)
+                            if qty_state_sell > 0 and executed_qty >= qty_state_sell - 1e-12:
+                                minutes = int(config.get("COOLDOWN_MINUTES_AFTER_CLOSE", 0) or 0)
+                                state["cooldown_until"] = (
+                                    state_mod.now_ms() + minutes * 60 * 1000
+                                )
+                                state["last_trade_time"] = state_mod.now_ms()
+                            state["pending_order"] = None
+                            changed = True
+                    else:
+                        state["pending_order"] = None
+                        changed = True
+                elif status in _NONTERMINAL_ORDER_STATUSES:
+                    pending["last_status"] = status
+                    pending["executed_qty"] = executed_qty
+                    pending["cummulative_quote_qty"] = float(
+                        order.get("cummulativeQuoteQty", 0.0) or 0.0
+                    )
+                    issue("PENDING_ORDER_NONTERMINAL", symbol_pending)
+                    changed = True
+                else:
+                    pending["last_status"] = status or "UNKNOWN"
+                    issue("PENDING_ORDER_STATUS_UNKNOWN", symbol_pending)
+                    changed = True
 
     symbol = state.get("current_symbol")
     qty_state = float(state.get("qty") or 0.0)
     pending_unresolved = isinstance(state.get("pending_order"), dict)
-    if symbol and qty_state > 0 and symbol.endswith(quote):
-        base_asset = symbol[: -len(quote)]
+    if symbol and qty_state > 0 and str(symbol).endswith(quote):
+        base_asset = str(symbol)[: -len(quote)]
         total_base = get_total_balance(account, base_asset)
         free_base = get_balance(account, base_asset)
         if total_base <= 0 and not pending_unresolved:
             logger.warning(
-                "REKONSILIASI: state bilang pegang %s qty=%.8f, tapi saldo total %s = 0. "
-                "Posisi hantu direset.", symbol, qty_state, base_asset,
+                "REKONSILIASI: state memegang %s qty=%.8f tetapi saldo total %s nol. "
+                "Posisi hantu direset berdasarkan saldo terverifikasi.",
+                symbol, qty_state, base_asset,
             )
             reset_position(state)
             changed = True
         elif total_base <= 0 and pending_unresolved:
-            state["reconciliation_required"] = True
-            state["reconciliation_assets"] = [base_asset]
-            changed = True
-            logger.critical(
-                "Intent %s untuk %s masih unresolved dan saldo total sementara nol; "
-                "posisi dipertahankan, bukan direset.",
-                state["pending_order"].get("side"), symbol,
-            )
+            issue("POSITION_BALANCE_ZERO_WITH_PENDING", base_asset)
         elif total_base < qty_state:
             logger.warning(
-                "REKONSILIASI: qty state %s (%.8f) lebih besar dari saldo total nyata %.8f. "
+                "REKONSILIASI: qty state %s %.8f lebih besar dari saldo total %.8f. "
                 "Qty disesuaikan.", symbol, qty_state, total_base,
             )
             state["qty"] = total_base
+            qty_state = total_base
             changed = True
-        if free_base <= 0 and total_base > 0:
-            state["reconciliation_required"] = True
-            state["reconciliation_assets"] = [base_asset]
-            changed = True
-            logger.critical("%s seluruhnya locked. Entry baru diblokir sampai order manual direkonsiliasi.",
-                            base_asset)
-    elif not state.get("current_symbol") and not state.get("pending_order"):
+
+        expected_native_lock = (
+            not pending_unresolved
+            and (
+                isinstance(state.get("native_oco"), dict)
+                or isinstance(state.get("native_stop"), dict)
+            )
+        )
+        if free_base <= 0 and total_base > 0 and not expected_native_lock:
+            issue("BASE_BALANCE_LOCKED_BY_UNKNOWN_ORDER", base_asset)
+    elif symbol or qty_state > 0:
+        issue("POSITION_STATE_MALFORMED", str(symbol or ""))
+    elif not state.get("pending_order"):
         foreign = []
         for bal in account.get("balances", []):
             asset = str(bal.get("asset") or "")
             if not asset or asset in (quote, "BNB"):
                 continue
-            try:
-                amount = float(bal.get("free", 0.0)) + float(bal.get("locked", 0.0))
-            except (TypeError, ValueError):
-                continue
+            amount = float(bal.get("free", 0.0)) + float(bal.get("locked", 0.0))
             if amount > 0:
                 foreign.append(asset)
         if foreign:
-            state["reconciliation_required"] = True
-            state["reconciliation_assets"] = sorted(set(foreign))
-            changed = True
-            logger.critical("State kosong tetapi akun masih punya aset base %s. Entry baru diblokir sampai rekonsiliasi manual.",
-                            ", ".join(state["reconciliation_assets"]))
+            issue("UNMANAGED_BASE_ASSETS", *foreign)
+            logger.critical(
+                "State kosong tetapi akun memiliki aset base tidak terkelola: %s.",
+                ", ".join(sorted(set(foreign))),
+            )
 
+    if live and check_open_orders:
+        try:
+            open_orders = client.get_open_orders()
+            if not isinstance(open_orders, list):
+                raise BinanceAPIError(502, None, "openOrders bukan list")
+        except BinanceAPIError as exc:
+            issue("OPEN_ORDERS_UNVERIFIED")
+            logger.critical("Daftar open order LIVE tidak dapat diverifikasi: %s", exc)
+        else:
+            known_ids = _known_open_order_client_ids(state)
+            unknown_orders = []
+            for order in open_orders:
+                if not isinstance(order, dict):
+                    unknown_orders.append("<malformed>")
+                    continue
+                client_id = str(order.get("clientOrderId") or "")
+                if not client_id or client_id not in known_ids:
+                    unknown_orders.append(
+                        f"{order.get('symbol') or '?'}:{client_id or '?'}"
+                    )
+            if unknown_orders:
+                issue("UNMANAGED_OPEN_ORDERS", *unknown_orders)
+                logger.critical(
+                    "Ditemukan open order yang tidak tercatat di state: %s.",
+                    ", ".join(unknown_orders),
+                )
+
+    symbol = state.get("current_symbol")
     if (
         _native_protection_enabled(config)
-        and state.get("current_symbol")
+        and symbol
         and float(state.get("qty") or 0.0) > 0
         and not state.get("pending_order")
         and filters_cache is not None
     ):
-        filters = filters_cache.get(state["current_symbol"])
-        _ensure_native_protection(client, config, filters, state)
+        protection_ok = True
+        if isinstance(state.get("native_oco"), dict):
+            protection_ok = _reconcile_native_oco(client, config, state)
+        if state.get("current_symbol") and isinstance(state.get("native_stop"), dict):
+            protection_ok = _reconcile_native_stop(client, config, state) and protection_ok
+        if (
+            state.get("current_symbol")
+            and not state.get("native_oco")
+            and not state.get("native_stop")
+            and not state.get("_native_stop_exit_blocked")
+        ):
+            protection_ok = _ensure_native_protection(
+                client, config, filters_cache.get(str(state["current_symbol"])), state
+            ) and protection_ok
+        if not protection_ok or state.get("_native_stop_exit_blocked"):
+            issue("NATIVE_PROTECTION_UNVERIFIED", str(state.get("current_symbol") or symbol))
 
-    if changed:
-        state_mod.save_state(config["STATE_FILE"], state)
+    if isinstance(state.get("pending_order"), dict):
+        issue("PENDING_ORDER_UNRESOLVED", str((state.get("pending_order") or {}).get("symbol") or ""))
+    if state.get("state_integrity_error"):
+        issue("STATE_INTEGRITY_UNVERIFIED")
+
+    if issues:
+        _mark_reconciliation(
+            state,
+            ";".join(dict.fromkeys(issues)),
+            sorted(issue_assets),
+        )
+    else:
+        _clear_reconciliation(state)
+    state_mod.save_state(config["STATE_FILE"], state)
+    return not issues
 
 
 def reset_position(state: dict) -> None:
@@ -504,7 +852,10 @@ def try_dust_sweep(client: ExchangeClient, config: dict, symbol: "str | None") -
         logger.warning("Dust sweep: gagal ambil daftar aset convertible (%s). Dilewati, dicoba lagi nanti.", exc)
         return
 
-    details = convertible.get("details", []) if isinstance(convertible, dict) else []
+    details = convertible.get("details") if isinstance(convertible, dict) else None
+    if not isinstance(details, list) or any(not isinstance(item, dict) for item in details):
+        logger.warning("Dust sweep: respons daftar convertible tidak valid. Dilewati fail-closed.")
+        return
     match = next((d for d in details if d.get("asset") == base_asset), None)
     if not match:
         logger.info("Dust sweep: %s tidak (lagi) terdaftar sebagai dust convertible saat ini, dilewati.",
@@ -520,7 +871,18 @@ def try_dust_sweep(client: ExchangeClient, config: dict, symbol: "str | None") -
         )
         return
 
-    transferred = result.get("totalTransfered", "0") if isinstance(result, dict) else "0"
+    if (
+        not isinstance(result, dict)
+        or "totalTransfered" not in result
+        or not isinstance(result.get("transferResult"), list)
+    ):
+        logger.critical(
+            "Dust sweep %s mengembalikan respons yang tidak dapat diverifikasi. "
+            "Jangan mengulang konversi secara buta; saldo akan diperiksa saat rekonsiliasi.",
+            base_asset,
+        )
+        return
+    transferred = result["totalTransfered"]
     logger.info("DUST SWEEP OK: sisa %s dikonversi ke %s BNB (sudah dikurangi biaya layanan Binance).",
                 base_asset, transferred)
 
@@ -539,7 +901,7 @@ def _submit_market_order(client: ExchangeClient, symbol: str, side: str,
 
 
 _TERMINAL_ORDER_STATUSES = frozenset({
-    "FILLED", "EXPIRED", "CANCELED", "REJECTED",
+    "FILLED", "EXPIRED", "EXPIRED_IN_MATCH", "CANCELED", "REJECTED",
 })
 _NONTERMINAL_ORDER_STATUSES = frozenset({
     "NEW", "PARTIALLY_FILLED",
@@ -631,11 +993,16 @@ _DEFINITIVE_REJECT_CODES = {
     -1020,
 }
 _NOT_FOUND_CODES = {-2013}
-_NOT_FOUND_MIN_INTENT_AGE_MS = 10_000
+_NOT_FOUND_MIN_INTENT_AGE_MS = 60_000
+
+
+def _is_duplicate_client_id_error(exc: BinanceAPIError) -> bool:
+    message = str(getattr(exc, "msg", "") or "").lower()
+    return getattr(exc, "code", None) == -2010 and "duplicate" in message
 
 
 def _is_definitive_reject(exc: BinanceAPIError) -> bool:
-    if isinstance(exc, BinanceRateLimitError):
+    if isinstance(exc, BinanceRateLimitError) or _is_duplicate_client_id_error(exc):
         return False
     return getattr(exc, "code", None) in _DEFINITIVE_REJECT_CODES
 
@@ -658,18 +1025,38 @@ def _arm_native_oco(client: ExchangeClient, config: dict,
     now = state_mod.now_ms()
     if now < int(state.get("native_protection_retry_at", 0) or 0):
         return False
+    if filters is None:
+        _mark_reconciliation(state, "NATIVE_OCO_FILTERS_UNVERIFIED", [symbol])
+        state["native_protection_retry_at"] = now + 60_000
+        state_mod.save_state(config["STATE_FILE"], state)
+        return False
+    qty = filters.round_limit_qty(qty)
+    oco_types_supported = {
+        "TAKE_PROFIT_LIMIT", "STOP_LOSS_LIMIT"
+    }.issubset(filters.order_types)
+    if not filters.limit_qty_valid(qty) or not oco_types_supported:
+        _mark_reconciliation(state, "NATIVE_OCO_QTY_OR_TYPE_INVALID", [symbol])
+        state["native_protection_retry_at"] = now + 60_000
+        state_mod.save_state(config["STATE_FILE"], state)
+        return False
     levels = _native_oco_levels(state, filters, config)
     bid = _executable_bid(client, symbol)
     above_price = float(levels["above_price"])
     above_stop = float(levels["above_stop_price"])
     below_price = float(levels["below_price"])
     below_stop = float(levels["below_stop_price"])
+    limit_min = float(filters.limit_min_notional)
+    limit_max = float(filters.limit_max_notional)
+    prices = (below_price, below_stop, above_price, above_stop)
     valid = (
-        below_price > 0
-        and below_price < below_stop < entry
-        and above_price > entry
-        and above_stop >= above_price > entry
-        and (bid is None or below_price < below_stop < bid < above_price <= above_stop)
+        bid is not None
+        and all(filters.price_valid(value) for value in prices)
+        and below_price < below_stop < bid < above_price <= above_stop
+        and below_stop < entry < above_stop
+        and (limit_min <= 0 or qty * below_price >= limit_min)
+        and (limit_min <= 0 or qty * above_price >= limit_min)
+        and (limit_max <= 0 or qty * below_price <= limit_max)
+        and (limit_max <= 0 or qty * above_price <= limit_max)
     )
     if not valid:
         state["native_protection_retry_at"] = now + 60_000
@@ -764,13 +1151,80 @@ def _arm_native_oco(client: ExchangeClient, config: dict,
     intent = state.get("native_oco")
     if not isinstance(intent, dict):
         state["_native_stop_exit_blocked"] = True
-        state["reconciliation_required"] = True
-        state["reconciliation_assets"] = [symbol]
+        _mark_reconciliation(state, "NATIVE_OCO_INTENT_LOST", [symbol])
         state_mod.save_state(config["STATE_FILE"], state)
+        return False
+    orders = []
+    order_reports = []
+    if isinstance(response, dict):
+        orders = [x for x in response.get("orders", []) if isinstance(x, dict)]
+        order_reports = [
+            x for x in response.get("orderReports", []) if isinstance(x, dict)
+        ]
+    order_ids = {str(x.get("clientOrderId") or "") for x in orders}
+    report_by_id = {
+        str(x.get("clientOrderId") or ""): x for x in order_reports
+    }
+    above_report = report_by_id.get(above_client_order_id)
+    below_report = report_by_id.get(below_client_order_id)
+
+    def report_matches(report: dict | None, *, expected_type: str,
+                       expected_price: float, expected_stop: float) -> bool:
+        if not isinstance(report, dict):
+            return False
+        try:
+            numeric_ok = (
+                Decimal(str(report.get("origQty"))) == Decimal(str(qty))
+                and Decimal(str(report.get("price"))) == Decimal(str(expected_price))
+                and Decimal(str(report.get("stopPrice"))) == Decimal(str(expected_stop))
+            )
+        except (ArithmeticError, ValueError, TypeError):
+            return False
+        return (
+            str(report.get("symbol") or "").upper() == str(symbol).upper()
+            and str(report.get("side") or "").upper() == "SELL"
+            and str(report.get("type") or "").upper() == expected_type
+            and str(report.get("status") or "").upper() == "NEW"
+            and numeric_ok
+        )
+
+    response_status = str(
+        response.get("listOrderStatus") if isinstance(response, dict) else ""
+    ).upper()
+    response_valid = (
+        isinstance(response, dict)
+        and response.get("orderListId") is not None
+        and str(response.get("symbol") or "").upper() == str(symbol).upper()
+        and str(response.get("contingencyType") or "").upper() == "OCO"
+        and str(response.get("listClientOrderId") or "") == list_client_order_id
+        and str(response.get("listStatusType") or "").upper() == "EXEC_STARTED"
+        and response_status == "EXECUTING"
+        and above_client_order_id in order_ids
+        and below_client_order_id in order_ids
+        and report_matches(
+            above_report,
+            expected_type="TAKE_PROFIT_LIMIT",
+            expected_price=above_price,
+            expected_stop=above_stop,
+        )
+        and report_matches(
+            below_report,
+            expected_type="STOP_LOSS_LIMIT",
+            expected_price=below_price,
+            expected_stop=below_stop,
+        )
+    )
+    if not response_valid:
+        intent["status"] = "UNKNOWN"
+        intent["last_error"] = "respons pemasangan OCO tidak lengkap/tidak konsisten"
+        state["_native_stop_exit_blocked"] = True
+        _mark_reconciliation(state, "NATIVE_OCO_RESPONSE_UNVERIFIED", [symbol])
+        state_mod.save_state(config["STATE_FILE"], state)
+        logger.critical("Respons pemasangan OCO %s tidak dapat diverifikasi: %s", symbol, response)
         return False
     intent["order_list_id"] = response.get("orderListId")
     intent["list_status_type"] = str(response.get("listStatusType") or "EXEC_STARTED").upper()
-    intent["status"] = str(response.get("listOrderStatus") or "EXECUTING").upper()
+    intent["status"] = response_status
     for leg_name, _client_key in (("above", "aboveClientOrderId"), ("below", "belowClientOrderId")):
         leg = intent.get(leg_name)
         if not isinstance(leg, dict):
@@ -786,11 +1240,9 @@ def _arm_native_oco(client: ExchangeClient, config: dict,
     state["native_protection_retry_at"] = 0
     if intent["status"] in ("ALL_DONE", "REJECT"):
         state["_native_stop_exit_blocked"] = True
-        state["reconciliation_required"] = True
-        state["reconciliation_assets"] = [symbol]
+        _mark_reconciliation(state, "NATIVE_OCO_TERMINAL_ON_CREATE", [symbol])
     else:
-        state["reconciliation_required"] = False
-        state["reconciliation_assets"] = []
+        _clear_reconciliation(state)
     state_mod.save_state(config["STATE_FILE"], state)
     logger.info(
         "OCO native aktif %s: TP_LIMIT %.12g/trigger %.12g, SL_LIMIT %.12g/trigger %.12g, list=%s",
@@ -809,17 +1261,39 @@ def _arm_native_stop(client: ExchangeClient, config: dict,
     entry = float(state.get("entry_price") or 0.0)
     if not symbol or qty <= 0 or entry <= 0:
         return False
-
-    stop_price = _native_stop_price(state, filters, config)
+    now = state_mod.now_ms()
+    if now < int(state.get("native_protection_retry_at", 0) or 0):
+        return False
+    if filters is None:
+        state["native_protection_retry_at"] = now + 60_000
+        _mark_reconciliation(state, "NATIVE_STOP_FILTERS_UNVERIFIED", [symbol])
+        state_mod.save_state(config["STATE_FILE"], state)
+        return False
+    qty = filters.round_qty(qty)
     bid = _executable_bid(client, symbol)
-    if stop_price <= 0 or stop_price >= entry or (bid is not None and stop_price >= bid):
-        state["reconciliation_required"] = True
-        state["reconciliation_assets"] = [symbol]
-        logger.critical(
-            "Proteksi native %s tidak dipasang: stopPrice %.12g tidak valid "
-            "terhadap entry %.12g/bid %.12g. Local stop tetap aktif; entry baru diblokir.",
-            symbol, stop_price, entry, bid or 0.0,
+    stop_price = _native_stop_price(state, filters, config)
+    valid = (
+        bid is not None
+        and "STOP_LOSS" in filters.order_types
+        and filters.market_qty_valid(qty)
+        and filters.price_valid(stop_price)
+        and 0 < stop_price < entry
+        and stop_price < bid
+        and (
+            filters.min_notional <= 0
+            or Decimal(str(qty * stop_price)) >= filters.min_notional
         )
+        and (filters.max_notional <= 0 or Decimal(str(qty * bid)) <= filters.max_notional)
+    )
+    if not valid:
+        state["native_protection_retry_at"] = now + 60_000
+        _mark_reconciliation(state, "NATIVE_STOP_FILTER_OR_PRICE_INVALID", [symbol])
+        logger.critical(
+            "Proteksi native %s tidak dipasang: qty/stopPrice/bid/filter tidak valid "
+            "(qty=%.12g stopPrice=%.12g entry=%.12g bid=%.12g).",
+            symbol, qty, stop_price, entry, bid or 0.0,
+        )
+        state_mod.save_state(config["STATE_FILE"], state)
         return False
 
     client_order_id = _new_client_order_id("sl")
@@ -847,8 +1321,9 @@ def _arm_native_stop(client: ExchangeClient, config: dict,
         if isinstance(intent, dict):
             intent["status"] = "FAILED" if definitive else "UNKNOWN"
             intent["last_error"] = str(exc)
-        state["reconciliation_required"] = True
-        state["reconciliation_assets"] = [symbol]
+        state["native_protection_retry_at"] = now + 60_000
+        state["_native_stop_exit_blocked"] = not definitive
+        _mark_reconciliation(state, "NATIVE_STOP_SUBMISSION_UNVERIFIED", [symbol])
         state_mod.save_state(config["STATE_FILE"], state)
         logger.critical(
             "Proteksi native %s gagal/status tidak pasti: %s. "
@@ -859,28 +1334,51 @@ def _arm_native_stop(client: ExchangeClient, config: dict,
 
     intent = state.get("native_stop")
     if not isinstance(intent, dict):
-        state["reconciliation_required"] = True
-        state["reconciliation_assets"] = [symbol]
+        state["_native_stop_exit_blocked"] = True
+        _mark_reconciliation(state, "NATIVE_STOP_INTENT_LOST", [symbol])
         state_mod.save_state(config["STATE_FILE"], state)
         return False
+    response_status = str(response.get("status") if isinstance(response, dict) else "").upper()
+    try:
+        numeric_response_valid = (
+            Decimal(str(response.get("origQty"))) == Decimal(str(qty))
+            and Decimal(str(response.get("stopPrice"))) == Decimal(str(stop_price))
+        )
+    except (AttributeError, ArithmeticError, TypeError, ValueError):
+        numeric_response_valid = False
+    response_valid = (
+        isinstance(response, dict)
+        and response.get("orderId") is not None
+        and str(response.get("symbol") or "").upper() == str(symbol).upper()
+        and str(response.get("clientOrderId") or "") == client_order_id
+        and str(response.get("side") or "").upper() == "SELL"
+        and str(response.get("type") or "").upper() == "STOP_LOSS"
+        and response_status == "NEW"
+        and numeric_response_valid
+    )
+    if not response_valid:
+        intent["status"] = "UNKNOWN"
+        intent["last_error"] = "respons pemasangan native stop tidak lengkap/tidak konsisten"
+        state["_native_stop_exit_blocked"] = True
+        _mark_reconciliation(state, "NATIVE_STOP_RESPONSE_UNVERIFIED", [symbol])
+        state_mod.save_state(config["STATE_FILE"], state)
+        logger.critical(
+            "Respons pemasangan native stop %s tidak dapat diverifikasi: %s", symbol, response,
+        )
+        return False
     intent["order_id"] = response.get("orderId")
-    intent["status"] = str(response.get("status") or "NEW").upper()
+    intent["status"] = response_status
     intent["last_response"] = {
         key: response.get(key) for key in ("orderId", "clientOrderId", "status")
         if key in response
     }
-    if intent["status"] in ("FILLED", "CANCELED", "EXPIRED", "REJECTED"):
-        state["reconciliation_required"] = True
-        state["reconciliation_assets"] = [symbol]
-        logger.critical("Proteksi native %s langsung berstatus %s; rekonsiliasi diwajibkan.",
-                        symbol, intent["status"])
-    else:
-        state["reconciliation_required"] = False
-        state["reconciliation_assets"] = []
+    state["_native_stop_exit_blocked"] = False
+    state["native_protection_retry_at"] = 0
+    _clear_reconciliation(state)
     state_mod.save_state(config["STATE_FILE"], state)
     logger.info("Proteksi native aktif %s: STOP_LOSS stopPrice=%.12g qty=%.12g id=%s",
                 symbol, stop_price, qty, client_order_id)
-    return intent["status"] not in ("FILLED", "CANCELED", "EXPIRED", "REJECTED")
+    return True
 
 
 def _ensure_native_protection(client: ExchangeClient, config: dict,
@@ -897,6 +1395,7 @@ def _ensure_native_protection(client: ExchangeClient, config: dict,
         oco_status = (state.get("native_oco") or {}).get("status")
         if oco_status in (None, "FAILED") and _native_stop_enabled(config):
             state["native_oco"] = None
+            state["native_protection_retry_at"] = 0
             return _arm_native_stop(client, config, filters, state)
         return False
     return _arm_native_stop(client, config, filters, state)
@@ -904,11 +1403,17 @@ def _ensure_native_protection(client: ExchangeClient, config: dict,
 
 def _oco_response_has_fill(response: dict) -> bool:
     reports = response.get("orderReports", []) if isinstance(response, dict) else []
-    return any(
-        str(report.get("status") or "").upper() == "FILLED"
-        or float(report.get("executedQty", 0.0) or 0.0) > 0
-        for report in reports if isinstance(report, dict)
-    )
+    for report in reports:
+        if not isinstance(report, dict):
+            continue
+        if str(report.get("status") or "").upper() == "FILLED":
+            return True
+        try:
+            if float(report.get("executedQty", 0.0) or 0.0) > 0:
+                return True
+        except (TypeError, ValueError):
+            return True
+    return False
 
 
 def _settle_native_protective_fill(client: ExchangeClient, config: dict,
@@ -985,6 +1490,35 @@ def _reconcile_native_oco(client: ExchangeClient, config: dict,
         logger.critical("Status OCO %s tidak dapat diverifikasi: %s. Exit market ditahan.", symbol, exc)
         return False
 
+    expected_list_id = intent.get("order_list_id")
+    response_order_ids = {
+        str(item.get("clientOrderId") or "")
+        for item in (response.get("orders", []) if isinstance(response, dict) else [])
+        if isinstance(item, dict)
+    }
+    expected_leg_ids = {
+        str((intent.get(name) or {}).get("client_order_id") or "")
+        for name in ("above", "below")
+    }
+    response_valid = (
+        isinstance(response, dict)
+        and str(response.get("symbol") or "").upper() == str(symbol).upper()
+        and str(response.get("contingencyType") or "").upper() == "OCO"
+        and expected_leg_ids.issubset(response_order_ids)
+        and "" not in expected_leg_ids
+        and str(response.get("listClientOrderId") or "")
+        == str(intent.get("list_client_order_id") or "")
+        and (
+            expected_list_id is None
+            or str(response.get("orderListId")) == str(expected_list_id)
+        )
+    )
+    if not response_valid:
+        intent["status"] = "UNKNOWN"
+        state["_native_stop_exit_blocked"] = True
+        _mark_reconciliation(state, "NATIVE_OCO_QUERY_IDENTITY_MISMATCH", [symbol])
+        state_mod.save_state(config["STATE_FILE"], state)
+        return False
     intent["order_list_id"] = response.get("orderListId", intent.get("order_list_id"))
     intent["list_status_type"] = str(response.get("listStatusType") or "UNKNOWN").upper()
     status = str(response.get("listOrderStatus") or "UNKNOWN").upper()
@@ -1022,6 +1556,21 @@ def _reconcile_native_oco(client: ExchangeClient, config: dict,
                 state["reconciliation_assets"] = [symbol]
                 state_mod.save_state(config["STATE_FILE"], state)
                 logger.critical("Leg OCO %s tidak dapat diverifikasi: %s", symbol, exc)
+                return False
+            child_valid = (
+                isinstance(child, dict)
+                and str(child.get("symbol") or "").upper() == str(symbol).upper()
+                and str(child.get("orderId")) == str(leg.get("order_id"))
+                and str(child.get("clientOrderId") or "")
+                == str(leg.get("client_order_id") or "")
+                and str(child.get("side") or "").upper() == "SELL"
+                and str(child.get("type") or "").upper()
+                == str(leg.get("type") or "").upper()
+            )
+            if not child_valid:
+                state["_native_stop_exit_blocked"] = True
+                _mark_reconciliation(state, "NATIVE_OCO_LEG_IDENTITY_MISMATCH", [symbol])
+                state_mod.save_state(config["STATE_FILE"], state)
                 return False
             leg["status"] = str(child.get("status") or "UNKNOWN").upper()
             leg["executed_qty"] = float(child.get("executedQty", 0.0) or 0.0)
@@ -1069,7 +1618,7 @@ def _reconcile_native_stop(client: ExchangeClient, config: dict,
         state["reconciliation_assets"] = [symbol]
         state_mod.save_state(config["STATE_FILE"], state)
         return False
-    if status in ("CANCELED", "EXPIRED", "REJECTED"):
+    if status in ("CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "REJECTED"):
         state["native_stop"] = None
         state["_native_stop_exit_blocked"] = False
         state["reconciliation_required"] = True
@@ -1111,6 +1660,34 @@ def _reconcile_native_stop(client: ExchangeClient, config: dict,
         logger.critical("Status proteksi native %s tidak dapat diverifikasi: %s. Exit market ditahan.",
                         symbol, exc)
         return False
+    try:
+        order_numeric_valid = (
+            Decimal(str(order.get("origQty")))
+            == Decimal(str(intent.get("quantity")))
+            and Decimal(str(order.get("stopPrice")))
+            == Decimal(str(intent.get("stop_price")))
+        )
+    except (AttributeError, ArithmeticError, TypeError, ValueError):
+        order_numeric_valid = False
+    order_identity_valid = (
+        isinstance(order, dict)
+        and str(order.get("symbol") or "").upper() == str(symbol).upper()
+        and (
+            intent.get("order_id") is None
+            or str(order.get("orderId")) == str(intent.get("order_id"))
+        )
+        and str(order.get("clientOrderId") or "")
+        == str(intent.get("client_order_id") or "")
+        and str(order.get("side") or "").upper() == "SELL"
+        and str(order.get("type") or "").upper() == "STOP_LOSS"
+        and order_numeric_valid
+    )
+    if not order_identity_valid:
+        intent["status"] = "UNKNOWN"
+        state["_native_stop_exit_blocked"] = True
+        _mark_reconciliation(state, "NATIVE_STOP_QUERY_IDENTITY_MISMATCH", [symbol])
+        state_mod.save_state(config["STATE_FILE"], state)
+        return False
     status = str(order.get("status") or "UNKNOWN").upper()
     intent["status"] = status
     intent["order_id"] = order.get("orderId", intent.get("order_id"))
@@ -1124,7 +1701,7 @@ def _reconcile_native_stop(client: ExchangeClient, config: dict,
         logger.critical("Proteksi native %s FILLED; tidak mengirim SELL kedua. Rekonsiliasi saldo dijalankan.", symbol)
         _settle_native_protective_fill(client, config, state, symbol, "NATIVE_STOP_FILLED")
         return False
-    if status in ("CANCELED", "EXPIRED", "REJECTED"):
+    if status in ("CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "REJECTED"):
         state["native_stop"] = None
         state["_native_stop_exit_blocked"] = False
         state["reconciliation_required"] = True
@@ -1173,6 +1750,22 @@ def _cancel_native_oco_before_exit(client: ExchangeClient, config: dict,
         state["reconciliation_assets"] = [symbol]
         state_mod.save_state(config["STATE_FILE"], state)
         logger.critical("OCO %s gagal dibatalkan: %s. SELL manual ditahan.", symbol, exc)
+        return False
+    cancel_identity_valid = (
+        isinstance(response, dict)
+        and str(response.get("symbol") or "").upper() == str(symbol).upper()
+        and str(response.get("contingencyType") or "").upper() == "OCO"
+        and str(response.get("listClientOrderId") or "")
+        == str(intent.get("list_client_order_id") or "")
+        and (
+            intent.get("order_list_id") is None
+            or str(response.get("orderListId")) == str(intent.get("order_list_id"))
+        )
+    )
+    if not cancel_identity_valid:
+        state["_native_stop_exit_blocked"] = True
+        _mark_reconciliation(state, "NATIVE_OCO_CANCEL_IDENTITY_MISMATCH", [symbol])
+        state_mod.save_state(config["STATE_FILE"], state)
         return False
     if _oco_response_has_fill(response):
         state["native_oco"] = None
@@ -1235,8 +1828,34 @@ def _cancel_native_stop_before_exit(client: ExchangeClient, config: dict,
         state_mod.save_state(config["STATE_FILE"], state)
         logger.critical("Proteksi native %s gagal dibatalkan: %s. SELL manual ditahan.", symbol, exc)
         return False
+    cancel_client_ids = {
+        str(response.get("clientOrderId") or ""),
+        str(response.get("origClientOrderId") or ""),
+    } if isinstance(response, dict) else set()
+    cancel_identity_valid = (
+        isinstance(response, dict)
+        and str(response.get("symbol") or "").upper() == str(symbol).upper()
+        and str(response.get("orderId")) == str(intent.get("order_id"))
+        and str(intent.get("client_order_id") or "") in cancel_client_ids
+        and str(response.get("side") or "").upper() == "SELL"
+        and str(response.get("type") or "").upper() == "STOP_LOSS"
+    )
+    if not cancel_identity_valid:
+        state["_native_stop_exit_blocked"] = True
+        _mark_reconciliation(state, "NATIVE_STOP_CANCEL_IDENTITY_MISMATCH", [symbol])
+        state_mod.save_state(config["STATE_FILE"], state)
+        return False
     final_status = str(response.get("status") or "").upper()
-    if final_status not in ("CANCELED", "EXPIRED", "REJECTED"):
+    if final_status == "FILLED" or float(response.get("executedQty", 0.0) or 0.0) > 0:
+        state["native_stop"] = None
+        state["_native_stop_exit_blocked"] = True
+        _mark_reconciliation(state, "NATIVE_STOP_FILLED_ON_CANCEL", [symbol])
+        state_mod.save_state(config["STATE_FILE"], state)
+        _settle_native_protective_fill(
+            client, config, state, symbol, "NATIVE_STOP_FILLED_ON_CANCEL"
+        )
+        return False
+    if final_status not in ("CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "REJECTED"):
         state["reconciliation_required"] = True
         state["reconciliation_assets"] = [symbol]
         state_mod.save_state(config["STATE_FILE"], state)
@@ -1316,6 +1935,52 @@ def _restore_pending_buy(config: dict, state: dict, pending: dict, order: dict,
     state["sell_fail_count"] = 0
     return True
 
+def _fresh_live_entry_filters(client: ExchangeClient, symbol: str,
+                              account: dict) -> SymbolFilters:
+    """Ambil ulang metadata satu simbol dan verifikasi permission tepat sebelum entry."""
+    exchange_info = client.get_exchange_info(symbol)
+    if not isinstance(exchange_info, dict) or not isinstance(
+        exchange_info.get("symbols"), list
+    ):
+        raise BinanceAPIError(
+            502, None, f"exchangeInfo {symbol} tidak memiliki daftar symbols"
+        )
+    matches = [
+        item for item in exchange_info["symbols"]
+        if isinstance(item, dict)
+        and str(item.get("symbol") or "").upper() == str(symbol).upper()
+    ]
+    if len(exchange_info["symbols"]) != 1 or len(matches) != 1:
+        raise BinanceAPIError(
+            502, None,
+            f"exchangeInfo {symbol} tidak menghasilkan tepat satu simbol yang cocok",
+        )
+    symbol_data = matches[0]
+    if str(symbol_data.get("status") or "").upper() != "TRADING":
+        raise BinanceAPIError(403, None, f"simbol {symbol} tidak berstatus TRADING")
+    if symbol_data.get("isSpotTradingAllowed") is not True:
+        raise BinanceAPIError(
+            403, None, f"simbol {symbol} tidak mengonfirmasi Spot trading aktif"
+        )
+    try:
+        fresh_filters = SymbolFilters.from_symbol_data(symbol_data)
+    except (KeyError, ValueError, TypeError, ArithmeticError) as exc:
+        raise BinanceAPIError(
+            502, None, f"filter/permissionSets {symbol} tidak dapat diverifikasi"
+        ) from exc
+    if not fresh_filters.permission_metadata_verified:
+        raise BinanceAPIError(
+            502, None, f"permissionSets {symbol} hilang atau rusak"
+        )
+    if not permission_sets_allow(
+        fresh_filters.permission_sets, _effective_account_permissions(account)
+    ):
+        raise BinanceAPIError(
+            403, None, f"permissionSets {symbol} tidak cocok dengan permission akun"
+        )
+    return fresh_filters
+
+
 def open_position(client: ExchangeClient, config: dict, filters_cache: dict,
                    state: dict, candidate: "scanner.Candidate",
                    reference_price: "float | None" = None) -> None:
@@ -1328,9 +1993,24 @@ def open_position(client: ExchangeClient, config: dict, filters_cache: dict,
 
     try:
         account = client.get_account()
+        if str(config.get("MODE", "PAPER")).upper() == "LIVE":
+            _validate_live_account_snapshot(account, config["QUOTE_ASSET"])
     except BinanceAPIError as exc:
-        logger.error("Gagal ambil saldo sebelum BUY %s: %s. Entry dilewati.", candidate.symbol, exc)
+        _mark_reconciliation(state, "BUY_ACCOUNT_UNVERIFIED", [config["QUOTE_ASSET"]])
+        state_mod.save_state(config["STATE_FILE"], state)
+        logger.error("Gagal verifikasi saldo/status akun sebelum BUY %s: %s. Entry dilewati.",
+                     candidate.symbol, exc)
         return
+    if str(config.get("MODE", "PAPER")).upper() == "LIVE":
+        try:
+            filters = _fresh_live_entry_filters(client, candidate.symbol, account)
+        except BinanceAPIError as exc:
+            logger.error(
+                "Entry %s diblokir saat verifikasi ulang metadata simbol: %s",
+                candidate.symbol, exc,
+            )
+            return
+        filters_cache[candidate.symbol] = filters
     usdt_free = get_balance(account, config["QUOTE_ASSET"])
     sizing = strategy.resolve_position_notional(config, usdt_free)
     usdt_amount = sizing["notional"]
@@ -1364,9 +2044,10 @@ def open_position(client: ExchangeClient, config: dict, filters_cache: dict,
         order_quote_qty = min(order_quote_qty, qty * price_ref)
     notional = qty * price_ref
     if (
-        qty < float(filters.min_qty)
+        not filters.market_qty_valid(qty)
         or notional < float(filters.min_notional)
         or order_quote_qty < float(filters.min_notional)
+        or (filters.max_notional > 0 and order_quote_qty > float(filters.max_notional))
     ):
         logger.warning(
             "Entry %s dilewati: qty/notional di bawah atau melampaui batas bursa "
@@ -1429,164 +2110,235 @@ def open_position(client: ExchangeClient, config: dict, filters_cache: dict,
                         candidate.symbol, exc)
         return
 
-    state["pending_order"] = None
-    executed_qty = float(resp.get("executedQty", 0.0))
-    cumm_quote = float(resp.get("cummulativeQuoteQty", 0.0))
-    if executed_qty <= 0 or cumm_quote <= 0:
-        state["pending_order"] = pending_intent
-        state["reconciliation_required"] = True
-        state["reconciliation_assets"] = [candidate.symbol]
-        state_mod.save_state(config["STATE_FILE"], state)
-        logger.critical("Order BUY %s tidak memberi fill lengkap. Intent dipertahankan untuk rekonsiliasi: %s",
-                        candidate.symbol, resp)
-        return
-    fill_price = cumm_quote / executed_qty
-
-    logger.info(
-        "BUY FILLED %s: qty=%.8f @ avg %.6f | 24h=%.2f%% | vol24h=%.0f | alasan: %s",
-        candidate.symbol, executed_qty, fill_price, candidate.price_change_pct,
-        candidate.quote_volume, candidate.confirm_reason,
+    executed_qty = max(0.0, float(resp.get("executedQty", 0.0) or 0.0))
+    cumm_quote = max(0.0, float(resp.get("cummulativeQuoteQty", 0.0) or 0.0))
+    status = str(resp.get("status") or "").upper()
+    live = str(config.get("MODE", "PAPER")).upper() == "LIVE"
+    identity_valid = (
+        not live
+        or (
+            str(resp.get("symbol") or "").upper() == candidate.symbol.upper()
+            and str(resp.get("clientOrderId") or "") == client_order_id
+            and str(resp.get("side") or "").upper() == "BUY"
+            and str(resp.get("type") or "").upper() == "MARKET"
+        )
     )
-    base_asset = candidate.symbol[: -len(config["QUOTE_ASSET"])]
-    managed_qty = executed_qty
-    try:
-        managed_qty = min(executed_qty, get_balance(client.get_account(), base_asset))
-    except BinanceAPIError:
-        pass
-    if managed_qty <= 0:
-        state["pending_order"] = pending_intent
-        state["reconciliation_required"] = True
-        state["reconciliation_assets"] = [candidate.symbol]
+    if (
+        not identity_valid
+        or status in _NONTERMINAL_ORDER_STATUSES
+        or status not in _TERMINAL_ORDER_STATUSES
+    ):
+        pending = state.get("pending_order")
+        if isinstance(pending, dict):
+            pending["last_status"] = status or "UNKNOWN"
+            pending["executed_qty"] = executed_qty
+            pending["cummulative_quote_qty"] = cumm_quote
+        _mark_reconciliation(state, "BUY_RESPONSE_UNVERIFIED", [candidate.symbol])
         state_mod.save_state(config["STATE_FILE"], state)
-        logger.critical("BUY %s terisi tetapi saldo base tidak dapat dikonfirmasi. Entry diblokir sampai rekonsiliasi.",
-                        candidate.symbol)
+        logger.critical(
+            "Respons BUY %s belum terminal/konsisten: status=%s filled=%.8f. "
+            "Intent dipertahankan untuk query berdasarkan client order ID.",
+            candidate.symbol, status or "UNKNOWN", executed_qty,
+        )
         return
 
+    if executed_qty <= 0:
+        state["pending_order"] = None
+        _clear_reconciliation(state)
+        state_mod.save_state(config["STATE_FILE"], state)
+        logger.warning("BUY %s terminal tanpa fill (status=%s).", candidate.symbol, status)
+        return
+    if cumm_quote <= 0:
+        _mark_reconciliation(state, "BUY_FILL_VALUE_UNVERIFIED", [candidate.symbol])
+        state_mod.save_state(config["STATE_FILE"], state)
+        logger.critical(
+            "BUY %s memiliki executedQty tetapi cummulativeQuoteQty tidak valid: %s",
+            candidate.symbol, resp,
+        )
+        return
+
+    fill_price = cumm_quote / executed_qty
+    base_asset = candidate.symbol[: -len(config["QUOTE_ASSET"])]
+    base_commission = 0.0
+    fills = resp.get("fills", []) if isinstance(resp, dict) else []
+    if isinstance(fills, list):
+        for fill in fills:
+            if not isinstance(fill, dict) or fill.get("commissionAsset") != base_asset:
+                continue
+            try:
+                base_commission += max(0.0, float(fill.get("commission", 0.0) or 0.0))
+            except (TypeError, ValueError):
+                pass
+    estimated_qty = max(0.0, executed_qty - base_commission)
+
+    state["pending_order"] = None
     state["current_symbol"] = candidate.symbol
     state["entry_price"] = fill_price
-    state["qty"] = managed_qty
-    state["entry_time"] = state_mod.now_ms()
+    state["qty"] = estimated_qty or executed_qty
+    state["entry_time"] = int(resp.get("transactTime") or state_mod.now_ms())
     state["last_trade_time"] = state_mod.now_ms()
     state["be_active"] = False
     state["be_stop_price"] = 0.0
     state["trailing_active"] = False
     state["trailing_stop_price"] = 0.0
-    state["reconciliation_required"] = False
-    state["reconciliation_assets"] = []
-
-    levels = strategy.resolve_exit_levels(level_cfg)
-    state["sl_pct"] = levels["sl_pct"]
-    state["tp_pct"] = levels["tp_pct"]
-    state["be_trigger_pct"] = levels["be_trigger_pct"]
-    state["be_lock_pct"] = levels["be_lock_pct"]
-    state["trail_start_pct"] = levels["trail_start_pct"]
-    state["trail_step_pct"] = levels["trail_step_pct"]
-    state["exit_source"] = levels["source"]
+    state["sl_pct"] = preview["sl_pct"]
+    state["tp_pct"] = preview["tp_pct"]
+    state["be_trigger_pct"] = preview["be_trigger_pct"]
+    state["be_lock_pct"] = preview["be_lock_pct"]
+    state["trail_start_pct"] = preview["trail_start_pct"]
+    state["trail_step_pct"] = preview["trail_step_pct"]
+    state["exit_source"] = preview["source"]
     state["sell_fail_count"] = 0
 
+    try:
+        post_account = client.get_account()
+        if live:
+            _validate_live_account_snapshot(post_account, config["QUOTE_ASSET"])
+    except BinanceAPIError as exc:
+        _mark_reconciliation(state, "FILLED_BUY_BALANCE_UNVERIFIED", [base_asset])
+        state_mod.save_state(config["STATE_FILE"], state)
+        logger.critical(
+            "BUY %s terisi qty=%.8f tetapi saldo sesudah fill tidak dapat diverifikasi: %s. "
+            "Posisi dicatat secara konservatif dan proteksi baru ditunda.",
+            candidate.symbol, executed_qty, exc,
+        )
+        return
+
+    confirmed_free = get_balance(post_account, base_asset)
+    managed_qty = min(estimated_qty or executed_qty, confirmed_free)
+    if managed_qty <= 0:
+        state["pending_order"] = pending_intent
+        state["current_symbol"] = None
+        state["entry_price"] = 0.0
+        state["qty"] = 0.0
+        _mark_reconciliation(state, "FILLED_BUY_BASE_BALANCE_ZERO", [base_asset])
+        state_mod.save_state(config["STATE_FILE"], state)
+        logger.critical(
+            "BUY %s terisi tetapi saldo base terverifikasi nol. Intent dipertahankan.",
+            candidate.symbol,
+        )
+        return
+
+    state["qty"] = managed_qty
+    _clear_reconciliation(state)
     state_mod.save_state(config["STATE_FILE"], state)
+    logger.info(
+        "BUY FILLED %s: qty=%.8f managed=%.8f @ avg %.6f | 24h=%.2f%% | "
+        "vol24h=%.0f | alasan: %s",
+        candidate.symbol, executed_qty, managed_qty, fill_price,
+        candidate.price_change_pct, candidate.quote_volume, candidate.confirm_reason,
+    )
     logger.info("%s: level exit dikunci -> %s | %s",
-                candidate.symbol, levels["source"], levels["note"])
+                candidate.symbol, preview["source"], preview["note"])
 
     if _native_protection_enabled(config):
-        _ensure_native_protection(client, config, filters, state)
+        if not _ensure_native_protection(client, config, filters, state):
+            _mark_reconciliation(state, "NATIVE_PROTECTION_UNVERIFIED", [candidate.symbol])
+            state_mod.save_state(config["STATE_FILE"], state)
 
 
 def close_position(client: ExchangeClient, config: dict, filters_cache: dict,
                    state: dict, reason: str,
                    reference_price: float | None = None) -> None:
-    symbol = state["current_symbol"]
+    symbol = state.get("current_symbol")
     if not symbol:
         return
+    base_asset = str(symbol)[: -len(config["QUOTE_ASSET"])]
+    live = str(config.get("MODE", "PAPER")).upper() == "LIVE"
 
     pending = state.get("pending_order")
     if isinstance(pending, dict):
-        logger.critical("SELL %s (%s) belum dapat dikonfirmasi (intent %s). Tidak mengirim SELL duplikat.",
-                        symbol, reason, pending.get("client_order_id"))
-        state["reconciliation_required"] = True
-        state["reconciliation_assets"] = [symbol]
+        _mark_reconciliation(state, "SELL_PENDING_ORDER_UNRESOLVED", [symbol])
         state_mod.save_state(config["STATE_FILE"], state)
+        logger.critical(
+            "SELL %s (%s) tidak dikirim karena intent %s belum terverifikasi.",
+            symbol, reason, pending.get("client_order_id"),
+        )
         return
 
     if not _cancel_native_stop_before_exit(client, config, state):
         return
 
     filters = filters_cache.get(symbol)
-    qty_to_sell = float(state["qty"])
-    base_asset = symbol[: -len(config["QUOTE_ASSET"])]
+    if filters is None:
+        _mark_reconciliation(state, "SELL_FILTERS_UNVERIFIED", [symbol])
+        state_mod.save_state(config["STATE_FILE"], state)
+        logger.critical("SELL %s ditahan karena filter simbol tidak tersedia.", symbol)
+        return
     executable_bid = _executable_bid(client, symbol, reference_price)
-    account_loaded = False
-    locked_base = 0.0
+    if executable_bid is None or executable_bid <= 0:
+        _mark_reconciliation(state, "SELL_BID_UNVERIFIED", [symbol])
+        state_mod.save_state(config["STATE_FILE"], state)
+        logger.critical("SELL %s ditahan karena bid executable tidak dapat diverifikasi.", symbol)
+        return
 
     try:
         account = client.get_account()
-        account_loaded = True
-        free_base = get_balance(account, base_asset)
-        locked_base = next(
-            (float(b.get("locked", 0.0) or 0.0)
-             for b in account.get("balances", [])
-             if b.get("asset") == base_asset),
-            0.0,
-        )
-        qty_to_sell = min(qty_to_sell, free_base)
+        if live:
+            _validate_live_account_snapshot(account, config["QUOTE_ASSET"])
     except BinanceAPIError as exc:
-        logger.error("Gagal ambil saldo sebelum SELL %s: %s", symbol, exc)
+        _mark_reconciliation(state, "SELL_ACCOUNT_UNVERIFIED", [base_asset])
+        state_mod.save_state(config["STATE_FILE"], state)
+        logger.critical("SELL %s ditahan karena saldo/status akun tidak terverifikasi: %s", symbol, exc)
+        return
 
-    if filters:
-        if filters.max_qty > 0:
-            qty_to_sell = min(qty_to_sell, float(filters.max_qty))
-        qty_to_sell = filters.round_qty(qty_to_sell)
-        if (
-            executable_bid is not None
-            and filters.max_notional > 0
-            and qty_to_sell * executable_bid > float(filters.max_notional)
-        ):
-            qty_to_sell = filters.round_qty(
-                float(filters.max_notional) / executable_bid
-            )
-        if account_loaded and locked_base > 0 and qty_to_sell < float(filters.min_qty):
-            logger.critical(
-                "SELL %s ditahan: free base %.8f di bawah minQty tetapi masih "
-                "ada locked base %.8f. Rekonsiliasi open order diperlukan.",
-                symbol, qty_to_sell, locked_base,
-            )
-            state["reconciliation_required"] = True
-            state["reconciliation_assets"] = [base_asset]
-            state_mod.save_state(config["STATE_FILE"], state)
-            return
-        if qty_to_sell < float(filters.min_qty):
-            logger.warning("Qty jual %s (%.8f) di bawah minQty bursa. Posisi direset sebagai dust.",
-                           symbol, qty_to_sell)
-            reset_position(state)
-            state["sell_fail_count"] = 0
-            state["cooldown_until"] = state_mod.now_ms() + config["COOLDOWN_MINUTES_AFTER_CLOSE"] * 60 * 1000
-            state_mod.save_state(config["STATE_FILE"], state)
-            try_dust_sweep(client, config, symbol)
-            return
-        if (
-            executable_bid is not None
-            and filters.min_notional > 0
-            and qty_to_sell * executable_bid < float(filters.min_notional)
-        ):
-            logger.critical(
-                "SELL %s ditahan: notional executable %.8f di bawah minNotional %.8f. "
-                "Saldo dipertahankan untuk rekonsiliasi/dust sweep.",
-                symbol, qty_to_sell * executable_bid, float(filters.min_notional),
-            )
-            state["reconciliation_required"] = True
-            state["reconciliation_assets"] = [base_asset]
-            state_mod.save_state(config["STATE_FILE"], state)
-            return
+    free_base = get_balance(account, base_asset)
+    locked_base = next(
+        (float(b.get("locked", 0.0) or 0.0)
+         for b in account.get("balances", []) if b.get("asset") == base_asset),
+        0.0,
+    )
+    if locked_base > 0:
+        _mark_reconciliation(state, "SELL_BASE_BALANCE_LOCKED", [base_asset])
+        state_mod.save_state(config["STATE_FILE"], state)
+        logger.critical(
+            "SELL %s ditahan karena %.12g %s masih locked oleh order lain.",
+            symbol, locked_base, base_asset,
+        )
+        return
 
-    if qty_to_sell <= 0:
-        logger.critical("SELL %s (%s) tidak dikirim karena qty yang bisa dijual nol. Rekonsiliasi manual diperlukan.",
-                        symbol, reason)
-        state["reconciliation_required"] = True
-        state["reconciliation_assets"] = [base_asset]
+    qty_to_sell = min(float(state.get("qty") or 0.0), free_base)
+    if filters.max_qty > 0:
+        qty_to_sell = min(qty_to_sell, float(filters.max_qty))
+    qty_to_sell = filters.round_qty(qty_to_sell)
+    if filters.max_notional > 0 and qty_to_sell * executable_bid > float(filters.max_notional):
+        qty_to_sell = filters.round_qty(float(filters.max_notional) / executable_bid)
+
+    def settle_as_verified_dust(detail: str) -> None:
+        logger.warning("%s Posisi %s direset sebagai dust terverifikasi.", detail, symbol)
+        reset_position(state)
+        state["sell_fail_count"] = 0
+        state["cooldown_until"] = (
+            state_mod.now_ms() + config["COOLDOWN_MINUTES_AFTER_CLOSE"] * 60 * 1000
+        )
+        state["last_trade_time"] = state_mod.now_ms()
+        _clear_reconciliation(state)
+        state_mod.save_state(config["STATE_FILE"], state)
+        try_dust_sweep(client, config, symbol)
+
+    if not filters.market_qty_valid(qty_to_sell):
+        if qty_to_sell < float(filters.min_qty) and locked_base <= 0:
+            settle_as_verified_dust(
+                f"Qty jual {qty_to_sell:.12g} di bawah minQty {float(filters.min_qty):.12g}."
+            )
+        else:
+            _mark_reconciliation(state, "SELL_QTY_FILTER_INVALID", [base_asset])
+            state_mod.save_state(config["STATE_FILE"], state)
+        return
+
+    notional = qty_to_sell * executable_bid
+    if filters.min_notional > 0 and notional < float(filters.min_notional):
+        settle_as_verified_dust(
+            f"Notional jual {notional:.12g} di bawah minNotional "
+            f"{float(filters.min_notional):.12g}."
+        )
+        return
+    if filters.max_notional > 0 and notional > float(filters.max_notional):
+        _mark_reconciliation(state, "SELL_MAX_NOTIONAL_INVALID", [base_asset])
         state_mod.save_state(config["STATE_FILE"], state)
         return
 
-    entry_price = state["entry_price"]
+    entry_price = float(state.get("entry_price") or 0.0)
     client_order_id = _new_client_order_id("sell")
     state["pending_order"] = {
         "side": "SELL", "symbol": symbol, "qty": qty_to_sell,
@@ -1599,69 +2351,84 @@ def close_position(client: ExchangeClient, config: dict, filters_cache: dict,
         resp = _submit_market_order(client, symbol, "SELL", qty_to_sell, client_order_id)
     except BinanceAPIError as exc:
         state["sell_fail_count"] = int(state.get("sell_fail_count", 0)) + 1
-        state["reconciliation_required"] = True
-        state["reconciliation_assets"] = [base_asset]
-        n = state["sell_fail_count"]
-        logger.critical("SELL %s (%s) status tidak pasti (%d): %s. Intent disimpan; jangan kirim order duplikat.",
-                        symbol, reason, n, exc)
+        _mark_reconciliation(state, "SELL_SUBMISSION_UNVERIFIED", [base_asset])
         state_mod.save_state(config["STATE_FILE"], state)
-        if n == 5:
-            try:
-                info = client.get_exchange_info(symbol)
-                syms = info.get("symbols", []) if isinstance(info, dict) else []
-                if syms:
-                    filters_cache[symbol] = SymbolFilters.from_symbol_data(syms[0])
-            except BinanceAPIError as refresh_exc:
-                logger.warning("Penyegaran filter %s juga gagal: %s", symbol, refresh_exc)
+        logger.critical(
+            "SELL %s (%s) status tidak pasti (%d): %s. Intent dipertahankan.",
+            symbol, reason, state["sell_fail_count"], exc,
+        )
         return
 
     executed_qty = max(0.0, float(resp.get("executedQty", 0.0) or 0.0))
     cumm_quote = max(0.0, float(resp.get("cummulativeQuoteQty", 0.0) or 0.0))
     status = str(resp.get("status") or "").upper()
-
-    if status in _NONTERMINAL_ORDER_STATUSES or (
-        not status and executed_qty < qty_to_sell - 1e-12
+    identity_valid = (
+        not live
+        or (
+            str(resp.get("symbol") or "").upper() == str(symbol).upper()
+            and str(resp.get("clientOrderId") or "") == client_order_id
+            and str(resp.get("side") or "").upper() == "SELL"
+            and str(resp.get("type") or "").upper() == "MARKET"
+        )
+    )
+    if (
+        not identity_valid
+        or status in _NONTERMINAL_ORDER_STATUSES
+        or status not in _TERMINAL_ORDER_STATUSES
     ):
         pending_now = state.get("pending_order")
         if isinstance(pending_now, dict):
             pending_now["last_status"] = status or "UNKNOWN"
             pending_now["executed_qty"] = executed_qty
             pending_now["cummulative_quote_qty"] = cumm_quote
-        state["reconciliation_required"] = True
-        state["reconciliation_assets"] = [base_asset]
+        _mark_reconciliation(state, "SELL_RESPONSE_UNVERIFIED", [base_asset])
         state_mod.save_state(config["STATE_FILE"], state)
         logger.critical(
-            "SELL %s (%s) belum terminal: status=%s filled=%.8f dari %.8f. "
-            "Intent dipertahankan; jangan kirim SELL duplikat.",
+            "SELL %s (%s) belum terminal/konsisten: status=%s filled=%.8f dari %.8f.",
             symbol, reason, status or "UNKNOWN", executed_qty, qty_to_sell,
         )
         return
 
-    if not status:
-        status = "FILLED"
+    if executed_qty <= 0:
+        state["pending_order"] = None
+        state["sell_fail_count"] = 0
+        _clear_reconciliation(state)
+        state_mod.save_state(config["STATE_FILE"], state)
+        logger.warning("SELL %s terminal tanpa fill (status=%s). Posisi dipertahankan.", symbol, status)
+        return
 
-    state["pending_order"] = None
-    sell_price = (cumm_quote / executed_qty) if executed_qty > 0 else 0.0
-    pnl = (sell_price - entry_price) * executed_qty if entry_price > 0 else 0.0
-
-    remaining = max(0.0, float(state["qty"]) - executed_qty)
-    post_loaded = False
-    post_locked = 0.0
     try:
         post_account = client.get_account()
-        post_loaded = True
-        post_total = get_total_balance(post_account, base_asset)
-        post_locked = next(
-            (float(b.get("locked", 0.0) or 0.0)
-             for b in post_account.get("balances", [])
-             if b.get("asset") == base_asset),
-            0.0,
+        if live:
+            _validate_live_account_snapshot(post_account, config["QUOTE_ASSET"])
+    except BinanceAPIError as exc:
+        pending_now = state.get("pending_order")
+        if isinstance(pending_now, dict):
+            pending_now["last_status"] = status
+            pending_now["executed_qty"] = executed_qty
+            pending_now["cummulative_quote_qty"] = cumm_quote
+        _mark_reconciliation(state, "FILLED_SELL_BALANCE_UNVERIFIED", [base_asset])
+        state_mod.save_state(config["STATE_FILE"], state)
+        logger.critical(
+            "SELL %s terminal tetapi saldo setelah fill tidak dapat diverifikasi: %s. "
+            "Intent dipertahankan agar tidak ada SELL duplikat.", symbol, exc,
         )
-        remaining = min(remaining, post_total)
-    except BinanceAPIError:
-        pass
+        return
 
-    min_qty = float(filters.min_qty) if filters else 0.0
+    post_total = get_total_balance(post_account, base_asset)
+    post_locked = next(
+        (float(b.get("locked", 0.0) or 0.0)
+         for b in post_account.get("balances", []) if b.get("asset") == base_asset),
+        0.0,
+    )
+    remaining = min(
+        max(0.0, float(state.get("qty") or 0.0) - executed_qty),
+        post_total,
+    )
+    state["pending_order"] = None
+    sell_price = (cumm_quote / executed_qty) if cumm_quote > 0 else 0.0
+    pnl = (sell_price - entry_price) * executed_qty if entry_price > 0 and sell_price > 0 else 0.0
+    min_qty = float(filters.min_qty)
     fully_closed = (
         status == "FILLED"
         and executed_qty >= qty_to_sell - 1e-12
@@ -1669,23 +2436,33 @@ def close_position(client: ExchangeClient, config: dict, filters_cache: dict,
         and post_locked <= 0
     )
     if fully_closed:
-        logger.info("SELL FILLED %s (%s): qty=%.8f @ avg %.6f | entry=%.6f | estimasi PnL=%.2f %s",
-                    symbol, reason, executed_qty, sell_price, entry_price, pnl, config["QUOTE_ASSET"])
+        logger.info(
+            "SELL FILLED %s (%s): qty=%.8f @ avg %.6f | entry=%.6f | estimasi PnL=%.2f %s",
+            symbol, reason, executed_qty, sell_price, entry_price, pnl, config["QUOTE_ASSET"],
+        )
         reset_position(state)
         state["sell_fail_count"] = 0
-        state["cooldown_until"] = state_mod.now_ms() + config["COOLDOWN_MINUTES_AFTER_CLOSE"] * 60 * 1000
+        state["cooldown_until"] = (
+            state_mod.now_ms() + config["COOLDOWN_MINUTES_AFTER_CLOSE"] * 60 * 1000
+        )
         state["last_trade_time"] = state_mod.now_ms()
+        _clear_reconciliation(state)
         state_mod.save_state(config["STATE_FILE"], state)
         try_dust_sweep(client, config, symbol)
         return
 
     state["qty"] = remaining
     state["sell_fail_count"] = 0
-    state["reconciliation_required"] = bool(post_loaded and post_locked > 0)
-    state["reconciliation_assets"] = [base_asset] if state["reconciliation_required"] else []
+    if post_locked > 0 or remaining <= 0:
+        _mark_reconciliation(state, "SELL_REMAINDER_UNVERIFIED", [base_asset])
+    else:
+        _clear_reconciliation(state)
     state_mod.save_state(config["STATE_FILE"], state)
-    logger.critical("SELL PARTIAL/TERMINAL %s (%s): status=%s filled=%.8f dari %.8f, sisa state=%.8f. Posisi TIDAK direset.",
-                    symbol, reason, status or "UNKNOWN", executed_qty, qty_to_sell, remaining)
+    logger.critical(
+        "SELL PARTIAL/TERMINAL %s (%s): status=%s filled=%.8f dari %.8f, "
+        "sisa state=%.8f. Posisi tidak direset.",
+        symbol, reason, status, executed_qty, qty_to_sell, remaining,
+    )
 
 
 def check_manual_control(client: ExchangeClient, config: dict, filters_cache: dict,
@@ -1830,7 +2607,10 @@ def run(config: dict, lifecycle=None) -> int:
         return 2
     base_url = get_base_url(config)
 
-    if mode == "LIVE" and (not config["API_KEY"] or not config["API_SECRET"]):
+    if mode == "LIVE" and (
+        not str(config.get("API_KEY") or "").strip()
+        or not str(config.get("API_SECRET") or "").strip()
+    ):
         logger.error(
             "API key/secret belum di-set. Mode LIVE mengirim order dengan UANG ASLI, "
             "jadi kredensial produksi wajib ada di file .env. Bot dihentikan. "
@@ -1870,30 +2650,76 @@ def run(config: dict, lifecycle=None) -> int:
         )
     logger.info("=" * 70)
 
-    client = create_exchange_client(config)
-    client.sync_time()
+    client = None
+    try:
+        client = create_exchange_client(config)
+        client.sync_time()
 
-    logger.info("Mengambil exchangeInfo untuk semua simbol (sekali di awal)...")
-    exchange_info = client.get_exchange_info()
-    filters_cache = build_filters_cache(exchange_info)
-    tradable_symbols = build_trading_symbols(exchange_info)
-    filters_cache_time = time.time()
-    logger.info("Filter untuk %d simbol berhasil dimuat.", len(filters_cache))
+        logger.info("Mengambil exchangeInfo untuk semua simbol (sekali di awal)...")
+        exchange_info = client.get_exchange_info()
+        if not isinstance(exchange_info, dict) or not isinstance(
+            exchange_info.get("symbols"), list
+        ):
+            raise BinanceAPIError(502, None, "exchangeInfo tidak memiliki daftar symbols")
+        filters_cache = build_filters_cache(exchange_info)
+        account_permissions = None
+        if mode == "LIVE":
+            startup_account = client.get_account()
+            _validate_live_account_snapshot(startup_account, config["QUOTE_ASSET"])
+            account_permissions = _effective_account_permissions(startup_account)
+        tradable_symbols = build_trading_symbols(
+            exchange_info, account_permissions=account_permissions
+        )
+        if not filters_cache or not tradable_symbols:
+            raise BinanceAPIError(
+                502, None,
+                "filter atau daftar simbol TRADING yang cocok dengan permission akun "
+                "kosong; metadata exchange tidak terverifikasi",
+            )
+        filters_cache_time = time.time()
+        logger.info(
+            "Filter tervalidasi untuk %d simbol berhasil dimuat; %d simbol TRADING "
+            "cocok dengan permission efektif akun.",
+            len(filters_cache), len(tradable_symbols),
+        )
 
-    state = load_pump_state(config["STATE_FILE"])
-    logger.info("Mode exit efektif: %s", describe_exit_mode(config, state))
-    if state["current_symbol"]:
-        logger.info("Melanjutkan posisi yang sudah ada: %s qty=%.8f @ %.6f",
-                    state["current_symbol"], state["qty"], state["entry_price"])
-    reconcile_state_with_exchange(client, config, state, filters_cache)
+        state = load_pump_state(config["STATE_FILE"], fail_closed=(mode == "LIVE"))
+        held_symbol = state.get("current_symbol")
+        if held_symbol and held_symbol not in filters_cache:
+            _mark_reconciliation(state, "HELD_SYMBOL_FILTERS_UNVERIFIED", [held_symbol])
+            state_mod.save_state(config["STATE_FILE"], state)
+        logger.info("Mode exit efektif: %s", describe_exit_mode(config, state))
+        if held_symbol:
+            logger.info("Melanjutkan posisi yang sudah ada: %s qty=%.8f @ %.6f",
+                        held_symbol, state["qty"], state["entry_price"])
+        reconcile_state_with_exchange(
+            client, config, state, filters_cache,
+            check_open_orders=(mode == "LIVE"),
+        )
+    except Exception as exc:
+        logger.exception(
+            "Startup gagal karena waktu, akun, state, atau metadata exchange tidak dapat "
+            "diverifikasi. Bot berhenti fail-closed: %s", exc,
+        )
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+        if lifecycle is not None:
+            lifecycle.write("STOPPED", reason="Startup LIVE/PAPER gagal diverifikasi.")
+        return 1
+
     if lifecycle is not None:
         lifecycle.write("RUNNING")
 
     consecutive_errors = 0
     last_time_sync = time.time()
     last_heartbeat = 0.0
+    last_reconciliation = time.time()
     TIME_SYNC_INTERVAL_SECONDS = 15 * 60
     FILTERS_REFRESH_INTERVAL_SECONDS = 6 * 3600
+    RECONCILIATION_INTERVAL_SECONDS = 60
 
     def klines_fetcher(symbol: str):
         lookback = strategy.confirm_window_bars(config)
@@ -1919,23 +2745,58 @@ def run(config: dict, lifecycle=None) -> int:
                 last_time_sync = time.time()
 
             if time.time() - filters_cache_time > FILTERS_REFRESH_INTERVAL_SECONDS:
-                exchange_info = client.get_exchange_info()
-                filters_cache = build_filters_cache(exchange_info)
-                tradable_symbols = build_trading_symbols(exchange_info)
+                refreshed_info = client.get_exchange_info()
+                refreshed_filters = build_filters_cache(refreshed_info)
+                refreshed_permissions = None
+                if mode == "LIVE":
+                    refreshed_account = client.get_account()
+                    _validate_live_account_snapshot(
+                        refreshed_account, config["QUOTE_ASSET"]
+                    )
+                    refreshed_permissions = _effective_account_permissions(
+                        refreshed_account
+                    )
+                refreshed_tradable = build_trading_symbols(
+                    refreshed_info, account_permissions=refreshed_permissions
+                )
+                if not refreshed_filters or not refreshed_tradable:
+                    raise BinanceAPIError(
+                        502, None,
+                        "refresh exchangeInfo menghasilkan filter/simbol TRADING yang "
+                        "cocok dengan permission akun dalam keadaan kosong",
+                    )
+                filters_cache = refreshed_filters
+                tradable_symbols = refreshed_tradable
                 filters_cache_time = time.time()
-                logger.info("Filter simbol disegarkan ulang (%d simbol).", len(filters_cache))
+                logger.info(
+                    "Filter simbol disegarkan ulang (%d filter, %d cocok permission akun).",
+                    len(filters_cache), len(tradable_symbols),
+                )
                 held = state.get("current_symbol")
-                if held and tradable_symbols and held not in tradable_symbols:
+                if held and (held not in tradable_symbols or held not in filters_cache):
+                    _mark_reconciliation(state, "HELD_SYMBOL_NOT_TRADABLE", [held])
+                    state_mod.save_state(config["STATE_FILE"], state)
                     logger.critical(
-                        "Simbol %s yang sedang dipegang TIDAK lagi berstatus TRADING di "
-                        "Binance. Order SELL akan ditolak bursa. Perlu tindakan manual.",
+                        "Simbol %s yang sedang dipegang tidak lagi TRADING atau filternya "
+                        "tidak valid. Entry baru diblokir dan exit akan tetap dicoba bila bursa menerima.",
                         held,
                     )
 
-            if state.get("pending_order"):
-                logger.warning("Merekonsiliasi intent order pending %s sebelum melanjutkan loop.",
-                               state["pending_order"].get("client_order_id"))
-                reconcile_state_with_exchange(client, config, state)
+            if state.get("pending_order") or (
+                state.get("reconciliation_required")
+                and time.time() - last_reconciliation >= RECONCILIATION_INTERVAL_SECONDS
+            ):
+                pending_state = state.get("pending_order") or {}
+                logger.warning(
+                    "Menjalankan rekonsiliasi LIVE/PAPER (intent=%s, alasan=%s).",
+                    pending_state.get("client_order_id", "-"),
+                    state.get("reconciliation_reason") or "-",
+                )
+                reconcile_state_with_exchange(
+                    client, config, state, filters_cache,
+                    check_open_orders=(mode == "LIVE"),
+                )
+                last_reconciliation = time.time()
 
             check_manual_control(client, config, filters_cache, state)
 
@@ -1949,18 +2810,19 @@ def run(config: dict, lifecycle=None) -> int:
                         f"bid executable {state['current_symbol']} tidak valid",
                     )
 
-            equity = get_equity(client, config, state,
-                                position_price=current_price)
+            if state["current_symbol"] and current_price is not None:
+                manage_exit(client, config, filters_cache, state, current_price)
+
+            equity_price = current_price if state.get("current_symbol") else None
+            equity = get_equity(client, config, state, position_price=equity_price)
             if equity is None:
-                entries_paused = bool(state.get("dd_stopped") or state.get("daily_stopped"))
+                entries_paused = True
+                _mark_reconciliation(state, "EQUITY_UNVERIFIED")
             else:
                 entries_paused = update_equity_controls(state, equity, config)
 
             maybe_force_close_at_risk_limit(client, config, filters_cache, state,
                                             entries_paused, current_price)
-
-            if state["current_symbol"] and current_price is not None:
-                manage_exit(client, config, filters_cache, state, current_price)
 
             do_scan = time.time() * 1000 - state.get("last_scan_time", 0) > config["MARKET_SCAN_INTERVAL_SECONDS"] * 1000
             if do_scan:
@@ -2096,6 +2958,16 @@ def run(config: dict, lifecycle=None) -> int:
 
     if lifecycle is not None and _shutdown_requested:
         lifecycle.write("STOPPING", reason="Shutdown graceful sedang menyimpan state.")
+    if mode == "LIVE" and state.get("current_symbol"):
+        protected = isinstance(state.get("native_oco"), dict) or isinstance(
+            state.get("native_stop"), dict
+        )
+        if not protected or state.get("_native_stop_exit_blocked"):
+            logger.critical(
+                "Shutdown LIVE meninggalkan posisi %s tanpa proteksi native yang terverifikasi. "
+                "State disimpan, tetapi operator wajib memeriksa akun Binance.",
+                state.get("current_symbol"),
+            )
     try:
         state_mod.save_state(config["STATE_FILE"], state)
     except OSError as exc:
@@ -2204,6 +3076,9 @@ def selftest() -> None:
                 {"asset": self.base_asset, "free": str(self.free), "locked": "0"},
                 {"asset": "USDT", "free": "1000", "locked": "0"},
             ]}
+
+        def get_book_ticker(self, symbol, max_retries=3):
+            return {"symbol": symbol, "bidPrice": str(self.price), "askPrice": str(self.price)}
 
         def new_market_order(self, symbol, side, quantity=None, quote_order_qty=None,
                              new_client_order_id=None):
@@ -2541,9 +3416,11 @@ def selftest() -> None:
     st_eq = dict(DEFAULT_STATE)
     st_eq["current_symbol"] = "TESTUSDT"
     st_eq["qty"] = 1.0
-    eq_ok = get_equity(EquityClient(), cfg, st_eq)
+    cfg_equity = dict(cfg)
+    cfg_equity["MODE"] = "PAPER"
+    eq_ok = get_equity(EquityClient(), cfg_equity, st_eq)
     assert abs(eq_ok - 600.0) < 1e-9, f"equity harus 500 + 1x100 = 600, dapat {eq_ok}"
-    eq_none = get_equity(EquityClient(fail_price=True), cfg, st_eq)
+    eq_none = get_equity(EquityClient(fail_price=True), cfg_equity, st_eq)
     assert eq_none is None, "API harga gagal -> equity harus None, BUKAN 500 (posisi hilang semu)"
     print("  Equity normal = 600; API gagal -> None (bukan angka keliru pemicu stop semu) -> OK")
 
@@ -2607,6 +3484,7 @@ def selftest() -> None:
                                  for a, v in self.balances.items()]}
 
     cfg_rec = dict(cfg)
+    cfg_rec["MODE"] = "PAPER"
     cfg_rec["QUOTE_ASSET"] = "USDT"
     with tempfile.TemporaryDirectory() as tmprec:
         cfg_rec["STATE_FILE"] = f"{tmprec}/state.json"
@@ -2682,7 +3560,9 @@ def main() -> int:
         return 0
 
     from config.config import InvalidModeError
-    from infrastructure.process.runtime_control import BotAlreadyRunningError, BotRuntime
+    from infrastructure.process.runtime_control import (
+        BotAlreadyRunningError, BotControlError, BotRuntime,
+    )
 
     if CONFIG_LOAD_ERRORS:
         print("Konfigurasi runtime rusak: " + "; ".join(CONFIG_LOAD_ERRORS), file=sys.stderr)
@@ -2699,7 +3579,7 @@ def main() -> int:
             code = run(PUMP_CONFIG, lifecycle=lifecycle)
             runtime.finish(code, None if code == 0 else "Bot berhenti dengan kode error.")
             return code
-    except BotAlreadyRunningError as exc:
+    except (BotAlreadyRunningError, BotControlError) as exc:
         print(str(exc), file=sys.stderr)
         return 3
 

@@ -1,19 +1,18 @@
-"""Skema, validasi, dan penyimpanan konfigurasi runtime dashboard.
+"""Skema, validasi, dan pembacaan konfigurasi runtime bot.
 
-Seluruh konfigurasi runtime tersimpan dalam SATU file ``data/settings.json``
+Override konfigurasi per mode dapat disimpan dalam ``data/settings.json``
 dengan struktur:
 
     {
-      "active_mode": "PAPER",
       "overrides": {
         "PAPER": {"LOOP_INTERVAL_SECONDS": 9},
         "LIVE": {}
       }
     }
 
-Sebelumnya mode dan override per mode tersebar di tiga file terpisah di
-akar repo; sekarang cukup satu file sehingga mudah diperiksa, dicadangkan,
-dan dipindah.
+Mode aktif tidak dibaca dari file ini. Mode dipilih melalui ``BOT_MODE`` di
+``.env`` dan diterapkan setelah dashboard dijalankan ulang. Kunci lama
+``active_mode`` masih diterima tetapi sengaja diabaikan untuk kompatibilitas.
 File yang rusak diarsipkan sebagai ``settings.json.corrupt-<ts>`` lalu ditandai
 di ``settings.error.json``; bot selalu jatuh ke default aman (PAPER) dan tidak
 pernah menimpa file rusak secara diam-diam.
@@ -27,31 +26,23 @@ from __future__ import annotations
 import json
 import math
 import re
-import threading
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from infrastructure.storage.atomic_io import (
-    append_json_line,
     archive_corrupt,
     atomic_write_json,
     interprocess_lock,
     read_json,
 )
-from infrastructure.paths import DATA_DIR, LOGS_DIR
+from infrastructure.paths import DATA_DIR
 
 
 SETTINGS_FILE = DATA_DIR / "settings.json"
 SETTINGS_ERROR_FILE = DATA_DIR / "settings.error.json"
-AUDIT_FILE = LOGS_DIR / "settings_audit.log"
 VALID_MODES = ("PAPER", "LIVE")
-_WRITE_LOCK = threading.RLock()
-
-
-class ConcurrentSettingsError(RuntimeError):
-    pass
 
 
 _SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,40}$")
@@ -81,15 +72,15 @@ def _field(group: str, label: str, description: str, kind: str,
 
 PARAMETER_SCHEMA: dict[str, dict] = {
     "QUOTE_ASSET": _field("Sistem", "Aset kuotasi", "Aset modal dan kuotasi pasangan.", "str", editor="asset"),
-    "MODE": _field("Sistem", "Mode aktif", "Diubah melalui panel Mode.", "str", read_only=True, managed_by="mode"),
+    "MODE": _field("Sistem", "Mode aktif", "Dibaca dari BOT_MODE di file .env.", "str", read_only=True, managed_by="environment"),
     "SHOW_BACKTEST_IN_LIVE": _field("Sistem", "Tampilkan backtest di LIVE", "Mengizinkan beban backtest saat bot LIVE.", "bool", dangerous=True),
     "LIVE_BASE_URL": _field("Sistem", "URL REST Binance", "Endpoint produksi yang dikunci oleh aplikasi.", "str", read_only=True),
     "RATE_LIMIT_STATE_FILE": _field("Sistem", "Ledger rate limit", "File runtime bersama untuk koordinasi REQUEST_WEIGHT lintas proses.", "str", read_only=True),
     "RATE_LIMIT_WEIGHT_LIMIT": _field("Sistem", "Batas REQUEST_WEIGHT", "Batas weight Binance per menit dan IP.", "int", read_only=True),
     "RATE_LIMIT_SAFETY_MARGIN": _field("Sistem", "Cadangan REQUEST_WEIGHT", "Cadangan agar request tidak mendekati batas IP.", "int", read_only=True),
-    "API_KEY":  _field("Sistem", "API key", "Dikelola melalui panel Kredensial.", "str", read_only=True, managed_by="credentials"),
-    "API_SECRET": _field("Sistem", "API secret", "Write-only melalui panel Kredensial.", "str", read_only=True, managed_by="credentials"),
-    "PAPER_INITIAL_BALANCES": _field("Akun PAPER", "Saldo awal PAPER", "Diubah hanya saat reset akun PAPER.", "dict", read_only=True, editor="balances", managed_by="paper_reset"),
+    "API_KEY":  _field("Sistem", "API key", "Dibaca dari BINANCE_API_KEY di file .env.", "str", read_only=True, managed_by="credentials"),
+    "API_SECRET": _field("Sistem", "API secret", "Dibaca dari BINANCE_API_SECRET di file .env.", "str", read_only=True, managed_by="credentials"),
+    "PAPER_INITIAL_BALANCES": _field("Akun PAPER", "Saldo awal PAPER", "Dibaca dari override PAPER di data/settings.json.", "dict", read_only=True, editor="balances", managed_by="paper_reset"),
     "PAPER_ACCOUNT_STATE_FILE": _field("Sistem", "File akun PAPER", "Path runtime internal.", "str", read_only=True),
     "PAPER_DEPTH_LIMIT": _field("Akun PAPER", "Kedalaman order book", "Jumlah level order book untuk simulasi fill.", "int", minimum=5, maximum=5000, unit="level"),
     "PAPER_LIMIT_ORDER_TIMEOUT_SECONDS": _field("Akun PAPER", "Timeout order limit", "Batas tunggu order limit simulasi.", "int", minimum=1, maximum=86400, unit="detik"),
@@ -207,11 +198,12 @@ def _error_marker(path: Path, message: str, backup: Path | None = None) -> None:
     })
 
 
-def _clear_error_marker() -> None:
+def _clear_error_marker() -> bool:
     try:
         SETTINGS_ERROR_FILE.unlink(missing_ok=True)
+        return True
     except OSError:
-        pass
+        return False
 
 
 def _read_doc_unlocked() -> tuple[dict, list[str]]:
@@ -223,8 +215,11 @@ def _read_doc_unlocked() -> tuple[dict, list[str]]:
     """
     errors: list[str] = []
     if SETTINGS_ERROR_FILE.exists():
-        marker = read_json(SETTINGS_ERROR_FILE, {}) or {}
-        errors.append(str(marker.get("error") or "File settings runtime sebelumnya rusak."))
+        try:
+            marker = read_json(SETTINGS_ERROR_FILE, {}) or {}
+            errors.append(str(marker.get("error") or "File settings runtime sebelumnya rusak."))
+        except (json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
+            errors.append(f"Marker error settings tidak dapat dibaca: {exc}")
     if not SETTINGS_FILE.exists():
         return {}, errors
     try:
@@ -235,8 +230,8 @@ def _read_doc_unlocked() -> tuple[dict, list[str]]:
         unknown_root = sorted(set(data) - {"active_mode", "overrides"})
         if unknown_root:
             raise ValueError("kunci root tidak dikenal: " + ", ".join(unknown_root))
-        if "active_mode" not in data or not isinstance(data["active_mode"], str):
-            raise ValueError("active_mode wajib ada dan berupa string")
+        if "active_mode" in data and not isinstance(data["active_mode"], str):
+            raise ValueError("active_mode lama harus berupa string bila masih ada")
         overrides = data.get("overrides")
         if overrides is None:
             overrides = {}
@@ -249,6 +244,8 @@ def _read_doc_unlocked() -> tuple[dict, list[str]]:
             if not isinstance(payload, dict):
                 raise ValueError(f"override {mode} harus object")
         data["overrides"] = overrides
+        if errors and _clear_error_marker():
+            errors = []
         return data, errors
     except (json.JSONDecodeError, OSError, ValueError, TypeError) as exc:
         backup = archive_corrupt(SETTINGS_FILE)
@@ -265,33 +262,6 @@ def _validate_override_payload(payload: dict) -> None:
     forbidden = [k for k in forbidden if k != "PAPER_INITIAL_BALANCES"]
     if forbidden:
         raise ValueError("override memuat kunci read-only: " + ", ".join(forbidden))
-
-
-def load_runtime_mode(default: str = "PAPER") -> tuple[str, list[str]]:
-    with interprocess_lock(SETTINGS_FILE):
-        doc, errors = _read_doc_unlocked()
-    if not doc:
-        return default, errors
-    return str(doc["active_mode"]), errors
-
-
-def save_runtime_mode(mode: str, *, expected_current: str | None = None) -> None:
-    raw = str(mode).strip().upper()
-    if raw not in VALID_MODES:
-        raise ValueError(f"Mode tidak valid: {mode!r}")
-    with _WRITE_LOCK, interprocess_lock(SETTINGS_FILE):
-        doc, load_errors = _read_doc_unlocked()
-        if expected_current is not None:
-            current = str(doc.get("active_mode") or "PAPER").strip().upper()
-            if load_errors or current != str(expected_current).strip().upper():
-                raise ConcurrentSettingsError(
-                    "Mode runtime berubah setelah checklist; ulangi perpindahan mode."
-                )
-        atomic_write_json(SETTINGS_FILE, {
-            "active_mode": raw,
-            "overrides": doc.get("overrides", {}),
-        })
-        _clear_error_marker()
 
 
 def load_mode_override(mode: str) -> tuple[dict, list[str]]:
@@ -311,29 +281,6 @@ def load_mode_override(mode: str) -> tuple[dict, list[str]]:
             _error_marker(SETTINGS_ERROR_FILE, message, backup)
             return {}, errors + [message]
         return dict(payload), errors
-
-
-def save_mode_override(mode: str, overrides: dict,
-                       *, expected_existing: dict | None = None) -> None:
-    raw_mode = str(mode).strip().upper()
-    if raw_mode not in VALID_MODES:
-        raise ValueError("Mode override tidak valid.")
-    with _WRITE_LOCK, interprocess_lock(SETTINGS_FILE):
-        doc, load_errors = _read_doc_unlocked()
-        if expected_existing is not None:
-            existing = doc.get("overrides", {}).get(raw_mode, {})
-            if load_errors or existing != expected_existing:
-                raise ConcurrentSettingsError(
-                    "Override settings berubah setelah preview; ulangi preview terlebih dahulu."
-                )
-        _validate_override_payload(overrides)
-        merged_overrides = dict(doc.get("overrides", {}))
-        merged_overrides[raw_mode] = overrides
-        atomic_write_json(SETTINGS_FILE, {
-            "active_mode": doc.get("active_mode", "PAPER"),
-            "overrides": merged_overrides,
-        })
-        _clear_error_marker()
 
 
 def _coerce_bool(value: Any) -> bool:
@@ -442,6 +389,9 @@ def validate_candidate(candidate: dict, mode: str) -> tuple[dict, dict[str, str]
     cleaned = deepcopy(candidate)
     errors: dict[str, str] = {}
     warnings: list[str] = []
+    normalized_mode = str(mode).strip().upper()
+    if normalized_mode not in VALID_MODES:
+        errors["MODE"] = "mode valid hanya PAPER atau LIVE"
 
     keys = ["QUOTE_ASSET"] + [k for k in PARAMETER_SCHEMA if k != "QUOTE_ASSET"]
     for key in keys:
@@ -461,6 +411,11 @@ def validate_candidate(candidate: dict, mode: str) -> tuple[dict, dict[str, str]
             errors[key] = message
 
     if not errors:
+        relation(
+            "MODE",
+            str(cleaned.get("MODE", "")).strip().upper() == normalized_mode,
+            "MODE pada konfigurasi tidak sama dengan mode yang sedang divalidasi",
+        )
         relation("PUMP_VOLUME_SURGE_MULT", cleaned["PUMP_VOLUME_SURGE_MULT"] >= 1.0,
                  "harus minimal 1 kali rata-rata 7 hari, di bawah itu berarti volume justru turun")
         relation("ATR_MULT_TRAIL", cleaned["ATR_MULT_TRAIL"] <= cleaned["ATR_MULT_SL"],
@@ -488,13 +443,62 @@ def validate_candidate(candidate: dict, mode: str) -> tuple[dict, dict[str, str]
         if cleaned["USE_TP"]:
             relation("TP_PCT", cleaned["TP_PCT"] > 0, "harus lebih besar dari nol saat Take Profit aktif")
 
+        relation(
+            "RATE_LIMIT_SAFETY_MARGIN",
+            int(cleaned.get("RATE_LIMIT_SAFETY_MARGIN", 0))
+            < int(cleaned.get("RATE_LIMIT_WEIGHT_LIMIT", 0)),
+            "harus lebih kecil dari RATE_LIMIT_WEIGHT_LIMIT",
+        )
+
+        if normalized_mode == "LIVE":
+            relation(
+                "LIVE_BASE_URL",
+                str(cleaned.get("LIVE_BASE_URL", "")).rstrip("/")
+                == "https://api.binance.com",
+                "mode LIVE hanya boleh memakai endpoint produksi resmi https://api.binance.com",
+            )
+            relation(
+                "MAX_POSITION_USDT",
+                float(cleaned["MAX_POSITION_USDT"]) > 0,
+                "mode LIVE wajib memiliki plafon posisi lebih besar dari nol",
+            )
+            relation(
+                "USE_STOP_LOSS",
+                bool(cleaned["USE_STOP_LOSS"]),
+                "mode LIVE wajib memakai Stop Loss",
+            )
+            native_stop_available = bool(cleaned["USE_NATIVE_STOP_LOSS"])
+            native_oco_available = bool(cleaned["USE_NATIVE_OCO"] and cleaned["USE_TP"])
+            relation(
+                "USE_NATIVE_STOP_LOSS",
+                native_stop_available or native_oco_available,
+                "mode LIVE wajib memiliki minimal satu proteksi exchange-side: native stop atau OCO",
+            )
+            if cleaned["USE_NATIVE_OCO"]:
+                relation(
+                    "USE_TP",
+                    bool(cleaned["USE_TP"]),
+                    "USE_NATIVE_OCO memerlukan Take Profit aktif",
+                )
+                relation(
+                    "USE_STOP_LOSS",
+                    bool(cleaned["USE_STOP_LOSS"]),
+                    "USE_NATIVE_OCO memerlukan Stop Loss aktif",
+                )
+            if cleaned["USE_NATIVE_STOP_LOSS"]:
+                relation(
+                    "USE_STOP_LOSS",
+                    bool(cleaned["USE_STOP_LOSS"]),
+                    "USE_NATIVE_STOP_LOSS memerlukan Stop Loss aktif",
+                )
+
         if not cleaned["USE_EQUITY_STOP"] and not cleaned["USE_DAILY_STOP"]:
             pesan = ("USE_EQUITY_STOP dan USE_DAILY_STOP dua-duanya nonaktif: "
                      "tidak ada rem kerugian tingkat akun sama sekali.")
             if cleaned.get("CLOSE_ALL_AT_LIMIT"):
                 pesan += (" CLOSE_ALL_AT_LIMIT bernilai aktif tetapi TIDAK AKAN "
                           "PERNAH terpicu karena tidak ada limit yang bisa tercapai.")
-            pesan += " Mode LIVE akan menolak start dengan kombinasi ini."
+            pesan += " Mode LIVE akan menolak Resume Bot dengan kombinasi ini."
             warnings.append(pesan)
 
         if cleaned["USE_STOP_LOSS"] and cleaned["SL_PCT"] >= 20:
@@ -505,101 +509,3 @@ def validate_candidate(candidate: dict, mode: str) -> tuple[dict, dict[str, str]
             )
 
     return cleaned, errors, warnings
-
-
-def editable_keys() -> set[str]:
-    return {k for k, v in PARAMETER_SCHEMA.items() if not v["read_only"]}
-
-
-def compute_overrides(defaults: dict, candidate: dict, *, include_balances: bool = False) -> dict:
-    allowed = editable_keys()
-    if include_balances:
-        allowed.add("PAPER_INITIAL_BALANCES")
-    result = {}
-    for key in allowed:
-        if key in candidate and candidate.get(key) != defaults.get(key):
-            result[key] = deepcopy(candidate[key])
-    return result
-
-
-def diff_values(old: dict, new: dict) -> list[dict]:
-    result = []
-    for key in PARAMETER_SCHEMA:
-        if old.get(key) != new.get(key):
-            result.append({
-                "key": key,
-                "label": PARAMETER_SCHEMA[key]["label"],
-                "old": deepcopy(old.get(key)),
-                "new": deepcopy(new.get(key)),
-                "dangerous": bool(PARAMETER_SCHEMA[key]["dangerous"]),
-            })
-    return result
-
-
-def dangerous_relaxations(old: dict, new: dict) -> list[str]:
-    relaxed: list[str] = []
-    for key, label in (
-        ("USE_TP", "Take Profit dimatikan"),
-        ("USE_STOP_LOSS", "Stop Loss dimatikan"),
-        ("USE_NATIVE_OCO", "OCO exchange-side dimatikan"),
-        ("USE_NATIVE_STOP_LOSS", "Stop Loss exchange-side dimatikan"),
-        ("USE_EQUITY_STOP", "Equity Stop dimatikan"),
-        ("USE_DAILY_STOP", "Daily Stop dimatikan"),
-        ("CLOSE_ALL_AT_LIMIT", "penutupan posisi pada limit dimatikan"),
-    ):
-        if bool(old.get(key)) and not bool(new.get(key)):
-            relaxed.append(label)
-        elif key == "USE_DAILY_STOP" and not bool(new.get(key)):
-            relaxed.append(label)
-    if not bool(old.get("SHOW_BACKTEST_IN_LIVE")) and bool(new.get("SHOW_BACKTEST_IN_LIVE")):
-        relaxed.append("Backtest diaktifkan saat LIVE dan dapat memakai rate limit IP")
-    for key, label in (
-        ("MAX_DRAWDOWN_PERCENT", "MAX_DRAWDOWN_PERCENT dinaikkan"),
-        ("MAX_DAILY_LOSS_PERCENT", "MAX_DAILY_LOSS_PERCENT dinaikkan"),
-        ("SL_PCT", "jarak Stop Loss diperlebar"),
-    ):
-        if float(new.get(key, 0)) > float(old.get(key, 0)):
-            relaxed.append(label)
-    return relaxed
-
-
-def audit_change(event: dict) -> None:
-    safe = deepcopy(event)
-    for forbidden in ("API_SECRET", "BINANCE_API_SECRET", "secret"):
-        safe.pop(forbidden, None)
-    safe.setdefault("time", datetime.now(timezone.utc).isoformat())
-    with _WRITE_LOCK, interprocess_lock(AUDIT_FILE):
-        append_json_line(AUDIT_FILE, safe)
-
-
-def read_audit(limit: int = 200) -> list[dict]:
-    try:
-        with open(AUDIT_FILE, "r", encoding="utf-8") as handle:
-            lines = handle.readlines()[-max(1, min(int(limit), 1000)):]
-    except OSError:
-        return []
-    result = []
-    for line in reversed(lines):
-        try:
-            item = json.loads(line)
-            if isinstance(item, dict):
-                result.append(item)
-        except json.JSONDecodeError:
-            continue
-    return result
-
-
-def public_schema(defaults: dict, current: dict) -> list[dict]:
-    fields = []
-    for key, spec in PARAMETER_SCHEMA.items():
-        row = {"key": key, **deepcopy(spec)}
-        if key in ("API_KEY", "API_SECRET"):
-            row["default"] = None
-            row["value"] = None
-            row["modified"] = False
-        else:
-            row["default"] = deepcopy(defaults.get(key))
-            row["value"] = deepcopy(current.get(key))
-            row["modified"] = defaults.get(key) != current.get(key)
-        fields.append(row)
-    return fields

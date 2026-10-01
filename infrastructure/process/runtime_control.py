@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
 import time
@@ -10,7 +11,10 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from infrastructure.storage.atomic_io import atomic_write_json, read_json, replace_with_retry, timestamp_tag
+from infrastructure.storage.atomic_io import (
+    atomic_write_json, interprocess_lock, read_json, replace_with_retry,
+    timestamp_tag,
+)
 from infrastructure.process import procctl
 from infrastructure.storage import state as state_mod
 from infrastructure.paths import DATA_DIR, PROJECT_ROOT
@@ -43,6 +47,14 @@ def reclaim_lock_file(mode: str) -> Path:
     return DATA_DIR / f"pump_bot_lock_{_mode(mode).lower()}.reclaim"
 
 
+def global_lock_file() -> Path:
+    return DATA_DIR / "pump_bot_lock_global.json"
+
+
+def global_reclaim_lock_file() -> Path:
+    return DATA_DIR / "pump_bot_lock_global.reclaim"
+
+
 def _read_dict(path: Path) -> dict:
     try:
         data = read_json(path, {})
@@ -61,8 +73,8 @@ def _archive_stale(path: Path) -> None:
         pass
 
 
-def lock_owner(mode: str) -> dict:
-    data = _read_dict(lock_file(mode))
+def _live_lock_owner(path: Path) -> dict:
+    data = _read_dict(path)
     if not data:
         return {}
     try:
@@ -74,11 +86,140 @@ def lock_owner(mode: str) -> dict:
     return {}
 
 
+def lock_owner(mode: str) -> dict:
+    return _live_lock_owner(lock_file(mode))
+
+
+def global_lock_owner() -> dict:
+    return _live_lock_owner(global_lock_file())
+
+
+def lifecycle_owner(mode: str) -> dict:
+    data = _read_dict(process_file(mode))
+    if str(data.get("status") or "").upper() not in ("STARTING", "RUNNING", "STOPPING"):
+        return {}
+    try:
+        pid = int(data.get("pid", 0))
+    except (TypeError, ValueError):
+        return {}
+    if procctl.is_process_alive(pid, data.get("process_identity")):
+        return data
+    return {}
+
+
+def _strict_position_snapshot(mode: str) -> dict:
+    """Baca posisi mode secara fail-closed tanpa mengubah file yang rusak."""
+    normalized = _mode(mode)
+    result = {
+        "mode": normalized,
+        "state_file": None,
+        "has_position": False,
+        "symbol": None,
+        "qty": 0.0,
+        "entry_price": 0.0,
+        "inspection_error": None,
+        "config_errors": [],
+    }
+    try:
+        cfgmod = BotProcessManager._config()
+        cfg, config_errors = cfgmod.build_config_for_mode(normalized, validate=False)
+        path = Path(str(cfg.get("STATE_FILE") or ""))
+    except Exception as exc:
+        result["inspection_error"] = f"Konfigurasi mode gagal dibaca: {exc}"
+        return result
+    result["state_file"] = str(path)
+    result["config_errors"] = list(config_errors)
+    if config_errors:
+        result["inspection_error"] = "Konfigurasi mode tidak dapat diverifikasi: " + "; ".join(config_errors)
+        return result
+    if not path.exists():
+        return result
+    try:
+        with interprocess_lock(path):
+            with open(path, "r", encoding="utf-8") as handle:
+                raw = json.load(handle)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        result["inspection_error"] = f"State tidak dapat dibaca dengan aman: {exc}"
+        return result
+    if not isinstance(raw, dict):
+        result["inspection_error"] = "State bukan object JSON."
+        return result
+
+    symbol_raw = raw.get("current_symbol")
+    symbol = str(symbol_raw).strip().upper() if symbol_raw else None
+    try:
+        qty = float(raw.get("qty", 0) or 0)
+        entry = float(raw.get("entry_price", 0) or 0)
+    except (TypeError, ValueError):
+        result["inspection_error"] = "Qty atau harga entry pada state tidak valid."
+        return result
+    if not math.isfinite(qty) or qty < 0 or not math.isfinite(entry) or entry < 0:
+        result["inspection_error"] = "Qty atau harga entry pada state bukan angka aman."
+        return result
+    if bool(symbol) != bool(qty > 0):
+        result["inspection_error"] = "State posisi tidak konsisten antara simbol dan qty."
+        return result
+
+    result.update({
+        "has_position": bool(symbol and qty > 0),
+        "symbol": symbol,
+        "qty": qty,
+        "entry_price": entry,
+    })
+    return result
+
+
+def mode_switch_guard(target_mode: str) -> dict:
+    """Pastikan mode lain berhenti dan tidak menyimpan posisi terbuka."""
+    target = _mode(target_mode)
+    other = "LIVE" if target == "PAPER" else "PAPER"
+    owner = lock_owner(other) or lifecycle_owner(other)
+    global_owner = global_lock_owner()
+    if global_owner and str(global_owner.get("mode", "")).upper() == other:
+        owner = global_owner
+    position = _strict_position_snapshot(other)
+    reasons: list[str] = []
+    if owner:
+        reasons.append(f"Bot {other} masih berjalan dengan PID {owner.get('pid')}.")
+    if position.get("inspection_error"):
+        reasons.append(f"State {other} tidak dapat diverifikasi: {position['inspection_error']}")
+    elif position.get("has_position"):
+        reasons.append(
+            f"Mode {other} masih memiliki posisi {position.get('symbol')} "
+            f"qty {position.get('qty')}."
+        )
+    return {
+        "safe": not reasons,
+        "target_mode": target,
+        "other_mode": other,
+        "other_process": {
+            "running": bool(owner),
+            "pid": owner.get("pid") if owner else None,
+        },
+        "other_position": position,
+        "reasons": reasons,
+    }
+
+
+def _guard_error(guard: dict) -> str:
+    details = " ".join(str(item) for item in guard.get("reasons", []))
+    other = guard.get("other_mode", "mode lain")
+    return (
+        f"Resume Bot ditolak demi keamanan antar mode. {details} "
+        f"Aktifkan kembali BOT_MODE={other}, selesaikan posisi dan hentikan bot, "
+        "lalu ubah BOT_MODE dan jalankan ulang dashboard."
+    ).strip()
+
+
 class BotModeLock:
 
-    def __init__(self, mode: str):
+    def __init__(self, mode: str, *, global_scope: bool = False):
         self.mode = _mode(mode)
-        self.path = lock_file(self.mode)
+        self.global_scope = bool(global_scope)
+        self.path = global_lock_file() if self.global_scope else lock_file(self.mode)
+        self.reclaim_path = (
+            global_reclaim_lock_file() if self.global_scope else reclaim_lock_file(self.mode)
+        )
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.token = uuid.uuid4().hex
         self.acquired = False
@@ -92,7 +233,7 @@ class BotModeLock:
             "created_at": time.time(),
         }
         encoded = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-        reclaim_path = reclaim_lock_file(self.mode)
+        reclaim_path = self.reclaim_path
         for _ in range(150):
             try:
                 fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -104,8 +245,9 @@ class BotModeLock:
                     pid = 0
                 token = existing.get("token")
                 if pid and procctl.is_process_alive(pid, existing.get("process_identity")):
+                    running_mode = str(existing.get("mode") or self.mode).upper()
                     raise BotAlreadyRunningError(
-                        f"Bot mode {self.mode} sudah berjalan dengan PID {pid}."
+                        f"Bot mode {running_mode} sudah berjalan dengan PID {pid}."
                     ) from None
 
                 if not pid or not token:
@@ -142,8 +284,9 @@ class BotModeLock:
                     if current_pid and procctl.is_process_alive(
                         current_pid, current.get("process_identity")
                     ):
+                        running_mode = str(current.get("mode") or self.mode).upper()
                         raise BotAlreadyRunningError(
-                            f"Bot mode {self.mode} sudah berjalan dengan PID {current_pid}."
+                            f"Bot mode {running_mode} sudah berjalan dengan PID {current_pid}."
                         )
                     _archive_stale(self.path)
                 finally:
@@ -212,14 +355,24 @@ class BotRuntime:
 
     def __init__(self, mode: str):
         self.mode = _mode(mode)
+        self.global_lock = BotModeLock(self.mode, global_scope=True)
         self.lock = BotModeLock(self.mode)
         self.lifecycle = BotLifecycle(self.mode)
         self._finished = False
 
     def __enter__(self) -> BotLifecycle:
-        self.lock.acquire()
-        self.lifecycle.write("STARTING")
-        return self.lifecycle
+        self.global_lock.acquire()
+        try:
+            guard = mode_switch_guard(self.mode)
+            if not guard["safe"]:
+                raise BotControlError(_guard_error(guard))
+            self.lock.acquire()
+            self.lifecycle.write("STARTING")
+            return self.lifecycle
+        except Exception:
+            self.lock.release()
+            self.global_lock.release()
+            raise
 
     def finish(self, code: int, reason: str | None = None) -> None:
         status = "STOPPED" if int(code) == 0 else "CRASHED"
@@ -236,6 +389,7 @@ class BotRuntime:
                                          reason=f"{type(exc).__name__}: {str(exc)[:300]}")
         finally:
             self.lock.release()
+            self.global_lock.release()
         return False
 
 
@@ -243,6 +397,10 @@ class BotProcessManager:
 
     def __init__(self):
         self._lock = threading.RLock()
+        # START/STOP harus berurutan, tetapi status dashboard tidak boleh ikut
+        # terkunci selama STOP menunggu child keluar. Lock operasi hanya
+        # menserialkan mutasi proses; _lock tetap dipakai singkat untuk snapshot.
+        self._operation_lock = threading.Lock()
         self._proc = None
         self._tree: procctl.ProcessTreeHandle | None = None
         self._managed_mode: str | None = None
@@ -423,45 +581,62 @@ class BotProcessManager:
         self._proc = None
         self._managed_mode = None
 
+    def mode_guard(self, mode: str | None = None) -> dict:
+        cfgmod = self._config()
+        target = _mode(mode or cfgmod.get_mode(cfgmod.PUMP_CONFIG))
+        return mode_switch_guard(target)
+
     def start(self, *, _auto_restart: bool = False) -> dict:
         cfgmod = self._config()
-        with self._lock:
-            self._intentional_stop = False
-            self._auto_restart_mode = None
-            if not _auto_restart:
-                self._restart_attempts = 0
-                self._restart_window_started = time.monotonic()
-            if cfgmod.CONFIG_LOAD_ERRORS:
-                raise BotControlError("Konfigurasi runtime rusak: " + "; ".join(cfgmod.CONFIG_LOAD_ERRORS))
-            mode = cfgmod.require_valid_mode(cfgmod.PUMP_CONFIG)
-            current = self.status(mode)
-            if current["status"] in ("STARTING", "RUNNING", "STOPPING"):
-                raise BotControlError(f"Bot sudah {current['status']} dengan PID {current['pid']}.")
-            if mode == "LIVE" and (not cfgmod.PUMP_CONFIG.get("API_KEY") or not cfgmod.PUMP_CONFIG.get("API_SECRET")):
-                raise BotControlError("Kredensial LIVE belum lengkap.")
+        with self._operation_lock:
+            with self._lock:
+                self._intentional_stop = False
+                self._auto_restart_mode = None
+                if not _auto_restart:
+                    self._restart_attempts = 0
+                    self._restart_window_started = time.monotonic()
+                if cfgmod.CONFIG_LOAD_ERRORS:
+                    raise BotControlError(
+                        "Konfigurasi runtime rusak: " + "; ".join(cfgmod.CONFIG_LOAD_ERRORS)
+                    )
+                mode = cfgmod.require_valid_mode(cfgmod.PUMP_CONFIG)
+                current = self.status(mode)
+                if current["status"] in ("STARTING", "RUNNING", "STOPPING"):
+                    raise BotControlError(
+                        f"Bot sudah {current['status']} dengan PID {current['pid']}."
+                    )
+                guard = self.mode_guard(mode)
+                if not guard["safe"]:
+                    raise BotControlError(_guard_error(guard))
+                if mode == "LIVE" and (
+                    not cfgmod.PUMP_CONFIG.get("API_KEY")
+                    or not cfgmod.PUMP_CONFIG.get("API_SECRET")
+                ):
+                    raise BotControlError("Kredensial LIVE belum lengkap.")
 
-            state_mod.clear_stop_request(cfgmod.PUMP_CONFIG["CONTROL_FILE"])
-            env = os.environ.copy()
-            env["PUMP_BOT_MANAGED"] = "1"
-            proc, tree = procctl.spawn_python(
-                PROJECT_ROOT / "pump_scanner_bot.py", cwd=PROJECT_ROOT, env=env,
-            )
-            self._proc = proc
-            self._tree = tree
-            self._managed_mode = mode
-            self._last_job_warning = tree.error
-            atomic_write_json(process_file(mode), {
-                "mode": mode,
-                "status": "STARTING",
-                "pid": proc.pid,
-                "process_identity": procctl.process_identity(proc.pid),
-                "managed": True,
-                "started_at": time.time(),
-                "updated_at": time.time(),
-                "exit_code": None,
-                "reason": None,
-            })
-            return self.status(mode)
+                state_mod.clear_stop_request(cfgmod.PUMP_CONFIG["CONTROL_FILE"])
+                env = os.environ.copy()
+                env["PUMP_BOT_MANAGED"] = "1"
+                env["PUMP_BOT_MANAGED_MODE"] = mode
+                proc, tree = procctl.spawn_python(
+                    PROJECT_ROOT / "pump_scanner_bot.py", cwd=PROJECT_ROOT, env=env,
+                )
+                self._proc = proc
+                self._tree = tree
+                self._managed_mode = mode
+                self._last_job_warning = tree.error
+                atomic_write_json(process_file(mode), {
+                    "mode": mode,
+                    "status": "STARTING",
+                    "pid": proc.pid,
+                    "process_identity": procctl.process_identity(proc.pid),
+                    "managed": True,
+                    "started_at": time.time(),
+                    "updated_at": time.time(),
+                    "exit_code": None,
+                    "reason": None,
+                })
+                return self.status(mode)
 
     def _position(self, config: dict) -> dict:
         raw = state_mod.load_state(config["STATE_FILE"]) if Path(config["STATE_FILE"]).exists() else {}
@@ -505,71 +680,131 @@ class BotProcessManager:
 
     def stop(self, *, position_policy: str = "REQUIRE_EMPTY",
              graceful_timeout: float = 25.0, signal_timeout: float = 8.0) -> dict:
+        """Hentikan bot tanpa membekukan pembacaan status dashboard.
+
+        Menunggu close posisi, shutdown graceful, sinyal, atau kill dapat berlangsung
+        lama. Karena itu hanya satu mutasi proses yang diizinkan lewat
+        ``_operation_lock``, sedangkan ``_lock`` dilepas selama semua penantian.
+        """
         cfgmod = self._config()
-        with self._lock:
-            self._intentional_stop = True
-            self._auto_restart_mode = None
-            mode = cfgmod.require_valid_mode(cfgmod.PUMP_CONFIG)
-            cfg = cfgmod.PUMP_CONFIG
-            status = self.status(mode)
-            if status["status"] in ("STOPPED", "CRASHED"):
-                return status
-            policy = str(position_policy or "REQUIRE_EMPTY").strip().upper()
-            position = self._position(cfg)
-            if position["has_position"]:
-                if policy == "SELL_FIRST":
-                    self._sell_first(cfg, max(30.0, float(cfg.get("LOOP_INTERVAL_SECONDS", 15)) * 5))
-                elif policy != "KEEP_OPEN":
-                    raise BotControlError("Ada posisi terbuka. Pilih SELL_FIRST atau KEEP_OPEN.")
-
-            pid = int(status["pid"])
-            expected_identity = status.get("process_identity")
-            managed_group = bool(self._proc is not None and self._managed_mode == mode and self._proc.pid == pid)
-            state_mod.request_stop(cfg["CONTROL_FILE"])
-            lifecycle = self._read_lifecycle(mode)
-            lifecycle.update({"mode": mode, "status": "STOPPING", "pid": pid,
-                              "updated_at": time.time(), "managed": managed_group})
-            atomic_write_json(process_file(mode), lifecycle)
-
-            if self._wait_dead(pid, graceful_timeout, expected_identity):
-                self._finish_stop(mode)
-                return self.status(mode)
-
-            if expected_identity and not procctl.is_process_alive(pid, expected_identity):
-                self._finish_stop(mode)
-                return self.status(mode)
+        with self._operation_lock:
             try:
-                procctl.send_graceful_signal(pid, process_group=managed_group)
-            except (OSError, ProcessLookupError, RuntimeError):
-                pass
-            if self._wait_dead(pid, signal_timeout, expected_identity):
-                self._finish_stop(mode)
-                return self.status(mode)
+                with self._lock:
+                    self._intentional_stop = True
+                    self._auto_restart_mode = None
+                    mode = cfgmod.require_valid_mode(cfgmod.PUMP_CONFIG)
+                    cfg = cfgmod.PUMP_CONFIG
+                    status = self.status(mode)
+                    if status["status"] in ("STOPPED", "CRASHED"):
+                        return status
+                    policy = str(position_policy or "REQUIRE_EMPTY").strip().upper()
+                    position = self._position(cfg)
+                    if position["has_position"] and policy not in (
+                        "SELL_FIRST", "KEEP_OPEN"
+                    ):
+                        raise BotControlError(
+                            "Ada posisi terbuka. Pilih SELL_FIRST atau KEEP_OPEN."
+                        )
 
-            if expected_identity and not procctl.is_process_alive(pid, expected_identity):
-                self._finish_stop(mode)
-                return self.status(mode)
-            try:
-                procctl.force_kill(pid, self._tree if managed_group else None,
-                                   process_group=managed_group)
-            except (OSError, ProcessLookupError):
-                pass
-            self._wait_dead(pid, 5.0, expected_identity)
-            self._finish_stop(mode, forced=True)
-            return self.status(mode)
+                # SELL_FIRST menunggu loop bot dan dapat memakan waktu beberapa
+                # interval. Jangan pegang _lock agar endpoint status tetap responsif.
+                if position["has_position"] and policy == "SELL_FIRST":
+                    self._sell_first(
+                        cfg,
+                        max(30.0, float(cfg.get("LOOP_INTERVAL_SECONDS", 15)) * 5),
+                    )
+
+                with self._lock:
+                    # Ambil snapshot baru setelah kemungkinan penjualan posisi.
+                    status = self.status(mode)
+                    if status["status"] in ("STOPPED", "CRASHED"):
+                        return status
+                    pid = int(status["pid"])
+                    expected_identity = status.get("process_identity")
+                    managed_group = bool(
+                        self._proc is not None
+                        and self._managed_mode == mode
+                        and self._proc.pid == pid
+                    )
+                    tree = self._tree if managed_group else None
+                    state_mod.request_stop(cfg["CONTROL_FILE"])
+                    lifecycle = self._read_lifecycle(mode)
+                    lifecycle.update({
+                        "mode": mode,
+                        "status": "STOPPING",
+                        "pid": pid,
+                        "updated_at": time.time(),
+                        "managed": managed_group,
+                    })
+                    atomic_write_json(process_file(mode), lifecycle)
+
+                if self._wait_dead(pid, graceful_timeout, expected_identity):
+                    with self._lock:
+                        self._finish_stop(mode)
+                        return self.status(mode)
+
+                if expected_identity and not procctl.is_process_alive(
+                    pid, expected_identity
+                ):
+                    with self._lock:
+                        self._finish_stop(mode)
+                        return self.status(mode)
+                try:
+                    procctl.send_graceful_signal(pid, process_group=managed_group)
+                except (OSError, ProcessLookupError, RuntimeError):
+                    pass
+                if self._wait_dead(pid, signal_timeout, expected_identity):
+                    with self._lock:
+                        self._finish_stop(mode)
+                        return self.status(mode)
+
+                if expected_identity and not procctl.is_process_alive(
+                    pid, expected_identity
+                ):
+                    with self._lock:
+                        self._finish_stop(mode)
+                        return self.status(mode)
+                try:
+                    procctl.force_kill(
+                        pid, tree, process_group=managed_group
+                    )
+                except (OSError, ProcessLookupError):
+                    pass
+                self._wait_dead(pid, 5.0, expected_identity)
+                with self._lock:
+                    self._finish_stop(mode, forced=True)
+                    return self.status(mode)
+            except Exception:
+                # Jika STOP gagal sebelum proses benar-benar berhenti, pertahankan
+                # fungsi supervisor untuk crash berikutnya.
+                with self._lock:
+                    self._intentional_stop = False
+                raise
 
     def _wait_dead(self, pid: int, timeout: float,
                    expected_identity: str | None = None) -> bool:
         deadline = time.monotonic() + max(0.0, timeout)
         while time.monotonic() < deadline:
-            if self._proc is not None and self._proc.pid == pid:
-                if self._proc.poll() is not None:
+            with self._lock:
+                managed_proc = (
+                    self._proc
+                    if self._proc is not None and self._proc.pid == pid
+                    else None
+                )
+            if managed_proc is not None:
+                if managed_proc.poll() is not None:
                     return True
             elif not procctl.is_process_alive(pid, expected_identity):
                 return True
             time.sleep(0.1)
-        if self._proc is not None and self._proc.pid == pid:
-            return self._proc.poll() is not None
+        with self._lock:
+            managed_proc = (
+                self._proc
+                if self._proc is not None and self._proc.pid == pid
+                else None
+            )
+        if managed_proc is not None:
+            return managed_proc.poll() is not None
         return not procctl.is_process_alive(pid, expected_identity)
 
     def _finish_stop(self, mode: str, forced: bool = False) -> None:
@@ -582,20 +817,23 @@ class BotProcessManager:
             self._clear_managed_handles()
         else:
             current = self._read_lifecycle(mode)
+            previous_code = current.get("exit_code")
+            previous_crash = (
+                str(current.get("status") or "").upper() == "CRASHED"
+                and previous_code not in (None, 0)
+            )
+            crashed = forced or previous_crash
             current.update({
                 "mode": mode,
-                "status": "CRASHED" if forced else "STOPPED",
+                "status": "CRASHED" if crashed else "STOPPED",
                 "updated_at": time.time(),
-                "exit_code": 1 if forced else current.get("exit_code", 0),
-                "reason": "Dihentikan paksa setelah timeout." if forced else "Stop graceful dari dashboard.",
+                "exit_code": 1 if forced else previous_code if previous_code is not None else 0,
+                "reason": (
+                    "Dihentikan paksa setelah timeout."
+                    if forced else current.get("reason") or "Stop graceful dari dashboard."
+                ),
             })
             atomic_write_json(process_file(mode), current)
-
-    def restart(self, *, position_policy: str = "REQUIRE_EMPTY") -> dict:
-        self.stop(position_policy=position_policy)
-        cfgmod = self._config()
-        cfgmod.reload_config()
-        return self.start()
 
     def shutdown_dashboard(self) -> None:
         self._watchdog_stop.set()

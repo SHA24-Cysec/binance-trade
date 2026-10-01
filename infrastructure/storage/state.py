@@ -32,33 +32,42 @@ DEFAULT_STATE = {
 }
 
 
-def _load_state_unlocked(path: str) -> dict:
+def _load_state_checked_unlocked(path: str) -> tuple[dict, bool, str]:
     if not os.path.exists(path):
         logger.info("File state %s tidak ditemukan, mulai dari state kosong.", path)
-        return dict(DEFAULT_STATE)
+        return dict(DEFAULT_STATE), True, ""
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("root state harus object JSON")
         merged = dict(DEFAULT_STATE)
         merged.update(data)
-        return merged
-    except json.JSONDecodeError as exc:
+        return merged, True, ""
+    except (json.JSONDecodeError, ValueError, TypeError) as exc:
         try:
             backup = archive_corrupt(path)
         except OSError as backup_exc:
             backup = None
             logger.error("State %s rusak dan gagal diarsipkan: %s", path, backup_exc)
-        logger.error("Gagal membaca %s (%s). Cadangan: %s. Membuat state default.",
-                     path, exc, backup)
-        return dict(DEFAULT_STATE)
+        message = f"Gagal membaca state valid {path}: {exc}. Cadangan: {backup}"
+        logger.error("%s. Membuat state default fail-closed.", message)
+        return dict(DEFAULT_STATE), False, message
     except OSError as exc:
-        logger.error("Gagal membaca %s (%s). Membuat state baru dari default.", path, exc)
-        return dict(DEFAULT_STATE)
+        message = f"Gagal membaca state {path}: {exc}"
+        logger.error("%s. Membuat state default fail-closed.", message)
+        return dict(DEFAULT_STATE), False, message
+
+
+def load_state_checked(path: str) -> tuple[dict, bool, str]:
+    """Baca state beserta status integritas untuk keputusan fail-closed."""
+    with interprocess_lock(path):
+        return _load_state_checked_unlocked(path)
 
 
 def load_state(path: str) -> dict:
-    with interprocess_lock(path):
-        return _load_state_unlocked(path)
+    state, _valid, _error = load_state_checked(path)
+    return state
 
 
 def save_state(path: str, state: dict) -> None:

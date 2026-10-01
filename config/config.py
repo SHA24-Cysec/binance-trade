@@ -4,7 +4,8 @@ Konfigurasi bot Binance Spot.
 Bot memindai pasar, membuka posisi baru saat setup pullback-retest lolos
 semua filter (gerbang pump, likuiditas, spread, usia listing, rem risiko),
 lalu mengelola exit (SL/TP/BE/trailing, mode FIXED atau ATR). Mode PAPER
-dan LIVE dipisah per file state.
+dan LIVE dipisah per file state. Mode aktif dibaca dari BOT_MODE di file .env
+saat proses dimulai.
 
 Semua artefak runtime ditulis ke dua folder khusus (definisi ada di
 infrastructure/paths.py): file log ke logs/, file state/kontrol/settings ke
@@ -16,6 +17,11 @@ import os
 from copy import deepcopy
 
 from infrastructure.paths import PROJECT_ROOT
+
+# Nilai ini ditangkap sebelum .env dimuat. Dashboard mengisinya pada child bot
+# agar perubahan .env setelah dashboard hidup tidak dapat membuat mode child
+# berbeda dari mode yang sudah diperiksa oleh parent.
+_MANAGED_MODE_OVERRIDE = os.environ.get("PUMP_BOT_MANAGED_MODE", "")
 
 try:
     from dotenv import load_dotenv
@@ -155,20 +161,52 @@ PUMP_CONFIG = {
 PUMP_DEFAULTS = deepcopy(PUMP_CONFIG)
 PUMP_DEFAULTS["BASE_URL"] = PUMP_DEFAULTS["LIVE_BASE_URL"]
 CONFIG_LOAD_ERRORS: list[str] = []
+MODE_SOURCE = "default"
+
+
+def _mode_from_environment(default: str) -> tuple[str, str, list[str]]:
+    """Pilih mode secara deterministik dari parent terkelola atau .env.
+
+    PUMP_BOT_MANAGED_MODE hanya diisi oleh dashboard untuk child bot. Pengguna
+    memilih mode lewat BOT_MODE di .env. MODE tetap diterima sebagai alias lama.
+    Dua nilai pengguna yang berbeda ditolak agar tidak ada pilihan diam-diam.
+    """
+    managed = str(_MANAGED_MODE_OVERRIDE or "").strip()
+    if managed:
+        return managed, "managed-parent", []
+
+    primary = str(os.environ.get("BOT_MODE", "") or "").strip()
+    legacy = str(os.environ.get("MODE", "") or "").strip()
+    errors: list[str] = []
+    if primary and legacy and primary.upper() != legacy.upper():
+        errors.append(
+            f"BOT_MODE={primary!r} berbeda dari MODE={legacy!r}. "
+            "Sisakan satu nilai mode yang konsisten di .env."
+        )
+    if primary:
+        return primary, ".env:BOT_MODE", errors
+    if legacy:
+        return legacy, ".env:MODE", errors
+    return default, "default:PAPER", errors
 
 
 def _load_runtime_layers(explicit_mode: str | None = None) -> None:
-    from config.settings_schema import load_mode_override, load_runtime_mode, validate_candidate
+    global MODE_SOURCE
+    from config.settings_schema import load_mode_override, validate_candidate
 
     cfg = deepcopy(PUMP_DEFAULTS)
     cfg["API_KEY"] = os.environ.get("BINANCE_API_KEY", "")
     cfg["API_SECRET"] = os.environ.get("BINANCE_API_SECRET", "")
     errors: list[str] = []
     if explicit_mode is None:
-        active_mode, runtime_errors = load_runtime_mode(str(cfg.get("MODE", "PAPER")))
-        errors.extend(runtime_errors)
+        active_mode, mode_source, mode_errors = _mode_from_environment(
+            str(cfg.get("MODE", "PAPER"))
+        )
+        errors.extend(mode_errors)
     else:
         active_mode = explicit_mode
+        mode_source = "explicit"
+    MODE_SOURCE = mode_source
     cfg["MODE"] = active_mode
 
     normalized = str(active_mode).strip().upper()
@@ -192,17 +230,14 @@ def _load_runtime_layers(explicit_mode: str | None = None) -> None:
     PUMP_CONFIG.clear()
     PUMP_CONFIG.update(cfg)
     CONFIG_LOAD_ERRORS.clear()
-    # Marker error yang sama bisa dilaporkan oleh load_runtime_mode dan
-    # load_mode_override karena keduanya kini membaca satu file settings;
-    # hapus duplikat supaya pesan di dashboard tidak dobel.
     CONFIG_LOAD_ERRORS.extend(dict.fromkeys(errors))
 
 
 _load_runtime_layers()
 
 
-# Satu sumber kebenaran: didefinisikan di settings_schema (dipakai UI dan
-# validasi override) dan diimpor di sini supaya get_mode/require_valid_mode
+# Satu sumber kebenaran: didefinisikan di settings_schema dan diimpor di sini
+# supaya get_mode/require_valid_mode
 # tidak punya salinan sendiri yang bisa berbeda diam-diam.
 from config.settings_schema import VALID_MODES  # noqa: E402
 
@@ -217,6 +252,10 @@ def get_mode(config: dict = None) -> str:
     return mode if mode in VALID_MODES else "PAPER"
 
 
+def get_mode_source() -> str:
+    return MODE_SOURCE
+
+
 def require_valid_mode(config: dict = None) -> str:
     cfg = PUMP_CONFIG if config is None else config
     raw = cfg.get("MODE", None)
@@ -224,9 +263,8 @@ def require_valid_mode(config: dict = None) -> str:
     if mode not in VALID_MODES:
         raise InvalidModeError(
             f"MODE tidak valid: {raw!r}. Nilai yang diizinkan hanya "
-            f"{', '.join(VALID_MODES)}. Perbaiki data/settings.json atau "
-            "hapus file itu agar default PAPER dipakai. Bot TIDAK akan berjalan "
-            "dengan mode yang tidak dikenal demi keamanan."
+            f"{', '.join(VALID_MODES)}. Perbaiki BOT_MODE di file .env. "
+            "Bot TIDAK akan berjalan dengan mode yang tidak dikenal demi keamanan."
         )
     return mode
 

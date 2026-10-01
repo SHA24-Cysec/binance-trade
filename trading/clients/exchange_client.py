@@ -30,6 +30,11 @@ from typing import Optional
 
 logger = logging.getLogger("exchange_client")
 
+# Metadata internal yang hanya ditambahkan oleh LiveClient setelah endpoint
+# resmi API-key permission Binance mengonfirmasi izin Spot trading.
+ACCOUNT_SPOT_PERMISSION_VERIFIED = "_pump_bot_spot_permission_verified"
+ACCOUNT_SPOT_PERMISSION_SOURCE = "_pump_bot_spot_permission_source"
+
 
 class ExchangeClient(ABC):
 

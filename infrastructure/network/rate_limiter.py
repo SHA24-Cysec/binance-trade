@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import tempfile
 import threading
@@ -60,14 +61,24 @@ class SharedRequestWeightLimiter:
         }
 
     def _normalise(self, state: dict | None, now: float) -> dict:
+        if state is None:
+            return self._fresh_state(now)
         if not isinstance(state, dict):
-            return self._fresh_state(now)
+            raise RateLimitBlockedError(self.window_seconds)
         try:
-            window_start = float(state.get("window_start", 0.0))
-            used = max(0, int(state.get("used", 0)))
-            blocked_until = max(0.0, float(state.get("blocked_until", 0.0)))
-        except (TypeError, ValueError):
-            return self._fresh_state(now)
+            window_start = float(state["window_start"])
+            used = max(0, int(state["used"]))
+            blocked_until = max(0.0, float(state["blocked_until"]))
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            logger.error("Ledger rate limit Binance rusak: %s", exc)
+            raise RateLimitBlockedError(self.window_seconds) from exc
+        if (
+            not math.isfinite(window_start)
+            or not math.isfinite(blocked_until)
+            or used > 10**15
+        ):
+            logger.error("Ledger rate limit Binance memuat angka tidak valid.")
+            raise RateLimitBlockedError(self.window_seconds)
         if now >= window_start + self.window_seconds:
             return {
                 "window_start": self._window_start(now, self.window_seconds),
@@ -86,8 +97,14 @@ class SharedRequestWeightLimiter:
         try:
             with open(self.state_file, "r", encoding="utf-8") as fh:
                 return json.load(fh)
-        except (FileNotFoundError, OSError, ValueError, TypeError):
+        except FileNotFoundError:
             return None
+        except (OSError, ValueError, TypeError) as exc:
+            logger.error(
+                "Ledger rate limit %s tidak dapat diverifikasi: %s. Request diblokir.",
+                self.state_file, exc,
+            )
+            raise RateLimitBlockedError(self.window_seconds) from exc
 
     def _write_file(self, state: dict) -> None:
         if not self.state_file:

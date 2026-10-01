@@ -15,11 +15,16 @@ Versi acuan: requests>=2.32.4, Python 3.10+.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Optional
 
-from trading.clients.binance_client import BinanceSpotClient, _fmt_num
+from trading.clients.binance_client import BinanceAPIError, BinanceSpotClient, _fmt_num
 from config.config import get_base_url
-from trading.clients.exchange_client import ExchangeClient
+from trading.clients.exchange_client import (
+    ACCOUNT_SPOT_PERMISSION_SOURCE,
+    ACCOUNT_SPOT_PERMISSION_VERIFIED,
+    ExchangeClient,
+)
 from market.market_data import MarketDataProvider
 
 logger = logging.getLogger("live_client")
@@ -39,6 +44,9 @@ class LiveClient(ExchangeClient):
             rate_limit_safety_margin=int(config.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100),
         )
         self.market = MarketDataProvider(config)
+        self._spot_permission_verified_until = 0.0
+        self._spot_permission_logged = False
+        self._account_permission_diagnostic_logged = False
         logger.info("LiveClient siap (UANG ASLI). endpoint=%s", get_base_url(config))
 
     def sync_time(self) -> None:
@@ -46,7 +54,10 @@ class LiveClient(ExchangeClient):
         self.market.sync_time()
 
     def close(self) -> None:
-        self.market.close()
+        try:
+            self.market.close()
+        finally:
+            self.signed.close()
 
     def get_exchange_info(self, symbol: Optional[str] = None) -> dict:
         return self.market.get_exchange_info(symbol=symbol)
@@ -68,8 +79,84 @@ class LiveClient(ExchangeClient):
     def get_depth(self, symbol: str, limit: int = 100) -> dict:
         return self.market.get_depth(symbol, limit=limit)
 
+    def _verify_api_key_spot_permission(self) -> None:
+        """Verifikasi izin trading milik API key, bukan hanya status akun.
+
+        ``GET /api/v3/account`` pada sebagian respons produksi dapat tidak
+        menyertakan ``permissions`` walaupun ``canTrade`` dan ``accountType``
+        valid. Endpoint apiRestrictions adalah sumber resmi untuk izin API key.
+        Hasil di-cache singkat agar tiap pembacaan saldo tidak menambah request.
+        """
+        now = time.monotonic()
+        if now < self._spot_permission_verified_until:
+            return
+        permission = self.signed.get_api_key_permissions()
+        if not isinstance(permission, dict):
+            raise BinanceAPIError(
+                502, None, "respons API-key permission bukan object"
+            )
+        if permission.get("enableReading") is not True:
+            raise BinanceAPIError(
+                403, None, "API key tidak memiliki izin membaca akun"
+            )
+        if permission.get("enableSpotAndMarginTrading") is not True:
+            raise BinanceAPIError(
+                403, None,
+                "API key tidak mengizinkan Spot & Margin Trading",
+            )
+        self._spot_permission_verified_until = now + 60.0
+        if not self._spot_permission_logged:
+            logger.info(
+                "Izin API key Spot trading terverifikasi melalui "
+                "GET /sapi/v1/account/apiRestrictions."
+            )
+            self._spot_permission_logged = True
+
+    @staticmethod
+    def _safe_diagnostic_label(value, limit: int = 64) -> str:
+        text = str(value).strip().upper()
+        safe = "".join(
+            char if char.isascii() and (char.isalnum() or char in "_:-") else "?"
+            for char in text
+        )[:limit]
+        return safe or "<kosong>"
+
+    @classmethod
+    def _safe_permission_diagnostic(cls, account: dict) -> str:
+        """Ringkas field permission tanpa saldo, UID, atau karakter kontrol."""
+        if "permissions" not in account:
+            return "<field tidak ada>"
+        raw = account.get("permissions")
+        if not isinstance(raw, list):
+            return f"<tipe {type(raw).__name__}>"
+        labels = [cls._safe_diagnostic_label(item) for item in raw[:20]]
+        if len(raw) > 20:
+            labels.append(f"<dan {len(raw) - 20} lainnya>")
+        return repr(labels)
+
     def get_account(self) -> dict:
-        return self.signed.get_account()
+        account = self.signed.get_account()
+        if not isinstance(account, dict):
+            return account
+        self._verify_api_key_spot_permission()
+        if not self._account_permission_diagnostic_logged:
+            logger.info(
+                "DIAGNOSTIK AMAN permission akun: permissions=%s | "
+                "canTrade=%s | accountType=%s | apiRestrictionsSpot=True. "
+                "Saldo, UID, API key, dan secret tidak dicatat.",
+                self._safe_permission_diagnostic(account),
+                self._safe_diagnostic_label(account.get("canTrade")),
+                self._safe_diagnostic_label(
+                    account.get("accountType") or "<kosong>", limit=32
+                ),
+            )
+            self._account_permission_diagnostic_logged = True
+        verified = dict(account)
+        verified[ACCOUNT_SPOT_PERMISSION_VERIFIED] = True
+        verified[ACCOUNT_SPOT_PERMISSION_SOURCE] = (
+            "GET /sapi/v1/account/apiRestrictions"
+        )
+        return verified
 
     def new_market_order(self, symbol: str, side: str,
                          quantity: Optional[float] = None,
@@ -143,25 +230,20 @@ class LiveClient(ExchangeClient):
 
     def get_order(self, symbol: str, order_id: Optional[int] = None,
                   orig_client_order_id: Optional[str] = None) -> dict:
-        params = {"symbol": symbol}
-        if order_id is not None:
-            params["orderId"] = order_id
-        if orig_client_order_id is not None:
-            params["origClientOrderId"] = orig_client_order_id
-        return self.signed._request("GET", "/api/v3/order", params, signed=True)
+        return self.signed.get_order(
+            symbol, order_id=order_id,
+            orig_client_order_id=orig_client_order_id,
+        )
 
     def cancel_order(self, symbol: str, order_id: Optional[int] = None,
                      orig_client_order_id: Optional[str] = None) -> dict:
-        params = {"symbol": symbol}
-        if order_id is not None:
-            params["orderId"] = order_id
-        if orig_client_order_id is not None:
-            params["origClientOrderId"] = orig_client_order_id
-        return self.signed._request("DELETE", "/api/v3/order", params, signed=True)
+        return self.signed.cancel_order(
+            symbol, order_id=order_id,
+            orig_client_order_id=orig_client_order_id,
+        )
 
     def get_open_orders(self, symbol: Optional[str] = None) -> list:
-        params = {"symbol": symbol} if symbol else {}
-        return self.signed._request("GET", "/api/v3/openOrders", params, signed=True)
+        return self.signed.get_open_orders(symbol)
 
     def get_dust_convertible(self, account_type: str = "SPOT") -> dict:
         return self.signed.get_dust_convertible(account_type)

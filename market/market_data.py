@@ -103,6 +103,7 @@ class MarketDataProvider:
                     pass
                 self._ws = None
             self._subscribed.clear()
+        self.rest.close()
 
     def sync_time(self) -> None:
         self.rest.sync_time()

@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """Dashboard pemantauan dan kontrol Pump Scanner Bot Binance Spot.
 
-Dashboard dapat memulai, menghentikan, dan me-restart child process bot,
-mengelola settings per mode, mengganti PAPER/LIVE, menyimpan kredensial,
-menguji endpoint account read-only, serta mereset akun PAPER. File state,
-log, settings, lock, dan lifecycle dipisahkan untuk PAPER dan LIVE.
+Dashboard menyediakan Resume Bot dan Stop Bot untuk child process bot.
+Kontrol perubahan mode, kredensial, settings, reset PAPER, dan restart manual
+tidak disediakan. Mode aktif dibaca dari BOT_MODE di .env saat dashboard
+mulai. File state, log, lock, dan lifecycle tetap dipisahkan untuk PAPER dan
+LIVE; Resume ditolak jika mode lain berjalan atau masih memiliki posisi.
 
 Keamanan sengaja berlapis: bind default 127.0.0.1, validasi Host dan Origin,
 token admin per proses untuk semua request tulis, pembatasan request, dan
 mode read-only otomatis jika bind bukan loopback. Dashboard tidak memiliki
 login dan tidak ditujukan untuk diekspos ke internet.
 
-Menjalankan ``python dashboard.py`` membuka dashboard dengan bot STOPPED.
-Menjalankan ``python run.py`` membuka dashboard dan auto-start bot.
+Menjalankan ``python dashboard.py`` atau ``python run.py`` membuka dashboard
+dengan bot STOPPED. Bot baru berjalan setelah tombol Resume Bot ditekan.
 """
 
 from __future__ import annotations
 
-import hashlib
 import ipaddress
 import json
 import logging
@@ -31,35 +31,23 @@ import uuid
 from copy import deepcopy
 from datetime import datetime, timezone
 from hmac import compare_digest
-from pathlib import Path
 from urllib.parse import urlsplit
 
 from flask import Flask, jsonify, render_template, request
 
 from infrastructure.paths import PROJECT_ROOT
 
-from config import config as config_mod
 from config.config import (
-    PUMP_CONFIG, CONFIG_LOAD_ERRORS, get_mode, get_base_url, is_paper,
-    backtest_enabled, get_state_file, get_log_file, get_control_file,
+    PUMP_CONFIG, CONFIG_LOAD_ERRORS, get_mode, get_mode_source, get_base_url,
+    is_paper, backtest_enabled, get_state_file, get_log_file, get_control_file,
     watchlist_enabled,
 )
 from infrastructure.storage import state as state_mod
 from market import market_scanner as scanner
-from infrastructure.storage.atomic_io import replace_with_retry, timestamp_tag
-from infrastructure.security.credential_store import (
-    ENV_PATH, credential_status, update_env,
-)
 from infrastructure.process.runtime_control import BotControlError, BotProcessManager
-from config.settings_schema import (
-    PARAMETER_SCHEMA, ConcurrentSettingsError, audit_change, compute_overrides,
-    dangerous_relaxations, diff_values, public_schema, read_audit,
-    save_mode_override, save_runtime_mode, validate_balances,
-    validate_candidate,
-)
 
 try:
-    from trading.clients.binance_client import BinanceAPIError, BinanceSpotClient
+    from trading.clients.binance_client import BinanceSpotClient
     _HAS_CLIENT = True
 except Exception:
     _HAS_CLIENT = False
@@ -120,13 +108,17 @@ _ADMIN_TOKEN = secrets.token_urlsafe(32)
 _process_manager = BotProcessManager()
 _runtime_lock = threading.RLock()
 _cache_lock = threading.RLock()
-_credential_lock = threading.RLock()
 _confirm_lock = threading.RLock()
 _confirmations: dict[str, dict] = {}
 _rate_lock = threading.RLock()
 _last_dangerous_action: dict[str, float] = {}
 _write_attempts: dict[str, list[float]] = {}
-_credential_test_state: dict = {"fingerprint": None, "tested_at": None, "account": None}
+
+# Aksi proses dijalankan di worker agar request HTTP langsung mendapat jawaban.
+# STOP dapat menunggu penjualan posisi dan shutdown graceful cukup lama.
+_control_operation_lock = threading.RLock()
+_control_operation: dict | None = None
+_CONTROL_ACTIVE_STATUSES = frozenset(("PENDING", "RUNNING"))
 
 try:
     _DASHBOARD_PORT = int(os.environ.get("DASHBOARD_PORT", "8080"))
@@ -247,6 +239,58 @@ def _take_confirmation(token: str, kind: str) -> dict | None:
     return item.get("payload") or {}
 
 
+def _control_operation_snapshot() -> dict | None:
+    with _control_operation_lock:
+        return deepcopy(_control_operation) if _control_operation else None
+
+
+def _active_control_operation() -> dict | None:
+    operation = _control_operation_snapshot()
+    if operation and operation.get("status") in _CONTROL_ACTIVE_STATUSES:
+        return operation
+    return None
+
+
+def _update_control_operation(operation_id: str, **updates) -> bool:
+    global _control_operation
+    with _control_operation_lock:
+        if not _control_operation or _control_operation.get("id") != operation_id:
+            return False
+        _control_operation.update(updates)
+        _control_operation["updated_at"] = time.time()
+        return True
+
+
+def _run_control_operation(operation_id: str, action: str,
+                           position_policy: str) -> None:
+    _update_control_operation(
+        operation_id,
+        status="RUNNING",
+        started_at=time.time(),
+    )
+    try:
+        if action == "START":
+            result = _process_manager.start()
+        else:
+            result = _process_manager.stop(position_policy=position_policy)
+    except Exception as exc:
+        logger.exception("Aksi proses %s gagal: %s", action, exc)
+        _update_control_operation(
+            operation_id,
+            status="FAILED",
+            finished_at=time.time(),
+            error=str(exc)[:500] or type(exc).__name__,
+        )
+        return
+    _update_control_operation(
+        operation_id,
+        status="SUCCEEDED",
+        finished_at=time.time(),
+        process=result,
+        error=None,
+    )
+
+
 _client = None
 _price_cache: dict = {}
 _balance_cache: dict = {"data": None, "ts": 0}
@@ -257,35 +301,6 @@ PRICE_TTL = 5.0
 BALANCE_TTL = 30.0
 
 WATCHLIST_TTL = 20.0
-
-
-def _refresh_runtime_globals() -> None:
-    global STATE_FILE, LOG_FILE, CONTROL_FILE, QUOTE, _client, _auto_refresher
-    with _runtime_lock:
-        old_client = _client
-        if old_client is not None:
-            try:
-                close = getattr(old_client, "close", None)
-                if close:
-                    close()
-            except Exception:
-                pass
-        _client = None
-        if _auto_refresher is not None:
-            try:
-                _auto_refresher.stop()
-            except Exception:
-                pass
-            _auto_refresher = None
-        STATE_FILE = PUMP_CONFIG.get("STATE_FILE") or get_state_file()
-        LOG_FILE = PUMP_CONFIG.get("LOG_FILE") or get_log_file()
-        CONTROL_FILE = PUMP_CONFIG.get("CONTROL_FILE") or get_control_file()
-        QUOTE = PUMP_CONFIG.get("QUOTE_ASSET", "USDT")
-        with _cache_lock:
-            _price_cache.clear()
-            _balance_cache.update({"data": None, "ts": 0})
-            _watchlist_cache.update({"data": None, "ts": 0, "error": None})
-        start_auto_refresher()
 
 
 def get_client():
@@ -1462,89 +1477,18 @@ def api_all():
     })
 
 
-def _config_pair(mode: str) -> tuple[dict, dict, list[str]]:
-    raw = str(mode).strip().upper()
-    if raw not in config_mod.VALID_MODES:
-        raise ValueError("Mode hanya boleh PAPER atau LIVE.")
-    defaults = config_mod.default_config_for_mode(raw)
-    current, errors = config_mod.build_config_for_mode(raw, validate=False)
-    return defaults, current, errors
-
-
-def _revision(config: dict) -> str:
-    public = {k: config.get(k) for k in PARAMETER_SCHEMA if k not in ("API_KEY", "API_SECRET")}
-    encoded = json.dumps(public, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-
-
-def _credential_fingerprint(key: str, secret: str) -> str:
-    return hashlib.sha256((key + "\x00" + secret).encode("utf-8")).hexdigest()
-
-
-def _write_audit(event: dict) -> str | None:
-    try:
-        audit_change(event)
-        return None
-    except OSError as exc:
-        return f"Audit gagal ditulis: {exc}"
-
-
-def _credentials_tested_for_active_values() -> bool:
-    key = str(PUMP_CONFIG.get("API_KEY", ""))
-    secret = str(PUMP_CONFIG.get("API_SECRET", ""))
-    if not key or not secret:
-        return False
-    with _credential_lock:
-        fingerprint = str(_credential_test_state.get("fingerprint") or "")
-    return compare_digest(fingerprint, _credential_fingerprint(key, secret))
-
-
-def _withdrawal_permission_safe() -> bool:
-    if str(os.environ.get("ALLOW_LIVE_WITHDRAWAL_KEY", "")).strip().lower() in (
-        "1", "true", "yes", "on"
-    ):
-        return True
-    if not _credentials_tested_for_active_values():
-        return False
-    with _credential_lock:
-        account = _credential_test_state.get("account") or {}
-    if "can_withdraw" not in account:
-        return False
-    return not bool(account.get("can_withdraw"))
-
-
-def _risk_summary(config: dict) -> dict:
-    use_atr = bool(config.get("USE_ATR_EXIT"))
-    summary: dict = {
-        "USE_ATR_EXIT": use_atr,
-        "USE_STOP_LOSS": config.get("USE_STOP_LOSS"),
-        "USE_TP": config.get("USE_TP"),
-        "USE_EQUITY_STOP": config.get("USE_EQUITY_STOP"),
-        "MAX_DRAWDOWN_PERCENT": config.get("MAX_DRAWDOWN_PERCENT"),
-        "USE_DAILY_STOP": config.get("USE_DAILY_STOP"),
-        "MAX_DAILY_LOSS_PERCENT": config.get("MAX_DAILY_LOSS_PERCENT"),
-        "CLOSE_ALL_AT_LIMIT": config.get("CLOSE_ALL_AT_LIMIT"),
-    }
-    if use_atr:
-        # Saat ATR aktif, SL_PCT/TP_PCT hanyalah fallback bila ATR mati;
-        # beri label eksplisit supaya tidak disangka level yang sedang dipakai.
-        summary["ATR_MULT_SL"] = config.get("ATR_MULT_SL")
-        summary["ATR_MULT_TP"] = config.get("ATR_MULT_TP")
-        summary["SL_PCT (fallback)"] = config.get("SL_PCT")
-        summary["TP_PCT (fallback)"] = config.get("TP_PCT")
-    else:
-        summary["SL_PCT"] = config.get("SL_PCT")
-        summary["TP_PCT"] = config.get("TP_PCT")
-    return summary
-
-
 @app.route("/api/control/status")
 def api_control_status():
-    process = _process_manager.status(get_mode(PUMP_CONFIG))
+    mode = get_mode(PUMP_CONFIG)
+    process = _process_manager.status(mode)
+    guard = _process_manager.mode_guard(mode)
     return jsonify({
         "process": process,
         "position": _process_manager.position(),
-        "mode": get_mode(PUMP_CONFIG),
+        "operation": _control_operation_snapshot(),
+        "mode": mode,
+        "mode_source": get_mode_source(),
+        "mode_guard": guard,
         "read_only": not _bind_is_loopback(),
         "config_errors": list(CONFIG_LOAD_ERRORS),
         "platform": {"os_name": os.name, "windows": os.name == "nt"},
@@ -1555,17 +1499,32 @@ def api_control_status():
 def api_control_prepare():
     data = request.get_json(silent=True) or {}
     action = str(data.get("action", "")).strip().upper()
-    if action not in ("START", "STOP", "RESTART"):
-        return jsonify({"error": "Aksi proses tidak valid."}), 400
+    if action not in ("START", "STOP"):
+        return jsonify({"error": "Aksi hanya boleh START atau STOP."}), 400
+    active_operation = _active_control_operation()
+    if active_operation:
+        return jsonify({
+            "error": "Aksi bot lain masih diproses. Tunggu sampai selesai.",
+            "operation": active_operation,
+        }), 409
     status = _process_manager.status(get_mode(PUMP_CONFIG))
     position = _process_manager.position()
     active_statuses = ("STARTING", "RUNNING", "STOPPING")
+    if action == "START" and CONFIG_LOAD_ERRORS:
+        return jsonify({"error": "Konfigurasi mode tidak valid: " + "; ".join(CONFIG_LOAD_ERRORS)}), 409
     if action == "START" and status["status"] not in ("STOPPED", "CRASHED"):
-        return jsonify({"error": f"Start ditolak karena bot sedang {status['status']}."}), 409
-    if action in ("STOP", "RESTART") and status["status"] not in active_statuses:
-        return jsonify({"error": f"{action.title()} ditolak karena bot sudah {status['status']}."}), 409
+        return jsonify({"error": f"Resume Bot ditolak karena bot sedang {status['status']}."}), 409
+    if action == "START":
+        guard = _process_manager.mode_guard(get_mode(PUMP_CONFIG))
+        if not guard["safe"]:
+            return jsonify({
+                "error": "Resume Bot ditolak demi keamanan antar mode. " + " ".join(guard["reasons"]),
+                "mode_guard": guard,
+            }), 409
+    if action == "STOP" and status["status"] not in active_statuses:
+        return jsonify({"error": f"Stop Bot ditolak karena bot sudah {status['status']}."}), 409
     policy = str(data.get("position_policy", "REQUIRE_EMPTY")).strip().upper()
-    if action in ("STOP", "RESTART") and position["has_position"]:
+    if action == "STOP" and position["has_position"]:
         if policy not in ("SELL_FIRST", "KEEP_OPEN"):
             return jsonify({
                 "error": "Ada posisi terbuka. Pilih jual dulu atau pertahankan posisi.",
@@ -1594,522 +1553,88 @@ def api_control_prepare():
 
 @app.route("/api/control/execute", methods=["POST"])
 def api_control_execute():
+    global _control_operation
+
     data = request.get_json(silent=True) or {}
     payload = _take_confirmation(data.get("confirmation_id", ""), "process")
     if payload is None:
         return jsonify({"error": "Konfirmasi kedaluwarsa atau tidak valid."}), 409
     if payload.get("mode") != get_mode(PUMP_CONFIG):
         return jsonify({"error": "Mode berubah sejak konfirmasi. Ulangi aksi."}), 409
-    current = _process_manager.status(get_mode(PUMP_CONFIG))
-    if payload.get("action") == "START":
-        if current["status"] not in ("STOPPED", "CRASHED"):
-            return jsonify({"error": "Status proses berubah sejak konfirmasi Start."}), 409
-    elif current["status"] not in ("STARTING", "RUNNING", "STOPPING") or current.get("pid") != payload.get("pid"):
-        return jsonify({"error": "PID atau status proses berubah sejak konfirmasi. Ulangi aksi."}), 409
-    ok, left = _cooldown("process", 2.0)
-    if not ok:
-        return jsonify({"error": f"Tunggu {left:.1f} detik sebelum aksi proses berikutnya."}), 429
-    try:
-        action = payload["action"]
+
+    # Pemeriksaan dan pembuatan operation harus atomik agar klik ganda tidak
+    # pernah meluncurkan dua worker START/STOP.
+    with _control_operation_lock:
+        if (
+            _control_operation
+            and _control_operation.get("status") in _CONTROL_ACTIVE_STATUSES
+        ):
+            return jsonify({
+                "error": "Aksi bot lain masih diproses. Tunggu sampai selesai.",
+                "operation": deepcopy(_control_operation),
+            }), 409
+
+        current = _process_manager.status(get_mode(PUMP_CONFIG))
+        action = payload.get("action")
         if action == "START":
-            result = _process_manager.start()
-        elif action == "STOP":
-            result = _process_manager.stop(position_policy=payload["position_policy"])
-        else:
-            result = _process_manager.restart(position_policy=payload["position_policy"])
-        return jsonify({"ok": True, "process": result})
-    except (BotControlError, ValueError) as exc:
-        return jsonify({"error": str(exc)}), 409
+            if current["status"] not in ("STOPPED", "CRASHED"):
+                return jsonify({
+                    "error": "Status proses berubah sejak konfirmasi Resume Bot."
+                }), 409
+        elif (
+            current["status"] not in ("STARTING", "RUNNING", "STOPPING")
+            or current.get("pid") != payload.get("pid")
+        ):
+            return jsonify({
+                "error": "PID atau status proses berubah sejak konfirmasi. Ulangi aksi."
+            }), 409
 
+        ok, left = _cooldown("process", 2.0)
+        if not ok:
+            return jsonify({
+                "error": f"Tunggu {left:.1f} detik sebelum aksi proses berikutnya."
+            }), 429
 
-@app.route("/api/settings")
-def api_settings():
-    mode = str(request.args.get("mode") or get_mode(PUMP_CONFIG)).upper()
+        now = time.time()
+        operation_id = uuid.uuid4().hex[:16]
+        _control_operation = {
+            "id": operation_id,
+            "action": action,
+            "position_policy": payload.get("position_policy", "REQUIRE_EMPTY"),
+            "status": "PENDING",
+            "requested_at": now,
+            "updated_at": now,
+            "started_at": None,
+            "finished_at": None,
+            "error": None,
+            "process": None,
+        }
+        operation = deepcopy(_control_operation)
+
+    worker = threading.Thread(
+        target=_run_control_operation,
+        args=(operation_id, action, operation["position_policy"]),
+        name=f"bot-control-{action.lower()}-{operation_id[:6]}",
+        daemon=True,
+    )
     try:
-        defaults, current, errors = _config_pair(mode)
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    return jsonify({
-        "mode": mode,
-        "fields": public_schema(defaults, current),
-        "load_errors": errors,
-        "active_mode": get_mode(PUMP_CONFIG),
-    })
-
-
-@app.route("/api/settings/history")
-def api_settings_history():
-    return jsonify({"items": read_audit(250)})
-
-
-@app.route("/api/settings/preview", methods=["POST"])
-def api_settings_preview():
-    data = request.get_json(silent=True) or {}
-    mode = str(data.get("mode") or "").strip().upper()
-    try:
-        defaults, current, load_errors = _config_pair(mode)
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    if load_errors:
-        return jsonify({"error": "Override rusak harus diperbaiki terlebih dahulu.",
-                        "details": load_errors}), 409
-    values = data.get("values")
-    if not isinstance(values, dict):
-        return jsonify({"error": "values harus berupa object JSON."}), 400
-    unknown = sorted(set(values) - set(PARAMETER_SCHEMA))
-    if unknown:
-        return jsonify({"error": "Kunci tidak dikenal: " + ", ".join(unknown)}), 400
-    readonly = sorted(k for k in values if PARAMETER_SCHEMA[k]["read_only"])
-    if readonly:
-        return jsonify({"error": "Kunci read-only tidak boleh diubah: " + ", ".join(readonly)}), 400
-
-    candidate = deepcopy(current)
-    candidate.update(values)
-    cleaned, errors, warnings = validate_candidate(candidate, mode)
-    if errors:
-        return jsonify({"error": "Validasi pengaturan gagal.", "fields": errors}), 400
-    diff = diff_values(current, cleaned)
-    if not diff:
-        return jsonify({"error": "Tidak ada perubahan untuk disimpan."}), 400
-    relaxations = dangerous_relaxations(current, cleaned) if mode == "LIVE" else []
-    policy = str(data.get("position_policy", "REQUIRE_EMPTY")).strip().upper()
-    process = _process_manager.status(get_mode(PUMP_CONFIG))
-    position = _process_manager.position()
-    if mode == get_mode(PUMP_CONFIG) and process["status"] in ("STARTING", "RUNNING", "STOPPING"):
-        if position["has_position"] and policy not in ("SELL_FIRST", "KEEP_OPEN"):
-            return jsonify({"error": "Pilih penanganan posisi sebelum restart.",
-                            "requires_position_choice": True, "position": position}), 409
-    else:
-        policy = "REQUIRE_EMPTY"
-
-    baseline_overrides = compute_overrides(defaults, current)
-    overrides = compute_overrides(defaults, cleaned)
-    if current.get("PAPER_INITIAL_BALANCES") != defaults.get("PAPER_INITIAL_BALANCES"):
-        baseline_overrides["PAPER_INITIAL_BALANCES"] = deepcopy(current.get("PAPER_INITIAL_BALANCES"))
-        overrides["PAPER_INITIAL_BALANCES"] = deepcopy(current.get("PAPER_INITIAL_BALANCES"))
-    token = _make_confirmation("settings", {
-        "mode": mode,
-        "candidate": cleaned,
-        "overrides": overrides,
-        "baseline_overrides": baseline_overrides,
-        "baseline_revision": _revision(current),
-        "position_policy": policy,
-        "relaxations": relaxations,
-    })
-    return jsonify({
-        "confirmation_id": token,
-        "diff": diff,
-        "warnings": warnings,
-        "risk_warnings": relaxations,
-        "requires_risk_phrase": bool(relaxations),
-        "bot_will_restart": mode == get_mode(PUMP_CONFIG) and process["status"] in ("STARTING", "RUNNING"),
-    })
-
-
-@app.route("/api/settings/commit", methods=["POST"])
-def api_settings_commit():
-    data = request.get_json(silent=True) or {}
-    payload = _take_confirmation(data.get("confirmation_id", ""), "settings")
-    if payload is None:
-        return jsonify({"error": "Konfirmasi settings kedaluwarsa atau tidak valid."}), 409
-    if payload.get("relaxations") and str(data.get("risk_phrase", "")) != "SAYA PAHAM":
-        return jsonify({"error": "Ketik SAYA PAHAM untuk pelonggaran risiko LIVE."}), 400
-    mode = payload["mode"]
-    defaults, current, load_errors = _config_pair(mode)
-    if load_errors or _revision(current) != payload.get("baseline_revision"):
-        return jsonify({"error": "Settings berubah sejak preview. Muat ulang dan ulangi."}), 409
-    ok, left = _cooldown("settings", 3.0)
-    if not ok:
-        return jsonify({"error": f"Tunggu {left:.1f} detik sebelum menyimpan lagi."}), 429
-
-    process_before = _process_manager.status(get_mode(PUMP_CONFIG))
-    try:
-        save_mode_override(
-            mode, payload["overrides"],
-            expected_existing=payload.get("baseline_overrides"),
+        worker.start()
+    except RuntimeError as exc:
+        _update_control_operation(
+            operation_id,
+            status="FAILED",
+            finished_at=time.time(),
+            error=f"Worker kontrol gagal dimulai: {exc}",
         )
-    except ConcurrentSettingsError as exc:
-        return jsonify({"error": str(exc)}), 409
-    except (OSError, ValueError) as exc:
-        return jsonify({"error": f"Settings gagal ditulis secara atomik: {exc}"}), 500
-    diff = diff_values(current, payload["candidate"])
-    audit_warning = None
-    for item in diff:
-        audit_warning = _write_audit({
-            "event": "SETTING_CHANGED", "mode": mode, "key": item["key"],
-            "old": item["old"], "new": item["new"],
-        })
-        if audit_warning:
-            audit_warning = "Settings tersimpan, tetapi " + audit_warning.lower()
-            break
+        return jsonify({"error": "Worker kontrol gagal dimulai."}), 500
 
-    restarted = False
-    restart_error = None
-    if mode == get_mode(PUMP_CONFIG):
-        if process_before["status"] in ("STARTING", "RUNNING", "STOPPING"):
-            try:
-                _process_manager.restart(position_policy=payload["position_policy"])
-                restarted = True
-            except BotControlError as exc:
-                restart_error = str(exc)
-        else:
-            config_mod.reload_config()
-        _refresh_runtime_globals()
-    return jsonify({
-        "ok": restart_error is None,
-        "saved": True,
-        "restarted": restarted,
-        "restart_error": restart_error,
-        "audit_warning": audit_warning,
-        "diff": diff,
-        "process": _process_manager.status(get_mode(PUMP_CONFIG)),
-    }), (200 if restart_error is None else 409)
-
-
-@app.route("/api/mode/checklist")
-def api_mode_checklist():
-    target = str(request.args.get("target") or "").strip().upper()
-    if target not in config_mod.VALID_MODES:
-        return jsonify({"error": "Target mode tidak valid."}), 400
-    try:
-        target_cfg, target_errors = config_mod.build_config_for_mode(target)
-    except Exception as exc:
-        return jsonify({"error": f"Gagal membaca konfigurasi target: {exc}"}), 400
-    process = _process_manager.status(get_mode(PUMP_CONFIG))
-    position = _process_manager.position()
-    creds_complete = bool(PUMP_CONFIG.get("API_KEY") and PUMP_CONFIG.get("API_SECRET"))
-    tested = _credentials_tested_for_active_values()
-    checks = {
-        "different_mode": target != get_mode(PUMP_CONFIG),
-        "bot_stopped": process["status"] in ("STOPPED", "CRASHED"),
-        "no_open_position": not position["has_position"],
-        "credentials_complete": target != "LIVE" or creds_complete,
-        "connection_tested": target != "LIVE" or tested,
-        "withdrawal_disabled": target != "LIVE" or _withdrawal_permission_safe(),
-        "account_stop_enabled": target != "LIVE" or bool(
-            target_cfg.get("USE_EQUITY_STOP") or target_cfg.get("USE_DAILY_STOP")
-        ),
-        "settings_valid": not target_errors,
-    }
-    return jsonify({
-        "current_mode": get_mode(PUMP_CONFIG),
-        "target_mode": target,
-        "checks": checks,
-        "ready": all(checks.values()),
-        "position": position,
-        "risk": _risk_summary(target_cfg),
-        "settings_errors": target_errors,
-        "state_separation_note": "State PAPER dan LIVE disimpan terpisah. Posisi tidak dipindahkan antar-mode.",
-    })
-
-
-@app.route("/api/mode/prepare", methods=["POST"])
-def api_mode_prepare():
-    data = request.get_json(silent=True) or {}
-    target = str(data.get("target", "")).strip().upper()
-    if target not in config_mod.VALID_MODES:
-        return jsonify({"error": "Target mode tidak valid."}), 400
-    target_cfg, target_errors = config_mod.build_config_for_mode(target)
-    process = _process_manager.status(get_mode(PUMP_CONFIG))
-    position = _process_manager.position()
-    if target == get_mode(PUMP_CONFIG):
-        return jsonify({"error": "Mode target sudah aktif."}), 400
-    if process["status"] not in ("STOPPED", "CRASHED"):
-        return jsonify({"error": "Bot harus STOPPED sebelum ganti mode."}), 409
-    if position["has_position"]:
-        return jsonify({"error": "Posisi mode aktif harus ditutup sebelum ganti mode.",
-                        "position": position}), 409
-    if target_errors:
-        return jsonify({"error": "Konfigurasi target rusak.", "details": target_errors}), 409
-    if target == "LIVE":
-        if not PUMP_CONFIG.get("API_KEY") or not PUMP_CONFIG.get("API_SECRET"):
-            return jsonify({"error": "API key dan secret belum lengkap."}), 409
-        if not _credentials_tested_for_active_values():
-            return jsonify({"error": "Kredensial tersimpan belum lulus Uji Koneksi pada sesi ini."}), 409
-        if not _withdrawal_permission_safe():
-            return jsonify({
-                "error": "API key masih mengizinkan penarikan dana, atau status itu belum "
-                         "diverifikasi lewat Uji Koneksi. Matikan permission Enable "
-                         "Withdrawals di Binance lalu jalankan Uji Koneksi ulang."
-            }), 409
-        if not (target_cfg.get("USE_EQUITY_STOP") or target_cfg.get("USE_DAILY_STOP")):
-            return jsonify({
-                "error": "USE_EQUITY_STOP dan USE_DAILY_STOP dua-duanya nonaktif. "
-                         "Mode LIVE akan berjalan tanpa rem kerugian tingkat akun dan "
-                         "CLOSE_ALL_AT_LIMIT tidak akan pernah terpicu. Aktifkan minimal satu."
-            }), 409
-    token = _make_confirmation("mode", {
-        "from": get_mode(PUMP_CONFIG), "target": target,
-        "risk_revision": _revision(target_cfg),
-    }, ttl=180)
-    return jsonify({"confirmation_id": token, "target": target,
-                    "risk": _risk_summary(target_cfg),
-                    "required_phrase": "LIVE" if target == "LIVE" else None})
-
-
-@app.route("/api/mode/commit", methods=["POST"])
-def api_mode_commit():
-    data = request.get_json(silent=True) or {}
-    payload = _take_confirmation(data.get("confirmation_id", ""), "mode")
-    if payload is None:
-        return jsonify({"error": "Konfirmasi mode kedaluwarsa atau tidak valid."}), 409
-    target = payload["target"]
-    if target == "LIVE" and str(data.get("phrase", "")) != "LIVE":
-        return jsonify({"error": "Ketik LIVE persis untuk mengaktifkan mode uang asli."}), 400
-    if get_mode(PUMP_CONFIG) != payload.get("from"):
-        return jsonify({"error": "Mode aktif berubah setelah checklist. Ulangi perpindahan mode."}), 409
-    process = _process_manager.status(get_mode(PUMP_CONFIG))
-    if process["status"] not in ("STOPPED", "CRASHED") or _process_manager.position()["has_position"]:
-        return jsonify({"error": "Kondisi proses atau posisi berubah. Ulangi perpindahan mode."}), 409
-    target_cfg, errors = config_mod.build_config_for_mode(target)
-    if errors or _revision(target_cfg) != payload.get("risk_revision"):
-        return jsonify({"error": "Konfigurasi target berubah sejak konfirmasi."}), 409
-    if target == "LIVE" and not _credentials_tested_for_active_values():
-        return jsonify({"error": "Status uji kredensial tidak lagi valid."}), 409
-    if target == "LIVE" and not _withdrawal_permission_safe():
-        return jsonify({"error": "API key masih mengizinkan penarikan dana."}), 409
-    if target == "LIVE" and not (target_cfg.get("USE_EQUITY_STOP")
-                                 or target_cfg.get("USE_DAILY_STOP")):
-        return jsonify({"error": "Mode LIVE membutuhkan minimal satu rem kerugian akun."}), 409
-    ok, left = _cooldown("mode", 5.0)
-    if not ok:
-        return jsonify({"error": f"Tunggu {left:.1f} detik sebelum ganti mode."}), 429
-    old = get_mode(PUMP_CONFIG)
-    try:
-        save_runtime_mode(target, expected_current=payload.get("from"))
-        config_mod.reload_config()
-        _refresh_runtime_globals()
-    except ConcurrentSettingsError as exc:
-        return jsonify({"error": str(exc)}), 409
-    except (OSError, ValueError) as exc:
-        try:
-            save_runtime_mode(old, expected_current=target)
-            config_mod.reload_config()
-            _refresh_runtime_globals()
-        except Exception:
-            pass
-        return jsonify({"error": f"Mode gagal disimpan: {exc}"}), 500
-    audit_warning = _write_audit({"event": "MODE_CHANGED", "mode": target, "key": "MODE",
-                                  "old": old, "new": target})
-    return jsonify({"ok": True, "mode": target, "audit_warning": audit_warning,
-                    "message": f"Mode berubah ke {target}. Bot tetap STOPPED sampai Anda menekan Start."})
-
-
-@app.route("/api/credentials/status")
-def api_credentials_status():
-    status = credential_status(ENV_PATH)
-    with _credential_lock:
-        tested_at = _credential_test_state.get("tested_at")
-    status.update({
-        "connection_tested": _credentials_tested_for_active_values(),
-        "tested_at": tested_at,
-        "recommendation": "Gunakan key tanpa izin withdrawal dan aktifkan pembatasan IP bila tersedia.",
-    })
-    return jsonify(status)
-
-
-@app.route("/api/credentials/save", methods=["POST"])
-def api_credentials_save():
-    process = _process_manager.status(get_mode(PUMP_CONFIG))
-    if get_mode(PUMP_CONFIG) == "LIVE" and process["status"] in ("STARTING", "RUNNING", "STOPPING"):
-        return jsonify({"error": "Hentikan bot LIVE sebelum mengganti kredensial."}), 409
-    ok, left = _cooldown("credentials-save", 5.0)
-    if not ok:
-        return jsonify({"error": f"Tunggu {left:.1f} detik sebelum menyimpan kredensial."}), 429
-    data = request.get_json(silent=True) or {}
-    old_key = str(PUMP_CONFIG.get("API_KEY", ""))
-    old_secret = str(PUMP_CONFIG.get("API_SECRET", ""))
-    key_input = data.get("api_key")
-    secret_input = data.get("api_secret")
-    new_key = "" if data.get("clear_api_key") else (
-        str(key_input) if isinstance(key_input, str) and key_input != "" else old_key
-    )
-    new_secret = "" if data.get("clear_api_secret") else (
-        str(secret_input) if isinstance(secret_input, str) and secret_input != "" else old_secret
-    )
-    try:
-        permissions = update_env(api_key=new_key, api_secret=new_secret, path=ENV_PATH)
-        from dotenv import load_dotenv
-        load_dotenv(dotenv_path=ENV_PATH, override=True)
-        config_mod.reload_config()
-        _refresh_runtime_globals()
-    except (OSError, ValueError) as exc:
-        return jsonify({"error": f"Gagal menyimpan kredensial: {exc}"}), 400
-    with _credential_lock:
-        _credential_test_state.update({"fingerprint": None, "tested_at": None, "account": None})
-    audit_warning = _write_audit({
-        "event": "CREDENTIALS_CHANGED", "mode": get_mode(PUMP_CONFIG),
-        "key_changed": new_key != old_key, "secret_changed": new_secret != old_secret,
-    })
+    # Jangan tunggu proses bot selesai di request HTTP. Browser mendapat ACK
+    # cepat dan memantau hasil akhirnya melalui /api/control/status.
     return jsonify({
         "ok": True,
-        "audit_warning": audit_warning,
-        "api_key_set": bool(new_key),
-        "api_secret_set": bool(new_secret),
-        "api_key_last4": new_key[-4:] if new_key else None,
-        "permissions": permissions,
-    })
-
-
-@app.route("/api/credentials/test", methods=["POST"])
-def api_credentials_test():
-    ok, left = _cooldown("credentials-test", 5.0)
-    if not ok:
-        return jsonify({"error": f"Tunggu {left:.1f} detik sebelum uji koneksi berikutnya."}), 429
-    data = request.get_json(silent=True) or {}
-    key = str(data.get("api_key") or PUMP_CONFIG.get("API_KEY") or "")
-    secret = str(data.get("api_secret") or PUMP_CONFIG.get("API_SECRET") or "")
-    if not key or not secret:
-        return jsonify({"error": "API key dan secret wajib terisi untuk pengujian."}), 400
-    if (len(key) > 512 or len(secret) > 512 or key != key.strip() or secret != secret.strip()
-            or any(ord(ch) < 33 or ord(ch) > 126 for ch in key + secret)):
-        return jsonify({"error": "Format kredensial tidak valid."}), 400
-    try:
-        client = BinanceSpotClient(
-            key, secret, get_base_url(PUMP_CONFIG), allow_signed=True,
-            rate_limit_state_file=PUMP_CONFIG.get("RATE_LIMIT_STATE_FILE"),
-            rate_limit_limit=int(PUMP_CONFIG.get("RATE_LIMIT_WEIGHT_LIMIT", 6000) or 6000),
-            rate_limit_safety_margin=int(PUMP_CONFIG.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100),
-        )
-        client.sync_time()
-        account = client.get_account()
-    except BinanceAPIError as exc:
-        return jsonify({
-            "error": "Binance menolak uji koneksi.",
-            "binance_code": exc.code,
-            "binance_message": str(exc.msg)[:240],
-        }), 400
-    except Exception:
-        return jsonify({"error": "Uji koneksi gagal karena jaringan atau layanan Binance tidak tersedia."}), 502
-    tested_account = {"account_type": account.get("accountType"),
-                      "can_trade": bool(account.get("canTrade")),
-                      "can_withdraw": bool(account.get("canWithdraw")),
-                      "can_deposit": bool(account.get("canDeposit")),
-                      "permissions": account.get("permissions", [])}
-    with _credential_lock:
-        _credential_test_state.update({
-            "fingerprint": _credential_fingerprint(key, secret),
-            "tested_at": datetime.now(timezone.utc).isoformat(),
-            "account": tested_account,
-        })
-    warnings = []
-    if tested_account["can_withdraw"]:
-        warnings.append(
-            "API key ini MENGIZINKAN PENARIKAN DANA. Bot tidak pernah membutuhkannya. "
-            "Matikan permission Enable Withdrawals di Binance sebelum memakai mode LIVE."
-        )
-    if not tested_account["can_trade"]:
-        warnings.append("API key ini tidak mengizinkan Spot Trading, jadi bot tidak bisa menjual.")
-    return jsonify({"ok": True, "message": "Koneksi signed read-only berhasil.",
-                    "account": tested_account,
-                    "warnings": warnings,
-                    "withdrawal_enabled": tested_account["can_withdraw"],
-                    "api_key_last4": key[-4:]})
-
-
-@app.route("/api/paper/reset/status")
-def api_paper_reset_status():
-    return jsonify({
-        "eligible": get_mode(PUMP_CONFIG) == "PAPER" and
-                    _process_manager.status("PAPER")["status"] in ("STOPPED", "CRASHED"),
-        "mode": get_mode(PUMP_CONFIG),
-        "process": _process_manager.status(get_mode(PUMP_CONFIG)),
-        "default_balances": PUMP_CONFIG.get("PAPER_INITIAL_BALANCES", {"USDT": 10000.0}),
-    })
-
-
-@app.route("/api/paper/reset/prepare", methods=["POST"])
-def api_paper_reset_prepare():
-    if get_mode(PUMP_CONFIG) != "PAPER":
-        return jsonify({"error": "Reset akun hanya tersedia saat mode aktif PAPER."}), 409
-    process = _process_manager.status("PAPER")
-    if process["status"] not in ("STOPPED", "CRASHED"):
-        return jsonify({"error": "Bot PAPER harus STOPPED sebelum reset."}), 409
-    data = request.get_json(silent=True) or {}
-    try:
-        balances = validate_balances(data.get("balances"))
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    files = [PUMP_CONFIG["PAPER_ACCOUNT_STATE_FILE"], PUMP_CONFIG["STATE_FILE"]]
-    token = _make_confirmation("paper-reset", {"balances": balances, "files": files}, ttl=180)
-    return jsonify({"confirmation_id": token, "balances": balances,
-                    "archives": [f"{path}.bak-<timestamp>" for path in files if Path(path).exists()],
-                    "required_phrase": "RESET"})
-
-
-@app.route("/api/paper/reset/commit", methods=["POST"])
-def api_paper_reset_commit():
-    data = request.get_json(silent=True) or {}
-    payload = _take_confirmation(data.get("confirmation_id", ""), "paper-reset")
-    if payload is None:
-        return jsonify({"error": "Konfirmasi reset kedaluwarsa atau tidak valid."}), 409
-    if str(data.get("phrase", "")) != "RESET":
-        return jsonify({"error": "Ketik RESET persis untuk melanjutkan."}), 400
-    if get_mode(PUMP_CONFIG) != "PAPER" or _process_manager.status("PAPER")["status"] not in ("STOPPED", "CRASHED"):
-        return jsonify({"error": "Mode atau status bot berubah. Reset dibatalkan."}), 409
-    ok, left = _cooldown("paper-reset", 10.0)
-    if not ok:
-        return jsonify({"error": f"Tunggu {left:.1f} detik sebelum reset berikutnya."}), 429
-    stamp = timestamp_tag()
-    moved: list[tuple[Path, Path]] = []
-    try:
-        for raw in payload["files"]:
-            source = Path(raw)
-            if not source.exists():
-                continue
-            backup = Path(f"{source}.bak-{stamp}")
-            if backup.exists():
-                backup = Path(f"{source}.bak-{stamp}-{uuid.uuid4().hex[:6]}")
-            replace_with_retry(source, backup)
-            moved.append((source, backup))
-    except OSError as exc:
-        for source, backup in reversed(moved):
-            try:
-                replace_with_retry(backup, source)
-            except OSError:
-                pass
-        return jsonify({"error": f"Pengarsipan gagal, reset dibatalkan: {exc}"}), 500
-
-    defaults, current, errors = _config_pair("PAPER")
-    if errors:
-        for source, backup in reversed(moved):
-            try:
-                replace_with_retry(backup, source)
-            except OSError:
-                pass
-        return jsonify({"error": "Override PAPER rusak. Reset dibatalkan."}), 409
-    candidate = deepcopy(current)
-    candidate["PAPER_INITIAL_BALANCES"] = payload["balances"]
-    overrides = compute_overrides(defaults, candidate, include_balances=True)
-    previous_overrides = compute_overrides(defaults, current, include_balances=True)
-    try:
-        save_mode_override("PAPER", overrides)
-        config_mod.reload_config()
-        _refresh_runtime_globals()
-    except (OSError, ValueError) as exc:
-        try:
-            save_mode_override("PAPER", previous_overrides)
-            config_mod.reload_config()
-            _refresh_runtime_globals()
-        except Exception:
-            pass
-        for source, backup in reversed(moved):
-            try:
-                replace_with_retry(backup, source)
-            except OSError:
-                pass
-        return jsonify({"error": f"Reset gagal saat menyimpan saldo; file dipulihkan: {exc}"}), 500
-    audit_warning = _write_audit({
-        "event": "PAPER_RESET", "mode": "PAPER", "key": "PAPER_INITIAL_BALANCES",
-        "old": current.get("PAPER_INITIAL_BALANCES"), "new": payload["balances"],
-        "archives": [str(backup) for _, backup in moved],
-    })
-    state_mod.clear_control(PUMP_CONFIG["CONTROL_FILE"])
-    state_mod.clear_stop_request(PUMP_CONFIG["CONTROL_FILE"])
-    return jsonify({"ok": True, "balances": payload["balances"],
-                    "archives": [str(backup) for _, backup in moved],
-                    "audit_warning": audit_warning,
-                    "message": "Akun PAPER diarsipkan. Saldo baru dibuat saat bot berikutnya Start."})
+        "accepted": True,
+        "operation": _control_operation_snapshot(),
+    }), 202
 
 
 def main(*, auto_start_bot: bool = False) -> int:

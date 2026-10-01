@@ -3,8 +3,8 @@
 Kode aplikasi dikelompokkan langsung di folder domain repository, sedangkan
 artefak runtime dipisah ke dua folder khusus supaya akar repository bersih:
 
-- ``logs/`` : semua file log (log bot per mode dan audit perubahan settings).
-- ``data/`` : semua file state dan konfigurasi runtime (settings gabungan,
+- ``logs/`` : semua file log bot per mode.
+- ``data/`` : semua file state dan konfigurasi runtime (override settings,
   state posisi, kontrol, lock proses, akun PAPER, ledger rate limit,
   watchlist otomatis, dan cache backtest).
 
