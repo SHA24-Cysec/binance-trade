@@ -151,7 +151,7 @@ def test_file_descriptor_selalu_ditutup(atomic_io_windows, tmp_path):
     def hitung_fd() -> int:
         try:
             return len(os.listdir(f"/proc/{os.getpid()}/fd"))
-        except OSError:  # pragma: no cover
+        except OSError:
             pytest.skip("penghitungan fd hanya tersedia di Linux")
 
     sebelum = hitung_fd()

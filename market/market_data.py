@@ -74,7 +74,7 @@ class MarketDataProvider:
                         "WS_BASE_URL", "wss://stream.binance.com:9443"))
                     self._ws.start(all_mini_ticker=True)
                     logger.info("Lapisan data pasar: WebSocket AKTIF (hybrid).")
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     logger.warning("Gagal memulai WebSocket (%s). Fallback REST penuh.", exc)
                     self._use_ws = False
                     self._ws = None
@@ -91,7 +91,7 @@ class MarketDataProvider:
             self._subscribed.add(key)
         try:
             ws.subscribe_symbol(symbol, book_ticker=True)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.debug("Gagal subscribe WS %s: %s", symbol, exc)
 
     def close(self) -> None:
@@ -99,7 +99,7 @@ class MarketDataProvider:
             if self._ws is not None:
                 try:
                     self._ws.stop()
-                except Exception:  # noqa: BLE001
+                except Exception:
                     pass
                 self._ws = None
             self._subscribed.clear()

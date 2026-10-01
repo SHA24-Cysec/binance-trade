@@ -28,14 +28,12 @@ def test_bobot_endpoint_bertanda_tangan_sesuai_dokumentasi_resmi():
     assert est("GET", "/api/v3/orderList", {"origClientOrderId": "x"}) == 4
     assert est("GET", "/api/v3/openOrders", {"symbol": "BTCUSDT"}) == 6
     assert est("GET", "/api/v3/openOrders", {}) == 80
-    # order eksekusi tetap murah sesuai dokumen (IP Weight 1)
     assert est("POST", "/api/v3/order", {"symbol": "BTCUSDT", "side": "BUY"}) == 1
     assert est("DELETE", "/api/v3/order", {"symbol": "BTCUSDT", "orderId": 1}) == 1
 
 
 def test_bobot_endpoint_publik_tetap_sesuai_dokumentasi():
     est = BinanceSpotClient._estimate_request_weight
-    # https://developers.binance.com/docs/binance-spot-api-docs/rest-api/market-data-endpoints
     assert est("GET", "/api/v3/ticker/24hr", {}) == 80
     assert est("GET", "/api/v3/ticker/24hr", {"symbol": "BTCUSDT"}) == 2
     assert est("GET", "/api/v3/exchangeInfo", {}) == 20

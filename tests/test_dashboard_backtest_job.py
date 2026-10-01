@@ -153,8 +153,6 @@ def test_job_yang_dibatalkan_tetap_menghapus_file_temporary(job_palsu, monkeypat
         assert not os.path.exists(os.path.dirname(path))
 
 
-
-
 def test_job_kedua_memakai_cache_dan_jauh_lebih_sedikit_request(job_palsu, monkeypatch):
     job_id, klien = job_palsu
 

@@ -19,13 +19,13 @@ from pathlib import Path
 from typing import Any, Iterator
 
 try:
-    import fcntl  # type: ignore
-except ImportError:  # pragma: no cover
+    import fcntl
+except ImportError:
     fcntl = None
 
 try:
-    import msvcrt  # type: ignore
-except ImportError:  # pragma: no cover
+    import msvcrt
+except ImportError:
     msvcrt = None
 
 
@@ -46,7 +46,6 @@ def _thread_lock_for(lock_path: str) -> threading.RLock:
         return lock
 
 
-
 _LOCK_OFFSET = 0
 _LOCK_LENGTH = 1
 
@@ -55,7 +54,7 @@ def _open_lock_fd(lock_path: str) -> int:
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0)
     fd = os.open(lock_path, flags, 0o600)
     try:
-        if msvcrt is not None and fcntl is None:  # pragma: no cover
+        if msvcrt is not None and fcntl is None:
             if os.lseek(fd, 0, os.SEEK_END) == 0:
                 os.write(fd, b"0")
     except OSError:
@@ -67,7 +66,7 @@ def _open_lock_fd(lock_path: str) -> int:
 def _acquire_lock(fd: int) -> None:
     if fcntl is not None:
         fcntl.flock(fd, fcntl.LOCK_EX)
-    elif msvcrt is not None:  # pragma: no cover
+    elif msvcrt is not None:
         os.lseek(fd, _LOCK_OFFSET, os.SEEK_SET)
         msvcrt.locking(fd, msvcrt.LK_LOCK, _LOCK_LENGTH)
 
@@ -76,7 +75,7 @@ def _release_lock(fd: int) -> None:
     try:
         if fcntl is not None:
             fcntl.flock(fd, fcntl.LOCK_UN)
-        elif msvcrt is not None:  # pragma: no cover
+        elif msvcrt is not None:
             os.lseek(fd, _LOCK_OFFSET, os.SEEK_SET)
             msvcrt.locking(fd, msvcrt.LK_UNLCK, _LOCK_LENGTH)
     except OSError as exc:

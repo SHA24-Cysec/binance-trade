@@ -84,7 +84,6 @@ class PortfolioResult:
     final_equity: float = 0.0
 
 
-
 def select_universe(tickers: list, config: dict, max_symbols: Optional[int] = None,
                     tradable_symbols: Optional[set] = None) -> list[str]:
     cfg = dict(config)
@@ -97,7 +96,6 @@ def select_universe(tickers: list, config: dict, max_symbols: Optional[int] = No
     if max_symbols is not None and max_symbols > 0:
         symbols = symbols[:max_symbols]
     return symbols
-
 
 
 def new_backtest_store(config: Optional[dict] = None) -> KlineStore:
@@ -125,7 +123,7 @@ def open_kline_cache(config: Optional[dict] = None) -> Optional[KlineCache]:
         )
         cache.prune()
         return cache
-    except (sqlite3.Error, OSError, kcache.CacheError) as exc:  # noqa: BLE001
+    except (sqlite3.Error, OSError, kcache.CacheError) as exc:
         logger.warning("Cache candle backtest tidak bisa dipakai (%s). Backtest "
                        "tetap berjalan dengan mengunduh penuh.", exc)
         return None
@@ -159,7 +157,7 @@ def fetch_universe_klines(
             else:
                 failed.append({"symbol": sym, "error": "tidak ada data candle pada rentang ini"})
             del kl
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             failed.append({"symbol": sym, "error": str(exc)[:160]})
 
         if progress_cb:
@@ -207,7 +205,7 @@ def fetch_universe_daily_klines(
             if harian:
                 store.write_daily(sym, harian)
                 tersimpan.append(sym)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("Candle harian %s gagal diunduh (%s). Gerbang pump "
                            "akan memakai agregasi candle intraday simbol ini.",
                            sym, str(exc)[:120])
@@ -223,7 +221,6 @@ def ensure_daily_series(store: KlineStore, symbols: list[str]) -> None:
         harian = scanner.aggregate_to_daily(store.load_klines(sym))
         if harian:
             store.write_daily(sym, harian)
-
 
 
 def build_timeline(store: KlineStore, interval: str,
@@ -272,7 +269,6 @@ def _resolve_symbol_cache_size(config: dict, top_n: int) -> int:
                              storage.DEFAULT_SYMBOL_CACHE_SIZE)
                   or storage.DEFAULT_SYMBOL_CACHE_SIZE)
     return max(1, diminta, 2 * int(top_n) + 4)
-
 
 
 def run_portfolio_backtest(
@@ -501,7 +497,7 @@ def run_portfolio_backtest(
             window_kl = kl[max(0, i - lookback + 1): i + 1]
             try:
                 setup = scanner.detect_pullback_retest(window_kl, config)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 continue
             if setup.ok:
                 lolos.append((rank, pct, sym, i, vol24, setup))
@@ -658,7 +654,6 @@ def summarize_portfolio(result: PortfolioResult) -> dict:
         "exposure_pct": exposure, "span_days": span_days,
         "trades_per_day": (total / span_days) if span_days > 0 else 0.0,
     }
-
 
 
 def _mk(t, o, h, l, c, qv=5_000_000.0):

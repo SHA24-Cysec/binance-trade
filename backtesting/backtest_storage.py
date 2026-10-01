@@ -70,7 +70,6 @@ DEFAULT_DAILY_CACHE_SIZE = 4
 _INSERT_BATCH = 2_000
 
 
-
 _KLINE_COLUMNS = "open_time, open, high, low, close, close_time, volume, quote_volume"
 _KLINE_PLACEHOLDERS = "?, ?, ?, ?, ?, ?, ?, ?"
 
@@ -150,7 +149,6 @@ class StorageError(RuntimeError):
     pass
 
 
-
 class SymbolSeries:
 
     __slots__ = ("symbol", "_open_times", "_close_times", "_pct24h",
@@ -222,7 +220,6 @@ class SymbolSeries:
     def board_arrays(self) -> tuple:
         return (self._open_times, self._close_times, self._pct24h,
                 self._vol24h, self._ready, self._daily_close_times)
-
 
 
 class KlineStore:
@@ -319,7 +316,7 @@ class KlineStore:
             try:
                 self._conn.execute("ANALYZE")
                 self._conn.commit()
-            except sqlite3.Error as exc:  # noqa: BLE001
+            except sqlite3.Error as exc:
                 logger.debug("ANALYZE store backtest dilewati: %s", exc)
 
     def symbols(self) -> list[str]:
@@ -414,7 +411,7 @@ class KlineStore:
             self._closed = True
             try:
                 self._conn.close()
-            except sqlite3.Error as exc:  # noqa: BLE001
+            except sqlite3.Error as exc:
                 logger.warning("Gagal menutup koneksi store backtest: %s", exc)
 
     def cleanup(self) -> None:
@@ -424,7 +421,7 @@ class KlineStore:
                 shutil.rmtree(self._temp_dir, ignore_errors=True)
             else:
                 Path(self.db_path).unlink(missing_ok=True)
-        except OSError as exc:  # noqa: BLE001
+        except OSError as exc:
             logger.warning("Gagal menghapus file backtest temporary %s: %s",
                            self.db_path, exc)
 

@@ -74,7 +74,6 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
-
 def _load_control_unlocked(path: str) -> dict:
     if not os.path.exists(path):
         return {}

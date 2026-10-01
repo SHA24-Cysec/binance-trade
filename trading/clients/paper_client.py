@@ -74,7 +74,7 @@ class PaperClient(ExchangeClient):
                 syms = info.get("symbols", []) if isinstance(info, dict) else []
                 if syms:
                     self._filters_cache[s] = SymbolFilters.from_symbol_data(syms[0])
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.debug("Gagal ambil filter %s: %s", s, exc)
         return self._filters_cache.get(s)
 
@@ -111,7 +111,7 @@ class PaperClient(ExchangeClient):
     def get_account(self) -> dict:
         try:
             self.engine.process_open_orders()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.debug("process_open_orders saat get_account: %s", exc)
         return self.store.account_snapshot()
 

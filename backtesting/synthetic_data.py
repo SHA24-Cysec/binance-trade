@@ -112,7 +112,6 @@ def seri_banyak_setup(harga: float = 100.0, siklus: int = 10, bar_datar: int = 2
     return out
 
 
-
 def riwayat_harian(klines: list[Kline], hari: int = 7,
                    quote_volume_harian: float = 1_000_000.0,
                    harga: float = 1.0) -> list[Kline]:

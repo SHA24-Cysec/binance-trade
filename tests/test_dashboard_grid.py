@@ -77,8 +77,6 @@ def test_grid_start_validasi_masukan_sisi_server(client):
 
 
 def test_grid_start_menolak_parameter_mati_sesuai_mode(client, monkeypatch):
-    # Mode bawaan konfigurasi adalah exit ATR: parameter persen tidak
-    # berpengaruh apa pun dan harus ditolak dengan pesan yang menjelaskan.
     r = client.post("/api/backtest/grid/start",
                     json={"days": 30, "spec": {"SL_PCT": [1.0], "TP_PCT": [2.0]}},
                     headers=write_headers())
@@ -178,12 +176,6 @@ def test_template_memuat_elemen_dan_route_grid():
         assert penanda in source, penanda
 
 
-# ---------------------------------------------------------------------------
-# End-to-end job grid tanpa jaringan (klien Binance palsu, pola
-# test_dashboard_backtest_job.py): payload kind=grid lengkap dan file
-# temporary selalu dibersihkan.
-# ---------------------------------------------------------------------------
-
 MS_PER_5M = 5 * 60 * 1000
 
 
@@ -271,8 +263,6 @@ def test_job_grid_end_to_end_dan_membersihkan_file(monkeypatch, tmp_path):
         assert "skor_latih" in payload["rows"][0]
         assert "pf_latih" in payload["rows"][0]
         assert "winrate_latih" in payload["rows"][0]
-        # Seluruh payload grid harus bisa diserialisasi sebagai JSON standar
-        # (tanpa Infinity/NaN yang membuat JSON.parse browser gagal).
         json.dumps(payload["rows"], allow_nan=False)
         assert payload["limitations"]
         assert klien.jumlah_request > 0

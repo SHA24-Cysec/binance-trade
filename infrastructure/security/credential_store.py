@@ -112,7 +112,7 @@ def credential_status(path: os.PathLike | str = ENV_PATH) -> dict:
     }
 
 
-def _windows_current_sid() -> str | None:  # pragma: no cover
+def _windows_current_sid() -> str | None:
     try:
         result = subprocess.run(
             ["whoami.exe", "/user", "/fo", "csv", "/nh"],
@@ -143,7 +143,7 @@ def secure_permissions(path: os.PathLike | str) -> dict:
         except OSError as exc:
             return {"ok": False, "platform": "posix", "message": f"Gagal mengatur izin: {exc}"}
 
-    if os.name == "nt":  # pragma: no cover
+    if os.name == "nt":
         sid = _windows_current_sid()
         if not sid:
             return {
@@ -200,7 +200,7 @@ def permission_status(path: os.PathLike | str = ENV_PATH) -> dict:
             }
         except OSError as exc:
             return {"ok": False, "platform": "posix", "message": str(exc)}
-    if os.name == "nt":  # pragma: no cover
+    if os.name == "nt":
         sid = _windows_current_sid()
         if not sid:
             return {"ok": False, "platform": "windows", "message": "SID pengguna tidak tersedia."}

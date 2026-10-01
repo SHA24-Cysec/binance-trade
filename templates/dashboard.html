@@ -30,7 +30,6 @@
   .bgfx .o3{width:520px;height:520px;background:#334155;bottom:-220px;left:28%}
   .wrap{max-width:1420px;margin:0 auto;padding:18px 18px 34px}
 
-
   header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;
     margin-bottom:14px;padding:12px 16px;border-radius:var(--radius);
     background:var(--panel);border:1px solid var(--border);box-shadow:var(--shadow);
@@ -54,7 +53,6 @@
   .dot.live-dot{background:var(--red);animation:pulseLive 1.4s infinite}
   @keyframes pulseLive{0%{box-shadow:0 0 0 0 rgba(244,63,94,.65)}70%{box-shadow:0 0 0 8px rgba(244,63,94,0)}100%{box-shadow:0 0 0 0 rgba(244,63,94,0)}}
 
-
   .tabs{display:flex;gap:3px;padding:4px;border-radius:12px;background:var(--panel2);
     border:1px solid var(--border);overflow-x:auto;scrollbar-width:none}
   .tabs::-webkit-scrollbar{display:none}
@@ -63,7 +61,6 @@
   .tabs button:hover{color:var(--txt)}
   .tabs button[aria-selected="true"]{background:rgba(148,163,184,.18);color:var(--txt)}
   .tabpane[hidden]{display:none}
-
 
   .grid{display:grid;gap:14px}
 
@@ -89,7 +86,6 @@
   .panel h2{font-size:13.5px;font-weight:700;margin-bottom:12px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
   .panel h2 .ic{width:18px;height:18px;opacity:.8}
 
-
   table{width:100%;border-collapse:collapse;font-size:12.5px}
   th{text-align:left;color:var(--muted);font-weight:700;font-size:10.5px;text-transform:uppercase;
     letter-spacing:.8px;padding:9px 12px;border-bottom:1px solid var(--border);background:var(--panel2)}
@@ -107,7 +103,6 @@
   .tag.manual{background:rgba(167,139,250,.13);color:#a78bfa;border-color:rgba(167,139,250,.3)}
   .tag.stop_loss{background:rgba(244,63,94,.13);color:var(--red);border-color:rgba(244,63,94,.3)}
   .mono{font-variant-numeric:tabular-nums;font-family:var(--mono)}
-
 
   .wl-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
   .wl-chip{font-size:10.5px;font-weight:700;padding:3px 9px;border-radius:20px;
@@ -142,7 +137,6 @@
   .wl-gap{font-size:10.5px;color:var(--muted);margin-top:3px;font-variant-numeric:tabular-nums}
   @media(max-width:640px){ table.wl{min-width:600px} }
 
-
   .posbox{display:flex;flex-direction:column;gap:2px}
   .posrow{display:flex;justify-content:space-between;align-items:baseline;gap:12px;font-size:12.5px;
     padding:8px 11px;border-radius:7px}
@@ -156,12 +150,10 @@
   .empty{text-align:center;padding:30px 16px;color:var(--muted);font-size:13px}
   .empty .big{font-size:36px;opacity:.45;margin-bottom:8px}
 
-
   .skel{display:block;height:1em;border-radius:6px;background:linear-gradient(90deg,
     rgba(148,163,184,.1),rgba(148,163,184,.22),rgba(148,163,184,.1));
     background-size:200% 100%;animation:skel 1.3s ease-in-out infinite}
   @keyframes skel{0%{background-position:200% 0}100%{background-position:-200% 0}}
-
 
   .progress{height:7px;border-radius:5px;background:var(--grid);overflow:hidden;margin-top:8px;position:relative}
   .progress > span{display:block;height:100%;border-radius:5px;
@@ -188,7 +180,6 @@
   .bt-dots::after{content:'';animation:dots 1.4s steps(4,end) infinite}
   @keyframes dots{0%{content:''}25%{content:'.'}50%{content:'..'}75%{content:'...'}100%{content:''}}
 
-
   .logbox{max-height:330px;overflow-y:auto;overflow-x:hidden;width:100%;font-family:var(--mono);
     font-size:11.5px;line-height:1.7;border:1px solid var(--border);border-radius:9px;
     background:rgba(14,17,22,.5);padding:4px}
@@ -205,7 +196,6 @@
     border-radius:50%;animation:sp 1s linear infinite;flex:none}
   @keyframes sp{to{transform:rotate(360deg)}}
 
-
   .banner{padding:11px 15px;border-radius:9px;font-size:12.5px;margin-bottom:14px;display:none;
     align-items:center;gap:9px;border-left-width:3px;border-left-style:solid}
   .banner.show{display:flex}
@@ -213,7 +203,6 @@
     border-left:3px solid var(--amber);color:var(--amber)}
   .banner.err{background:rgba(244,63,94,.09);border:1px solid rgba(244,63,94,.3);
     border-left:3px solid var(--red);color:#fda4af}
-
 
   .bt-form{display:grid;grid-template-columns:repeat(5,1fr);gap:12px}
   .bt-form > *{min-width:0}
@@ -270,7 +259,6 @@
   .bt-actions button:hover:not(:disabled){box-shadow:0 6px 18px rgba(74,222,128,.28);transform:translateY(-1px)}
   .bt-actions button:disabled{opacity:.45;cursor:not-allowed}
 
-
   .btn-danger{background:rgba(244,63,94,.14);color:#fda4af;border:1px solid rgba(244,63,94,.35);
     border-radius:9px;padding:11px 14px;font-size:13px;font-weight:700;cursor:pointer;
     transition:.16s;width:100%;margin-top:14px;font-family:inherit}
@@ -301,7 +289,6 @@
   .modal-confirm{background:var(--red);color:#fff}
   .modal-confirm:disabled{opacity:.45;cursor:not-allowed}
 
-
   .toastwrap{position:fixed;right:16px;bottom:16px;z-index:200;display:flex;flex-direction:column;
     gap:9px;max-width:min(360px,calc(100vw - 32px));pointer-events:none}
   .toast{pointer-events:auto;display:flex;gap:10px;align-items:flex-start;padding:11px 13px;
@@ -315,7 +302,6 @@
   .toast.err{border-left:3px solid var(--red)} .toast.err b{color:#fda4af}
   .toast.warn{border-left:3px solid var(--amber)} .toast.warn b{color:var(--amber)}
   .toast.info{border-left:3px solid var(--info)} .toast.info b{color:var(--info)}
-
 
   .ctl-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
   .ctl-full{grid-column:1/-1}
@@ -358,7 +344,6 @@
   .history-item{padding:7px 8px;border-bottom:1px solid var(--grid);word-break:break-word}
   @media(max-width:1000px){.settings-fields{grid-template-columns:repeat(2,minmax(0,1fr))}}
   @media(max-width:760px){.ctl-grid{grid-template-columns:1fr}.ctl-full{grid-column:auto}.settings-fields,.ctl-form{grid-template-columns:1fr}}
-
 
   @media(max-width:1200px){.bt-form{grid-template-columns:repeat(3,1fr)}}
   @media(max-width:1080px){
@@ -415,7 +400,6 @@
   <div class="banner dry" id="paperBanner"><span>🧪</span><span>Mode <b>PAPER</b> aktif: eksekusi order, fee, dan saldo <b>disimulasikan lokal</b>. Data pasar tetap asli dari Binance produksi. Tidak ada uang asli dan tidak ada order sungguhan. Hasil PAPER bukan jaminan hasil LIVE.</span></div>
   <div class="banner err" id="errBanner"><span>⚠️</span><span id="errText"></span></div>
 
-
   <nav class="tabs" role="tablist" aria-label="Bagian dashboard" style="margin-bottom:14px">
     <button role="tab" aria-selected="true" aria-controls="paneIkhtisar" data-tab="Ikhtisar">Ikhtisar</button>
     <button role="tab" aria-selected="false" aria-controls="paneRiwayat" data-tab="Riwayat">Riwayat<span class="mut" id="tabTradeBadge"></span></button>
@@ -425,14 +409,12 @@
 
   <div class="tabpane" id="paneIkhtisar" role="tabpanel">
 
-
   <div class="grid cards" style="margin-bottom:16px">
     <div class="card" id="cardEquity"><div class="accent-bar"></div><div class="label">Equity (Live)</div><div class="value mono" id="equityVal"><span class="skel" style="width:70%"></span></div><div class="sub" id="equitySub">saldo + nilai posisi</div></div>
     <div class="card" id="cardPnl"><div class="accent-bar"></div><div class="label">PnL Posisi Terbuka</div><div class="value mono" id="openPnlVal"><span class="skel" style="width:70%"></span></div><div class="sub" id="openPnlSub">belum ada posisi</div></div>
     <div class="card" id="cardRealized"><div class="accent-bar"></div><div class="label">Total PnL Terealisasi</div><div class="value mono" id="realizedVal"><span class="skel" style="width:70%"></span></div><div class="sub" id="realizedSub">dari riwayat trade</div></div>
     <div class="card" id="cardWin"><div class="accent-bar"></div><div class="label">Win Rate</div><div class="value mono" id="winVal"><span class="skel" style="width:70%"></span></div><div class="sub" id="winSub">-</div></div>
   </div>
-
 
   <div class="grid cols" style="margin-bottom:16px">
     <div class="panel">
@@ -446,7 +428,6 @@
       <div id="manualStatus" class="manual-status"></div>
     </div>
   </div>
-
 
   <div class="panel" id="watchlistPanel" style="display:none;margin-bottom:16px">
     <h2>👁️ Watchlist Pantau <span class="mut" style="font-weight:400;font-size:11.5px" id="wlCount"></span></h2>
@@ -462,7 +443,6 @@
       </table>
     </div>
   </div>
-
 
   <div class="grid cols">
     <div class="panel">
@@ -834,7 +814,6 @@
     </div>
   </div>
 
-
   <div class="modal-overlay" id="botActionModal">
     <div class="modal-box">
       <h3 id="botActionTitle">Konfirmasi Aksi Bot</h3>
@@ -849,7 +828,6 @@
       </div>
     </div>
   </div>
-
 
   <div class="modal-overlay" id="manualCloseModal">
     <div class="modal-box">
@@ -883,7 +861,6 @@ const fmt = (n,d=2)=> (n===null||n===undefined||isNaN(n))?'-':Number(n).toLocale
 const fmtP = (n,d=6)=> (n===null||n===undefined||isNaN(n))?'-':Number(n).toLocaleString(LOCALE,{minimumFractionDigits:2,maximumFractionDigits:d});
 const sign = n => (n>0?'+':'');
 const cls = n => n>0?'pos':(n<0?'neg':'mut');
-
 
 const TAB_KEY = 'psb_tab';
 function showTab(name, save){
@@ -1206,7 +1183,6 @@ function renderChart(trades){
     <text x="${W-pad}" y="16" fill="${col}" font-size="13" font-weight="700" text-anchor="end" font-family="monospace">${(cum>=0?'+':'')}${cum.toFixed(2)}</text>
   </svg>`;
 }
-
 
 function wlVol(v){
   if(v===null||v===undefined||isNaN(v)) return '-';
@@ -1914,8 +1890,6 @@ const BT_GRID_PARAMS_PERSEN = [
 let _btGridDefaults = null;
 const btGridMaxKombinasi = () =>
   (_btGridDefaults && _btGridDefaults.grid_max_kombinasi) || 150;
-// Hanya tawarkan parameter yang benar-benar dipakai mesin pada mode exit aktif;
-// parameter mode lain tidak berpengaruh apa pun (grid akan menolaknya).
 const btGridIsAtrMode = () =>
   !(_btGridDefaults && _btGridDefaults.USE_ATR_EXIT === false);
 const btGridParamsForMode = () =>
@@ -2051,8 +2025,6 @@ async function loadBtGridDefaults(){
   btGridUpdateEstimate();
 }
 
-// Baris bawaan harus cocok dengan mode exit aktif: memberi baris persen saat
-// exit ATR aktif (atau sebaliknya) sama saja menipu, grid akan menolaknya.
 function btGridSeedDefaultRow(){
   const wrap = document.getElementById('btGridRows');
   if(!wrap || wrap.children.length) return;
@@ -2236,8 +2208,6 @@ function renderGridResult(res){
 }
 
 loadBtGridDefaults();
-// Baris bawaan ditambahkan oleh btGridSeedDefaultRow() setelah default termuat,
-// supaya parameternya cocok dengan mode exit aktif (ATR atau persen).
 
 function pollBacktest(jobId){
   if(btPolling) clearInterval(btPolling);
@@ -2393,7 +2363,6 @@ function renderBacktestResult(res){
     ${(res.warnings&&res.warnings.length)? '<div style="border-top:1px solid var(--border);margin:4px 0"></div>'+res.warnings.map(w=>`<div class="posrow"><span class="k" style="color:var(--amber)">⚠ ${esc(w)}</span></div>`).join('') : ''}
   `;
 
-
   document.getElementById('btLimitList').innerHTML = (res.limitations||[]).map(l=>`<li>${esc(l)}</li>`).join('');
 
   const trades = res.trades || [];
@@ -2418,7 +2387,6 @@ function renderBacktestResult(res){
 
   renderSymbolBreakdown(s);
   renderSkipped(res);
-
 
   const wrap = document.getElementById('btChartWrap');
   const pts = s.equity_curve || [0];

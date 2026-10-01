@@ -19,12 +19,11 @@ from typing import Iterator
 
 logger = logging.getLogger("rate_limiter")
 
-from infrastructure.storage.atomic_io import (  # noqa: E402
+from infrastructure.storage.atomic_io import (
     _acquire_lock,
     _open_lock_fd,
     _release_lock,
 )
-
 
 
 class RateLimitBlockedError(RuntimeError):

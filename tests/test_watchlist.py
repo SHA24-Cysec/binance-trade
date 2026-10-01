@@ -59,8 +59,6 @@ def K(o, h, l, c, v=1000.0, qv=None, t=0):
                  close_time=t + 299_999, quote_volume=qv if qv is not None else v * c)
 
 
-
-
 class TestConfigHelper(unittest.TestCase):
 
     def test_daftar_manual_benar_benar_hilang(self):

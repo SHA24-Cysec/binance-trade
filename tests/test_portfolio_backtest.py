@@ -202,10 +202,6 @@ def test_path_store_dari_tempfile():
         store.cleanup()
 
 
-# ---------------------------------------------------------------------------
-# Batas jendela waktu (start_ms/end_ms): fondasi split latih/uji grid search
-# ---------------------------------------------------------------------------
-
 def _cfg_portfolio_uji() -> dict:
     from backtesting.synthetic_data import cfg_gerbang_pump_nonaktif
     cfg = cfg_gerbang_pump_nonaktif(config_uji())

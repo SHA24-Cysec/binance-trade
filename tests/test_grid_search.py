@@ -154,8 +154,6 @@ def data_uji():
     cfg["_symbol"] = "TESTUSDT"
     cfg["MIN_QUOTE_VOLUME_USDT_24H"] = 1_000_000
     cfg["ROLLING_VOLUME_FILTER_ENABLED"] = False
-    # SL longgar bawaan (28.8%) membuat sapuan TP_PCT 2-12% melanggar relasi
-    # wajib TP > SL; tes memakai konfigurasi persen yang sah secara struktur.
     cfg["SL_PCT"] = 1.0
     return kl, daily, cfg
 
@@ -303,7 +301,6 @@ def test_ringkas_untuk_tabel_membatasi_jumlah_baris(data_uji):
     assert "params" in baris[0]
     assert "pf_latih" in baris[0]
     assert "winrate_latih" in baris[0]
-    # Payload harus JSON standar: Infinity/NaN membuat JSON.parse browser gagal.
     json.dumps(baris, allow_nan=False)
 
 
@@ -331,7 +328,6 @@ def test_run_grid_search_grid_atr_tidak_terpangkas(data_uji):
 def test_run_grid_search_melanggar_relasi_dilewati(data_uji):
     kl, daily, cfg = data_uji
     cfg["USE_ATR_EXIT"] = True
-    # TRAIL=16 melebihi SL bawaan 12 (melanggar relasi); TRAIL=8 sah.
     hasil = gs.run_grid_search(
         kl, cfg, {"ATR_MULT_TRAIL": [8.0, 16.0]},
         warmup_bars=288, daily_klines=daily, min_trades=1)
@@ -414,20 +410,12 @@ def test_parse_spec_menolak_masukan_salah(teks):
         gs.parse_spec_cli(teks)
 
 
-# ---------------------------------------------------------------------------
-# Grid search versi PORTOFOLIO (multi-simbol, dipakai dashboard).
-# Sifat yang dijaga sama dengan versi simbol tunggal: periode uji terpisah,
-# peringkat dari skor latih, batas kombinasi ditegakkan, pembatalan dihormati.
-# ---------------------------------------------------------------------------
-
-WARMUP_PORTFOLIO_MS = 288 * 300_000  # satu hari candle 5m
+WARMUP_PORTFOLIO_MS = 288 * 300_000
 
 
 @pytest.fixture()
 def store_portfolio():
     from backtesting.backtest_storage import KlineStore
-    # Dua simbol dengan penempatan setup berbeda (BUSDT mulai ~3 hari kemudian)
-    # supaya periode latih DAN periode uji sama-sama memuat trade.
     data = {
         "AUSDT": seri_banyak_setup(harga=100.0, siklus=20, bar_datar=288),
         "BUSDT": seri_banyak_setup(harga=200.0, siklus=20, bar_datar=876),
@@ -447,8 +435,6 @@ def cfg_portfolio():
     cfg["BACKTEST_INITIAL_EQUITY_USDT"] = 10_000.0
     cfg["ROLLING_VOLUME_FILTER_ENABLED"] = False
     cfg["USE_ATR_EXIT"] = False
-    # Sama seperti data_uji: SL bawaan 28.8% membuat sapuan TP 2-12% melanggar
-    # relasi TP > SL, jadi kunci ke nilai yang sah secara struktur.
     cfg["SL_PCT"] = 1.0
     return cfg
 

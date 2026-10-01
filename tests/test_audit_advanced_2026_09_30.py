@@ -19,7 +19,6 @@ from trading import pump_scanner_bot as bot
 from trading.clients.binance_client import BinanceSpotClient
 
 
-
 def _state_with_position() -> dict:
     st = dict(bot.DEFAULT_STATE)
     st["current_symbol"] = "XXXUSDT"
@@ -92,7 +91,6 @@ def test_gate_bisa_dilewati_dengan_override_eksplisit(monkeypatch):
     assert ok is True, "override eksplisit operator harus dihormati"
 
 
-
 def test_deskripsi_mode_exit_sesuai_yang_benar_benar_dipakai():
     cfg = dict(config_mod.PUMP_CONFIG)
     cfg["USE_ATR_EXIT"] = True
@@ -113,7 +111,6 @@ def test_deskripsi_mode_exit_atr_saat_state_memang_atr():
     st["sl_pct"] = 5.0
     desc = bot.describe_exit_mode(cfg, st)
     assert "ATR" in desc.upper()
-
 
 
 def test_dd_stopped_lama_dilepas_saat_equity_stop_dimatikan():
@@ -160,7 +157,6 @@ def test_dd_cooldown_yang_masih_berjalan_tetap_dihormati():
 
     paused = bot.update_equity_controls(st, 1000.0, cfg)
     assert paused is True and st["dd_stopped"] is True
-
 
 
 def test_signature_tidak_bocor_ke_log_saat_error_jaringan():
@@ -220,7 +216,6 @@ def test_redaksi_juga_menutup_parameter_rahasia_lain():
         assert bocor not in safe, f"parameter rahasia masih bocor: {raw}"
 
 
-
 def test_setup_logging_tidak_menggandakan_handler(tmp_path):
     cfg = {"LOG_FILE": str(tmp_path / "bot.log")}
     root = logging.getLogger()
@@ -241,7 +236,6 @@ def test_setup_logging_tidak_menggandakan_handler(tmp_path):
             except Exception:
                 pass
         root.handlers = saved
-
 
 
 def _kandidat_settings(**override) -> dict:

@@ -84,7 +84,7 @@ class BinanceSpotClient:
     def _redact(text) -> str:
         try:
             return _REDACT_RE.sub(r"\1=<REDACTED>", str(text))
-        except Exception:  # pragma: no cover
+        except Exception:
             return "<pesan tidak dapat diredaksi>"
 
     def __init__(self, api_key: str, api_secret: str, base_url: str, timeout: float = 10.0,
@@ -121,12 +121,6 @@ class BinanceSpotClient:
     @staticmethod
     def _estimate_request_weight(method: str, path: str,
                                  params: dict | None = None) -> int:
-        # Bobot mengikuti dokumentasi resmi Binance Spot (diakses 2026-10-01):
-        # https://developers.binance.com/docs/binance-spot-api-docs/rest-api
-        # (market-data-endpoints, account-endpoints, trading-endpoints) dan
-        # CHANGELOG resmi 2023-08-25 (account 10->20, order 2->4,
-        # orderList 2->4, openOrders 3->6 / 40->80):
-        # https://github.com/binance/binance-spot-api-docs/blob/master/CHANGELOG.md
         method = str(method or "GET").upper()
         params = params or {}
         if path == "/api/v3/ticker/24hr":

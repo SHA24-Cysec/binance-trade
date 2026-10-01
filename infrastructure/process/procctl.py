@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 
-if os.name == "nt":  # pragma: no cover
+if os.name == "nt":
     import ctypes
     from ctypes import wintypes
 
@@ -93,7 +93,7 @@ def process_identity(pid: int) -> str | None:
     if pid <= 0:
         return None
 
-    if os.name == "nt":  # pragma: no cover
+    if os.name == "nt":
         handle = _kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
         if not handle:
             return None
@@ -133,7 +133,7 @@ def is_process_alive(pid: int, expected_identity: str | None = None) -> bool:
     if pid <= 0:
         return False
 
-    if os.name == "nt":  # pragma: no cover
+    if os.name == "nt":
         handle = _kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
         if not handle:
             return False
@@ -168,7 +168,7 @@ class ProcessTreeHandle:
         self.error: str | None = None
         if os.name != "nt":
             return
-        try:  # pragma: no cover
+        try:
             handle = _kernel32.CreateJobObjectW(None, None)
             if not handle:
                 raise OSError(ctypes.get_last_error(), "CreateJobObjectW gagal")
@@ -197,13 +197,13 @@ class ProcessTreeHandle:
     def terminate(self, exit_code: int = 1) -> bool:
         if os.name != "nt" or self.handle is None:
             return False
-        try:  # pragma: no cover
+        try:
             return bool(_kernel32.TerminateJobObject(self.handle, int(exit_code)))
         except Exception:
             return False
 
     def close(self) -> None:
-        if os.name == "nt" and self.handle is not None:  # pragma: no cover
+        if os.name == "nt" and self.handle is not None:
             _kernel32.CloseHandle(self.handle)
             self.handle = None
 
@@ -218,7 +218,7 @@ def spawn_python(script: os.PathLike | str, *, args: Optional[list[str]] = None,
         "stdout": None,
         "stderr": None,
     }
-    if os.name == "nt":  # pragma: no cover
+    if os.name == "nt":
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         kwargs["start_new_session"] = True
@@ -227,7 +227,7 @@ def spawn_python(script: os.PathLike | str, *, args: Optional[list[str]] = None,
 
 
 def send_graceful_signal(pid: int, *, process_group: bool = True) -> None:
-    if os.name == "nt":  # pragma: no cover
+    if os.name == "nt":
         if not process_group:
             raise RuntimeError("CTRL_BREAK_EVENT membutuhkan child CREATE_NEW_PROCESS_GROUP")
         os.kill(int(pid), signal.CTRL_BREAK_EVENT)
@@ -240,7 +240,7 @@ def send_graceful_signal(pid: int, *, process_group: bool = True) -> None:
 
 def force_kill(pid: int, tree: ProcessTreeHandle | None = None,
                *, process_group: bool = True) -> None:
-    if os.name == "nt":  # pragma: no cover
+    if os.name == "nt":
         if tree is not None and tree.terminate(exit_code=1):
             return
         handle = _kernel32.OpenProcess(_PROCESS_TERMINATE, False, int(pid))

@@ -341,7 +341,6 @@ def _validate_symbol_list(value: Any, quote: str) -> list[str]:
     return result
 
 
-
 def validate_balances(value: Any) -> dict[str, float]:
     if not isinstance(value, dict) or not value:
         raise ValueError("saldo awal harus object yang tidak kosong")

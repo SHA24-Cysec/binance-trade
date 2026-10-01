@@ -61,7 +61,7 @@ from config.settings_schema import (
 try:
     from trading.clients.binance_client import BinanceAPIError, BinanceSpotClient
     _HAS_CLIENT = True
-except Exception:  # pragma: no cover
+except Exception:
     _HAS_CLIENT = False
 
 logger = logging.getLogger(__name__)
@@ -556,7 +556,6 @@ def build_trade_summary(trades):
     }
 
 
-
 def _reject_if_backtest_disabled():
     if backtest_enabled(PUMP_CONFIG):
         return None
@@ -575,9 +574,6 @@ BT_PARAM_KEYS = (
     "TRAILING_START_PCT", "TRAILING_STEP_PCT",
 )
 
-# Parameter yang boleh di-grid lewat dashboard: parameter exit numerik saja.
-# USE_ATR_EXIT (boolean) sengaja tidak bisa di-grid: itu pilihan mode, bukan
-# nilai yang disapu; grid lintas mode akan membandingkan apel dengan jeruk.
 GRID_PARAM_KEYS = tuple(k for k in BT_PARAM_KEYS if k != "USE_ATR_EXIT")
 
 _bt_jobs: dict = {}
@@ -595,11 +591,6 @@ def _bt_cleanup_old_jobs():
 
 def _bt_prepare_universe(job_id: str, cfg: dict, days: int, max_symbols: int,
                          set_progress, cancelled) -> dict:
-    """Siapkan semesta data (ticker, klines, volume harian) untuk simulasi.
-
-    Dipakai bersama oleh job backtest portofolio dan job grid search.
-    Pemanggil WAJIB menutup store dan kline_cache pada finally.
-    """
     interval = cfg.get("MARKET_DATA_INTERVAL", "5m")
     bt.bars_per_day(interval)
     bar_ms = bt.INTERVAL_MINUTES[interval] * 60_000
@@ -624,7 +615,7 @@ def _bt_prepare_universe(job_id: str, cfg: dict, days: int, max_symbols: int,
     set_progress(0.01, "mengambil daftar pasar...")
     try:
         tickers = client.get_ticker_24hr_all()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise bt.BacktestError(
             f"Gagal mengambil daftar pasar dari Binance: {exc}"
         ) from exc
@@ -637,7 +628,7 @@ def _bt_prepare_universe(job_id: str, cfg: dict, days: int, max_symbols: int,
             if s.get("symbol") and s.get("status") == "TRADING"
             and s.get("isSpotTradingAllowed", True)
         }
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("Metadata status pair tidak tersedia untuk portfolio backtest: %s", exc)
     if tradable_now is not None:
         cfg["_historical_tradable_symbols"] = tradable_now
@@ -685,8 +676,6 @@ def _bt_prepare_universe(job_id: str, cfg: dict, days: int, max_symbols: int,
             cancel_cb=cancelled,
         )
     except Exception:
-        # Pemanggil hanya menutup store yang berhasil dikembalikan; bila gagal
-        # di tengah unduhan (termasuk pembatalan), tanggung jawab bersih ada di sini.
         if store is not None:
             store.cleanup()
         if kline_cache is not None:
@@ -819,7 +808,7 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
         with _bt_jobs_lock:
             if job_id in _bt_jobs:
                 _bt_jobs[job_id].update({"status": "error", "error": str(exc)})
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         with _bt_jobs_lock:
             if job_id in _bt_jobs:
                 _bt_jobs[job_id].update({"status": "error", "error": f"Error tak terduga: {exc}"})
@@ -935,7 +924,7 @@ def _bt_run_grid_job(job_id: str, days: int, max_symbols: int, spec: dict,
         with _bt_jobs_lock:
             if job_id in _bt_jobs:
                 _bt_jobs[job_id].update({"status": "error", "error": str(exc)})
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         with _bt_jobs_lock:
             if job_id in _bt_jobs:
                 _bt_jobs[job_id].update({"status": "error", "error": f"Error tak terduga: {exc}"})
@@ -1217,7 +1206,7 @@ def build_watchlist() -> dict:
                     _watchlist_cache["ts"] = now
                     _watchlist_cache["error"] = None
                 error = None
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 error = f"Gagal mengambil data pasar: {str(exc)[:120]}"
                 with _cache_lock:
                     tickers = _watchlist_cache["data"]
@@ -1300,7 +1289,7 @@ def _watchlist_config() -> dict:
 def _bot_has_open_position() -> bool:
     try:
         st = load_state()
-    except Exception:  # noqa: BLE001
+    except Exception:
         return True
     if not isinstance(st, dict):
         return True

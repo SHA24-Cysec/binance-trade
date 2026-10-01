@@ -81,8 +81,6 @@ KUNCI_PERSEN = (
 
 MAX_KOMBINASI = 2000
 
-# Grid di atas simulasi portofolio jauh lebih mahal per kombinasi (semesta
-# multi-simbol vs satu simbol), jadi batas efektifnya lebih kecil.
 MAX_KOMBINASI_PORTFOLIO = 150
 
 METRIK_TERSEDIA = (
@@ -569,13 +567,6 @@ def run_portfolio_grid_search(
 
 
 def _pf_aman(nilai) -> Optional[float]:
-    """Profit factor yang aman untuk JSON: inf dan nan menjadi None.
-
-    Portofolio tanpa satu pun trade rugi menghasilkan profit_factor = inf.
-    JSON standar tidak boleh memuat Infinity/NaN (JSON.parse di browser
-    akan gagal total), jadi nilai tak hingga dikembalikan sebagai None dan
-    dashboard menampilkannya sebagai simbol tak hingga.
-    """
     if nilai is None:
         return None
     v = float(nilai)

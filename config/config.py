@@ -58,7 +58,7 @@ PUMP_CONFIG = {
     "ATR_MULT_SL": 10.0,
     "ATR_MULT_TP": 20.0,
     "ATR_MULT_TRAIL": 6.0,
-    "ATR_MULT_BE_TRIGGER": 8.0,
+    "ATR_MULT_BE_TRIGGER": 6.0,
     "ATR_MULT_BE_LOCK": 0.8,
     "ATR_MULT_TRAIL_START": 6.0,
 
@@ -349,8 +349,6 @@ def watchlist_enabled(config: dict = None) -> bool:
     if isinstance(raw, bool):
         return raw
     return str(raw).strip().lower() in ("true", "1", "yes", "ya", "on")
-
-
 
 
 def watchlist_auto_enabled(config: dict = None) -> bool:

@@ -36,10 +36,10 @@ import time
 from typing import Any, Optional
 
 try:
-    from websocket import WebSocketApp  # type: ignore
+    from websocket import WebSocketApp
     _WS_AVAILABLE = True
-except ImportError:  # pragma: no cover
-    WebSocketApp = object  # type: ignore
+except ImportError:
+    WebSocketApp = object
     _WS_AVAILABLE = False
 
 logger = logging.getLogger("market_ws")
@@ -112,7 +112,7 @@ class MarketWebSocket:
         if app is not None:
             try:
                 app.close()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
         t = self._thread
         if t and t.is_alive():
@@ -186,7 +186,7 @@ class MarketWebSocket:
             return
         try:
             app.send(json.dumps(payload))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.debug("Gagal kirim pesan langganan WS: %s", exc)
 
     @staticmethod
@@ -212,7 +212,7 @@ class MarketWebSocket:
                 self._app.run_forever(ping_interval=_PING_INTERVAL,
                                       ping_timeout=_PING_TIMEOUT,
                                       reconnect=None)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning("WebSocket run_forever error: %s", exc)
             connected_before_close = self._connected.is_set()
             self._connected.clear()
@@ -225,18 +225,18 @@ class MarketWebSocket:
             backoff = self._next_backoff(backoff, connected_before_close)
         logger.info("Thread WebSocket berhenti.")
 
-    def _on_open(self, _app) -> None:  # noqa: ANN001
+    def _on_open(self, _app) -> None:
         self._connected.set()
         logger.info("WebSocket tersambung.")
 
-    def _on_error(self, _app, error) -> None:  # noqa: ANN001
+    def _on_error(self, _app, error) -> None:
         logger.debug("WebSocket error: %s", error)
 
-    def _on_close(self, _app, status_code, msg) -> None:  # noqa: ANN001
+    def _on_close(self, _app, status_code, msg) -> None:
         self._connected.clear()
         logger.debug("WebSocket ditutup (code=%s, msg=%s).", status_code, msg)
 
-    def _on_message(self, _app, message: str) -> None:  # noqa: ANN001
+    def _on_message(self, _app, message: str) -> None:
         try:
             obj = json.loads(message)
         except (ValueError, TypeError):
@@ -251,7 +251,7 @@ class MarketWebSocket:
             if app is not None:
                 try:
                     app.close()
-                except Exception:  # noqa: BLE001
+                except Exception:
                     pass
 
     def _handle_payload(self, data: Any) -> None:

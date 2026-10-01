@@ -35,7 +35,6 @@ MS_5M = 5 * 60 * 1000
 MS_HARI = 24 * 60 * 60 * 1000
 
 
-
 def deret_5m(bars: int, akhir_ms: int, harga_awal: float = 100.0) -> list[Kline]:
     mulai = akhir_ms - bars * MS_5M
     mulai -= mulai % MS_5M
@@ -80,7 +79,6 @@ def cache(tmp_path) -> KlineCache:
     obj.close()
 
 
-
 def test_merge_ranges_menggabungkan_yang_tumpang_tindih_dan_berdempetan():
     assert merge_ranges([(10, 20), (15, 30)]) == [(10, 30)]
     assert merge_ranges([(10, 20), (21, 30)]) == [(10, 30)]
@@ -117,7 +115,6 @@ def test_jendela_segar_nol_membuat_seluruh_cakupan_dipercaya(tmp_path):
         sekarang = int(time.time() * 1000)
         c.put("AUSDT", "5m", [], sekarang - MS_HARI, sekarang)
         assert c.missing_ranges("AUSDT", "5m", sekarang - MS_HARI, sekarang) == []
-
 
 
 def _unduh(klien, cache, symbols, awal, akhir) -> dict:
@@ -232,9 +229,6 @@ def test_simbol_gagal_tetap_masuk_daftar_gagal_walau_cache_aktif(cache):
     assert cache.coverage("RUSAKUSDT", "5m") == []
 
 
-
-
-
 def test_prune_membuang_simbol_yang_lama_tidak_dipakai(tmp_path):
     with KlineCache(str(tmp_path / "c.sqlite3"), ttl_days=7) as c:
         sekarang = int(time.time() * 1000)
@@ -283,7 +277,6 @@ def test_cache_dipakai_dua_objek_sekaligus_tanpa_saling_merusak(tmp_path):
         dua.put("BUSDT", "5m", deret_5m(10, sekarang), sekarang - MS_HARI, sekarang)
         assert len(satu.read("BUSDT", "5m", 0, sekarang)) == 10
         assert len(dua.read("AUSDT", "5m", 0, sekarang)) == 10
-
 
 
 def test_open_kline_cache_menghormati_config(tmp_path):

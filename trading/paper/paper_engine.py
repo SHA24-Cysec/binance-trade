@@ -542,7 +542,7 @@ class PaperMatchingEngine:
     def _stop_triggered(self, order: dict) -> bool:
         try:
             mkt = _d(self.price_provider(order["symbol"]))
-        except Exception:  # noqa: BLE001
+        except Exception:
             return False
         sp = _d(order["stopPrice"])
         side = order["side"]

@@ -71,7 +71,6 @@ def spread_pct_from_book(bid: float, ask: float) -> float:
     return ((float(ask) - float(bid)) / mid * 100.0) if mid > 0 else float("inf")
 
 
-
 def _angka_wajar(nilai) -> bool:
     try:
         angka = float(nilai)
@@ -197,7 +196,7 @@ def is_pumping_today(symbol: str, price_change_pct, quote_volume,
 
     try:
         harian = get_daily_klines_fn(symbol)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return False, f"gagal mengambil candle harian: {str(exc)[:160]}"
 
     rata, alasan = average_prior_daily_quote_volume(harian, ref)
@@ -458,7 +457,7 @@ def find_best_candidate(tickers: list, klines_fetcher, config: dict,
     for cand in top_n:
         try:
             klines = klines_fetcher(cand.symbol)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             cand.confirmed = False
             cand.confirm_reason = f"gagal mengambil candle: {exc}"
             continue

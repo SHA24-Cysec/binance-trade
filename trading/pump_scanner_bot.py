@@ -101,7 +101,6 @@ DEFAULT_STATE = {
 }
 
 
-
 _LOGGING_MARKER = "_pump_bot_handler"
 
 
@@ -1711,7 +1710,6 @@ def check_manual_control(client: ExchangeClient, config: dict, filters_cache: di
     close_position(client, config, filters_cache, state, "MANUAL_CLOSE_DASHBOARD")
 
 
-
 def manage_exit(client: ExchangeClient, config: dict, filters_cache: dict,
                  state: dict, current_price: float) -> None:
     if not state["current_symbol"] or state["qty"] <= 0 or state["entry_price"] <= 0:
@@ -2056,7 +2054,7 @@ def run(config: dict, lifecycle=None) -> int:
         except BinanceAPIError as exc:
             consecutive_errors += 1
             logger.error("BinanceAPIError (%d berturut-turut): %s", consecutive_errors, exc)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             consecutive_errors += 1
             logger.exception("Error tak terduga (%d berturut-turut): %s", consecutive_errors, exc)
 
@@ -2085,7 +2083,7 @@ def run(config: dict, lifecycle=None) -> int:
 
     try:
         client.close()
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
     logger.info("Bot berhenti.")
     return exit_code

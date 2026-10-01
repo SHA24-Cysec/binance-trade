@@ -111,7 +111,6 @@ class CacheError(RuntimeError):
     pass
 
 
-
 def merge_ranges(ranges: Iterable[tuple[int, int]]) -> list[tuple[int, int]]:
     bersih = sorted((int(a), int(b)) for a, b in ranges if int(b) >= int(a))
     hasil: list[tuple[int, int]] = []
@@ -144,7 +143,6 @@ def subtract_ranges(awal: int, akhir: int,
     if kursor <= akhir:
         sisa.append((kursor, akhir))
     return sisa
-
 
 
 class KlineCache:
@@ -201,7 +199,7 @@ class KlineCache:
             self._closed = True
             try:
                 self._conn.close()
-            except sqlite3.Error as exc:  # noqa: BLE001
+            except sqlite3.Error as exc:
                 logger.warning("Gagal menutup cache backtest: %s", exc)
 
     @property

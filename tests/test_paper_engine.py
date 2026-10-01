@@ -151,7 +151,6 @@ def test_idempotent_client_order_id(make_engine):
     assert "Duplicate" in ei.value.msg
 
 
-
 def test_stop_buy_partial_fill_releases_leftover_quote_lock(make_engine):
     book = {"asks": [["2.00", "6"]], "bids": [["1.99", "100"]]}
     market = FakeMarket(book, price=2.50)

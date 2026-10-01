@@ -59,7 +59,6 @@ import json
 import logging
 import os
 import statistics
-import threading
 import time
 from typing import Callable, Optional
 
@@ -254,7 +253,7 @@ def refresh_once(client, config: dict,
         if progress_cb:
             try:
                 progress_cb(msg, frac)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
 
     if has_open_position is not None:
@@ -262,7 +261,7 @@ def refresh_once(client, config: dict,
             if has_open_position():
                 return {"ok": False, "skipped": True,
                         "error": "dilewati: bot sedang memegang posisi terbuka"}
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
     if client is None:
@@ -285,7 +284,7 @@ def refresh_once(client, config: dict,
         prog("mengambil ticker 24 jam seluruh pasar...", 0.02)
         tickers = client.get_ticker_24hr_all()
         budget.spend(WEIGHT_TICKER_ALL)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return {"ok": False, "error": f"gagal ticker 24 jam: {str(exc)[:140]}"}
 
     spreads: dict = {}
@@ -301,7 +300,7 @@ def refresh_once(client, config: dict,
                         spreads[b["symbol"]] = scanner.spread_pct_from_book(bid, ask)
                 except (KeyError, TypeError, ValueError):
                     continue
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("bookTicker gagal, spread diabaikan: %s", exc)
 
     _daily_cache: dict = {}
@@ -340,7 +339,7 @@ def refresh_once(client, config: dict,
                 if has_open_position():
                     budget.stopped_reason = "bot membuka posisi di tengah penyegaran"
                     break
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
         if not budget.can_spend(WEIGHT_KLINES):
             break
@@ -353,7 +352,7 @@ def refresh_once(client, config: dict,
             row = evaluate_symbol(cand.symbol, kl, meta, config)
             if row:
                 evaluated.append(row)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             failed += 1
             logger.warning("gagal menilai %s: %s", cand.symbol, str(exc)[:120])
             if "429" in str(exc) or "418" in str(exc):
@@ -419,81 +418,3 @@ def load_result(config: dict) -> Optional[dict]:
         return data
     except (json.JSONDecodeError, OSError):
         return None
-
-
-class AutoRefresher:
-
-    def __init__(self, client_getter: Callable, config: dict,
-                 has_open_position: Optional[Callable[[], bool]] = None):
-        self.client_getter = client_getter
-        self.config = config
-        self.has_open_position = has_open_position
-        self._thread: Optional[threading.Thread] = None
-        self._stop = threading.Event()
-        self.status = {"state": "idle", "message": "belum berjalan",
-                       "progress": 0.0, "last_run": None, "next_run": None,
-                       "last_error": None}
-        self._lock = threading.Lock()
-
-    def _set(self, **kw):
-        with self._lock:
-            self.status.update(kw)
-
-    def get_status(self) -> dict:
-        with self._lock:
-            return dict(self.status)
-
-    def start(self) -> None:
-        if self._thread and self._thread.is_alive():
-            return
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._loop, daemon=True,
-                                        name="watchlist-auto")
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._stop.set()
-
-    def _loop(self) -> None:
-        interval = max(1, int(self.config.get("WATCHLIST_AUTO_INTERVAL_HOURS", 6))) * 3600
-        delay = max(0, int(self.config.get("WATCHLIST_AUTO_STARTUP_DELAY_SECONDS", 60)))
-
-        prev = load_result(self.config)
-        if prev:
-            age = time.time() - prev.get("generated_at", 0)
-            if age < interval:
-                delay = max(delay, int(interval - age))
-                self._set(message=f"memakai hasil sebelumnya, umur {age/3600:.1f} jam")
-
-        self._set(next_run=int(time.time() + delay))
-        if self._stop.wait(delay):
-            return
-
-        while not self._stop.is_set():
-            self._set(state="running", message="menyiapkan...", progress=0.0)
-            try:
-                res = refresh_once(
-                    self.client_getter(), self.config,
-                    has_open_position=self.has_open_position,
-                    progress_cb=lambda m, f: self._set(message=m, progress=f),
-                )
-                if res.get("ok"):
-                    save_result(res, self.config)
-                    self._set(state="idle", progress=1.0,
-                              message=(f"selesai: {len(res['items'])} simbol, "
-                                       f"{res['weight_spent']} weight, "
-                                       f"{res['duration_seconds']:.0f} detik"),
-                              last_run=res["generated_at"], last_error=None)
-                else:
-                    self._set(state="idle", progress=0.0,
-                              message=res.get("error", "gagal"),
-                              last_error=res.get("error"))
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("siklus penyegaran watchlist gagal")
-                self._set(state="idle", message=f"error: {str(exc)[:140]}",
-                          last_error=str(exc)[:140])
-
-            nxt = int(time.time() + interval)
-            self._set(next_run=nxt)
-            if self._stop.wait(interval):
-                return
