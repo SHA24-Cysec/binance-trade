@@ -40,10 +40,11 @@ from infrastructure.paths import PROJECT_ROOT
 from config.config import (
     PUMP_CONFIG, CONFIG_LOAD_ERRORS, get_mode, get_mode_source, get_base_url,
     is_paper, backtest_enabled, get_state_file, get_log_file, get_control_file,
-    watchlist_enabled,
+    detector_enabled,
 )
 from infrastructure.storage import state as state_mod
 from market import market_scanner as scanner
+from strategy import indicators as strategy_ind
 from infrastructure.process.runtime_control import BotControlError, BotProcessManager
 
 try:
@@ -77,6 +78,9 @@ class _PaperDashboardClient:
         return self._market.get_klines(symbol, interval, limit=limit,
                                        start_time_ms=start_time_ms,
                                        end_time_ms=end_time_ms)
+
+    def get_depth(self, symbol, limit=100):
+        return self._market.get_depth(symbol, limit=limit)
 
     def is_rate_limited(self):
         return self._market.is_rate_limited()
@@ -294,13 +298,12 @@ def _run_control_operation(operation_id: str, action: str,
 _client = None
 _price_cache: dict = {}
 _balance_cache: dict = {"data": None, "ts": 0}
-_watchlist_cache: dict = {"data": None, "ts": 0, "error": None}
-
-_auto_refresher = None
 PRICE_TTL = 5.0
 BALANCE_TTL = 30.0
 
-WATCHLIST_TTL = 20.0
+DETECTOR_TTL = 120.0
+DETECTOR_DAILY_TTL = 3600.0
+DETECTOR_WORKERS = 4
 
 
 def get_client():
@@ -1296,111 +1299,184 @@ def index():
     return render_template("dashboard.html", admin_token=_ADMIN_TOKEN)
 
 
-def build_watchlist() -> dict:
-    if not watchlist_enabled(PUMP_CONFIG):
-        return {"enabled": False, "items": [], "summary": {}, "error": None}
+_detector_cache: dict = {"data": None, "ts": 0.0, "error": None}
+_detector_daily_cache: dict = {}
+_detector_state: dict = {"running": False}
 
+
+def _detector_planned_notional() -> float:
+    """Ukuran order acuan untuk menilai kedalaman order book."""
+    for key in ("MAX_POSITION_USDT", "POSITION_SIZE_USDT"):
+        try:
+            v = float(PUMP_CONFIG.get(key, 0) or 0)
+        except (TypeError, ValueError):
+            v = 0.0
+        if v > 0:
+            return v
+    return 100.0
+
+
+def _detector_daily_avg(client, symbol: str, now_ms: int):
     now = time.time()
-    tickers = None
-    error = None
-
     with _cache_lock:
-        cached_watchlist = dict(_watchlist_cache)
-    if cached_watchlist["data"] is not None and now - cached_watchlist["ts"] < WATCHLIST_TTL:
-        tickers = cached_watchlist["data"]
-        error = cached_watchlist["error"]
+        hit = _detector_daily_cache.get(symbol)
+    if hit and now - hit[0] < DETECTOR_DAILY_TTL:
+        return hit[1], hit[2]
+    try:
+        raw = client.get_klines(symbol, "1d", limit=scanner.PUMP_GATE_DAILY_CANDLES + 1)
+        avg, why = scanner.average_prior_daily_quote_volume(
+            strategy_ind.parse_klines(raw), now_ms)
+    except Exception as exc:
+        return None, f"gagal mengambil candle harian: {str(exc)[:80]}"
+    with _cache_lock:
+        _detector_daily_cache[symbol] = (now, avg, why)
+    return avg, why
+
+
+def _detector_score_symbol(client, symbol: str, ticker: dict, planned: float) -> dict:
+    now_ms = int(time.time() * 1000)
+    price = float(ticker.get("lastPrice", 0) or 0)
+    chg = float(ticker.get("priceChangePercent", 0) or 0)
+    qv = float(ticker.get("quoteVolume", 0) or 0)
+
+    avg, avg_why = _detector_daily_avg(client, symbol, now_ms)
+
+    klines = None
+    try:
+        lookback = strategy_ind.confirm_window_bars(PUMP_CONFIG)
+        raw = client.get_klines(symbol, PUMP_CONFIG["CONFIRM_INTERVAL"], limit=lookback + 1)
+        closed = [k for k in strategy_ind.parse_klines(raw) if k.close_time < now_ms]
+        klines = closed[-lookback:]
+    except Exception:
+        klines = None
+
+    depth = None
+    try:
+        depth = client.get_depth(
+            symbol, scanner.normalize_depth_limit(PUMP_CONFIG.get("ORDERBOOK_DEPTH_LIMIT", 500)))
+    except Exception:
+        depth = None
+
+    book = scanner.orderbook_metrics(depth, planned, PUMP_CONFIG)
+    det = scanner.compute_detector_score(chg, qv, avg, klines, price, book, PUMP_CONFIG)
+
+    gate_ok, gate_reason = scanner.evaluate_pump_gate(chg, qv, avg, PUMP_CONFIG)
+    if depth is None:
+        book_ok, book_reason = False, "order book gagal diambil"
     else:
+        book_ok, book_reason, _m = scanner.evaluate_orderbook(
+            depth, planned, dict(PUMP_CONFIG, DEPTH_FILTER_ENABLED=True,
+                                 ORDERBOOK_FILTER_ENABLED=True))
+    if not gate_ok:
+        verdict, reason = "DITOLAK GERBANG", gate_reason
+    elif not book_ok:
+        verdict, reason = "DITOLAK ORDER BOOK", book_reason
+    else:
+        verdict, reason = "LOLOS", "lolos gerbang pump dan filter order book"
+    return {
+        "symbol": symbol, "price": price, "change_24h": chg, "quote_volume_24h": qv,
+        "score": det["score"], "components": det["components"],
+        "missing": det["missing"], "partial": det["partial"],
+        "verdict": verdict, "reason": reason,
+    }
+
+
+def _detector_rebuild() -> None:
+    """Hitung ulang skor di thread latar belakang, hasil disimpan di cache."""
+    try:
         client = get_client()
         if client is None:
-            error = "Klien Binance tidak tersedia (requests belum terpasang?)."
-            tickers = cached_watchlist["data"]
-        else:
+            raise RuntimeError("Klien Binance tidak tersedia (requests belum terpasang?).")
+        if hasattr(client, "is_rate_limited") and client.is_rate_limited():
+            raise RuntimeError("Batas rate Binance sedang aktif, skor ditunda.")
+        raw = client.get_ticker_24hr_all()
+        min_vol = float(PUMP_CONFIG.get("MIN_QUOTE_VOLUME_USDT_24H", 0) or 0)
+        try:
+            top_n = max(1, int(PUMP_CONFIG.get("DETECTOR_TOP_N", 15) or 15))
+        except (TypeError, ValueError):
+            top_n = 15
+        picked = []
+        for t in raw:
+            if not isinstance(t, dict) or "symbol" not in t:
+                continue
+            sym = str(t["symbol"])
+            if not scanner.is_structurally_allowed_symbol(sym, PUMP_CONFIG):
+                continue
             try:
-                raw = client.get_ticker_24hr_all()
-                tickers = {t["symbol"]: t for t in raw if isinstance(t, dict) and "symbol" in t}
-                with _cache_lock:
-                    _watchlist_cache["data"] = tickers
-                    _watchlist_cache["ts"] = now
-                    _watchlist_cache["error"] = None
-                error = None
-            except Exception as exc:
-                error = f"Gagal mengambil data pasar: {str(exc)[:120]}"
-                with _cache_lock:
-                    tickers = _watchlist_cache["data"]
-                    _watchlist_cache["error"] = error
+                qv = float(t.get("quoteVolume", 0) or 0)
+                price = float(t.get("lastPrice", 0) or 0)
+                chg = float(t.get("priceChangePercent", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if price <= 0 or qv < min_vol:
+                continue
+            picked.append((chg, qv, sym, t))
+        picked.sort(key=lambda x: (-x[0], -x[1]))
+        picked = picked[:top_n]
 
-    min_vol = float(PUMP_CONFIG.get("MIN_QUOTE_VOLUME_USDT_24H", 0))
-    try:
-        top_n = max(1, int(PUMP_CONFIG.get("WATCHLIST_TOP_N", 15) or 15))
-    except (TypeError, ValueError):
-        top_n = 15
-
-    selected: list[tuple[float, float, str, dict]] = []
-    for sym, t in (tickers or {}).items():
-        if not scanner.is_structurally_allowed_symbol(str(sym), PUMP_CONFIG):
-            continue
-        try:
-            qv = float(t.get("quoteVolume", 0) or 0)
-            price = float(t.get("lastPrice", 0) or 0)
-            chg = float(t.get("priceChangePercent", 0) or 0)
-        except (TypeError, ValueError):
-            continue
-        if price <= 0 or qv < min_vol:
-            continue
-        selected.append((chg, qv, sym, t))
-    selected.sort(key=lambda x: (-x[0], -x[1]))
-    selected = selected[:top_n]
-
-    items = []
-    for _chg, qv, sym, t in selected:
-        try:
-            price = float(t.get("lastPrice", 0) or 0)
-            chg = float(t.get("priceChangePercent", 0) or 0)
-            hi = float(t.get("highPrice", 0) or 0)
-            lo = float(t.get("lowPrice", 0) or 0)
-        except (TypeError, ValueError):
-            price = chg = hi = lo = 0.0
-
-        rng = hi - lo
-        rpos = ((price - lo) / rng) if rng > 0 else None
-
-        monitoring_score = round(min(100.0, max(0.0, (chg + 100.0) / 2.0)), 1)
-        items.append({
-            "symbol": sym,
-            "monitoring_score": monitoring_score,
-            "price": price, "change_24h": chg, "quote_volume_24h": qv,
-            "high_24h": hi, "low_24h": lo,
-            "trades_24h": int(t.get("count", 0) or 0),
-            "pass_volume": True,
-            "status": "LIKUID",
-            "range_position": round(rpos, 3) if rpos is not None else None,
-        })
-
-    items.sort(key=lambda r: (-r["change_24h"], -r["quote_volume_24h"]))
-
-    counts = {}
-    for r in items:
-        counts[r["status"]] = counts.get(r["status"], 0) + 1
-
-    return {
-        "enabled": True,
-        "items": items,
-        "summary": {
-            "total": len(items),
-            "counts": counts,
-            "with_data": len(items),
-        },
-        "config": _watchlist_config(),
-        "error": error,
-    }
+        planned = _detector_planned_notional()
+        items = []
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=DETECTOR_WORKERS) as pool:
+            futures = [pool.submit(_detector_score_symbol, client, sym, t, planned)
+                       for _chg, _qv, sym, t in picked]
+            for fut in futures:
+                try:
+                    items.append(fut.result())
+                except Exception as exc:
+                    logger.debug("Skor detector gagal untuk satu simbol: %s", exc)
+        items.sort(key=lambda r: (-r["score"], -r["change_24h"]))
+        scores = [r["score"] for r in items]
+        data = {
+            "enabled": True,
+            "items": items,
+            "summary": {
+                "total": len(items),
+                "lolos": sum(1 for r in items if r["verdict"] == "LOLOS"),
+                "skor_tertinggi": max(scores) if scores else None,
+                "skor_rata_rata": round(sum(scores) / len(scores), 1) if scores else None,
+            },
+            "config": {
+                "quote_asset": PUMP_CONFIG.get("QUOTE_ASSET", "USDT"),
+                "top_n": top_n,
+                "min_quote_volume_24h": min_vol,
+                "planned_notional": planned,
+                "weights": {key: PUMP_CONFIG.get(wkey) for key, wkey, _l in scanner.DETECTOR_COMPONENTS},
+            },
+        }
+        with _cache_lock:
+            _detector_cache.update(data=data, ts=time.time(), error=None)
+    except Exception as exc:
+        with _cache_lock:
+            _detector_cache["error"] = f"Gagal menghitung skor: {str(exc)[:140]}"
+            _detector_cache["ts"] = time.time()
+    finally:
+        with _cache_lock:
+            _detector_state["running"] = False
 
 
-def _watchlist_config() -> dict:
-    return {
-        "min_quote_volume_24h": PUMP_CONFIG.get("MIN_QUOTE_VOLUME_USDT_24H"),
-        "quote_asset": PUMP_CONFIG.get("QUOTE_ASSET", "USDT"),
-        "top_n": PUMP_CONFIG.get("WATCHLIST_TOP_N", 15),
-    }
+def build_detector() -> dict:
+    """Skor detector (hanya tampilan). Tidak pernah memblokir request: hitung di latar belakang."""
+    if not detector_enabled(PUMP_CONFIG):
+        return {"enabled": False, "items": [], "summary": {}, "error": None}
+    now = time.time()
+    with _cache_lock:
+        data = _detector_cache["data"]
+        ts = _detector_cache["ts"]
+        error = _detector_cache["error"]
+        stale = data is None or now - ts >= DETECTOR_TTL
+        start = stale and not _detector_state["running"]
+        if start:
+            _detector_state["running"] = True
+        running = _detector_state["running"]
+    if start:
+        threading.Thread(target=_detector_rebuild, name="detector-rebuild", daemon=True).start()
+    if data is None:
+        return {"enabled": True, "items": [], "summary": {}, "loading": running,
+                "error": error, "updated_at": None}
+    out = dict(data)
+    out.update(loading=running, error=error, updated_at=ts)
+    return out
 
 
 def _bot_has_open_position() -> bool:
@@ -1417,13 +1493,9 @@ def _bot_has_open_position() -> bool:
     return bool(st.get("current_symbol")) and qty > 0
 
 
-def start_auto_refresher() -> None:
-    pass
-
-
-@app.route("/api/watchlist")
-def api_watchlist():
-    return jsonify(build_watchlist())
+@app.route("/api/detector")
+def api_detector():
+    return jsonify(build_detector())
 
 
 @app.route("/api/status")
@@ -1544,7 +1616,6 @@ def api_all():
         "trades": trades[:100],
         "events": events,
         "log_levels": level_count,
-        "watchlist": build_watchlist(),
     })
 
 
@@ -1709,8 +1780,6 @@ def api_control_execute():
 
 
 def main(*, auto_start_bot: bool = False) -> int:
-    start_auto_refresher()
-
     if not _bind_is_loopback():
         trusted = list(app.config.get("TRUSTED_HOSTS") or [])
         if _DASHBOARD_HOST not in ("0.0.0.0", "::"):
@@ -1735,11 +1804,6 @@ def main(*, auto_start_bot: bool = False) -> int:
                 use_reloader=False, threaded=True)
     finally:
         _process_manager.shutdown_dashboard()
-        if _auto_refresher is not None:
-            try:
-                _auto_refresher.stop()
-            except Exception:
-                pass
     return 0
 
 

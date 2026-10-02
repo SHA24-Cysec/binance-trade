@@ -1,6 +1,6 @@
 """Generator data candle sintetis yang deterministik untuk tes dan selftest.
 
-SATU sumber data sintetis dipakai bersama oleh tests/, test_watchlist.py, dan
+SATU sumber data sintetis dipakai bersama oleh tests/ dan
 selftest di pump_scanner_bot.py, backtest.py, serta portfolio_backtest.py.
 Alasannya sederhana: kalau setiap file membuat candle sendiri, mudah sekali
 satu di antaranya lupa mengisi volume, dan deteksi setup yang memakai anchored

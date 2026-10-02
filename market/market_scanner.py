@@ -434,6 +434,199 @@ def evaluate_orderbook(depth, planned_notional: float, config: dict) -> tuple[bo
                   f"wall {metrics.get('wall_share', 0) * 100:.0f}%"), metrics
 
 
+# ---------------------------------------------------------------------------
+# Skor detector (hanya tampilan di dashboard, TIDAK mempengaruhi keputusan entry)
+# ---------------------------------------------------------------------------
+
+DETECTOR_COMPONENTS = (
+    ("change", "DETECTOR_WEIGHT_CHANGE", "Kenaikan 24j"),
+    ("volume24", "DETECTOR_WEIGHT_VOLUME24", "Volume 24j"),
+    ("volume5m", "DETECTOR_WEIGHT_VOLUME5M", "Volume 5m"),
+    ("orderbook", "DETECTOR_WEIGHT_ORDERBOOK", "Order book"),
+    ("atr", "DETECTOR_WEIGHT_ATR", "ATR"),
+)
+
+
+def _clamp01(x: float) -> float:
+    if x is None or not math.isfinite(x):
+        return 0.0
+    return max(0.0, min(1.0, float(x)))
+
+
+def _closed_volume_ratio(klines: "list[Kline] | None", config: dict) -> Optional[float]:
+    """Volume candle tertutup terakhir dibanding rata-rata ROLLING_VOLUME_LOOKBACK_BARS sebelumnya."""
+    lookback = max(1, int(config.get("ROLLING_VOLUME_LOOKBACK_BARS", 20) or 20))
+    if not klines or len(klines) < lookback + 1:
+        return None
+    values = []
+    for k in klines:
+        quote = float(getattr(k, "quote_volume", 0.0) or 0.0)
+        base = float(getattr(k, "volume", 0.0) or 0.0)
+        v = quote if quote > 0 else base
+        if not math.isfinite(v) or v < 0:
+            return None
+        values.append(v)
+    prior = values[-1 - lookback:-1]
+    avg = sum(prior) / lookback
+    if avg <= 0:
+        return None
+    return values[-1] / avg
+
+
+def orderbook_metrics(depth, planned_notional: float, config: dict) -> Optional[dict]:
+    """Metrik order book tanpa keputusan lolos atau tidak (untuk tampilan skor)."""
+    if not isinstance(depth, dict):
+        return None
+    asks = sorted(_parse_levels(depth.get("asks")), key=lambda x: x[0])
+    bids = sorted(_parse_levels(depth.get("bids")), key=lambda x: x[0], reverse=True)
+    if not asks or not bids or planned_notional <= 0:
+        return None
+    best_ask, best_bid = asks[0][0], bids[0][0]
+    if best_bid >= best_ask:
+        return None
+
+    def _inside(pct: float) -> list:
+        lim = best_ask * (1.0 + pct / 100.0)
+        return [lv for lv in asks if lv[0] <= lim]
+
+    depth_rng = float(config.get("DEPTH_RANGE_PCT", 0.5) or 0.5)
+    n = max(1, int(config.get("ORDERBOOK_LEVELS", 10) or 10))
+    wall_rng = float(config.get("SELL_WALL_RANGE_PCT", 1.0) or 1.0)
+    ask_depth = sum(p * q for p, q in _inside(depth_rng))
+    bid_n = sum(p * q for p, q in bids[:n])
+    ask_n = sum(p * q for p, q in asks[:n])
+    wall_lv = _inside(wall_rng)
+    wall_total = sum(p * q for p, q in wall_lv)
+    wall_share = None
+    if len(wall_lv) >= SELL_WALL_MIN_LEVELS and wall_total > 0:
+        wall_share = max(p * q for p, q in wall_lv) / wall_total
+    return {
+        "ask_depth_notional": ask_depth,
+        "bid_ask_ratio": (bid_n / ask_n) if ask_n > 0 else None,
+        "wall_share": wall_share,
+        "planned_notional": planned_notional,
+    }
+
+
+def compute_detector_score(change_pct, quote_volume, avg_daily_quote_volume,
+                           klines_5m: "list[Kline] | None", last_price,
+                           book: Optional[dict], config: dict) -> dict:
+    """Skor detector 0 sampai 100 dari lima komponen, hanya untuk tampilan.
+
+    Tiap komponen bernilai 0 sampai 1 relatif terhadap ambang yang dipakai bot,
+    lalu dibobot (DETECTOR_WEIGHT_*). Data yang tidak tersedia dihitung 0 dan
+    dicatat di ``missing``, jadi skor tidak pernah terlihat lebih baik dari
+    kenyataan. Tidak ada indikator teknikal (EMA, RSI, MACD).
+    """
+    comps: dict = {}
+    missing: list = []
+
+    # 1. Kenaikan 24 jam: penuh di dalam rentang gerbang pump, turun di luar rentang.
+    lo = float(config.get("PUMP_MIN_24H_CHANGE_PCT", 6.0) or 0.0)
+    hi = float(config.get("PUMP_MAX_24H_CHANGE_PCT", 0.0) or 0.0)
+    try:
+        chg = float(change_pct)
+        if not math.isfinite(chg):
+            raise ValueError
+        if chg < lo:
+            sub = chg / lo if lo > 0 else 1.0
+        elif hi > 0 and chg > hi:
+            sub = 1.0 - (chg - hi) / hi
+        else:
+            sub = 1.0
+        comps["change"] = {"sub": _clamp01(sub), "value": chg, "unit": "%"}
+    except (TypeError, ValueError):
+        comps["change"] = {"sub": 0.0, "value": None, "unit": "%"}
+        missing.append("change")
+
+    # 2. Lonjakan volume 24 jam dibanding rata-rata 7 hari.
+    surge = float(config.get("PUMP_VOLUME_SURGE_MULT", 2.0) or 0.0)
+    try:
+        ratio24 = float(quote_volume) / float(avg_daily_quote_volume)
+        if not math.isfinite(ratio24) or ratio24 < 0:
+            raise ValueError
+        comps["volume24"] = {"sub": _clamp01(ratio24 / surge) if surge > 0 else 1.0,
+                             "value": ratio24, "unit": "x"}
+    except (TypeError, ValueError, ZeroDivisionError):
+        comps["volume24"] = {"sub": 0.0, "value": None, "unit": "x"}
+        missing.append("volume24")
+
+    # 3. Lonjakan volume candle 5m terakhir.
+    mult5 = float(config.get("ROLLING_VOLUME_SURGE_MULT", 2.0) or 0.0)
+    r5 = _closed_volume_ratio(klines_5m, config)
+    if r5 is None:
+        comps["volume5m"] = {"sub": 0.0, "value": None, "unit": "x"}
+        missing.append("volume5m")
+    else:
+        comps["volume5m"] = {"sub": _clamp01(r5 / mult5) if mult5 > 0 else 1.0,
+                             "value": r5, "unit": "x"}
+
+    # 4. Kualitas order book: kedalaman 40%, bid/ask 30%, sell wall 30%.
+    if book is None:
+        comps["orderbook"] = {"sub": 0.0, "value": None, "unit": ""}
+        missing.append("orderbook")
+    else:
+        planned = float(book["planned_notional"])
+        need = float(config.get("DEPTH_MIN_ASK_NOTIONAL_MULT", 10.0) or 0.0) * planned
+        depth_sub = _clamp01(book["ask_depth_notional"] / need) if need > 0 else 1.0
+        min_ratio = float(config.get("ORDERBOOK_MIN_BID_ASK_RATIO", 0.8) or 0.0)
+        ratio = book.get("bid_ask_ratio")
+        imb_sub = 0.0 if ratio is None else (_clamp01(ratio / min_ratio) if min_ratio > 0 else 1.0)
+        max_share = float(config.get("SELL_WALL_MAX_SHARE_PCT", 30.0) or 0.0) / 100.0
+        share = book.get("wall_share")
+        if share is None or max_share <= 0 or share <= max_share:
+            wall_sub = 1.0
+        else:
+            wall_sub = _clamp01(1.0 - (share - max_share) / max(1e-9, 1.0 - max_share))
+        comps["orderbook"] = {
+            "sub": 0.4 * depth_sub + 0.3 * imb_sub + 0.3 * wall_sub,
+            "value": None, "unit": "",
+            "depth_sub": depth_sub, "imbalance_sub": imb_sub, "wall_sub": wall_sub,
+            "ask_depth_notional": book["ask_depth_notional"],
+            "bid_ask_ratio": ratio, "wall_share": share,
+        }
+
+    # 5. ATR/harga: penuh di pita sehat, turun linear di luar pita.
+    band_lo = float(config.get("DETECTOR_ATR_MIN_PCT", 0.3) or 0.0)
+    band_hi = float(config.get("DETECTOR_ATR_MAX_PCT", 1.2) or 0.0)
+    atr_val = None
+    try:
+        if klines_5m:
+            atr_val = strategy.atr(klines_5m, int(config.get("ATR_PERIOD", 14) or 14))
+        price = float(last_price)
+    except (TypeError, ValueError):
+        atr_val, price = None, 0.0
+    if atr_val is None or not math.isfinite(atr_val) or price <= 0:
+        comps["atr"] = {"sub": 0.0, "value": None, "unit": "%"}
+        missing.append("atr")
+    else:
+        pct = atr_val / price * 100.0
+        if pct < band_lo:
+            sub = pct / band_lo if band_lo > 0 else 1.0
+        elif band_hi > 0 and pct > band_hi:
+            sub = 1.0 - (pct - band_hi) / band_hi
+        else:
+            sub = 1.0
+        comps["atr"] = {"sub": _clamp01(sub), "value": pct, "unit": "%"}
+
+    total_w = 0.0
+    acc = 0.0
+    for key, wkey, label in DETECTOR_COMPONENTS:
+        w = max(0.0, float(config.get(wkey, 0.0) or 0.0))
+        comps[key]["weight"] = w
+        comps[key]["label"] = label
+        comps[key]["points"] = None
+        total_w += w
+        acc += w * comps[key]["sub"]
+    score = (acc / total_w * 100.0) if total_w > 0 else 0.0
+    for key, wkey, _label in DETECTOR_COMPONENTS:
+        w = comps[key]["weight"]
+        comps[key]["points"] = (w * comps[key]["sub"] / total_w * 100.0) if total_w > 0 else 0.0
+        comps[key]["max_points"] = (w / total_w * 100.0) if total_w > 0 else 0.0
+    return {"score": round(score, 1), "components": comps, "missing": missing,
+            "partial": bool(missing)}
+
+
 @dataclass
 class SetupResult:
     ok: bool

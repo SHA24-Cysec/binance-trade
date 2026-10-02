@@ -108,8 +108,15 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "ATR_MULT_TRAIL_START": _field("Breakeven dan Trailing", "Pengali ATR mulai trailing", "Profit ATR untuk mengaktifkan trailing.", "float", minimum=0, maximum=50, unit="x"),
     "EXTRA_EXCLUDE_SYMBOLS": _field("Scan", "Blacklist simbol", "Simbol tambahan yang tidak boleh dipilih.", "list", editor="symbols"),
 
-    "WATCHLIST_ENABLED": _field("Watchlist", "Aktifkan watchlist", "Menampilkan panel pemantauan watchlist.", "bool"),
-    "WATCHLIST_TOP_N": _field("Watchlist", "Jumlah pair dipantau", "Berapa pair dengan kenaikan 24 jam terbesar yang ditampilkan sebagai data monitoring.", "int", minimum=1, maximum=50),
+    "DETECTOR_ENABLED": _field("Skor Detector", "Aktifkan skor detector", "Menampilkan panel skor detector di dashboard. Hanya tampilan: skor TIDAK mempengaruhi keputusan entry bot.", "bool"),
+    "DETECTOR_TOP_N": _field("Skor Detector", "Jumlah pair dinilai", "Berapa pair likuid dengan kenaikan 24 jam terbesar yang dinilai skornya. Makin banyak, makin banyak panggilan API (order book 25 bobot per pair).", "int", minimum=1, maximum=30),
+    "DETECTOR_WEIGHT_CHANGE": _field("Skor Detector", "Bobot kenaikan 24 jam", "Bobot relatif komponen kenaikan 24 jam terhadap rentang gerbang pump.", "float", minimum=0, maximum=100),
+    "DETECTOR_WEIGHT_VOLUME24": _field("Skor Detector", "Bobot lonjakan volume 24 jam", "Bobot relatif volume 24 jam dibanding rata-rata 7 hari.", "float", minimum=0, maximum=100),
+    "DETECTOR_WEIGHT_VOLUME5M": _field("Skor Detector", "Bobot lonjakan volume 5m", "Bobot relatif volume candle 5m terakhir dibanding rata-rata candle sebelumnya.", "float", minimum=0, maximum=100),
+    "DETECTOR_WEIGHT_ORDERBOOK": _field("Skor Detector", "Bobot kualitas order book", "Bobot relatif kedalaman ask, rasio bid/ask, dan sell wall.", "float", minimum=0, maximum=100),
+    "DETECTOR_WEIGHT_ATR": _field("Skor Detector", "Bobot volatilitas ATR", "Bobot relatif ATR/harga candle 5m terhadap pita sehat.", "float", minimum=0, maximum=100),
+    "DETECTOR_ATR_MIN_PCT": _field("Skor Detector", "ATR sehat minimum", "Batas bawah pita ATR/harga yang bernilai penuh. Di bawahnya skor turun.", "float", minimum=0.01, maximum=50, unit="%"),
+    "DETECTOR_ATR_MAX_PCT": _field("Skor Detector", "ATR sehat maksimum", "Batas atas pita ATR/harga yang bernilai penuh. Di atasnya skor turun sampai nol di dua kali batas ini.", "float", minimum=0.01, maximum=50, unit="%"),
     "BACKTEST_INITIAL_EQUITY_USDT": _field("Data Backtest", "Modal awal backtest", "Saldo USDT awal simulasi backtest. 0 berarti mengikuti saldo awal PAPER (PAPER_INITIAL_BALANCES) supaya persen return dan drawdown sebanding dengan bot.", "float", minimum=0, maximum=1e12, unit="USDT"),
     "BACKTEST_CACHE_ENABLED": _field("Sistem", "Cache candle backtest", "Pakai ulang candle yang sudah pernah diunduh supaya backtest ulang tidak mengunduh dari nol.", "bool"),
     "BACKTEST_CACHE_FILE": _field("Sistem", "File cache backtest", "Path runtime internal cache candle backtest.", "str", read_only=True),
@@ -257,6 +264,7 @@ REMOVED_PARAMETERS = frozenset({
     "WATCHLIST_ENTRY_WEIGHT_MACD", "WATCHLIST_ENTRY_WEIGHT_HL",
     "WATCHLIST_ENTRY_EMA_GAP_PCT", "WATCHLIST_ENTRY_RSI_DECAY_PTS",
     "WATCHLIST_ENTRY_SCORE_TTL_SECONDS", "WATCHLIST_ENTRY_MIN_HEADROOM",
+    "WATCHLIST_ENABLED", "WATCHLIST_TOP_N",
 })
 
 
@@ -429,6 +437,15 @@ def validate_candidate(candidate: dict, mode: str) -> tuple[dict, dict[str, str]
                  cleaned["PUMP_MAX_24H_CHANGE_PCT"] == 0
                  or cleaned["PUMP_MAX_24H_CHANGE_PCT"] > cleaned["PUMP_MIN_24H_CHANGE_PCT"],
                  "harus lebih besar dari PUMP_MIN_24H_CHANGE_PCT (atau 0 untuk menonaktifkan)")
+        relation("DETECTOR_ATR_MAX_PCT",
+                 cleaned["DETECTOR_ATR_MAX_PCT"] > cleaned["DETECTOR_ATR_MIN_PCT"],
+                 "harus lebih besar dari DETECTOR_ATR_MIN_PCT")
+        relation("DETECTOR_WEIGHT_CHANGE",
+                 sum(float(cleaned[k]) for k in (
+                     "DETECTOR_WEIGHT_CHANGE", "DETECTOR_WEIGHT_VOLUME24",
+                     "DETECTOR_WEIGHT_VOLUME5M", "DETECTOR_WEIGHT_ORDERBOOK",
+                     "DETECTOR_WEIGHT_ATR")) > 0,
+                 "total bobot detector harus lebih dari 0")
         relation("PUMP_VOLUME_SURGE_MULT", cleaned["PUMP_VOLUME_SURGE_MULT"] >= 1.0,
                  "harus minimal 1 kali rata-rata 7 hari, di bawah itu berarti volume justru turun")
         relation("ATR_MULT_TRAIL", cleaned["ATR_MULT_TRAIL"] <= cleaned["ATR_MULT_SL"],

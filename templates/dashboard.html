@@ -104,21 +104,21 @@
   .tag.stop_loss{background:rgba(244,63,94,.13);color:var(--red);border-color:rgba(244,63,94,.3)}
   .mono{font-variant-numeric:tabular-nums;font-family:var(--mono)}
 
-  .wl-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
-  .wl-chip{font-size:10.5px;font-weight:700;padding:3px 9px;border-radius:20px;
+  .det-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+  .det-chip{font-size:10.5px;font-weight:700;padding:3px 9px;border-radius:20px;
     border:1px solid var(--border);background:var(--panel2);color:var(--muted);white-space:nowrap}
-  .wl-chip b{color:var(--txt);font-variant-numeric:tabular-nums}
-  .wl-chip.siap{background:rgba(74,222,128,.13);color:var(--green);border-color:rgba(74,222,128,.32)}
-  .wl-chip.siap b{color:var(--green)}
-  .wl-note{font-size:11px;color:var(--muted);line-height:1.65;margin-bottom:12px}
-  .wl-note b{color:#cbd5e1}
-  .wl-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
-  table.wl{min-width:680px}
-  table.wl td{padding:8px 10px;font-size:12px}
-  table.wl th{padding:8px 10px}
-  table.wl tr.siap{background:rgba(74,222,128,.045)}
-  table.wl tr.siap:hover{background:rgba(74,222,128,.09)}
-  .wl-sym{font-weight:700;letter-spacing:.2px}
+  .det-chip b{color:var(--txt);font-variant-numeric:tabular-nums}
+  .det-chip.siap{background:rgba(74,222,128,.13);color:var(--green);border-color:rgba(74,222,128,.32)}
+  .det-chip.siap b{color:var(--green)}
+  .det-note{font-size:11px;color:var(--muted);line-height:1.65;margin-bottom:12px}
+  .det-note b{color:#cbd5e1}
+  .det-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  table.det{min-width:900px}
+  table.det td{padding:8px 10px;font-size:12px}
+  table.det th{padding:8px 10px}
+  table.det tr.siap{background:rgba(74,222,128,.045)}
+  table.det tr.siap:hover{background:rgba(74,222,128,.09)}
+  .det-sym{font-weight:700;letter-spacing:.2px}
   .tag.st-siap{background:rgba(74,222,128,.15);color:var(--green);border-color:rgba(74,222,128,.35)}
   .tag.st-tipis{background:rgba(245,158,11,.13);color:var(--amber);border-color:rgba(245,158,11,.3)}
   .tag.st-menunggu{background:rgba(56,189,248,.12);color:var(--info);border-color:rgba(56,189,248,.28)}
@@ -129,13 +129,17 @@
   .tag.ti-spekulatif{background:rgba(245,158,11,.12);color:var(--amber);border-color:rgba(245,158,11,.28)}
   .tag.ti-lainnya{background:rgba(148,163,184,.1);color:var(--muted);border-color:var(--border)}
 
-  .wl-bar{position:relative;height:5px;border-radius:3px;background:rgba(148,163,184,.14);
+  .det-bar{position:relative;height:5px;border-radius:3px;background:rgba(148,163,184,.14);
     overflow:hidden;min-width:52px}
-  .wl-bar span{position:absolute;inset:0 auto 0 0;border-radius:3px;background:var(--info);
+  .det-bar span{position:absolute;inset:0 auto 0 0;border-radius:3px;background:var(--info);
     transition:width .3s ease}
-  .wl-bar.full span{background:var(--green)}
-  .wl-gap{font-size:10.5px;color:var(--muted);margin-top:3px;font-variant-numeric:tabular-nums}
-  @media(max-width:640px){ table.wl{min-width:600px} }
+  .det-bar.full span{background:var(--green)}
+  .det-bar.mid span{background:var(--amber)}
+  .det-bar.low span{background:#f43f5e}
+  .det-score{font-weight:800;font-size:13px;min-width:34px;display:inline-block}
+  td.det-miss{color:var(--muted);opacity:.6}
+  .det-gap{font-size:10.5px;color:var(--muted);margin-top:3px;font-variant-numeric:tabular-nums}
+  @media(max-width:640px){ table.det{min-width:860px} }
 
   .posbox{display:flex;flex-direction:column;gap:2px}
   .posrow{display:flex;justify-content:space-between;align-items:baseline;gap:12px;font-size:12.5px;
@@ -402,17 +406,17 @@
     </div>
   </div>
 
-  <div class="panel" id="watchlistPanel" style="display:none;margin-bottom:16px">
-    <h2>👁️ Watchlist Pantau <span class="mut" style="font-weight:400;font-size:11.5px" id="wlCount"></span></h2>
-    <div class="wl-head" id="wlChips"></div>
-    <div class="wl-note" id="wlNote"></div>
-    <div class="wl-scroll">
-      <table class="wl" id="wlTable">
+  <div class="panel" id="detectorPanel" style="display:none;margin-bottom:16px">
+    <h2>🎯 Skor Detector <span class="mut" style="font-weight:400;font-size:11.5px" id="detCount"></span></h2>
+    <div class="det-head" id="detChips"></div>
+    <div class="det-note" id="detNote"></div>
+    <div class="det-scroll">
+      <table class="det" id="detTable">
         <thead><tr>
-          <th>Simbol</th><th>Harga</th><th>24 Jam</th>
-          <th>Menuju Ambang Volume</th><th>Volume 24J</th><th>Posisi Range</th><th>Status</th>
+          <th>Simbol</th><th>Harga</th><th>24 Jam</th><th>Skor</th>
+          <th>Kenaikan</th><th>Vol 24J</th><th>Vol 5m</th><th>Order Book</th><th>ATR</th><th>Status</th>
         </tr></thead>
-        <tbody id="wlBody"><tr><td colspan="7" class="empty">Memuat watchlist…</td></tr></tbody>
+        <tbody id="detBody"><tr><td colspan="10" class="empty">Memuat skor detector…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -1131,7 +1135,7 @@ function renderChart(trades){
   </svg>`;
 }
 
-function wlVol(v){
+function detVol(v){
   if(v===null||v===undefined||isNaN(v)) return '-';
   if(v>=1e9) return fmt(v/1e9,2)+' M';
   if(v>=1e6) return fmt(v/1e6,2)+' jt';
@@ -1139,204 +1143,97 @@ function wlVol(v){
   return fmt(v,0);
 }
 
-let _wlWsSocket = null;
-let _wlWsConnected = false;
-let _currentWlData = null;
+function detBarCls(sc){ return sc>=70?' full':(sc>=40?' mid':' low'); }
 
-function updateWsBadge(connected){
-  const el = document.getElementById('wlWsChip');
-  if(!el) return;
-  if(connected){
-    el.className = 'wl-chip siap';
-    el.innerHTML = '● <b>WebSocket Live (Real-Time)</b>';
-  }else{
-    el.className = 'wl-chip';
-    el.innerHTML = 'Menghubungkan WebSocket…';
-  }
+function detCell(c, fmtVal){
+  if(!c) return '<td class="det-miss">-</td>';
+  const pts = (c.points===null||c.points===undefined) ? '-' : fmt(c.points,1);
+  const mx = (c.max_points===null||c.max_points===undefined) ? '-' : fmt(c.max_points,0);
+  const val = fmtVal(c);
+  if(val===null) return `<td class="det-miss" title="Data tidak tersedia, dihitung 0">n/a<div class="det-gap">0 / ${mx}</div></td>`;
+  return `<td><span class="mono">${val}</span><div class="det-gap">${pts} / ${mx}</div></td>`;
 }
 
-function initWatchlistWebSocket(){
-  if(_wlWsSocket && (_wlWsSocket.readyState === WebSocket.OPEN || _wlWsSocket.readyState === WebSocket.CONNECTING)){
-    return;
-  }
-  try{
-    const wsUrl = 'wss://stream.binance.com:9443/ws/!ticker@arr';
-    _wlWsSocket = new WebSocket(wsUrl);
+let _detTimer = null;
 
-    _wlWsSocket.onopen = () => {
-      _wlWsConnected = true;
-      updateWsBadge(true);
-    };
-
-    _wlWsSocket.onmessage = (event) => {
-      try{
-        const data = JSON.parse(event.data);
-        if(!Array.isArray(data) || !_currentWlData || !_currentWlData.items) return;
-        const tickMap = {};
-        for(let i=0; i<data.length; i++){
-          const t = data[i];
-          if(t && t.s){
-            tickMap[t.s] = t;
-          }
-        }
-        updateWatchlistTicks(tickMap);
-      }catch(e){}
-    };
-
-    _wlWsSocket.onerror = () => {
-      _wlWsConnected = false;
-      updateWsBadge(false);
-    };
-
-    _wlWsSocket.onclose = () => {
-      _wlWsConnected = false;
-      updateWsBadge(false);
-      setTimeout(initWatchlistWebSocket, 5000);
-    };
-  }catch(err){
-    _wlWsConnected = false;
-    updateWsBadge(false);
-  }
-}
-
-function updateWatchlistTicks(tickMap){
-  if(!_currentWlData || !_currentWlData.items) return;
-  const cfg = _currentWlData.config || {};
-  const minVol = cfg.min_quote_volume_24h || 0;
-
-  for(let i=0; i<_currentWlData.items.length; i++){
-    const r = _currentWlData.items[i];
-    const t = tickMap[r.symbol];
-    if(!t) continue;
-
-    const price = parseFloat(t.c || 0);
-    const chg = parseFloat(t.P || 0);
-    const qv = parseFloat(t.q || 0);
-    const hi = parseFloat(t.h || 0);
-    const lo = parseFloat(t.l || 0);
-
-    if(price > 0){
-      r.price = price;
-      r.change_24h = chg;
-      r.quote_volume_24h = qv;
-      r.pass_volume = qv >= minVol;
-      r.status = r.pass_volume ? 'LIKUID' : 'TIPIS';
-      const rng = hi - lo;
-      r.range_position = rng > 0 ? ((price - lo) / rng) : null;
-
-      const rowEl = document.getElementById('wl-row-' + r.symbol);
-      if(rowEl){
-        const priceEl = rowEl.querySelector('.wl-p');
-        const chgEl = rowEl.querySelector('.wl-c');
-        const volEl = rowEl.querySelector('.wl-v');
-        const barEl = rowEl.querySelector('.wl-b');
-        const rpEl = rowEl.querySelector('.wl-r');
-        const stEl = rowEl.querySelector('.wl-s');
-
-        if(priceEl) priceEl.textContent = fmtP(price);
-        if(chgEl){
-          chgEl.className = 'mono wl-c ' + cls(chg);
-          chgEl.textContent = sign(chg) + fmt(chg, 2) + '%';
-        }
-        if(volEl) volEl.textContent = wlVol(qv);
-        if(rpEl){
-          rpEl.innerHTML = (r.range_position === null || r.range_position === undefined)
-            ? '<span class="mut">-</span>'
-            : `<span class="mono">${fmt(r.range_position*100,0)}%</span>`;
-        }
-        if(barEl && minVol > 0){
-          const ratio = Math.max(0, Math.min(1, qv / minVol));
-          const full = r.pass_volume ? ' full' : '';
-          const gap = r.pass_volume
-            ? `<span class="pos">lolos ${wlVol(qv - minVol)} di atas ambang</span>`
-            : `kurang ${wlVol(minVol - qv)}`;
-          barEl.innerHTML = `<div class="wl-bar${full}"><span style="width:${(ratio*100).toFixed(1)}%"></span></div>` +
-                            `<div class="wl-gap">${gap}</div>`;
-        }
-        if(stEl){
-          const stCls = {'LIKUID':'st-siap','TIPIS':'st-tipis','TIDAK ADA DATA':'st-nodata'};
-          stEl.className = 'tag ' + (stCls[r.status] || 'st-nodata');
-          stEl.textContent = r.status;
-        }
-        rowEl.className = (r.status === 'LIKUID') ? 'siap' : '';
-      }
-    }
-  }
-}
-
-function renderWatchlist(w){
-  const panel=document.getElementById('watchlistPanel');
+function renderDetector(d){
+  const panel=document.getElementById('detectorPanel');
   if(!panel) return;
-  if(!w||!w.enabled){ panel.style.display='none'; return; }
+  if(!d||!d.enabled){ panel.style.display='none'; return; }
   panel.style.display='';
-  _currentWlData = w;
+  const items=d.items||[];
+  const cfg=d.config||{};
+  const sum=d.summary||{};
 
-  const items=w.items||[];
-  const cfg=w.config||{};
-  const sum=w.summary||{};
-  const counts=sum.counts||{};
+  document.getElementById('detCount').textContent =
+    items.length ? `${items.length} simbol dinilai` : '';
 
-  document.getElementById('wlCount').textContent =
-    items.length ? `${items.length} simbol dipantau` : '';
-
-  const chipOrder=[['LIKUID','siap'],['TIPIS',''],['TIDAK ADA DATA','']];
-  let chips=chipOrder.filter(([k])=>counts[k])
-    .map(([k,c])=>`<span class="wl-chip ${c}">${k} <b>${fmt(counts[k],0)}</b></span>`).join('');
-  chips+=`<span class="wl-chip">ambang volume <b>${wlVol(cfg.min_quote_volume_24h)}</b></span>`;
-  chips+=`<span class="wl-chip${_wlWsConnected?' siap':''}" id="wlWsChip">${_wlWsConnected?'● <b>WebSocket Live (Real-Time)</b>':'Menghubungkan WebSocket…'}</span>`;
-  document.getElementById('wlChips').innerHTML=chips;
-
-  const note=document.getElementById('wlNote');
-  if(w.error){
-    note.innerHTML=`<b style="color:var(--amber)">⚠️ ${esc(w.error)}</b><br>`+
-      `Daftar tetap ditampilkan memakai data terakhir yang berhasil diambil.`;
-  }else{
-    note.innerHTML=`Daftar ini disusun <b>otomatis</b>: ${fmt(cfg.top_n||15,0)} pair ${esc(cfg.quote_asset||'USDT')} `+
-      `dengan <b>kenaikan 24 jam terbesar</b> yang lolos semesta scanner bot (bukan stablecoin/leveraged token, volume 24 jam ≥ ${wlVol(cfg.min_quote_volume_24h)}). `+
-      `<b>Hanya untuk dipantau</b>, tidak mengubah perilaku bot. `+
-      `Panel ini hanya menampilkan data monitoring pasar.`;
+  let chips='';
+  if(items.length){
+    chips+=`<span class="det-chip siap">lolos semua filter <b>${fmt(sum.lolos||0,0)}</b></span>`;
+    chips+=`<span class="det-chip">skor tertinggi <b>${fmt(sum.skor_tertinggi,1)}</b></span>`;
+    chips+=`<span class="det-chip">rata-rata <b>${fmt(sum.skor_rata_rata,1)}</b></span>`;
+    chips+=`<span class="det-chip">order acuan <b>${fmt(cfg.planned_notional,0)} ${esc(cfg.quote_asset||'USDT')}</b></span>`;
   }
+  if(d.loading) chips+='<span class="det-chip">menghitung…</span>';
+  if(d.updated_at){
+    chips+=`<span class="det-chip">diperbarui <b>${new Date(d.updated_at*1000).toLocaleTimeString('id-ID')}</b></span>`;
+  }
+  document.getElementById('detChips').innerHTML=chips;
 
-  const tb=document.getElementById('wlBody');
+  const note=document.getElementById('detNote');
+  const warn=d.error?`<b style="color:var(--amber)">⚠️ ${esc(d.error)}</b><br>`+
+    (items.length?'Daftar memakai data terakhir yang berhasil dihitung.<br>':''):'';
+  note.innerHTML=warn+
+    `Skor 0 sampai 100 untuk ${fmt(cfg.top_n||15,0)} pair ${esc(cfg.quote_asset||'USDT')} dengan kenaikan 24 jam terbesar `+
+    `(volume 24 jam ≥ ${detVol(cfg.min_quote_volume_24h)}). Lima komponen dinilai terhadap ambang bot: kenaikan 24 jam, `+
+    `lonjakan volume 24 jam, lonjakan volume 5m, kualitas order book, dan ATR. Angka kecil di bawah nilai adalah poin / poin maksimum. `+
+    `<b>Hanya tampilan</b>, skor tidak mengubah keputusan entry bot. Data yang gagal diambil dihitung 0. `+
+    `Status LOLOS berarti gerbang pump dan filter order book terpenuhi saat ini; entry tetap butuh konfirmasi volume 5m, spread, chase, dan usia listing.`;
+
+  const tb=document.getElementById('detBody');
   if(!items.length){
-    tb.innerHTML='<tr><td colspan="7" class="empty">Belum ada pair yang lolos gerbang volume scanner (atau data pasar belum terambil).</td></tr>';
+    tb.innerHTML=`<tr><td colspan="10" class="empty">${d.loading?'Menghitung skor detector…':'Belum ada pair yang memenuhi semesta scanner (atau data pasar belum terambil).'}</td></tr>`;
     return;
   }
 
-  const stCls={'LIKUID':'st-siap','TIPIS':'st-tipis','TIDAK ADA DATA':'st-nodata'};
-
+  const stCls={'LOLOS':'st-siap','DITOLAK GERBANG':'st-tipis','DITOLAK ORDER BOOK':'st-menunggu'};
   tb.innerHTML=items.map(r=>{
-    const st=r.status||'TIDAK ADA DATA';
-    const rowCls=(st==='LIKUID')?' class="siap"':'';
-
-    let bar='<span class="mut">-</span>';
-    if(r.quote_volume_24h!==null&&r.quote_volume_24h!==undefined&&cfg.min_quote_volume_24h){
-      const ratio=Math.max(0,Math.min(1,r.quote_volume_24h/cfg.min_quote_volume_24h));
-      const full=r.pass_volume?' full':'';
-      const gap=r.pass_volume
-        ? `<span class="pos">lolos ${wlVol(r.quote_volume_24h-cfg.min_quote_volume_24h)} di atas ambang</span>`
-        : `kurang ${wlVol(cfg.min_quote_volume_24h-r.quote_volume_24h)}`;
-      bar=`<div class="wl-bar${full}"><span style="width:${(ratio*100).toFixed(1)}%"></span></div>`+
-          `<div class="wl-gap">${gap}</div>`;
-    }
-
-    const rp=(r.range_position===null||r.range_position===undefined)
-      ? '<span class="mut">-</span>'
-      : `<span class="mono">${fmt(r.range_position*100,0)}%</span>`;
-
-    const volCls=r.pass_volume===false?' class="mut"':'';
-    return `<tr id="wl-row-${esc(r.symbol)}"${rowCls}>
-      <td><span class="wl-sym">${esc(r.symbol)}</span></td>
-      <td class="mono wl-p">${fmtP(r.price)}</td>
-      <td class="mono wl-c ${cls(r.change_24h)}">${r.change_24h===null?'-':sign(r.change_24h)+fmt(r.change_24h,2)+'%'}</td>
-      <td class="wl-b">${bar}</td>
-      <td${volCls}><span class="mono wl-v">${wlVol(r.quote_volume_24h)}</span></td>
-      <td class="wl-r">${rp}</td>
-      <td><span class="tag wl-s ${stCls[st]||'st-nodata'}">${esc(st)}</span></td>
+    const c=r.components||{};
+    const sc=r.score;
+    return `<tr id="det-row-${esc(r.symbol)}"${r.verdict==='LOLOS'?' class="siap"':''}>
+      <td><span class="det-sym">${esc(r.symbol)}</span></td>
+      <td class="mono">${fmtP(r.price)}</td>
+      <td class="mono ${cls(r.change_24h)}">${sign(r.change_24h)}${fmt(r.change_24h,2)}%</td>
+      <td><span class="det-score mono">${fmt(sc,1)}</span><div class="det-bar${detBarCls(sc)}"><span style="width:${Math.max(0,Math.min(100,sc)).toFixed(1)}%"></span></div></td>
+      ${detCell(c.change, x=>x.value===null?null:sign(x.value)+fmt(x.value,2)+'%')}
+      ${detCell(c.volume24, x=>x.value===null?null:fmt(x.value,2)+'x')}
+      ${detCell(c.volume5m, x=>x.value===null?null:fmt(x.value,2)+'x')}
+      ${detCell(c.orderbook, x=>{
+        if(x.bid_ask_ratio===undefined) return null;
+        const ba=(x.bid_ask_ratio===null)?'-':fmt(x.bid_ask_ratio,2)+'x';
+        const wl=(x.wall_share===null||x.wall_share===undefined)?'-':fmt(x.wall_share*100,0)+'%';
+        return `${detVol(x.ask_depth_notional)}<span class="mut"> · b/a ${ba} · wall ${wl}</span>`;
+      })}
+      ${detCell(c.atr, x=>x.value===null?null:fmt(x.value,2)+'%')}
+      <td><span class="tag ${stCls[r.verdict]||'st-nodata'}" title="${esc(r.reason)}">${esc(r.verdict)}</span></td>
     </tr>`;
   }).join('');
+}
 
-  initWatchlistWebSocket();
+async function pollDetector(){
+  let delay = 30000;
+  try{
+    const r=await timedFetch('/api/detector',{cache:'no-store'},15000,null);
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const d=await responseJson(r);
+    renderDetector(d);
+    if(d && d.enabled && (d.loading || !(d.items||[]).length)) delay = 4000;
+  }catch(e){
+    delay = 15000;
+  }
+  clearTimeout(_detTimer);
+  _detTimer = setTimeout(pollDetector, delay);
 }
 
 let _pollingPaused = false;
@@ -1392,7 +1289,6 @@ async function refresh(){
     renderTrades(d.trades, d.status.quote);
     renderLogs(d.events);
     renderChart(d.trades);
-    renderWatchlist(d.watchlist);
     const t=new Date();
     document.getElementById('lastUpdate').textContent='diperbarui '+t.toLocaleTimeString('id-ID');
   }catch(e){
@@ -1411,6 +1307,7 @@ async function refresh(){
   }
 }
 scheduleRefresh(0);
+pollDetector();
 
 const esc = v => String(v===null||v===undefined?'':v).replace(/[&<>"']/g, c=>({
   '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'

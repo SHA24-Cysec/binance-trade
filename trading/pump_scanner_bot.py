@@ -3082,7 +3082,6 @@ def selftest() -> None:
     # Harga 1.0. Ask: 50 level x 400 USDT di 1.000 sampai 1.0049, total 20.000 dalam 0.5%.
     flat_asks = [(1.0 + i * 0.0001, 400.0 / (1.0 + i * 0.0001)) for i in range(1, 60)]
     flat_bids = [(1.0 - i * 0.0001, 400.0 / (1.0 - i * 0.0001)) for i in range(1, 60)]
-    best_ask_px = 1.0 + 0.0001
     book_ok = _book(flat_asks, flat_bids)
     ok, why, m = scanner.evaluate_orderbook(book_ok, 1000.0, cfg)
     assert ok, why
@@ -3111,6 +3110,40 @@ def selftest() -> None:
     assert scanner.normalize_depth_limit(50) == 100 and scanner.normalize_depth_limit(101) == 500 \
         and scanner.normalize_depth_limit(2000) == 1000 and scanner.normalize_depth_limit("abc") == 500
     print("  -> OK (depth, ketimpangan bid/ask, sell wall, data rusak = fail closed)")
+
+    print("=== SELFTEST: skor detector (hanya tampilan) ===")
+    det_cfg = dict(cfg)
+    det_asks = [(1.0 + i * 0.0001, 400.0 / (1.0 + i * 0.0001)) for i in range(1, 60)]
+    det_bids = [(1.0 - i * 0.0001, 400.0 / (1.0 - i * 0.0001)) for i in range(1, 60)]
+    book_good = scanner.orderbook_metrics(_book(det_asks, det_bids), 100.0, det_cfg)
+    assert book_good is not None and book_good["ask_depth_notional"] > 1000
+    # 40 candle 5m: volume datar 1000, candle terakhir 3x, harga 1.0, rentang high-low 0.6%
+    k5 = [strategy.Kline(open_time=i * 300_000, open=1.0, high=1.003, low=0.997, close=1.0,
+                         close_time=i * 300_000 + 299_999,
+                         volume=1000.0, quote_volume=1000.0) for i in range(40)]
+    k5[-1] = strategy.Kline(open_time=39 * 300_000, open=1.0, high=1.003, low=0.997, close=1.0,
+                            close_time=39 * 300_000 + 299_999, volume=3000.0, quote_volume=3000.0)
+    full = scanner.compute_detector_score(8.0, 6_000_000.0, 2_000_000.0, k5, 1.0, book_good, det_cfg)
+    assert full["score"] == 100.0 and not full["partial"], full
+    # data hilang dihitung 0 dan ditandai, skor turun
+    miss = scanner.compute_detector_score(8.0, 6_000_000.0, 2_000_000.0, None, 1.0, None, det_cfg)
+    assert miss["partial"] and set(miss["missing"]) == {"volume5m", "orderbook", "atr"}, miss["missing"]
+    assert abs(miss["score"] - 40.0) < 0.2, miss["score"]
+    # di atas batas atas 24 jam skor komponen kenaikan turun, di 2x batas atas jadi 0
+    hi = scanner.compute_detector_score(20.0, 6_000_000.0, 2_000_000.0, k5, 1.0, book_good, det_cfg)
+    assert hi["components"]["change"]["sub"] == 0.0 and hi["score"] == 80.0, hi["score"]
+    # volume lemah menurunkan skor
+    weak = scanner.compute_detector_score(8.0, 2_000_000.0, 2_000_000.0, k5, 1.0, book_good, det_cfg)
+    assert abs(weak["components"]["volume24"]["sub"] - 0.5) < 1e-9
+    # bobot tidak valid (semua nol) tidak membagi nol
+    zero = dict(det_cfg, DETECTOR_WEIGHT_CHANGE=0, DETECTOR_WEIGHT_VOLUME24=0, DETECTOR_WEIGHT_VOLUME5M=0,
+                DETECTOR_WEIGHT_ORDERBOOK=0, DETECTOR_WEIGHT_ATR=0)
+    assert scanner.compute_detector_score(8.0, 1.0, 1.0, k5, 1.0, book_good, zero)["score"] == 0.0
+    # skor tidak dipakai jalur entry: tidak ada rujukan di find_best_candidate/open_position
+    import inspect
+    assert "detector" not in inspect.getsource(scanner.find_best_candidate).lower()
+    assert "detector" not in inspect.getsource(open_position).lower()
+    print("  -> OK (skor 100 untuk data ideal, data hilang dihitung 0, bobot nol aman, tidak masuk jalur entry)")
 
     tanpa_sumber = scanner.filter_and_rank_candidates(tickers, cfg, tradable)
     assert tanpa_sumber == [], \

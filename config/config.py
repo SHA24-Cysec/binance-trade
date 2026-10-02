@@ -68,18 +68,25 @@ PUMP_CONFIG = {
 
     "USE_ATR_EXIT": True,
     "ATR_PERIOD": 14,
-    "ATR_MULT_SL": 8.0,
-    "ATR_MULT_TP": 24.0,
+    "ATR_MULT_SL": 10.0,
+    "ATR_MULT_TP": 20.0,
     "ATR_MULT_TRAIL": 6.0,
-    "ATR_MULT_BE_TRIGGER": 10.0,
-    "ATR_MULT_BE_LOCK": 3.0,
-    "ATR_MULT_TRAIL_START": 15.0,
+    "ATR_MULT_BE_TRIGGER": 6.0,
+    "ATR_MULT_BE_LOCK": 0.8,
+    "ATR_MULT_TRAIL_START": 6.0,
 
     "EXTRA_EXCLUDE_SYMBOLS": [],
 
 
-    "WATCHLIST_ENABLED": True,
-    "WATCHLIST_TOP_N": 15,
+    "DETECTOR_ENABLED": True,
+    "DETECTOR_TOP_N": 15,
+    "DETECTOR_WEIGHT_CHANGE": 20.0,
+    "DETECTOR_WEIGHT_VOLUME24": 20.0,
+    "DETECTOR_WEIGHT_VOLUME5M": 20.0,
+    "DETECTOR_WEIGHT_ORDERBOOK": 25.0,
+    "DETECTOR_WEIGHT_ATR": 15.0,
+    "DETECTOR_ATR_MIN_PCT": 0.3,
+    "DETECTOR_ATR_MAX_PCT": 1.2,
 
     "BACKTEST_INITIAL_EQUITY_USDT": 0.0,
     "BACKTEST_CACHE_ENABLED": True,
@@ -393,16 +400,12 @@ _finalize_config_dict(PUMP_CONFIG)
 PUMP_DEFAULTS["BASE_URL"] = PUMP_DEFAULTS["LIVE_BASE_URL"]
 
 
-def watchlist_enabled(config: dict = None) -> bool:
+def detector_enabled(config: dict = None) -> bool:
     cfg = PUMP_CONFIG if config is None else config
-    raw = cfg.get("WATCHLIST_ENABLED", False)
+    raw = cfg.get("DETECTOR_ENABLED", False)
     if isinstance(raw, bool):
         return raw
     return str(raw).strip().lower() in ("true", "1", "yes", "ya", "on")
-
-
-def watchlist_auto_enabled(config: dict = None) -> bool:
-    return False
 
 
 def get_taker_fee_pct(config: dict = None) -> float:
