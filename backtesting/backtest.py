@@ -2,8 +2,8 @@
 """
 Backtest simbol tunggal dengan simulasi eksekusi penuh.
 
-run_backtest() mengevaluasi sinyal entry (deteksi pullback-retest, gerbang
-pump, likuiditas) lalu menyimulasikan siklus BUY/SELL: latency entry (OPEN
+run_backtest() mengevaluasi sinyal entry (gerbang pump, konfirmasi volume
+rolling, likuiditas) lalu menyimulasikan siklus BUY/SELL: latency entry (OPEN
 bar berikutnya secara default), spread/slippage eksekusi, fee, cooldown
 setelah close, dan level exit FIXED/ATR. Tidak ada order nyata yang
 dikirim; semua berbasis data historis.
@@ -19,6 +19,7 @@ from typing import Callable, Optional
 from strategy.indicators import Kline
 from strategy import indicators as strategy
 from market import market_scanner as scanner
+from backtesting import parity
 
 MS_PER_MIN = 60_000
 MS_PER_DAY = 24 * 60 * MS_PER_MIN
@@ -63,6 +64,8 @@ class BacktestResult:
     warnings: list = field(default_factory=list)
     initial_equity: float = 0.0
     final_equity: float = 0.0
+    risk_events: dict = field(default_factory=dict)
+    chase_skips: int = 0
 
 
 def bars_per_day(interval: str) -> int:
@@ -73,9 +76,17 @@ def bars_per_day(interval: str) -> int:
 
 
 def initial_backtest_equity(config: dict) -> float:
-    fallback = (config.get("PAPER_INITIAL_BALANCES", {}) or {}).get(
+    """Modal awal simulasi.
+
+    BACKTEST_INITIAL_EQUITY_USDT bernilai 0 (default) berarti mengikuti saldo awal
+    PAPER (PAPER_INITIAL_BALANCES), supaya persen return dan drawdown sebanding
+    dengan bot. Isi angka positif untuk memakai modal lain.
+    """
+    paper = (config.get("PAPER_INITIAL_BALANCES", {}) or {}).get(
         config.get("QUOTE_ASSET", "USDT"), 10_000.0)
-    value = float(config.get("BACKTEST_INITIAL_EQUITY_USDT", fallback) or 0.0)
+    value = float(config.get("BACKTEST_INITIAL_EQUITY_USDT", 0.0) or 0.0)
+    if value <= 0:
+        value = float(paper or 0.0)
     return max(0.0, value)
 
 
@@ -172,7 +183,8 @@ def fetch_full_klines(
 
 def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
                   progress_cb: Optional[Callable[[float], None]] = None,
-                  daily_klines: Optional[list[Kline]] = None) -> BacktestResult:
+                  daily_klines: Optional[list[Kline]] = None,
+                  btc_klines: Optional[list[Kline]] = None) -> BacktestResult:
     interval = config.get("CONFIRM_INTERVAL", "5m")
     window = bars_per_day(interval)
     stats = compute_rolling_24h_stats(klines, window)
@@ -180,7 +192,6 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
 
     lookback = strategy.confirm_window_bars(config)
     min_vol = config["MIN_QUOTE_VOLUME_USDT_24H"]
-    cooldown_ms = config["COOLDOWN_MINUTES_AFTER_CLOSE"] * MS_PER_MIN
 
     n = len(klines)
     trades: list[BacktestTrade] = []
@@ -197,16 +208,13 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
                               trades=[], params=config, warnings=warnings,
                               initial_equity=initial_equity, final_equity=initial_equity)
     equity = initial_equity
-    in_position = False
+    pos: Optional[parity.PositionState] = None
     entry_price = 0.0
     entry_time = 0
     position_notional = 0.0
     equity_before_entry = 0.0
-    be_active = False
-    be_stop = 0.0
-    trailing_active = False
-    trailing_stop = 0.0
     next_entry_allowed_at = 0
+    chase_skips = 0
 
     try:
         from config.config import get_taker_fee_pct as _fee_fn
@@ -215,14 +223,15 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
         fee_round_trip_pct = float(config.get("TAKER_FEE_PCT", 0.1)) * 2.0
 
     execution_spread_pct, execution_slippage_pct, entry_delay_bars = entry_execution_params(config)
+    max_chase_pct = float(config.get("MAX_CHASE_PCT", 0) or 0)
 
-    cur_sl = abs(float(config.get("SL_PCT", 1.8)))
-    cur_tp = abs(float(config.get("TP_PCT", 4.0)))
-    cur_be_trig = abs(float(config.get("BE_TRIGGER_PCT", 1.0)))
-    cur_be_lock = abs(float(config.get("BE_LOCK_PCT", 0.15)))
-    cur_tr_start = abs(float(config.get("TRAILING_START_PCT", 1.5)))
-    cur_tr_step = abs(float(config.get("TRAILING_STEP_PCT", 0.6)))
-    cur_src = "FIXED"
+    controls = parity.AccountRiskControls(config, initial_equity)
+    bar_ms = strategy.interval_to_ms(interval)
+    btc_lookup = parity.make_btc_lookup(btc_klines, config, bar_ms)
+    gate_cfg = parity.gate_config(config, btc_lookup)
+    btc_warning = parity.btc_filter_warning(config, btc_lookup)
+    if btc_warning:
+        warnings.append(btc_warning)
 
     i = max(warmup_bars, window - 1, lookback)
     start_idx = i
@@ -233,14 +242,17 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
 
         candle = klines[i]
 
-        if not in_position:
+        if pos is None:
+            entries_paused = controls.update(candle.close_time, equity)
             st = stats[i]
-            if st is not None and st["vol24h"] >= min_vol \
+            if not entries_paused and st is not None and st["vol24h"] >= min_vol \
                     and candle.open_time >= next_entry_allowed_at \
-                    and scanner.pump_gate_ok_at(daily_series, candle.close_time,
-                                                st["pct24h"], st["vol24h"], config):
+                    and scanner.pump_gate_ok_at(
+                        daily_series, candle.close_time, st["pct24h"], st["vol24h"], gate_cfg,
+                        btc_drop_pct=(btc_lookup.drop_pct_at(candle.open_time)
+                                      if btc_lookup is not None else None)):
                 window_klines = klines[max(0, i - lookback + 1): i + 1]
-                setup = scanner.detect_pullback_retest(window_klines, config)
+                setup = scanner.detect_entry_setup(window_klines, config)
                 if setup.ok:
                     entry_idx = i + entry_delay_bars
                     if entry_idx >= n:
@@ -254,18 +266,20 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
                     if entry_delay_bars == 0:
                         raw_entry_price = candle.close
                         entry_time_value = candle.close_time
-                        next_index = i + 1
+                        first_exit_idx = i + 1
                     else:
                         entry_candle = klines[entry_idx]
                         raw_entry_price = entry_candle.open
                         entry_time_value = entry_candle.open_time
-                        next_index = entry_idx + 1
+                        # Posisi sudah terbuka di open candle ini, jadi rentang
+                        # high/low candle entry ikut dievaluasi (seperti bot live).
+                        first_exit_idx = entry_idx
                     # Paritas open_position(): kunci level exit SEBELUM posisi
-                    # dibuka, dan tolak entry yang akan ditolak bot live.
+                    # dibuka, dan tolak entry yang akan ditolak bot live. ATR
+                    # diambil dari jendela konfirmasi yang sama dengan bot live.
                     level_cfg = dict(config)
                     if bool(config.get("USE_ATR_EXIT", False)):
-                        atr_val = strategy.atr(
-                            klines[:i + 1], int(config.get("ATR_PERIOD", 14) or 14))
+                        atr_val = setup.atr_value
                         if atr_val is None:
                             warnings.append(
                                 f"Entry bar {i} dilewati: USE_ATR_EXIT aktif tetapi "
@@ -285,72 +299,43 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
                             "(paritas open_position). Cek ATR_MULT_SL/ATR.")
                         i += 1
                         continue
-                    in_position = True
+                    exec_entry_price = strategy.backtest_buy_execution_price(
+                        raw_entry_price, execution_spread_pct, execution_slippage_pct)
+                    if parity.chase_exceeded(exec_entry_price, setup.signal_close, max_chase_pct):
+                        chase_skips += 1
+                        i += 1
+                        continue
+                    pos = parity.PositionState(exec_entry_price, lv)
                     position_notional = sizing["notional"]
                     equity_before_entry = equity
-                    entry_price = strategy.backtest_buy_execution_price(
-                        raw_entry_price, execution_spread_pct, execution_slippage_pct)
+                    entry_price = exec_entry_price
                     entry_time = entry_time_value
-                    be_active = False
-                    trailing_active = False
-                    be_stop = 0.0
-                    trailing_stop = 0.0
-                    cur_sl = lv["sl_pct"]
-                    cur_tp = lv["tp_pct"]
-                    cur_be_trig = lv["be_trigger_pct"]
-                    cur_be_lock = lv["be_lock_pct"]
-                    cur_tr_start = lv["trail_start_pct"]
-                    cur_tr_step = lv["trail_step_pct"]
-                    cur_src = lv["source"]
-                    i = next_index
+                    i = first_exit_idx
                     continue
             i += 1
             continue
 
-        pnl_high = (candle.high / entry_price - 1.0) * 100.0
-        pnl_low = (candle.low / entry_price - 1.0) * 100.0
         hold_minutes = (candle.close_time - entry_time) / 60000.0
-
-        atr_mode = cur_src == "ATR"
-        sl_price = (entry_price - cur_sl) if atr_mode else entry_price * (1 - cur_sl / 100.0)
-        pnl_high_unit = candle.high - entry_price if atr_mode else pnl_high
-        if config["USE_BREAKEVEN"] and not be_active and pnl_high_unit >= cur_be_trig:
-            be_active = True
-            be_stop = entry_price + cur_be_lock if atr_mode else entry_price * (1 + cur_be_lock / 100.0)
-        if config["USE_TRAILING"]:
-            if not trailing_active and pnl_high_unit >= cur_tr_start:
-                trailing_active = True
-                trailing_stop = candle.high - cur_tr_step if atr_mode else candle.high * (1 - cur_tr_step / 100.0)
-            elif trailing_active:
-                cand_stop = candle.high - cur_tr_step if atr_mode else candle.high * (1 - cur_tr_step / 100.0)
-                if cand_stop > trailing_stop:
-                    trailing_stop = cand_stop
-
         exit_reason = None
         exit_price = None
-
-        sl_triggered = (candle.low <= sl_price if atr_mode else pnl_low <= -cur_sl)
-        if config["USE_STOP_LOSS"] and sl_triggered:
-            exit_reason = "STOP_LOSS"
-            exit_price = min(sl_price, candle.open)
-        elif config["USE_TP"] and (candle.high >= entry_price + cur_tp if atr_mode else pnl_high >= cur_tp):
-            exit_reason = "TAKE_PROFIT"
-            exit_price = max(entry_price + cur_tp if atr_mode else entry_price * (1 + cur_tp / 100.0), candle.open)
-        elif be_active and candle.low <= be_stop:
-            exit_reason = "BREAKEVEN"
-            exit_price = min(be_stop, candle.open)
-        elif trailing_active and candle.low <= trailing_stop:
-            exit_reason = "TRAILING_STOP"
-            exit_price = min(trailing_stop, candle.open)
+        verdict = parity.evaluate_candle_exit(pos, candle, config)
+        if verdict is not None:
+            exit_reason, exit_price = verdict
 
         is_last_bar = (i == n - 1)
-        if exit_reason is None and is_last_bar:
-            exit_reason = "END_OF_DATA"
-            exit_price = candle.close
-            warnings.append(
-                "Posisi terakhir masih terbuka saat data historis habis (ditutup paksa di harga "
-                "penutupan terakhir demi kelengkapan statistik, bukan exit sungguhan)."
-            )
+        if exit_reason is None:
+            mtm_equity = equity + position_notional * (candle.close / entry_price - 1.0)
+            entries_paused = controls.update(candle.close_time, mtm_equity)
+            if controls.force_close_due(entries_paused, True):
+                exit_reason = parity.RISK_LIMIT_REASON
+                exit_price = candle.close
+            elif is_last_bar:
+                exit_reason = "END_OF_DATA"
+                exit_price = candle.close
+                warnings.append(
+                    "Posisi terakhir masih terbuka saat data historis habis (ditutup paksa di harga "
+                    "penutupan terakhir demi kelengkapan statistik, bukan exit sungguhan)."
+                )
 
         if exit_reason:
             raw_exit_price = exit_price
@@ -364,18 +349,24 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
                 entry_time=entry_time, entry_price=entry_price,
                 exit_time=candle.close_time, exit_price=exit_price,
                 reason=exit_reason, hold_minutes=hold_minutes, pnl_pct=pnl_pct,
-                sl_pct=cur_sl, tp_pct=cur_tp, exit_source=cur_src,
+                sl_pct=pos.levels["sl"], tp_pct=pos.levels["tp"],
+                exit_source=pos.levels["src"],
                 gross_pnl_pct=gross_pct, fee_pct=fee_round_trip_pct,
                 position_notional=position_notional, equity_before=equity_before_entry,
                 equity_after=equity_after, pnl_quote=pnl_quote,
             ))
             equity = equity_after
-            in_position = False
+            pos = None
             position_notional = 0.0
-            next_entry_allowed_at = candle.close_time + cooldown_ms
+            next_entry_allowed_at = parity.next_entry_allowed(candle.close_time, config)
+            controls.update(candle.close_time, equity)
 
         i += 1
 
+    if chase_skips:
+        warnings.append(
+            f"{chase_skips} sinyal dilewati oleh filter MAX_CHASE_PCT "
+            f"({max_chase_pct:g}%), sama seperti bot live.")
     result = BacktestResult(
         symbol=config.get("_symbol", "?"),
         interval=interval,
@@ -388,6 +379,8 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
         warnings=warnings,
         initial_equity=initial_equity,
         final_equity=equity,
+        risk_events=dict(controls.events),
+        chase_skips=chase_skips,
     )
     return result
 
@@ -454,6 +447,9 @@ def summarize(result: BacktestResult) -> dict:
         "gross_return_pct": gross_return_pct,
         "fee_drag_pct": gross_return_pct - total_return_pct,
         "total_fee_pct": sum(t.fee_pct for t in trades),
+        "risk_events": dict(result.risk_events),
+        "chase_skips": int(result.chase_skips),
+        **parity.per_trade_metrics(trades),
     }
 
 def apply_overrides(base_config: dict, overrides: dict) -> dict:
@@ -484,7 +480,6 @@ def apply_overrides(base_config: dict, overrides: dict) -> dict:
         "BE_LOCK_PCT": float,
         "TRAILING_START_PCT": float,
         "TRAILING_STEP_PCT": float,
-        "MAX_BARS_BREAKOUT_TO_RETEST": int,
     }
     cfg = copy.deepcopy(base_config)
     for key, caster in ALLOWED.items():
@@ -516,7 +511,6 @@ def validate_params(cfg: dict) -> None:
             ("TRAILING_START_PCT", 0.01, 1000),
             ("TRAILING_STEP_PCT", 0.01, 1000),
         ]
-    checks.append(("MAX_BARS_BREAKOUT_TO_RETEST", 1, 500))
     for key, lo, hi in checks:
         val = cfg.get(key)
         if val is None or not (lo <= val <= hi):
@@ -526,7 +520,7 @@ def validate_params(cfg: dict) -> None:
     if int(cfg.get("CONFIRM_LOOKBACK_BARS", 0)) < butuh:
         raise BacktestError(
             f"CONFIRM_LOOKBACK_BARS={cfg.get('CONFIRM_LOOKBACK_BARS')} lebih kecil dari {butuh} "
-            "candle yang dibutuhkan struktur setup. Naikkan nilainya supaya backtest "
+            "candle yang dibutuhkan konfirmasi volume dan ATR. Naikkan nilainya supaya backtest "
             "dan bot live memakai jendela yang sama."
         )
 
@@ -556,7 +550,7 @@ def selftest():
     assert 10 < last["pct24h"] < 20, f"pct24h tidak masuk akal: {last['pct24h']}"
     print(f"  pct24h akhir = {last['pct24h']:.2f}% -> OK")
 
-    print("\n=== SELFTEST backtest.py: entry setup pullback retest + TP ===")
+    print("\n=== SELFTEST backtest.py: entry konfirmasi volume + TP ===")
     from config.config import PUMP_CONFIG
     from backtesting.synthetic_data import (
         cfg_gerbang_pump_nonaktif, riwayat_harian,
@@ -655,6 +649,126 @@ def selftest():
     assert levels["source"] == "FIXED" and levels["sl_pct"] == 3.0 and levels["tp_pct"] == 6.0
     print("  -> OK")
 
+    print("\n=== SELFTEST backtest.py: paritas dengan bot live (exit, filter, kontrol akun) ===")
+    from types import SimpleNamespace
+
+    def _mk(i, o, h, l, c, vol=10_000_000.0):
+        return _make_candle(i * 300_000, o, h, l, c, vol=vol)
+
+    # 1) Candle ENTRY dievaluasi: crash di candle entry harus kena SL, tidak lolos diam-diam.
+    cfg_d1 = dict(cfg, BACKTEST_ENTRY_DELAY_BARS=1)
+    k_crash = list(kl_setup)
+    k_crash[308] = _mk(308, 100.5, 101.5, 70.0, 100.5)
+    r_ec = run_backtest(k_crash, cfg_d1, warmup_bars=0, daily_klines=riwayat_harian(k_crash))
+    assert len(r_ec.trades) == 1, "Crash di candle entry harus menghasilkan satu trade SL"
+    t_ec = r_ec.trades[0]
+    assert t_ec.reason == "STOP_LOSS" and t_ec.entry_time == 308 * 300_000 and t_ec.exit_price < 81.0, \
+        (t_ec.reason, t_ec.entry_time, t_ec.exit_price)
+    r_ok = run_backtest(kl_setup, cfg_d1, warmup_bars=0, daily_klines=riwayat_harian(kl_setup))
+    assert [t.reason for t in r_ok.trades] == ["END_OF_DATA"], "Kontrol positif tanpa crash"
+    print("  candle entry dievaluasi (SL kena di candle entry) -> OK")
+
+    # 2) Urutan exit pada satu candle: BE yang sudah aktif lebih dulu daripada SL, gap ke bawah SL.
+    lv_pct = {"sl_pct": 2.0, "tp_pct": 10.0, "be_trigger_pct": 1.0, "be_lock_pct": 0.1,
+              "trail_start_pct": 5.0, "trail_step_pct": 1.0, "source": "FIXED"}
+    cfg_x = {"USE_STOP_LOSS": True, "USE_TP": True, "USE_BREAKEVEN": True, "USE_TRAILING": False}
+    pos = parity.PositionState(100.0, lv_pct)
+    assert parity.evaluate_candle_exit(pos, _mk(0, 100.0, 101.5, 100.5, 101.0), cfg_x) is None
+    assert pos.be_active
+    verdict = parity.evaluate_candle_exit(pos, _mk(1, 101.0, 101.0, 97.0, 97.5), cfg_x)
+    assert verdict is not None and verdict[0] == "BREAKEVEN" and abs(verdict[1] - 100.1) < 1e-9, verdict
+    verdict = parity.evaluate_candle_exit(parity.PositionState(100.0, lv_pct),
+                                          _mk(0, 95.0, 96.0, 94.0, 95.5), cfg_x)
+    assert verdict == ("STOP_LOSS", 95.0), verdict
+    verdict = parity.evaluate_candle_exit(parity.PositionState(100.0, lv_pct),
+                                          _mk(0, 100.0, 112.0, 88.0, 100.0), cfg_x)
+    assert verdict is not None and verdict[0] == "STOP_LOSS", verdict
+    verdict = parity.evaluate_candle_exit(parity.PositionState(100.0, lv_pct),
+                                          _mk(0, 115.0, 116.0, 114.0, 115.5), cfg_x)
+    assert verdict == ("TAKE_PROFIT", 115.0), verdict
+    print("  urutan exit BE-sebelum-SL, gap SL, SL-vs-TP, gap TP -> OK")
+
+    # 3) Filter MAX_CHASE_PCT, MIN_SECONDS_BETWEEN_TRADES dan cooldown.
+    r_ch = run_backtest(kl_setup, dict(cfg_d1, MAX_CHASE_PCT=0.1), warmup_bars=0,
+                        daily_klines=riwayat_harian(kl_setup))
+    assert len(r_ch.trades) == 0 and r_ch.chase_skips >= 1, (len(r_ch.trades), r_ch.chase_skips)
+    assert parity.chase_exceeded(101.6, 100.0, 1.5) and not parity.chase_exceeded(101.4, 100.0, 1.5)
+    assert not parity.chase_exceeded(150.0, 100.0, 0.0)
+    assert parity.next_entry_allowed(1000, {"COOLDOWN_MINUTES_AFTER_CLOSE": 5,
+                                            "MIN_SECONDS_BETWEEN_TRADES": 60}) == 1000 + 300_000
+    assert parity.next_entry_allowed(1000, {"COOLDOWN_MINUTES_AFTER_CLOSE": 0,
+                                            "MIN_SECONDS_BETWEEN_TRADES": 600}) == 1000 + 600_000
+    print("  MAX_CHASE_PCT dan jeda antar trade -> OK")
+
+    # 4) Filter BTC: turun melewati ambang memblokir entry, data hilang ditolak (fail closed).
+    btc_flat = [_mk(i, 100.0, 100.0, 100.0, 100.0) for i in range(309)]
+    btc_crash = [_mk(i, c, c, c, c) for i, c in enumerate([100.0] * 305 + [98.0, 96.5, 95.0, 95.0])]
+    r_b0 = run_backtest(kl_setup, cfg, warmup_bars=0, daily_klines=riwayat_harian(kl_setup),
+                        btc_klines=btc_flat)
+    r_b1 = run_backtest(kl_setup, cfg, warmup_bars=0, daily_klines=riwayat_harian(kl_setup),
+                        btc_klines=btc_crash)
+    r_b2 = run_backtest(kl_setup, cfg, warmup_bars=0, daily_klines=riwayat_harian(kl_setup),
+                        btc_klines=btc_flat[:300])
+    r_b3 = run_backtest(kl_setup, cfg, warmup_bars=0, daily_klines=riwayat_harian(kl_setup))
+    assert len(r_b0.trades) == 1 and not any("BTC" in w for w in r_b0.warnings)
+    assert len(r_b1.trades) == 0, "BTC turun 5 persen harus memblokir entry"
+    assert len(r_b2.trades) == 0, "Data BTC tidak ada pada titik sinyal harus fail closed"
+    assert len(r_b3.trades) == 1 and any("BTC" in w for w in r_b3.warnings), \
+        "Tanpa data BTC harus ada peringatan eksplisit"
+    print("  filter BTC (lolos, blokir, fail closed, peringatan) -> OK")
+
+    # 5) Kontrol akun: DD stop, stop harian, penutupan paksa satu kali per episode.
+    ctl = parity.AccountRiskControls({"USE_EQUITY_STOP": True, "MAX_DRAWDOWN_PERCENT": 10.0,
+                                      "DD_COOLDOWN_HOURS": 1, "USE_DAILY_STOP": False,
+                                      "CLOSE_ALL_AT_LIMIT": True}, 1000.0)
+    assert ctl.update(0, 1000.0) is False
+    assert ctl.update(1_000, 880.0) is True and ctl.events["dd_stop"] == 1
+    assert ctl.force_close_due(True, True) is True and ctl.force_close_due(True, True) is False
+    assert ctl.update(1_800_000, 880.0) is True
+    assert ctl.update(3_700_000, 880.0) is False and ctl.peak_equity == 880.0
+    ctl2 = parity.AccountRiskControls({"USE_DAILY_STOP": True, "MAX_DAILY_LOSS_PERCENT": 5.0,
+                                       "DAILY_PROFIT_TARGET_PERCENT": 15.0,
+                                       "CLOSE_ALL_AT_LIMIT": True}, 1000.0)
+    assert ctl2.update(0, 1000.0) is False
+    assert ctl2.update(10_000, 940.0) is True and ctl2.events["daily_loss_stop"] == 1
+    assert ctl2.update(86_400_000 + 1, 940.0) is False, "Stop harian harus reset di hari UTC baru"
+    ctl3 = parity.AccountRiskControls({"USE_DAILY_STOP": True, "MAX_DAILY_LOSS_PERCENT": 5.0,
+                                       "DAILY_PROFIT_TARGET_PERCENT": 15.0,
+                                       "CLOSE_ALL_AT_LIMIT": True}, 1000.0)
+    ctl3.update(0, 1000.0)
+    assert ctl3.update(10_000, 1200.0) is True and ctl3.events["daily_profit_stop"] == 1
+    assert ctl3.force_close_due(True, True) is False, "Target profit harian tidak menutup posisi"
+    assert parity.AccountRiskControls({}, 1000.0).update(0, 1.0) is False, "Tanpa konfigurasi tidak ada stop"
+    cfg_fc = dict(cfg, BACKTEST_INITIAL_EQUITY_USDT=1000.0, MAX_DAILY_LOSS_PERCENT=1.0)
+    k_fc = list(kl_setup)
+    k_fc[308] = _mk(308, 100.0, 100.2, 84.0, 85.0)
+    r_fc = run_backtest(k_fc, cfg_fc, warmup_bars=0, daily_klines=riwayat_harian(k_fc))
+    assert len(r_fc.trades) == 1 and r_fc.trades[0].reason == "RISK_LIMIT_TRIGGERED", \
+        [t.reason for t in r_fc.trades]
+    assert r_fc.trades[0].exit_price == 85.0 and r_fc.risk_events["forced_close"] == 1
+    r_nf = run_backtest(k_fc, dict(cfg_fc, CLOSE_ALL_AT_LIMIT=False), warmup_bars=0,
+                        daily_klines=riwayat_harian(k_fc))
+    assert r_nf.trades[0].reason == "END_OF_DATA", "CLOSE_ALL_AT_LIMIT=False tidak menutup posisi"
+    print("  kontrol akun (DD, harian, force close, reset) -> OK")
+
+    # 6) Modal awal mengikuti PAPER, metrik per trade, lookup BTC.
+    base_eq = {"QUOTE_ASSET": "USDT", "PAPER_INITIAL_BALANCES": {"USDT": 1000.0}}
+    assert initial_backtest_equity(dict(base_eq, BACKTEST_INITIAL_EQUITY_USDT=0.0)) == 1000.0
+    assert initial_backtest_equity(dict(base_eq)) == 1000.0
+    assert initial_backtest_equity(dict(base_eq, BACKTEST_INITIAL_EQUITY_USDT=250.0)) == 250.0
+    assert initial_backtest_equity(dict(PUMP_CONFIG)) == float(PUMP_CONFIG["PAPER_INITIAL_BALANCES"]["USDT"])
+    fake = [SimpleNamespace(pnl_pct=p) for p in (2.0, -1.0, -1.0, -3.0, 4.0)]
+    m = parity.per_trade_metrics(fake)
+    assert m["max_consecutive_losses"] == 3 and abs(m["avg_trade_pct"] - 0.2) < 1e-9
+    assert m["median_trade_pct"] == -1.0 and m["best_trade_pct"] == 4.0 and m["worst_trade_pct"] == -3.0
+    assert abs(m["payoff_ratio"] - 3.0 / (5.0 / 3.0)) < 1e-9
+    assert parity.per_trade_metrics([])["payoff_ratio"] is None
+    assert parity.per_trade_metrics([SimpleNamespace(pnl_pct=1.0)])["payoff_ratio"] is None
+    lookup = parity.BtcDropLookup(btc_crash, 300_000, 3)
+    assert abs(lookup.drop_pct_at(307 * 300_000) - (-5.0)) < 1e-9
+    assert lookup.drop_pct_at(2 * 300_000) is None and lookup.drop_pct_at(999 * 300_000) is None
+    print("  modal awal, metrik per trade, lookup BTC -> OK")
+
     print("\nSEMUA SELFTEST backtest.py LULUS.")
     print("(Tidak menghubungi Binance sama sekali, murni logika lokal dengan data sintetis.)")
 
@@ -673,7 +787,14 @@ def print_single_result(result: BacktestResult) -> None:
     print(f"Win rate           : {summary['win_rate']:.1f}%")
     print(f"Max drawdown       : {summary['max_drawdown_pct']:.2f}%")
     print(f"Profit factor      : {summary['profit_factor']:.2f}")
+    print(f"Rata2 per trade    : {summary['avg_trade_pct']:+.3f}% (median {summary['median_trade_pct']:+.3f}%, "
+          f"terbaik {summary['best_trade_pct']:+.2f}%, terburuk {summary['worst_trade_pct']:+.2f}%)")
+    print(f"Rugi beruntun maks : {summary['max_consecutive_losses']}")
+    print(f"Modal awal         : {summary['initial_equity']:.2f}")
     print(f"Alasan exit        : {dict(sorted(summary['reason_counts'].items()))}")
+    risk_info = {k: v for k, v in summary.get("risk_events", {}).items() if v}
+    if risk_info or summary.get("chase_skips"):
+        print(f"Kontrol akun/filter: {risk_info}, chase dilewati {summary.get('chase_skips', 0)}")
     if result.warnings:
         print("Peringatan:")
         for item in result.warnings:
@@ -747,6 +868,16 @@ def main():
     daily_klines = strategy.parse_klines(daily_raw)
     print(f"Dapat {len(daily_klines)} candle harian untuk gerbang pump.")
 
+    btc_klines = None
+    if cfg.get("BTC_FILTER_ENABLED", False):
+        btc_symbol = "BTC" + str(cfg.get("QUOTE_ASSET", "USDT"))
+        try:
+            btc_klines = fetch_full_klines(client, btc_symbol, interval, start_ms, end_ms)
+            print(f"Dapat {len(btc_klines)} candle {btc_symbol} untuk filter BTC.")
+        except Exception as exc:
+            btc_klines = None
+            print(f"PERINGATAN: candle {btc_symbol} gagal diambil ({exc}); filter BTC tidak diterapkan.")
+
     if args.grid:
         from backtesting.grid_search import (
             GridSearchError, cetak_tabel, parse_spec_cli, run_grid_search,
@@ -770,7 +901,8 @@ def main():
             hasil = run_grid_search(
                 klines, cfg, spec, warmup, daily_klines=daily_klines,
                 metrik=args.grid_metric, rasio_latih=args.grid_train,
-                min_trades=args.grid_min_trades, progress_cb=_progress)
+                min_trades=args.grid_min_trades, progress_cb=_progress,
+                btc_klines=btc_klines)
         except GridSearchError as exc:
             print(f"\nGrid search gagal: {exc}")
             raise SystemExit(2) from exc
@@ -778,7 +910,8 @@ def main():
         cetak_tabel(hasil, top_n=args.grid_top)
         return
 
-    result = run_backtest(klines, cfg, warmup, daily_klines=daily_klines)
+    result = run_backtest(klines, cfg, warmup, daily_klines=daily_klines,
+                          btc_klines=btc_klines)
     print_single_result(result)
 
 

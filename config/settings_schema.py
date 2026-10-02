@@ -93,6 +93,7 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "MIN_QUOTE_VOLUME_USDT_24H": _field("Scan", "Minimum volume kuotasi", "Volume 24 jam minimum.", "float", minimum=0, maximum=1e15, unit="USDT"),
     "MARKET_DATA_INTERVAL": _field("Scan", "Interval data pasar", "Interval candle yang digunakan untuk monitoring pasar.", "str", editor="select", options=["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"]),
     "PUMP_MIN_24H_CHANGE_PCT": _field("Monitoring Pasar", "Minimum perubahan 24 jam", "Filter monitoring perubahan harga 24 jam.", "float", minimum=0, maximum=1000, unit="%"),
+    "PUMP_MAX_24H_CHANGE_PCT": _field("Monitoring Pasar", "Maksimum perubahan 24 jam", "Koin yang sudah naik lebih dari persen ini dalam 24 jam ditolak agar bot tidak membeli di pucuk. Harus lebih besar dari minimum. 0 = nonaktif.", "float", minimum=0, maximum=1000, unit="%", dangerous=True),
     "PUMP_VOLUME_SURGE_MULT": _field("Monitoring Pasar", "Pengali volume monitoring", "Filter monitoring volume kuotasi dibandingkan rata-rata 7 hari.", "float", minimum=1, maximum=100, unit="x"),
     "BTC_FILTER_ENABLED": _field("Monitoring Pasar", "Filter kondisi BTC", "Filter monitoring kondisi BTC pada jendela candle tertutup.", "bool"),
     "BTC_MAX_DROP_PCT": _field("Monitoring Pasar", "Penurunan BTC maksimum", "Batas penurunan BTC untuk filter monitoring.", "float", minimum=0.1, maximum=50, unit="%"),
@@ -109,7 +110,7 @@ PARAMETER_SCHEMA: dict[str, dict] = {
 
     "WATCHLIST_ENABLED": _field("Watchlist", "Aktifkan watchlist", "Menampilkan panel pemantauan watchlist.", "bool"),
     "WATCHLIST_TOP_N": _field("Watchlist", "Jumlah pair dipantau", "Berapa pair dengan kenaikan 24 jam terbesar yang ditampilkan sebagai data monitoring.", "int", minimum=1, maximum=50),
-    "BACKTEST_INITIAL_EQUITY_USDT": _field("Data Backtest", "Modal awal backtest", "Saldo USDT awal yang dipakai model sizing pada backtest.", "float", minimum=0.01, maximum=1e12, unit="USDT"),
+    "BACKTEST_INITIAL_EQUITY_USDT": _field("Data Backtest", "Modal awal backtest", "Saldo USDT awal simulasi backtest. 0 berarti mengikuti saldo awal PAPER (PAPER_INITIAL_BALANCES) supaya persen return dan drawdown sebanding dengan bot.", "float", minimum=0, maximum=1e12, unit="USDT"),
     "BACKTEST_CACHE_ENABLED": _field("Sistem", "Cache candle backtest", "Pakai ulang candle yang sudah pernah diunduh supaya backtest ulang tidak mengunduh dari nol.", "bool"),
     "BACKTEST_CACHE_FILE": _field("Sistem", "File cache backtest", "Path runtime internal cache candle backtest.", "str", read_only=True),
     "BACKTEST_CACHE_FRESH_HOURS": _field("Sistem", "Jendela segar cache", "Rentang jam terakhir yang selalu diunduh ulang karena candle belum tertutup.", "int", minimum=0, maximum=168, unit="jam"),
@@ -157,36 +158,31 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "BACKTEST_ENTRY_SPREAD_PCT": _field("Ukuran Posisi", "Spread entry backtest", "Total spread bid-ask yang dibebankan pada simulasi entry.", "float", minimum=0, maximum=10, unit="%"),
     "BACKTEST_SLIPPAGE_PCT": _field("Ukuran Posisi", "Slippage backtest", "Slippage adverse per eksekusi backtest.", "float", minimum=0, maximum=10, unit="%"),
     "BALANCE_BUFFER_PCT": _field("Ukuran Posisi", "Bantalan saldo", "Saldo yang tidak dibelanjakan untuk fee dan pergerakan harga.", "float", minimum=0, maximum=50, unit="%"),
-    "CONFIRM_INTERVAL": _field("Scan", "Interval konfirmasi", "Interval candle konfirmasi setup.", "str", editor="select", options=["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"]),
-    "CONFIRM_LOOKBACK_BARS": _field("Scan", "Jumlah candle konfirmasi", "Jumlah candle tertutup untuk deteksi setup. Limit endpoint klines 1000 per panggilan.", "int", minimum=3, maximum=1000, unit="candle"),
+    "CONFIRM_INTERVAL": _field("Scan", "Interval konfirmasi", "Interval candle konfirmasi volume rolling.", "str", editor="select", options=["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"]),
+    "CONFIRM_LOOKBACK_BARS": _field("Scan", "Jumlah candle konfirmasi", "Jumlah candle tertutup untuk konfirmasi volume dan ATR. Limit endpoint klines 1000 per panggilan.", "int", minimum=3, maximum=1000, unit="candle"),
     "COOLDOWN_MINUTES_AFTER_CLOSE": _field("Fee dan Filter", "Cooldown setelah close", "Jeda entry setelah posisi ditutup.", "int", minimum=0, maximum=525600, unit="menit"),
-    "MAX_BARS_BREAKOUT_TO_RETEST": _field("Setup Pullback", "Umur maksimum setup", "Batas jarak candle dari breakout ke retest.", "int", minimum=1, maximum=500, unit="candle"),
     "MAX_CHASE_PCT": _field("Fee dan Filter", "Batas chase entry", "Entry dilewati bila ask sudah melebihi close candle sinyal sebesar persen ini. 0 = nonaktif.", "float", minimum=0, maximum=100, unit="%", dangerous=True),
     "MAX_POSITION_USDT": _field("Ukuran Posisi", "Plafon posisi", "Nol berarti tanpa plafon di PAPER, tetapi dilarang di LIVE.", "float", minimum=0, maximum=1e9, unit="USDT", dangerous=True),
-    "MAX_RETEST_TOUCHES": _field("Setup Pullback", "Maksimum kunjungan zona", "Berapa kali harga boleh kembali ke zona sebelum setup dianggap lemah.", "int", minimum=1, maximum=20),
+    "DEPTH_FILTER_ENABLED": _field("Fee dan Filter", "Filter kedalaman order book", "Entry ditolak bila total nilai ask dalam rentang harga di bawah terlalu tipis dibanding nilai order. Hanya berlaku di PAPER dan LIVE, tidak di backtest. Data gagal diambil = entry dibatalkan.", "bool", dangerous=True),
+    "DEPTH_RANGE_PCT": _field("Fee dan Filter", "Rentang kedalaman", "Rentang harga di atas ask terbaik yang dihitung sebagai kedalaman beli.", "float", minimum=0.01, maximum=10, unit="%"),
+    "DEPTH_MIN_ASK_NOTIONAL_MULT": _field("Fee dan Filter", "Kedalaman minimum (kali nilai order)", "Total nilai ask dalam rentang kedalaman minimal sekian kali nilai order.", "float", minimum=1, maximum=1000, unit="x"),
+    "ORDERBOOK_FILTER_ENABLED": _field("Fee dan Filter", "Filter ketimpangan dan sell wall", "Entry ditolak bila bid jauh lebih tipis dari ask (tekanan jual) atau ada dinding ask besar di atas harga. Hanya berlaku di PAPER dan LIVE. Data gagal diambil = entry dibatalkan.", "bool", dangerous=True),
+    "ORDERBOOK_LEVELS": _field("Fee dan Filter", "Jumlah level ketimpangan", "Jumlah level teratas di sisi bid dan ask untuk menghitung rasio bid banding ask.", "int", minimum=1, maximum=100, unit="level"),
+    "ORDERBOOK_MIN_BID_ASK_RATIO": _field("Fee dan Filter", "Rasio bid banding ask minimum", "Entry ditolak bila total nilai bid di level teratas kurang dari rasio ini dikali total nilai ask.", "float", minimum=0, maximum=100, unit="x"),
+    "SELL_WALL_RANGE_PCT": _field("Fee dan Filter", "Rentang deteksi sell wall", "Rentang harga di atas ask terbaik untuk mencari dinding ask.", "float", minimum=0.01, maximum=10, unit="%"),
+    "SELL_WALL_MAX_SHARE_PCT": _field("Fee dan Filter", "Porsi maksimum satu level ask", "Entry ditolak bila satu level ask di rentang sell wall bernilai lebih dari persen ini dari total ask di rentang itu (minimal 3 level).", "float", minimum=1, maximum=100, unit="%"),
+    "ORDERBOOK_DEPTH_LIMIT": _field("Fee dan Filter", "Jumlah level snapshot order book", "Level yang diminta dari Binance saat cek order book. Nilai dibulatkan ke atas ke 100, 500, atau 1000.", "int", minimum=100, maximum=1000, unit="level"),
     "MAX_SPREAD_PCT": _field("Fee dan Filter", "Spread maksimum", "Spread bid-ask maksimum untuk entry.", "float", minimum=0, maximum=100, unit="%", dangerous=True),
-    "MIN_CLOSE_POSITION_IN_RANGE": _field("Scan", "Minimum posisi close", "Posisi close candle retest di dalam rentang high-low.", "float", minimum=0, maximum=1),
     "MIN_LISTING_AGE_DAYS": _field("Scan", "Usia listing minimum", "Pasangan lebih muda akan ditolak.", "int", minimum=0, maximum=36500, unit="hari"),
     "MIN_SECONDS_BETWEEN_TRADES": _field("Fee dan Filter", "Jarak minimum trade", "Jeda keras antartrade.", "int", minimum=0, maximum=31536000, unit="detik"),
     "POSITION_SIZE_USDT": _field("Ukuran Posisi", "Ukuran posisi tetap", "Nominal saat mode persen dimatikan.", "float", minimum=0.01, maximum=1e9, unit="USDT", dangerous=True),
     "RISK_PERCENT": _field("Ukuran Posisi", "Persen saldo per entry", "Persentase saldo bebas yang digunakan.", "float", minimum=0.01, maximum=100, unit="%", dangerous=True),
-    "ROLLING_VOLUME_CONFIRMATION_BARS": _field("Setup Momentum", "Candle volume konfirmasi", "Jumlah candle terakhir yang wajib memenuhi lonjakan volume.", "int", minimum=1, maximum=20, unit="candle"),
-    "ROLLING_VOLUME_FILTER_ENABLED": _field("Setup Momentum", "Filter volume rolling", "Wajibkan volume candle konfirmasi melampaui rata-rata candle sebelumnya.", "bool"),
-    "ROLLING_VOLUME_LOOKBACK_BARS": _field("Setup Momentum", "Lookback volume rolling", "Jumlah candle sebelumnya untuk menghitung rata-rata volume.", "int", minimum=2, maximum=500, unit="candle"),
-    "ROLLING_VOLUME_SURGE_MULT": _field("Setup Momentum", "Pengali volume rolling", "Volume candle konfirmasi minimal sekian kali rata-rata sebelumnya.", "float", minimum=0.1, maximum=100, unit="x"),
-    "SWING_LOOKBACK_BARS": _field("Setup Pullback", "Lookback swing high", "Berapa candle ke belakang dipindai untuk mencari level breakout.", "int", minimum=3, maximum=500, unit="candle"),
-    "SWING_PIVOT_WING_BARS": _field("Setup Pullback", "Sayap pivot", "Candle di kiri dan kanan yang harus lebih rendah agar sebuah candle menjadi pivot high.", "int", minimum=1, maximum=50, unit="candle"),
+    "ROLLING_VOLUME_CONFIRMATION_BARS": _field("Konfirmasi Volume", "Candle volume konfirmasi", "Jumlah candle terakhir yang wajib memenuhi lonjakan volume.", "int", minimum=1, maximum=20, unit="candle"),
+    "ROLLING_VOLUME_FILTER_ENABLED": _field("Konfirmasi Volume", "Filter volume rolling", "Wajibkan volume candle konfirmasi melampaui rata-rata candle sebelumnya.", "bool"),
+    "ROLLING_VOLUME_LOOKBACK_BARS": _field("Konfirmasi Volume", "Lookback volume rolling", "Jumlah candle sebelumnya untuk menghitung rata-rata volume.", "int", minimum=2, maximum=500, unit="candle"),
+    "ROLLING_VOLUME_SURGE_MULT": _field("Konfirmasi Volume", "Pengali volume rolling", "Volume candle konfirmasi minimal sekian kali rata-rata sebelumnya.", "float", minimum=0.1, maximum=100, unit="x"),
     "TOP_N_CANDIDATES_TO_CONFIRM": _field("Scan", "Jumlah kandidat konfirmasi", "Berapa kandidat teratas yang diperiksa.", "int", minimum=1, maximum=1000),
     "USE_RISK_PERCENT": _field("Ukuran Posisi", "Gunakan persen risiko", "Ukuran posisi dihitung dari saldo bebas.", "bool", dangerous=True),
-    "VWAP_MIN_BARS_AFTER_ANCHOR": _field("Legacy", "Parameter setup lama", "Disimpan untuk membaca konfigurasi lama. Tidak dipakai oleh strategi momentum baru.", "int", minimum=1, maximum=200, unit="candle", read_only=True),
-    "WATCHLIST_ENTRY_EMA_GAP_PCT": _field("Watchlist", "Jarak EMA", "Ambang EMA dekat untuk skor entry watchlist. Tidak memengaruhi keputusan entry bot.", "float", minimum=0.01, maximum=100),
-    "WATCHLIST_ENTRY_MIN_HEADROOM": _field("Watchlist", "Headroom skor", "Sisa kuota minimum skor watchlist. Tidak memengaruhi keputusan entry bot.", "float", minimum=0, maximum=1),
-    "WATCHLIST_ENTRY_RSI_DECAY_PTS": _field("Watchlist", "Decay RSI", "Lebar decay RSI untuk skor watchlist. Tidak memengaruhi keputusan entry bot.", "float", minimum=1, maximum=100),
-    "WATCHLIST_ENTRY_SCORE_TTL_SECONDS": _field("Watchlist", "TTL skor entry", "Cache skor candle untuk skor watchlist. Tidak memengaruhi keputusan entry bot.", "int", minimum=1, maximum=86400, unit="detik"),
-    "WATCHLIST_ENTRY_WEIGHT_EMA": _field("Watchlist", "Bobot EMA", "Bobot EMA untuk skor entry watchlist. Tidak memengaruhi keputusan entry bot.", "float", minimum=0, maximum=100),
-    "WATCHLIST_ENTRY_WEIGHT_HL": _field("Watchlist", "Bobot higher low", "Bobot higher low untuk skor entry watchlist. Tidak memengaruhi keputusan entry bot.", "float", minimum=0, maximum=100),
-    "WATCHLIST_ENTRY_WEIGHT_MACD": _field("Watchlist", "Bobot MACD", "Bobot MACD untuk skor entry watchlist. Tidak memengaruhi keputusan entry bot.", "float", minimum=0, maximum=100),
-    "WATCHLIST_ENTRY_WEIGHT_RSI": _field("Watchlist", "Bobot RSI", "Bobot RSI untuk skor entry watchlist. Tidak memengaruhi keputusan entry bot.", "float", minimum=0, maximum=100),
 }
 
 
@@ -254,6 +250,16 @@ def _read_doc_unlocked() -> tuple[dict, list[str]]:
         return {}, errors + [message]
 
 
+REMOVED_PARAMETERS = frozenset({
+    "MIN_CLOSE_POSITION_IN_RANGE", "SWING_LOOKBACK_BARS", "SWING_PIVOT_WING_BARS",
+    "VWAP_MIN_BARS_AFTER_ANCHOR", "MAX_BARS_BREAKOUT_TO_RETEST", "MAX_RETEST_TOUCHES",
+    "WATCHLIST_ENTRY_WEIGHT_EMA", "WATCHLIST_ENTRY_WEIGHT_RSI",
+    "WATCHLIST_ENTRY_WEIGHT_MACD", "WATCHLIST_ENTRY_WEIGHT_HL",
+    "WATCHLIST_ENTRY_EMA_GAP_PCT", "WATCHLIST_ENTRY_RSI_DECAY_PTS",
+    "WATCHLIST_ENTRY_SCORE_TTL_SECONDS", "WATCHLIST_ENTRY_MIN_HEADROOM",
+})
+
+
 def _validate_override_payload(payload: dict) -> None:
     unknown = sorted(set(payload) - set(PARAMETER_SCHEMA))
     if unknown:
@@ -273,6 +279,9 @@ def load_mode_override(mode: str) -> tuple[dict, list[str]]:
         payload = doc.get("overrides", {}).get(raw_mode)
         if payload is None:
             return {}, errors
+        # Parameter sinyal entry lama sudah dihapus. Override lama yang masih
+        # memuatnya dibuang diam-diam supaya file settings.json tidak dianggap rusak.
+        payload = {k: v for k, v in payload.items() if k not in REMOVED_PARAMETERS}
         try:
             _validate_override_payload(payload)
         except ValueError as exc:
@@ -416,6 +425,10 @@ def validate_candidate(candidate: dict, mode: str) -> tuple[dict, dict[str, str]
             str(cleaned.get("MODE", "")).strip().upper() == normalized_mode,
             "MODE pada konfigurasi tidak sama dengan mode yang sedang divalidasi",
         )
+        relation("PUMP_MAX_24H_CHANGE_PCT",
+                 cleaned["PUMP_MAX_24H_CHANGE_PCT"] == 0
+                 or cleaned["PUMP_MAX_24H_CHANGE_PCT"] > cleaned["PUMP_MIN_24H_CHANGE_PCT"],
+                 "harus lebih besar dari PUMP_MIN_24H_CHANGE_PCT (atau 0 untuk menonaktifkan)")
         relation("PUMP_VOLUME_SURGE_MULT", cleaned["PUMP_VOLUME_SURGE_MULT"] >= 1.0,
                  "harus minimal 1 kali rata-rata 7 hari, di bawah itu berarti volume justru turun")
         relation("ATR_MULT_TRAIL", cleaned["ATR_MULT_TRAIL"] <= cleaned["ATR_MULT_SL"],

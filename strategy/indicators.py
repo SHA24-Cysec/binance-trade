@@ -1,8 +1,7 @@
 """
 Struktur candle, parser klines, interval pasar, ATR, dan level exit.
-Modul ini juga menyediakan indikator setup entry (EMA, RSI, MACD), sizing
-posisi, dan model harga eksekusi backtest yang dipakai jalur pembukaan
-posisi bot maupun backtest.
+Modul ini juga menyediakan sizing posisi dan model harga eksekusi backtest
+yang dipakai jalur pembukaan posisi bot maupun backtest.
 
 Array candle memakai urutan kronologis, index 0 adalah candle paling lama.
 """
@@ -79,7 +78,8 @@ def parse_klines(raw: list) -> list[Kline]:
 def required_lookback_bars(config: dict) -> int:
     rolling_lookback = int(config.get("ROLLING_VOLUME_LOOKBACK_BARS", 20) or 20)
     confirmation_bars = int(config.get("ROLLING_VOLUME_CONFIRMATION_BARS", 1) or 1)
-    return max(30, rolling_lookback + max(1, confirmation_bars))
+    atr_period = max(1, int(config.get("ATR_PERIOD", 14) or 14))
+    return max(atr_period, rolling_lookback + max(1, confirmation_bars))
 
 def confirm_window_bars(config: dict) -> int:
     lookback = int(config.get("CONFIRM_LOOKBACK_BARS", 48) or 48)
@@ -129,54 +129,6 @@ def backtest_sell_execution_price(price: float, spread_pct: float = 0.0,
     raw = max(0.0, float(price))
     adverse = max(0.0, float(spread_pct)) / 200.0 + max(0.0, float(slippage_pct)) / 100.0
     return raw * max(0.0, 1.0 - adverse)
-
-def ema(closes: list[float], period: int) -> list[float]:
-    period = int(period)
-    values = [float(x) for x in closes]
-    if period <= 0:
-        raise ValueError("period EMA harus lebih besar dari nol")
-    if not values:
-        return []
-    alpha = 2.0 / (period + 1.0)
-    out = [values[0]]
-    for value in values[1:]:
-        out.append(alpha * value + (1.0 - alpha) * out[-1])
-    return out
-
-def rsi(closes: list[float], period: int = 14) -> list[float]:
-    period = int(period)
-    values = [float(x) for x in closes]
-    if period <= 0:
-        raise ValueError("period RSI harus lebih besar dari nol")
-    if not values:
-        return []
-    out = [50.0] * len(values)
-    if len(values) <= period:
-        return out
-    gains = [max(0.0, values[i] - values[i - 1]) for i in range(1, len(values))]
-    losses = [max(0.0, values[i - 1] - values[i]) for i in range(1, len(values))]
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
-    def value():
-        if avg_loss == 0:
-            return 100.0 if avg_gain > 0 else 50.0
-        return 100.0 - 100.0 / (1.0 + avg_gain / avg_loss)
-    out[period] = value()
-    for i in range(period + 1, len(values)):
-        avg_gain = (avg_gain * (period - 1) + gains[i - 1]) / period
-        avg_loss = (avg_loss * (period - 1) + losses[i - 1]) / period
-        out[i] = value()
-    return out
-
-def macd(closes: list[float], fast: int = 12, slow: int = 26,
-         signal: int = 9) -> tuple[list[float], list[float], list[float]]:
-    fast_line = ema(closes, fast)
-    slow_line = ema(closes, slow)
-    line = [a - b for a, b in zip(fast_line, slow_line)]
-    signal_line = ema(line, signal)
-    histogram = [a - b for a, b in zip(line, signal_line)]
-    return line, signal_line, histogram
-
 
 def atr(klines: list[Kline], period: int = 14) -> float | None:
     period = int(period)

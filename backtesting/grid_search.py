@@ -287,6 +287,7 @@ def run_grid_search(
     min_trades: int = 10,
     progress_cb: Optional[Callable[[float], None]] = None,
     cancel_cb: Optional[Callable[[], bool]] = None,
+    btc_klines: Optional[Sequence[Kline]] = None,
 ) -> HasilGridSearch:
     if metrik not in METRIK_TERSEDIA:
         raise GridSearchError(
@@ -355,7 +356,8 @@ def run_grid_search(
 
         try:
             r_latih = bt.run_backtest(kl_latih, cfg, warmup_bars,
-                                      daily_klines=_harian_untuk(kl_latih))
+                                      daily_klines=_harian_untuk(kl_latih),
+                                      btc_klines=btc_klines)
             s_latih = bt.summarize(r_latih)
         except Exception:
             dilewati += 1
@@ -375,7 +377,8 @@ def run_grid_search(
         if kl_uji:
             try:
                 r_uji = bt.run_backtest(kl_uji, cfg, warmup_bars,
-                                        daily_klines=_harian_untuk(kl_uji))
+                                        daily_klines=_harian_untuk(kl_uji),
+                                        btc_klines=btc_klines)
                 s_uji = bt.summarize(r_uji)
                 item.uji = s_uji
                 item.skor_uji = hitung_skor(s_uji, metrik)
@@ -424,6 +427,7 @@ def run_portfolio_grid_search(
     min_trades: int = 5,
     progress_cb: Optional[Callable[[float], None]] = None,
     cancel_cb: Optional[Callable[[], bool]] = None,
+    btc_klines: Optional[Sequence[Kline]] = None,
 ) -> HasilGridSearch:
     """Grid search di atas simulasi PORTOFOLIO (semesta multi-simbol).
 
@@ -502,7 +506,8 @@ def run_portfolio_grid_search(
             r_latih = pbt.run_portfolio_backtest(
                 store, cfg, interval, warmup_ms=warmup_ms,
                 end_ms=potong_ms, prebuilt=prebuilt,
-                progress_cb=_prog_latih, cancel_cb=cancel_cb)
+                progress_cb=_prog_latih, cancel_cb=cancel_cb,
+                btc_klines=btc_klines)
             s_latih = pbt.summarize_portfolio(r_latih)
             item.latih = s_latih
             item.skor_latih = hitung_skor(s_latih, metrik)
@@ -520,7 +525,8 @@ def run_portfolio_grid_search(
                     r_uji = pbt.run_portfolio_backtest(
                         store, cfg, interval, warmup_ms=warmup_ms,
                         start_ms=potong_ms - warmup_ms, prebuilt=prebuilt,
-                        progress_cb=_prog_uji, cancel_cb=cancel_cb)
+                        progress_cb=_prog_uji, cancel_cb=cancel_cb,
+                        btc_klines=btc_klines)
                     s_uji = pbt.summarize_portfolio(r_uji)
                     item.uji = s_uji
                     item.skor_uji = hitung_skor(s_uji, metrik)

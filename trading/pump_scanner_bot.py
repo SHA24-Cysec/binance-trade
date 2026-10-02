@@ -2,16 +2,20 @@
 """
 Bot rotasi Binance Spot. Bot tetap memantau pair QUOTE, mengelola posisi yang
 sudah terbuka, dan mempertahankan logika Take Profit, Stop Loss, Breakeven,
-Trailing, serta rekonsiliasi. Seluruh entry baru dinonaktifkan.
+Trailing, serta rekonsiliasi. Entry baru dipicu oleh gerbang pump dan
+konfirmasi volume rolling, tanpa indikator teknikal.
 
 Nama file masih pump_scanner_bot.py demi kompatibilitas skrip dan layanan
 yang sudah ada. Pengurutan top gainer memang sudah dihapus (kandidat diurut
-berdasarkan kualitas setup), tetapi seleksi semesta kembali memakai GERBANG
-PUMP yang wajib: naik >= PUMP_MIN_24H_CHANGE_PCT dalam 24 jam DAN volume
+berdasarkan volume kuotasi 24 jam terbesar), tetapi seleksi semesta kembali
+memakai GERBANG PUMP yang wajib: naik antara PUMP_MIN_24H_CHANGE_PCT dan
+PUMP_MAX_24H_CHANGE_PCT dalam 24 jam (koin yang sudah terlalu tinggi ditolak) DAN volume
 kuotasi 24 jam >= PUMP_VOLUME_SURGE_MULT x rata-rata 7 hari penuh sebelumnya.
-Lihat market_scanner.is_pumping_today().
+Lihat market_scanner.is_pumping_today(). Sebelum BUY, open_position() juga memeriksa
+kedalaman ask, ketimpangan bid/ask, dan sell wall (market_scanner.evaluate_orderbook);
+data order book gagal diambil = entry dibatalkan.
 
-INI BUKAN PREDIKSI. Bot ini bereaksi terhadap struktur yang SUDAH terbentuk.
+INI BUKAN PREDIKSI. Bot ini bereaksi terhadap lonjakan yang SUDAH terjadi.
 Baca README.md bagian strategi sebelum menjalankan dengan uang sungguhan.
 
 CARA PAKAI (sama seperti bot.py):
@@ -1981,6 +1985,27 @@ def _fresh_live_entry_filters(client: ExchangeClient, symbol: str,
     return fresh_filters
 
 
+def _entry_orderbook_ok(client: ExchangeClient, config: dict, symbol: str,
+                        planned_notional: float) -> bool:
+    """Cek kedalaman dan order book sebelum BUY. Fail closed bila data gagal diambil."""
+    if not (bool(config.get("DEPTH_FILTER_ENABLED", False))
+            or bool(config.get("ORDERBOOK_FILTER_ENABLED", False))):
+        return True
+    limit = scanner.normalize_depth_limit(config.get("ORDERBOOK_DEPTH_LIMIT", 500))
+    try:
+        depth = client.get_depth(symbol, limit)
+    except Exception as exc:  # noqa: BLE001 - fail closed untuk error apa pun
+        logger.warning("Entry %s dibatalkan: order book gagal diambil (%s). Fail closed.",
+                       symbol, str(exc)[:160])
+        return False
+    ok, reason, _metrics = scanner.evaluate_orderbook(depth, planned_notional, config)
+    if ok:
+        logger.info("Order book %s lolos: %s", symbol, reason)
+        return True
+    logger.warning("Entry %s dibatalkan oleh filter order book: %s", symbol, reason)
+    return False
+
+
 def open_position(client: ExchangeClient, config: dict, filters_cache: dict,
                    state: dict, candidate: "scanner.Candidate",
                    reference_price: "float | None" = None) -> None:
@@ -2083,6 +2108,8 @@ def open_position(client: ExchangeClient, config: dict, filters_cache: dict,
             "harga acuan %.10g. Cek ATR_MULT_SL/ATR kandidat.",
             candidate.symbol, float(preview.get("sl_pct") or 0.0), price_ref,
         )
+        return
+    if not _entry_orderbook_ok(client, config, candidate.symbol, notional):
         return
     client_order_id = _new_client_order_id("buy")
     state["pending_order"] = {
@@ -2643,7 +2670,7 @@ def run(config: dict, lifecycle=None) -> int:
     if have_bars < need_setup:
         logger.warning(
             "CONFIRM_LOOKBACK_BARS=%d lebih kecil dari %d candle yang dibutuhkan "
-            "struktur setup. Bot tetap mengambil %d candle per konfirmasi agar deteksi "
+            "konfirmasi volume dan ATR. Bot tetap mengambil %d candle per konfirmasi agar deteksi "
             "tidak selalu gagal, tetapi perbaiki nilai config ini supaya backtest dan live "
             "benar-benar memakai angka yang sama.",
             have_bars, need_setup, strategy.confirm_window_bars(config),
@@ -2864,8 +2891,8 @@ def run(config: dict, lifecycle=None) -> int:
                         bid, ask = float(book["bidPrice"]), float(book["askPrice"])
                         spread_pct = scanner.spread_pct_from_book(bid, ask)
                         max_chase = float(config.get("MAX_CHASE_PCT", 0) or 0)
-                        signal_close = float(best.setup.breakout_level or 0.0) if (
-                            best.setup is not None and best.setup.breakout_level
+                        signal_close = float(best.setup.signal_close or 0.0) if (
+                            best.setup is not None and best.setup.signal_close
                         ) else 0.0
                         chase_ok = True
                         if max_chase > 0 and signal_close > 0 and ask > signal_close * (
@@ -2910,7 +2937,7 @@ def run(config: dict, lifecycle=None) -> int:
                             logger.info("Kandidat %s dilewati: spread %.3f%% > batas %.3f%%.",
                                         best.symbol, spread_pct, config["MAX_SPREAD_PCT"])
                     else:
-                        logger.info("Tidak ada setup momentum (3-dari-4 konfirmasi) yang sah pada scan ini.")
+                        logger.info("Tidak ada kandidat yang lolos konfirmasi volume rolling pada scan ini.")
 
             if time.time() - last_heartbeat >= config["HEARTBEAT_INTERVAL_SECONDS"]:
                 last_heartbeat = time.time()
@@ -3000,7 +3027,7 @@ def selftest() -> None:
 
     RATA_HARIAN = {
         "AUSDT": 2_000_000.0, "BUSDT": 1_000_000.0, "CUSDT": 1_000_000.0,
-        "DUSDT": 1_000.0, "EUSDT": 4_000_000.0, "BTCUPUSDT": 1_000.0,
+        "DUSDT": 1_000.0, "EUSDT": 4_000_000.0, "HIGHUSDT": 2_000_000.0, "BTCUPUSDT": 1_000.0,
         "USDCUSDT": 1_000.0, "HALTUSDT": 1_000.0,
     }
 
@@ -3014,8 +3041,8 @@ def selftest() -> None:
     ref_ms = 7 * HARI_MS + 1
 
     tickers = [
-        {"symbol": "AUSDT", "priceChangePercent": "15.0", "quoteVolume": "6000000", "lastPrice": "1.0"},
-        {"symbol": "BUSDT", "priceChangePercent": "25.0", "quoteVolume": "4000000", "lastPrice": "2.0"},
+        {"symbol": "AUSDT", "priceChangePercent": "8.0", "quoteVolume": "6000000", "lastPrice": "1.0"},
+        {"symbol": "BUSDT", "priceChangePercent": "10.0", "quoteVolume": "4000000", "lastPrice": "2.0"},
         {"symbol": "CUSDT", "priceChangePercent": "-3.0", "quoteVolume": "9000000", "lastPrice": "0.5"},
         {"symbol": "DUSDT", "priceChangePercent": "40.0", "quoteVolume": "10000", "lastPrice": "0.1"},
         {"symbol": "EUSDT", "priceChangePercent": "20.0", "quoteVolume": "4000000", "lastPrice": "1.0"},
@@ -3024,9 +3051,10 @@ def selftest() -> None:
         {"symbol": "BTCUPUSDT", "priceChangePercent": "50.0", "quoteVolume": "9000000", "lastPrice": "3.0"},
         {"symbol": "USDCUSDT", "priceChangePercent": "20.0", "quoteVolume": "9000000", "lastPrice": "1.0"},
         {"symbol": "HALTUSDT", "priceChangePercent": "10.0", "quoteVolume": "8000000", "lastPrice": "1.0"},
+        {"symbol": "HIGHUSDT", "priceChangePercent": "10.01", "quoteVolume": "7000000", "lastPrice": "1.0"},
     ]
     tradable = {"AUSDT", "BUSDT", "CUSDT", "DUSDT", "EUSDT", "FUSDT", "GUSDT",
-                "BTCUPUSDT", "USDCUSDT"}
+                "BTCUPUSDT", "USDCUSDT", "HIGHUSDT"}
     ranked = scanner.filter_and_rank_candidates(
         tickers, cfg, tradable, get_daily_klines_fn=daily_fetcher, reference_ms=ref_ms)
     symbols = [c.symbol for c in ranked]
@@ -3035,29 +3063,82 @@ def selftest() -> None:
     print("  -> OK (leveraged token, stablecoin, volume rendah, simbol non-TRADING,")
     print("      koin yang TURUN 24 jam, volume yang tidak naik, koin baru listing,")
     print("      dan simbol yang gagal diambil candle hariannya semuanya ter-exclude)")
+    print("  -> OK (batas atas 24 jam: 10.00% lolos, 10.01% ditolak walau volumenya terbesar)")
+    assert cfg.get("PUMP_MAX_24H_CHANGE_PCT") == 10.0
+    ok_hi, why_hi = scanner.evaluate_pump_gate(12.0, 6_000_000.0, 2_000_000.0, cfg)
+    assert not ok_hi and "batas atas" in why_hi, why_hi
+    ok_lo, _ = scanner.evaluate_pump_gate(6.0, 6_000_000.0, 2_000_000.0, cfg)
+    assert ok_lo, "batas bawah 6.0% harus lolos (inklusif)"
+    cfg_nocap = dict(cfg, PUMP_MAX_24H_CHANGE_PCT=0.0)
+    assert scanner.evaluate_pump_gate(40.0, 6_000_000.0, 2_000_000.0, cfg_nocap)[0]
+    print("  -> OK (rentang 6.0% sampai 10.0% inklusif, 0 = batas atas nonaktif)")
+
+    print("=== SELFTEST: kedalaman dan order book sebelum entry ===")
+
+    def _book(ask_levels, bid_levels):
+        return {"asks": [[str(p), str(q)] for p, q in ask_levels],
+                "bids": [[str(p), str(q)] for p, q in bid_levels]}
+
+    # Harga 1.0. Ask: 50 level x 400 USDT di 1.000 sampai 1.0049, total 20.000 dalam 0.5%.
+    flat_asks = [(1.0 + i * 0.0001, 400.0 / (1.0 + i * 0.0001)) for i in range(1, 60)]
+    flat_bids = [(1.0 - i * 0.0001, 400.0 / (1.0 - i * 0.0001)) for i in range(1, 60)]
+    best_ask_px = 1.0 + 0.0001
+    book_ok = _book(flat_asks, flat_bids)
+    ok, why, m = scanner.evaluate_orderbook(book_ok, 1000.0, cfg)
+    assert ok, why
+    # order 3000 butuh 30.000, ask 0.5% hanya sekitar 20.000, jadi ditolak
+    ok, why, m = scanner.evaluate_orderbook(book_ok, 3000.0, cfg)
+    assert not ok and "kedalaman" in why, why
+    # bid tipis: 100 USDT per level, rasio 0.25
+    thin_bids = [(1.0 - i * 0.0001, 100.0 / (1.0 - i * 0.0001)) for i in range(1, 60)]
+    ok, why, m = scanner.evaluate_orderbook(_book(flat_asks, thin_bids), 1000.0, cfg)
+    assert not ok and "tekanan jual" in why, why
+    # sell wall: satu level 12.000 USDT di antara level 400, share > 30% di rentang 1%
+    wall_asks = list(flat_asks)
+    wall_asks[20] = (wall_asks[20][0], 12_000.0 / wall_asks[20][0])
+    ok, why, m = scanner.evaluate_orderbook(_book(wall_asks, flat_bids), 1000.0, cfg)
+    assert not ok and "sell wall" in why, why
+    # data kosong atau rusak: fail closed
+    for bad in (None, {}, {"asks": [], "bids": []}, {"asks": [["x", "y"]], "bids": [["1", "1"]]},
+                _book([(1.0, 5.0)], [(1.1, 5.0)])):
+        assert not scanner.evaluate_orderbook(bad, 1000.0, cfg)[0], bad
+    # filter nonaktif: lolos tanpa data
+    off = dict(cfg, DEPTH_FILTER_ENABLED=False, ORDERBOOK_FILTER_ENABLED=False)
+    assert scanner.evaluate_orderbook(None, 1000.0, off)[0]
+    # hanya depth aktif: bid tipis tidak masalah
+    only_depth = dict(cfg, ORDERBOOK_FILTER_ENABLED=False)
+    assert scanner.evaluate_orderbook(_book(flat_asks, thin_bids), 1000.0, only_depth)[0]
+    assert scanner.normalize_depth_limit(50) == 100 and scanner.normalize_depth_limit(101) == 500 \
+        and scanner.normalize_depth_limit(2000) == 1000 and scanner.normalize_depth_limit("abc") == 500
+    print("  -> OK (depth, ketimpangan bid/ask, sell wall, data rusak = fail closed)")
 
     tanpa_sumber = scanner.filter_and_rank_candidates(tickers, cfg, tradable)
     assert tanpa_sumber == [], \
         "Tanpa sumber candle harian, gerbang pump harus menolak semua simbol (fail closed)"
     print("  -> OK (tanpa sumber candle harian, gerbang pump fail closed)")
 
-    print("\n=== SELFTEST: deteksi setup pullback dan retest ===")
+    print("\n=== SELFTEST: konfirmasi entry (volume rolling, tanpa indikator) ===")
 
-    vals = [100.0] * 30 + [100.2, 100.4, 99.4, 98.4, 97.4, 97.6,
-                            98.6, 98.1, 98.3, 97.8, 98.8, 99.8, 98.8,
-                            99.8, 99.3, 99.5, 98.5, 99.5, 98.5, 100.0, 100.5]
-    kl_ok = [strategy.Kline(i * 300_000, v, v + 1, max(0.01, v - 1), v,
-                            i * 300_000 + 299_999,
-                            3000.0 if i >= len(vals) - 2 else 1000.0,
-                            v * (3000.0 if i >= len(vals) - 2 else 1000.0))
-             for i, v in enumerate(vals)]
-    hasil = scanner.detect_pullback_retest(kl_ok, cfg)
-    print(f"  Skenario 3 dari 4 konfirmasi momentum -> ok={hasil.ok} ({hasil.reason})")
-    assert hasil.ok, "Skenario momentum sah harusnya lolos"
+    def _seri_volume(volume_akhir: float):
+        out = []
+        for i in range(30):
+            v = 100.0 + (i % 3) * 0.1
+            vol = volume_akhir if i == 29 else 1000.0
+            out.append(strategy.Kline(i * 300_000, v, v + 1, v - 1, v,
+                                      i * 300_000 + 299_999, vol, v * vol))
+        return out
+
+    hasil = scanner.detect_entry_setup(_seri_volume(3000.0), cfg)
+    print(f"  Lonjakan volume 3x -> ok={hasil.ok} ({hasil.reason})")
+    assert hasil.ok, "Lonjakan volume 3x harusnya lolos konfirmasi"
     assert hasil.atr_value is not None, "ATR harus ikut tersedia pada setup"
-    ok_ce, reason_ce = scanner.confirm_entry(kl_ok, cfg)
-    assert ok_ce and reason_ce == hasil.reason, "confirm_entry harus memakai deteksi momentum"
-    print("  -> OK (confirm_entry tetap mengembalikan (bool, str))")
+    assert hasil.signal_close is not None and hasil.signal_close > 0, \
+        "close candle sinyal harus tersedia untuk filter MAX_CHASE_PCT"
+    hasil_tolak = scanner.detect_entry_setup(_seri_volume(1500.0), cfg)
+    assert not hasil_tolak.ok, "Volume hanya 1,5x harus ditolak (minimum 2x)"
+    hasil_pendek = scanner.detect_entry_setup(_seri_volume(3000.0)[:10], cfg)
+    assert not hasil_pendek.ok, "Data candle kurang harus ditolak"
+    print("  -> OK (volume 3x lolos, volume 1,5x ditolak, data kurang ditolak)")
 
     print("\n=== SELFTEST: simulasi exit (TP/Breakeven/Trailing) ===")
     from decimal import Decimal as D
@@ -3079,6 +3160,25 @@ def selftest() -> None:
 
         def get_book_ticker(self, symbol, max_retries=3):
             return {"symbol": symbol, "bidPrice": str(self.price), "askPrice": str(self.price)}
+
+        depth_mode = "deep"  # "deep", "thin_ask", "wall", "error"
+
+        def get_depth(self, symbol, limit=100):
+            if self.depth_mode == "error":
+                raise BinanceAPIError(500, None, "depth simulasi gagal")
+            px = float(self.price)
+            asks, bids = [], []
+            for i in range(1, 41):
+                ask_px = px * (1.0 + i * 0.0002)
+                bid_px = px * (1.0 - i * 0.0002)
+                ask_val = 1_000_000.0
+                if self.depth_mode == "thin_ask":
+                    ask_val = 100.0
+                elif self.depth_mode == "wall" and i == 10:
+                    ask_val = 30_000_000.0
+                asks.append([str(ask_px), str(ask_val / ask_px)])
+                bids.append([str(bid_px), str(1_000_000.0 / bid_px)])
+            return {"asks": asks, "bids": bids}
 
         def new_market_order(self, symbol, side, quantity=None, quote_order_qty=None,
                              new_client_order_id=None):
@@ -3187,6 +3287,24 @@ def selftest() -> None:
         got = nominal_dipakai(cfg_size, saldo)
         assert abs(got - harap) < 0.01, f"saldo {saldo}: harap {harap:.2f}, dapat {got:.2f}"
         print(f"  Saldo {saldo:>7.0f} -> pakai {got:>8.2f} USDT ({got / saldo * 100:.2f}% saldo) -> OK")
+
+    print("=== SELFTEST: open_position menolak entry bila order book buruk ===")
+    for mode_depth, harus_order in (("deep", True), ("thin_ask", False),
+                                     ("wall", False), ("error", False)):
+        cl = SizingClient(1000.0)
+        cl.depth_mode = mode_depth
+        st = dict(DEFAULT_STATE)
+        open_position(cl, cfg_size, size_filters, st, cand)
+        assert bool(cl.orders) == harus_order, f"depth_mode={mode_depth}: orders={cl.orders}"
+        if not harus_order:
+            assert not st.get("pending_order"), "penolakan tidak boleh meninggalkan pending_order"
+        print(f"  depth_mode={mode_depth:<9} -> order terkirim={bool(cl.orders)} -> OK")
+    cfg_off = dict(cfg_size, DEPTH_FILTER_ENABLED=False, ORDERBOOK_FILTER_ENABLED=False)
+    cl = SizingClient(1000.0)
+    cl.depth_mode = "error"
+    open_position(cl, cfg_off, size_filters, dict(DEFAULT_STATE), cand)
+    assert cl.orders, "filter nonaktif tidak boleh menyentuh depth"
+    print("  filter nonaktif -> depth tidak dipanggil, order terkirim -> OK")
 
     cfg_cap = dict(cfg_size)
     cfg_cap["MAX_POSITION_USDT"] = 10.0

@@ -133,6 +133,7 @@ def riwayat_harian(klines: list[Kline], hari: int = 7,
 def cfg_gerbang_pump_nonaktif(config: dict) -> dict:
     out = dict(config)
     out["PUMP_MIN_24H_CHANGE_PCT"] = -1000.0
+    out["PUMP_MAX_24H_CHANGE_PCT"] = 0.0
     out["PUMP_VOLUME_SURGE_MULT"] = 0.0
     return out
 

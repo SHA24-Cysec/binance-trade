@@ -713,6 +713,23 @@ def _bt_prepare_universe(job_id: str, cfg: dict, days: int, max_symbols: int,
                 0.80 + frac * 0.02, f"volume harian {sym}"),
             cancel_cb=cancelled,
         )
+
+        btc_klines = None
+        btc_error = ""
+        if cfg.get("BTC_FILTER_ENABLED", False):
+            btc_symbol = "BTC" + str(cfg.get("QUOTE_ASSET", "USDT"))
+            set_progress(0.82, f"mengunduh {btc_symbol} untuk filter BTC...")
+            try:
+                btc_klines = pbt._klines_untuk_simbol(
+                    client, btc_symbol, interval, fetch_start_ms, end_ms, kline_cache)
+                if not btc_klines:
+                    btc_klines = None
+                    btc_error = f"candle {btc_symbol} kosong"
+            except Exception as exc:
+                if cancelled():
+                    raise
+                btc_klines = None
+                btc_error = str(exc)[:200]
     except Exception:
         if store is not None:
             store.cleanup()
@@ -729,7 +746,25 @@ def _bt_prepare_universe(job_id: str, cfg: dict, days: int, max_symbols: int,
         "interval": interval,
         "warmup_ms": warmup_ms,
         "end_ms": end_ms,
+        "btc_klines": btc_klines,
+        "btc_error": btc_error,
     }
+
+
+def _json_safe(value):
+    """Ganti nilai tak hingga/NaN dengan None.
+
+    Flask menulis float('inf') sebagai `Infinity` yang BUKAN JSON sah, sehingga
+    JSON.parse di browser gagal dan seluruh hasil backtest tidak tampil. Kasus ini
+    nyata: profit factor bernilai inf bila tidak ada trade rugi.
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
 
 
 def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
@@ -764,6 +799,7 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
             progress_cb=lambda f: set_progress(0.82 + f * 0.17,
                                                "menjalankan simulasi portofolio..."),
             cancel_cb=cancelled,
+            btc_klines=prep.get("btc_klines"),
         )
         summary = pbt.summarize_portfolio(result)
 
@@ -809,7 +845,12 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
             "summary": summary,
             "trades": trades_out,
             "skipped": skipped_out,
-            "warnings": result.warnings,
+            "warnings": (list(result.warnings) + (
+                [f"Data BTC gagal diunduh ({prep.get('btc_error')}) sehingga filter BTC "
+                 "tidak diterapkan."]
+                if (cfg.get("BTC_FILTER_ENABLED", False) and prep.get("btc_klines") is None
+                    and not any("BTC" in w for w in result.warnings))
+                else [])),
             "limitations": [
                 "SURVIVORSHIP BIAS, dan ini tidak bisa diperbaiki: Binance hanya menyediakan "
                 "data historis untuk pair yang MASIH listing hari ini. Koin yang sudah "
@@ -821,20 +862,38 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "menentukan simbol mana yang masuk top-N kandidat per bar.",
                 "Fill exit memperhitungkan gap: candle yang DIBUKA sudah menembus level "
                 "SL/TP/BE/Trailing diisi pada harga pembukaan candle itu, konsisten dengan "
-                "simulasi PAPER, bukan pada harga levelnya.",
+                "simulasi PAPER, bukan pada harga levelnya. Candle tempat posisi dibuka "
+                "(termasuk candle entry saat ada jeda eksekusi) juga ikut dievaluasi.",
                 "Exit dievaluasi per-candle " + prep["interval"] + " (bukan tiap "
-                + str(PUMP_CONFIG.get("LOOP_INTERVAL_SECONDS", 15)) + " detik seperti bot asli), "
-                "dengan urutan prioritas konservatif: STOP_LOSS -> TAKE_PROFIT -> BREAKEVEN -> "
-                "TRAILING. Stop Loss dianggap kena lebih dulu kalau ambigu dalam satu candle, "
-                "supaya hasil tidak melebih-lebihkan profit.",
+                + str(PUMP_CONFIG.get("LOOP_INTERVAL_SECONDS", 15)) + " detik seperti bot asli). "
+                "Urutan konservatif: stop BE/trailing yang sudah aktif dari candle sebelumnya, "
+                "lalu STOP_LOSS, TAKE_PROFIT, dan BE/trailing yang baru aktif di candle yang "
+                "sama. Stop Loss dianggap kena lebih dulu kalau ambigu dalam satu candle.",
                 "Entry memodelkan spread (BACKTEST_ENTRY_SPREAD_PCT), slippage "
                 "(BACKTEST_SLIPPAGE_PCT), dan jeda eksekusi (BACKTEST_ENTRY_DELAY_BARS). "
-                "Fee taker beli dan jual sudah dipotong. Yang belum dimodelkan adalah "
-                "kedalaman order book, jadi order besar di koin tipis akan lebih buruk dari ini.",
-                "Rem tingkat akun (USE_EQUITY_STOP, USE_DAILY_STOP) dan gerbang eksekusi "
-                "live (MAX_SPREAD_PCT, MAX_CHASE_PCT, MIN_SECONDS_BETWEEN_TRADES) tidak "
-                "disimulasikan, jadi backtest bisa tampak lebih aktif daripada bot asli. "
-                "COOLDOWN_MINUTES_AFTER_CLOSE sudah disimulasikan.",
+                "Fee taker beli dan jual sudah dipotong. Kedalaman order book belum "
+                "dimodelkan, jadi order besar di koin tipis akan lebih buruk dari ini. "
+                "Filter kedalaman, ketimpangan bid/ask, dan sell wall juga hanya berlaku di "
+                "PAPER dan LIVE (snapshot order book tidak tersedia historis). Batas atas "
+                "kenaikan 24 jam (PUMP_MAX_24H_CHANGE_PCT) SUDAH diterapkan di backtest.",
+                "Filter live yang SUDAH disimulasikan dari candle: filter BTC (BTC_MAX_DROP_PCT, "
+                "memakai candle BTC historis), MAX_CHASE_PCT, MIN_SECONDS_BETWEEN_TRADES, "
+                "COOLDOWN_MINUTES_AFTER_CLOSE, equity stop (drawdown), stop harian, dan "
+                "CLOSE_ALL_AT_LIMIT. Kontrol akun dicek saat candle ditutup, bukan tiap "
+                + str(PUMP_CONFIG.get("LOOP_INTERVAL_SECONDS", 15)) + " detik, sehingga "
+                "penutupan paksa di bot asli bisa terjadi lebih awal dari di sini.",
+                "Filter live yang BELUM disimulasikan (butuh data yang tidak tersedia dari "
+                "candle historis): spread order book (MAX_SPREAD_PCT), filter kedalaman, "
+                "ketimpangan bid/ask dan sell wall, usia listing, serta "
+                "aturan lot size dan min notional. Stop-limit native bot bisa gagal terisi "
+                "saat harga gap melewati buffer, sedangkan backtest selalu terisi. Bot asli "
+                "juga memindai tiap beberapa menit sehingga bisa masuk sampai sekitar satu "
+                "candle lebih lambat dari simulasi.",
+                "Drawdown dan kurva equity dihitung dari trade yang sudah selesai, bukan "
+                "mark-to-market harian. Modal awal mengikuti saldo PAPER bila "
+                "BACKTEST_INITIAL_EQUITY_USDT = 0. Persen return bergantung pada rasio ukuran "
+                "posisi terhadap modal, jadi bandingkan strategi lewat metrik per trade "
+                "(rata-rata per trade, payoff ratio) bila modal berbeda.",
                 "Volume 24 jam direkonstruksi dari penjumlahan quote volume candle, "
                 "sehingga bisa sedikit berbeda dari field quoteVolume di ticker.",
             ],
@@ -844,7 +903,7 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
             if job_id in _bt_jobs:
                 _bt_jobs[job_id].update({
                     "status": "done", "progress": 1.0, "stage": "selesai",
-                    "result": payload,
+                    "result": _json_safe(payload),
                 })
     except bt.BacktestError as exc:
         with _bt_jobs_lock:
@@ -898,6 +957,7 @@ def _bt_run_grid_job(job_id: str, days: int, max_symbols: int, spec: dict,
                 f"grid search {total_kombinasi} kombinasi "
                 f"({int(round(f * total_kombinasi))}/{total_kombinasi})"),
             cancel_cb=cancelled,
+            btc_klines=prep.get("btc_klines"),
         )
         rows = gs.ringkas_untuk_tabel(hasil, top_n=20)
 
@@ -925,7 +985,11 @@ def _bt_run_grid_job(job_id: str, days: int, max_symbols: int, spec: dict,
                 "detik": round(hasil.detik, 1),
             },
             "rows": rows,
-            "warnings": [],
+            "warnings": (
+                [f"Filter BTC aktif tetapi data BTC gagal diunduh ({prep.get('btc_error')}); "
+                 "filter BTC TIDAK diterapkan pada grid ini."]
+                if (cfg.get("BTC_FILTER_ENABLED", False) and prep.get("btc_klines") is None)
+                else []),
             "limitations": [
                 "Grid ini berjalan di atas simulasi PORTOFOLIO (satu posisi lintas "
                 "simbol, prioritas volume) dengan parameter exit yang sama seperti "
@@ -952,11 +1016,18 @@ def _bt_run_grid_job(job_id: str, days: int, max_symbols: int, spec: dict,
                 "masuk top-N kandidat per bar.",
                 "Fill memodelkan spread, slippage, dan fee taker dua sisi. Kedalaman "
                 "order book TIDAK dimodelkan, jadi order besar di koin tipis akan "
-                "lebih buruk dari hasil di sini.",
-                "Rem tingkat akun (USE_EQUITY_STOP, USE_DAILY_STOP) dan gerbang eksekusi "
-                "live (MAX_SPREAD_PCT, MAX_CHASE_PCT, MIN_SECONDS_BETWEEN_TRADES) tidak "
-                "disimulasikan, jadi hasil grid bisa tampak lebih aktif daripada bot asli. "
-                "COOLDOWN_MINUTES_AFTER_CLOSE sudah disimulasikan.",
+                "lebih buruk dari hasil di sini. Filter kedalaman, ketimpangan bid/ask, dan "
+                "sell wall hanya berlaku di PAPER dan LIVE. Batas atas kenaikan 24 jam "
+                "(PUMP_MAX_24H_CHANGE_PCT) SUDAH diterapkan di backtest.",
+                "Filter live yang SUDAH disimulasikan dari candle: filter BTC, "
+                "MAX_CHASE_PCT, MIN_SECONDS_BETWEEN_TRADES, COOLDOWN_MINUTES_AFTER_CLOSE, "
+                "equity stop, stop harian, dan CLOSE_ALL_AT_LIMIT (dicek saat candle "
+                "ditutup, bukan tiap beberapa detik). Yang BELUM: spread order book "
+                "(MAX_SPREAD_PCT), usia listing, lot size dan min notional, serta gap "
+                "yang melewati buffer stop-limit native.",
+                "Persen return dan drawdown bergantung pada rasio ukuran posisi terhadap "
+                "modal. Modal awal mengikuti saldo PAPER bila BACKTEST_INITIAL_EQUITY_USDT "
+                "= 0. Untuk membandingkan kombinasi, perhatikan juga metrik per trade.",
             ],
         }
 
@@ -964,7 +1035,7 @@ def _bt_run_grid_job(job_id: str, days: int, max_symbols: int, spec: dict,
             if job_id in _bt_jobs:
                 _bt_jobs[job_id].update({
                     "status": "done", "progress": 1.0, "stage": "selesai",
-                    "result": payload,
+                    "result": _json_safe(payload),
                 })
     except (bt.BacktestError, gs.GridSearchError) as exc:
         with _bt_jobs_lock:

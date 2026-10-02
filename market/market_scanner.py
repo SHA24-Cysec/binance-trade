@@ -1,8 +1,9 @@
 """Scanner pasar dan filter operasional Binance Spot.
 
 Modul ini menyediakan filter semesta, gerbang pump, likuiditas, spread, usia
-listing, dan korelasi BTC, serta deteksi setup entry (pullback-retest) dan
-skor kualitas setup yang dipakai bot dan backtest untuk membuka posisi baru.
+listing, dan korelasi BTC, serta konfirmasi volume rolling yang dipakai bot
+dan backtest untuk membuka posisi baru. Tidak ada indikator teknikal (EMA,
+RSI, MACD, higher low) pada jalur entry.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ import logging
 import math
 import time
 from dataclasses import dataclass
-from typing import Callable, NamedTuple, Optional
+from typing import Callable, Optional
 
 
 from strategy import indicators as strategy
@@ -129,6 +130,7 @@ def evaluate_pump_gate(price_change_pct, quote_volume,
                        avg_daily_quote_volume: Optional[float],
                        config: dict, btc_drop_pct: float | None = None) -> tuple[bool, str]:
     min_change = float(config.get("PUMP_MIN_24H_CHANGE_PCT", 10.0) or 0.0)
+    max_change = float(config.get("PUMP_MAX_24H_CHANGE_PCT", 0.0) or 0.0)
     surge_mult = float(config.get("PUMP_VOLUME_SURGE_MULT", 1.5) or 0.0)
 
     if btc_drop_pct is None:
@@ -155,6 +157,9 @@ def evaluate_pump_gate(price_change_pct, quote_volume,
     if change < min_change:
         return False, (f"kenaikan 24 jam {change:.2f}% di bawah ambang "
                        f"{min_change:g}%")
+    if max_change > 0 and change > max_change:
+        return False, (f"kenaikan 24 jam {change:.2f}% melewati batas atas "
+                       f"{max_change:g}% (koin sudah terlalu tinggi)")
 
     if avg_daily_quote_volume is None:
         return False, "rata-rata volume harian tidak tersedia"
@@ -170,7 +175,8 @@ def evaluate_pump_gate(price_change_pct, quote_volume,
                        f"rata-rata 7 hari {float(avg_daily_quote_volume):.0f}, "
                        f"minimum {surge_mult:g}x")
 
-    return True, (f"pump sah: naik {change:.2f}% (ambang {min_change:g}%), "
+    rentang = f"{min_change:g}% sampai {max_change:g}%" if max_change > 0 else f">= {min_change:g}%"
+    return True, (f"pump sah: naik {change:.2f}% (rentang {rentang}), "
                   f"volume {rasio:.2f}x rata-rata 7 hari (ambang {surge_mult:g}x)")
 
 
@@ -179,6 +185,7 @@ def is_pumping_today(symbol: str, price_change_pct, quote_volume,
                      config: dict,
                      reference_ms: "int | None" = None) -> tuple[bool, str]:
     min_change = float(config.get("PUMP_MIN_24H_CHANGE_PCT", 10.0) or 0.0)
+    max_change = float(config.get("PUMP_MAX_24H_CHANGE_PCT", 0.0) or 0.0)
     try:
         change = float(price_change_pct)
     except (TypeError, ValueError):
@@ -187,6 +194,9 @@ def is_pumping_today(symbol: str, price_change_pct, quote_volume,
         return False, f"priceChangePercent tidak wajar ({price_change_pct!r})"
     if change < min_change:
         return False, f"kenaikan 24 jam {change:.2f}% di bawah ambang {min_change:g}%"
+    if max_change > 0 and change > max_change:
+        return False, (f"kenaikan 24 jam {change:.2f}% melewati batas atas "
+                       f"{max_change:g}% (koin sudah terlalu tinggi)")
 
     if get_daily_klines_fn is None:
         return False, "sumber candle harian tidak tersedia, simbol ditolak (fail closed)"
@@ -205,9 +215,11 @@ def is_pumping_today(symbol: str, price_change_pct, quote_volume,
 
 
 def pump_gate_ok_at(daily_klines: "list[Kline] | None", reference_ms: int,
-                    price_change_pct, quote_volume, config: dict) -> bool:
+                    price_change_pct, quote_volume, config: dict,
+                    btc_drop_pct: "float | None" = None) -> bool:
     rata, _alasan = average_prior_daily_quote_volume(daily_klines, reference_ms)
-    ok, _r = evaluate_pump_gate(price_change_pct, quote_volume, rata, config)
+    ok, _r = evaluate_pump_gate(price_change_pct, quote_volume, rata, config,
+                                btc_drop_pct=btc_drop_pct)
     return ok
 
 
@@ -285,80 +297,149 @@ def filter_and_rank_candidates(tickers: list, config: dict,
                         "saringan likuiditas.", len(out), lolos_struktural)
         else:
             logger.info("Gerbang pump: 0 kandidat lolos gerbang pump (dari %d simbol "
-                        "yang lolos saringan likuiditas). Ambang: naik >= %g%% "
+                        "yang lolos saringan likuiditas). Ambang: naik %g%% sampai %s "
                         "dan volume >= %gx rata-rata 7 hari.",
                         lolos_struktural,
                         float(config.get("PUMP_MIN_24H_CHANGE_PCT", 10.0) or 0.0),
+                        (f"{float(config.get('PUMP_MAX_24H_CHANGE_PCT', 0.0) or 0.0):g}%"
+                         if float(config.get("PUMP_MAX_24H_CHANGE_PCT", 0.0) or 0.0) > 0
+                         else "tanpa batas atas"),
                         float(config.get("PUMP_VOLUME_SURGE_MULT", 1.5) or 0.0))
     return out
 
 
-class EntrySignalScore(NamedTuple):
-    score: float
-    status: str
-    disqualified: Optional[str]
-    components: dict
-    reason: str
+# ---------------------------------------------------------------------------
+# Kedalaman dan order book (hanya PAPER dan LIVE, tidak ada di backtest)
+# ---------------------------------------------------------------------------
 
-def score_entry_signal(klines: list[Kline], config: dict, meta=None) -> EntrySignalScore:
-    zero = {"ema": 0.0, "rsi": 0.0, "macd": 0.0, "higher_low": 0.0}
-    passed, detail = _rolling_volume_confirmation(klines, config)
-    if not passed:
-        return EntrySignalScore(0.0, "TIDAK LOLOS", detail, zero, detail)
-    closes = [float(k.close) for k in klines]
-    if len(closes) < max(30, strategy.required_lookback_bars(config)):
-        return EntrySignalScore(0.0, "TIDAK LOLOS", "data candle kurang", zero, "data candle kurang")
-    w = {"ema": float(config.get("WATCH" + "LIST_ENTRY_WEIGHT_EMA", 25)),
-         "rsi": float(config.get("WATCH" + "LIST_ENTRY_WEIGHT_RSI", 25)),
-         "macd": float(config.get("WATCH" + "LIST_ENTRY_WEIGHT_MACD", 25)),
-         "higher_low": float(config.get("WATCH" + "LIST_ENTRY_WEIGHT_HL", 25))}
-    ema9, ema21 = strategy.ema(closes, 9), strategy.ema(closes, 21)
-    cross = ema9[-2] <= ema21[-2] and ema9[-1] > ema21[-1]
-    if cross: ema_credit = w["ema"]
-    elif ema9[-1] > ema21[-1]: ema_credit = w["ema"] * 0.6
-    else:
-        gap = float(config.get("WATCH" + "LIST_ENTRY_EMA_GAP_PCT", 1.0))
-        rel = (ema21[-1] - ema9[-1]) / ema21[-1] * 100
-        ema_credit = w["ema"] * max(0.0, 1.0 - rel / gap) if gap > 0 else 0.0
-    rsi = strategy.rsi(closes, 14)[-1]
-    decay = float(config.get("WATCH" + "LIST_ENTRY_RSI_DECAY_PTS", 15))
-    rsi_credit = w["rsi"] if 50 <= rsi <= 75 else w["rsi"] * max(0.0, 1 - (50-rsi if rsi < 50 else rsi-75) / decay)
-    _, _, hist = strategy.macd(closes)
-    improving = len(hist) >= 2 and (hist[-1] > hist[-2] or (hist[-2] <= 0 < hist[-1]))
-    slowing = len(hist) >= 3 and hist[-1] < hist[-2] and (hist[-1]-hist[-2]) > (hist[-2]-hist[-3])
-    macd_credit = w["macd"] if improving else (w["macd"] * 0.4 if slowing else 0.0)
-    hl = _higher_low_confirmed(klines, max(1, int(config.get("SWING_PIVOT_WING_BARS", 2) or 2)))
-    components = {"ema": round(ema_credit, 1), "rsi": round(rsi_credit, 1), "macd": round(macd_credit, 1), "higher_low": w["higher_low"] if hl else 0.0}
-    raw = round(sum(components.values()), 1)
-    dq = None
-    if meta:
-        spread = meta.get("spread_pct")
-        if spread is not None and spread > float(config.get("MAX_SPREAD_PCT", .25)): dq = "spread melewati batas"
-        if meta.get("weekend_pct") is not None and str(meta.get("symbol", "")).endswith("B") and meta["weekend_pct"] < 16: dq = "bStocks tidak berjalan 24/7"
-    status = "SIAP" if raw >= 75 else "MENDEKAT" if raw >= 50 else "AWAL" if raw >= 25 else "JAUH"
-    return EntrySignalScore(0.0 if dq else raw, "TIDAK LOLOS" if dq else status, dq, components, f"EMA={'ya' if cross else 'tidak'}, RSI={rsi:.2f}, MACD={'naik' if improving else 'tidak'}, HL={'ya' if hl else 'tidak'}; {detail}")
+SELL_WALL_MIN_LEVELS = 3
+VALID_DEPTH_LIMITS = (100, 500, 1000)
+
+
+def normalize_depth_limit(value) -> int:
+    """Bulatkan ke atas ke limit depth yang valid di Binance (100, 500, 1000)."""
+    try:
+        v = int(float(value))
+    except (TypeError, ValueError):
+        return 500
+    for limit in VALID_DEPTH_LIMITS:
+        if v <= limit:
+            return limit
+    return VALID_DEPTH_LIMITS[-1]
+
+
+def _parse_levels(raw) -> list[tuple[float, float]]:
+    """Ubah daftar [harga, qty] jadi tuple float. Level rusak dibuang."""
+    out: list[tuple[float, float]] = []
+    for lvl in raw or []:
+        try:
+            price = float(lvl[0])
+            qty = float(lvl[1])
+        except (TypeError, ValueError, IndexError, KeyError):
+            continue
+        if not (math.isfinite(price) and math.isfinite(qty)) or price <= 0 or qty <= 0:
+            continue
+        out.append((price, qty))
+    return out
+
+
+def evaluate_orderbook(depth, planned_notional: float, config: dict) -> tuple[bool, str, dict]:
+    """Nilai snapshot order book sebelum entry BUY.
+
+    Tiga pemeriksaan, semuanya fail closed bila data kosong atau rusak:
+    1. Kedalaman: total nilai ask dalam DEPTH_RANGE_PCT dari ask terbaik
+       harus >= DEPTH_MIN_ASK_NOTIONAL_MULT x nilai order.
+    2. Ketimpangan: total nilai bid di ORDERBOOK_LEVELS level teratas harus
+       >= ORDERBOOK_MIN_BID_ASK_RATIO x total nilai ask di level teratas.
+    3. Sell wall: tidak ada satu level ask di dalam SELL_WALL_RANGE_PCT yang
+       bernilai lebih dari SELL_WALL_MAX_SHARE_PCT dari total ask di rentang itu
+       (hanya dinilai bila ada minimal SELL_WALL_MIN_LEVELS level di rentang).
+
+    Mengembalikan (lolos, alasan, metrik).
+    """
+    depth_on = bool(config.get("DEPTH_FILTER_ENABLED", False))
+    book_on = bool(config.get("ORDERBOOK_FILTER_ENABLED", False))
+    metrics: dict = {}
+    if not depth_on and not book_on:
+        return True, "filter kedalaman dan order book nonaktif", metrics
+
+    if not isinstance(depth, dict):
+        return False, "snapshot order book tidak tersedia (fail closed)", metrics
+    asks = sorted(_parse_levels(depth.get("asks")), key=lambda x: x[0])
+    bids = sorted(_parse_levels(depth.get("bids")), key=lambda x: x[0], reverse=True)
+    if not asks or not bids:
+        return False, "order book kosong di salah satu sisi (fail closed)", metrics
+    try:
+        planned = float(planned_notional)
+    except (TypeError, ValueError):
+        return False, f"nilai order tidak valid ({planned_notional!r})", metrics
+    if not math.isfinite(planned) or planned <= 0:
+        return False, f"nilai order tidak valid ({planned_notional!r})", metrics
+
+    best_ask = asks[0][0]
+    best_bid = bids[0][0]
+    if best_bid >= best_ask:
+        return False, (f"order book tidak wajar (bid {best_bid:g} >= ask {best_ask:g})"), metrics
+    metrics.update(best_bid=best_bid, best_ask=best_ask, planned_notional=planned)
+
+    def _range(pct: float) -> tuple[list[tuple[float, float]], bool]:
+        limit_price = best_ask * (1.0 + pct / 100.0)
+        inside = [lv for lv in asks if lv[0] <= limit_price]
+        truncated = asks[-1][0] < limit_price
+        return inside, truncated
+
+    if depth_on:
+        rng = float(config.get("DEPTH_RANGE_PCT", 0.5) or 0.0)
+        mult = float(config.get("DEPTH_MIN_ASK_NOTIONAL_MULT", 10.0) or 0.0)
+        inside, truncated = _range(rng)
+        total = sum(p * q for p, q in inside)
+        need = mult * planned
+        metrics.update(ask_depth_notional=total, ask_depth_required=need,
+                       ask_depth_range_pct=rng, ask_depth_truncated=truncated)
+        if total < need:
+            extra = " (snapshot terpotong sebelum batas rentang)" if truncated else ""
+            return False, (f"kedalaman ask {rng:g}% hanya {total:,.0f} USDT, butuh "
+                           f"{need:,.0f} USDT ({mult:g}x order {planned:,.0f}){extra}"), metrics
+
+    if book_on:
+        n = max(1, int(config.get("ORDERBOOK_LEVELS", 10) or 10))
+        min_ratio = float(config.get("ORDERBOOK_MIN_BID_ASK_RATIO", 0.8) or 0.0)
+        bid_n = sum(p * q for p, q in bids[:n])
+        ask_n = sum(p * q for p, q in asks[:n])
+        ratio = bid_n / ask_n if ask_n > 0 else float("inf")
+        metrics.update(bid_top_notional=bid_n, ask_top_notional=ask_n,
+                       bid_ask_ratio=ratio, orderbook_levels=n)
+        if ratio < min_ratio:
+            return False, (f"tekanan jual: bid {n} level teratas {bid_n:,.0f} USDT hanya "
+                           f"{ratio:.2f}x ask {ask_n:,.0f} USDT, minimum {min_ratio:g}x"), metrics
+
+        wall_rng = float(config.get("SELL_WALL_RANGE_PCT", 1.0) or 0.0)
+        max_share = float(config.get("SELL_WALL_MAX_SHARE_PCT", 30.0) or 0.0) / 100.0
+        inside, truncated = _range(wall_rng)
+        total = sum(p * q for p, q in inside)
+        metrics.update(wall_range_pct=wall_rng, wall_range_levels=len(inside),
+                       wall_range_notional=total)
+        if len(inside) >= SELL_WALL_MIN_LEVELS and total > 0 and max_share > 0:
+            wall_price, wall_qty = max(inside, key=lambda x: x[0] * x[1])
+            wall_val = wall_price * wall_qty
+            share = wall_val / total
+            metrics.update(wall_price=wall_price, wall_notional=wall_val, wall_share=share)
+            if share > max_share:
+                return False, (f"sell wall di {wall_price:g}: {wall_val:,.0f} USDT = "
+                               f"{share * 100:.0f}% dari ask {wall_rng:g}% "
+                               f"({total:,.0f} USDT), maksimum {max_share * 100:g}%"), metrics
+
+    return True, (f"order book sehat: ask {metrics.get('ask_depth_notional', 0):,.0f} USDT, "
+                  f"bid/ask {metrics.get('bid_ask_ratio', 0):.2f}x, "
+                  f"wall {metrics.get('wall_share', 0) * 100:.0f}%"), metrics
+
 
 @dataclass
 class SetupResult:
     ok: bool
     reason: str
-    breakout_level: Optional[float] = None
-    zone_low: Optional[float] = None
-    zone_high: Optional[float] = None
-    anchor_index: Optional[int] = None
-    retest_touches: int = 0
+    signal_close: Optional[float] = None
     atr_value: Optional[float] = None
-
-def _pivot_low_indexes(klines: list[Kline], wing: int) -> list[int]:
-    if wing < 1 or len(klines) < 2 * wing + 1:
-        return []
-    return [p for p in range(wing, len(klines) - wing)
-            if all(klines[p].low < klines[j].low for j in range(p-wing, p))
-            and all(klines[p].low < klines[j].low for j in range(p+1, p+wing+1))]
-
-def _higher_low_confirmed(klines: list[Kline], wing: int) -> bool:
-    pivots = _pivot_low_indexes(klines, wing)
-    return len(pivots) >= 2 and klines[pivots[-1]].low > klines[pivots[-2]].low
 
 def _rolling_volume_confirmation(klines: list[Kline], config: dict) -> tuple[bool, str]:
     if not bool(config.get("ROLLING_VOLUME_FILTER_ENABLED", True)):
@@ -401,11 +482,9 @@ def _rolling_volume_confirmation(klines: list[Kline], config: dict) -> tuple[boo
               f"{passed}/{confirmations} candle konfirmasi")
     return ok, detail
 
-def detect_pullback_retest(klines: list[Kline], config: dict) -> SetupResult:
+def detect_entry_setup(klines: list[Kline], config: dict) -> SetupResult:
     n = len(klines)
-    period = 14
-    wing = max(1, int(config.get("SWING_PIVOT_WING_BARS", 2) or 2))
-    minimum = max(30, strategy.required_lookback_bars(config))
+    minimum = strategy.required_lookback_bars(config)
     if n < minimum:
         return SetupResult(False, f"data candle kurang: {n} dari minimum {minimum}")
     closes = [float(k.close) for k in klines]
@@ -414,31 +493,10 @@ def detect_pullback_retest(klines: list[Kline], config: dict) -> SetupResult:
     volume_ok, volume_detail = _rolling_volume_confirmation(klines, config)
     if not volume_ok:
         return SetupResult(False, f"rolling volume ditolak: {volume_detail}")
-    ema9, ema21 = strategy.ema(closes, 9), strategy.ema(closes, 21)
-    if len(ema9) < 2:
-        return SetupResult(False, "data EMA kurang")
-    ema_cross = ema9[-2] <= ema21[-2] and ema9[-1] > ema21[-1]
-    rsi_values = strategy.rsi(closes, period)
-    rsi_ok = 50.0 <= rsi_values[-1] <= 75.0
-    _macd, _signal, histogram = strategy.macd(closes)
-    macd_ok = len(histogram) >= 2 and (histogram[-1] > histogram[-2] or
-                                       (histogram[-2] <= 0 < histogram[-1]))
-    higher_low = _higher_low_confirmed(klines, wing)
-    confirmations = sum((ema_cross, rsi_ok, macd_ok, higher_low))
-    details = (f"EMA={'ya' if ema_cross else 'tidak'}, RSI={rsi_values[-1]:.2f}, "
-               f"MACD={'naik' if macd_ok else 'tidak'}, HL={'ya' if higher_low else 'tidak'} "
-               f"({confirmations}/4), {volume_detail}")
-    if confirmations < 3:
-        return SetupResult(False, f"konfirmasi entry kurang dari 3/4: {details}")
-    return SetupResult(True, f"momentum pump sah: {details}",
-                       breakout_level=klines[-1].close,
-                       zone_low=klines[-1].low, zone_high=klines[-1].high,
-                       anchor_index=max(0, n - 1), retest_touches=0,
-                       atr_value=strategy.atr(klines, int(config.get("ATR_PERIOD", 14) or 14)))
-
-def confirm_entry(klines: list[Kline], config: dict) -> tuple[bool, str]:
-    hasil = detect_pullback_retest(klines, config)
-    return hasil.ok, hasil.reason
+    return SetupResult(
+        True, f"entry sah: gerbang pump lolos, {volume_detail}",
+        signal_close=klines[-1].close,
+        atr_value=strategy.atr(klines, int(config.get("ATR_PERIOD", 14) or 14)))
 
 def setup_quality_key(setup: SetupResult, candidate: Candidate) -> tuple:
     return (-float(candidate.quote_volume),)
@@ -460,7 +518,7 @@ def find_best_candidate(tickers: list, klines_fetcher, config: dict,
             cand.confirmed = False
             cand.confirm_reason = f"gagal mengambil candle: {exc}"
             continue
-        hasil = detect_pullback_retest(klines or [], config)
+        hasil = detect_entry_setup(klines or [], config)
         cand.confirmed = hasil.ok
         cand.confirm_reason = hasil.reason
         cand.setup = hasil

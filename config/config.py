@@ -1,7 +1,7 @@
 """
 Konfigurasi bot Binance Spot.
 
-Bot memindai pasar, membuka posisi baru saat setup pullback-retest lolos
+Bot memindai pasar, membuka posisi baru saat konfirmasi volume rolling lolos
 semua filter (gerbang pump, likuiditas, spread, usia listing, rem risiko),
 lalu mengelola exit (SL/TP/BE/trailing, mode FIXED atau ATR). Mode PAPER
 dan LIVE dipisah per file state. Mode aktif dibaca dari BOT_MODE di file .env
@@ -59,6 +59,7 @@ PUMP_CONFIG = {
     "MARKET_DATA_INTERVAL": "5m",
 
     "PUMP_MIN_24H_CHANGE_PCT": 6.0,
+    "PUMP_MAX_24H_CHANGE_PCT": 10.0,
     "PUMP_VOLUME_SURGE_MULT": 2.0,
     "BTC_FILTER_ENABLED": True,
     "BTC_MAX_DROP_PCT": 3.0,
@@ -67,12 +68,12 @@ PUMP_CONFIG = {
 
     "USE_ATR_EXIT": True,
     "ATR_PERIOD": 14,
-    "ATR_MULT_SL": 10.0,
-    "ATR_MULT_TP": 20.0,
+    "ATR_MULT_SL": 8.0,
+    "ATR_MULT_TP": 24.0,
     "ATR_MULT_TRAIL": 6.0,
-    "ATR_MULT_BE_TRIGGER": 6.0,
-    "ATR_MULT_BE_LOCK": 0.8,
-    "ATR_MULT_TRAIL_START": 6.0,
+    "ATR_MULT_BE_TRIGGER": 1-0.0,
+    "ATR_MULT_BE_LOCK": 3.0,
+    "ATR_MULT_TRAIL_START": 15.0,
 
     "EXTRA_EXCLUDE_SYMBOLS": [],
 
@@ -80,7 +81,7 @@ PUMP_CONFIG = {
     "WATCHLIST_ENABLED": True,
     "WATCHLIST_TOP_N": 15,
 
-    "BACKTEST_INITIAL_EQUITY_USDT": 10_000.0,
+    "BACKTEST_INITIAL_EQUITY_USDT": 0.0,
     "BACKTEST_CACHE_ENABLED": True,
     "BACKTEST_CACHE_FILE": "data/backtest_cache.sqlite3",
     "BACKTEST_CACHE_FRESH_HOURS": 24,
@@ -128,21 +129,11 @@ PUMP_CONFIG = {
     "TOP_N_CANDIDATES_TO_CONFIRM": 15,
     "CONFIRM_INTERVAL": "5m",
     "CONFIRM_LOOKBACK_BARS": 60,
-    "MIN_CLOSE_POSITION_IN_RANGE": 0.35,
-    "SWING_LOOKBACK_BARS": 20,
-    "SWING_PIVOT_WING_BARS": 3,
-    "VWAP_MIN_BARS_AFTER_ANCHOR": 4,
-    "MAX_BARS_BREAKOUT_TO_RETEST": 24,
-    "MAX_RETEST_TOUCHES": 2,
     "ROLLING_VOLUME_FILTER_ENABLED": True,
     "ROLLING_VOLUME_LOOKBACK_BARS": 20,
     "ROLLING_VOLUME_SURGE_MULT": 2.0,
     "ROLLING_VOLUME_CONFIRMATION_BARS": 1,
     "MIN_LISTING_AGE_DAYS": 7,
-    "WATCHLIST_ENTRY_WEIGHT_EMA": 25, "WATCHLIST_ENTRY_WEIGHT_RSI": 25,
-    "WATCHLIST_ENTRY_WEIGHT_MACD": 25, "WATCHLIST_ENTRY_WEIGHT_HL": 25,
-    "WATCHLIST_ENTRY_EMA_GAP_PCT": 1.0, "WATCHLIST_ENTRY_RSI_DECAY_PTS": 15,
-    "WATCHLIST_ENTRY_SCORE_TTL_SECONDS": 60, "WATCHLIST_ENTRY_MIN_HEADROOM": 0.5,
     "USE_RISK_PERCENT": True,
     "RISK_PERCENT": 100.0,
     "POSITION_SIZE_USDT": 5.0,
@@ -153,6 +144,15 @@ PUMP_CONFIG = {
     "BALANCE_BUFFER_PCT": 0.5,
     "MAX_SPREAD_PCT": 0.25,
     "MAX_CHASE_PCT": 1.5,
+    "DEPTH_FILTER_ENABLED": True,
+    "DEPTH_RANGE_PCT": 0.5,
+    "DEPTH_MIN_ASK_NOTIONAL_MULT": 10.0,
+    "ORDERBOOK_FILTER_ENABLED": True,
+    "ORDERBOOK_LEVELS": 10,
+    "ORDERBOOK_MIN_BID_ASK_RATIO": 0.8,
+    "SELL_WALL_RANGE_PCT": 1.0,
+    "SELL_WALL_MAX_SHARE_PCT": 30.0,
+    "ORDERBOOK_DEPTH_LIMIT": 500,
     "COOLDOWN_MINUTES_AFTER_CLOSE": 5,
     "MIN_SECONDS_BETWEEN_TRADES": 60,
 

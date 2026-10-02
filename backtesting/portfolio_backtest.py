@@ -4,7 +4,7 @@ Backtest portofolio multi-simbol dengan simulasi eksekusi.
 
 Modul ini mengunduh dan menyimpan candle multi-simbol, memilih semesta
 berdasarkan filter pasar, lalu menyimulasikan bot satu posisi berurutan:
-kandidat setup bersaing via kualitas setup, entry disimulasikan dengan
+kandidat bersaing via volume kuotasi 24 jam terbesar, entry disimulasikan dengan
 latency, spread/slippage, fee, cooldown, dan level exit FIXED/ATR. Tidak
 ada order nyata yang dikirim.
 """
@@ -23,6 +23,7 @@ from strategy import indicators as strategy
 from market import market_scanner as scanner
 from backtesting import backtest_storage as storage
 from backtesting import backtest_cache as kcache
+from backtesting import parity
 from backtesting.backtest_storage import KlineStore, SymbolSeries
 from backtesting.backtest_cache import KlineCache
 
@@ -30,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 from backtesting.backtest import (
     BacktestError,
+    INTERVAL_MINUTES,
     MS_PER_MIN,
     bars_per_day,
     compute_rolling_24h_stats,
@@ -69,7 +71,7 @@ class SkippedSignal:
     time: int
     symbol: str
     reason: str
-    holding: str
+    holding: Optional[str] = None
 
 
 @dataclass
@@ -86,6 +88,8 @@ class PortfolioResult:
     symbols_failed: list = field(default_factory=list)
     initial_equity: float = 0.0
     final_equity: float = 0.0
+    risk_events: dict = field(default_factory=dict)
+    chase_skips: int = 0
 
 
 def select_universe(tickers: list, config: dict, max_symbols: Optional[int] = None,
@@ -286,6 +290,7 @@ def run_portfolio_backtest(
     start_ms: Optional[int] = None,
     end_ms: Optional[int] = None,
     prebuilt: Optional[tuple] = None,
+    btc_klines: Optional[list] = None,
 ) -> PortfolioResult:
     semua_simbol = store.symbols()
     if not semua_simbol:
@@ -321,7 +326,6 @@ def run_portfolio_backtest(
     min_vol = float(config["MIN_QUOTE_VOLUME_USDT_24H"])
     top_n = int(config.get("TOP_N_CANDIDATES_TO_CONFIRM", 10))
     store.set_cache_size(_resolve_symbol_cache_size(config, top_n))
-    cooldown_ms = int(config["COOLDOWN_MINUTES_AFTER_CLOSE"]) * MS_PER_MIN
     _pre_warnings: list = []
     if lolos_policy != original_count:
         _pre_warnings.append("Sebagian data dibuang oleh policy semesta bersama (stablecoin, leveraged token, blacklist, quote, atau status metadata).")
@@ -331,7 +335,7 @@ def run_portfolio_backtest(
     if int(config.get("CONFIRM_LOOKBACK_BARS", 0)) < _butuh:
         _pre_warnings.append(
             f"CONFIRM_LOOKBACK_BARS={config.get('CONFIRM_LOOKBACK_BARS')} lebih kecil dari "
-            f"{_butuh} candle yang dibutuhkan struktur setup. Simulasi memakai "
+            f"{_butuh} candle yang dibutuhkan konfirmasi volume dan ATR. Simulasi memakai "
             f"{lookback} candle agar deteksi tetap mungkin, tetapi perbaiki config supaya "
             "backtest dan bot live benar-benar memakai angka yang sama."
         )
@@ -351,19 +355,25 @@ def run_portfolio_backtest(
     equity = initial_equity
 
     holding: Optional[str] = None
+    position: Optional[parity.PositionState] = None
     entry_price = 0.0
     entry_time = 0
     position_notional = 0.0
     equity_before_entry = 0.0
-    be_active = False
-    be_stop = 0.0
-    trailing_active = False
-    trailing_stop = 0.0
-    cur = {}
     rank_at_entry = 0
     pct24h_at_entry = 0.0
     cands_at_entry = 0
     next_entry_allowed_at = 0
+    chase_skips = 0
+    max_chase_pct = float(config.get("MAX_CHASE_PCT", 0) or 0)
+
+    controls = parity.AccountRiskControls(config, initial_equity)
+    bar_ms = INTERVAL_MINUTES.get(interval, 5) * MS_PER_MIN
+    btc_lookup = parity.make_btc_lookup(btc_klines, config, bar_ms)
+    gate_cfg = parity.gate_config(config, btc_lookup)
+    btc_warning = parity.btc_filter_warning(config, btc_lookup)
+    if btc_warning:
+        warnings.append(btc_warning)
 
     first_allowed_time = timeline[0] + warmup_ms
     total_bars = len(timeline)
@@ -380,6 +390,7 @@ def run_portfolio_backtest(
         if cancel_cb is not None and bi % 200 == 0 and cancel_cb():
             raise BacktestError("Backtest dibatalkan.")
 
+        btc_drop = btc_lookup.drop_pct_at(t_now) if btc_lookup is not None else None
         board = []
         for (sym, ot, ct, pct_arr, vol_arr, ready_arr, daily_ct, memo, n_bar) in papan_input:
             pos = bisect_left(ot, t_now)
@@ -397,7 +408,7 @@ def run_portfolio_backtest(
                 rata_harian = gate_averages.compute(sym, ref_ms, kunci_memo)
             pct24 = pct_arr[pos]
             gate_ok, _gate_reason = scanner.evaluate_pump_gate(
-                pct24, vol24, rata_harian, config)
+                pct24, vol24, rata_harian, gate_cfg, btc_drop_pct=btc_drop)
             if not gate_ok:
                 continue
             board.append((vol24, sym, pos, pct24))
@@ -409,52 +420,30 @@ def run_portfolio_backtest(
                 continue
 
             candle = store.klines(holding)[hi]
-            if candle.open_time <= entry_time:
+            if candle.open_time < entry_time:
                 continue
-            pnl_high = (candle.high / entry_price - 1.0) * 100.0
-            pnl_low = (candle.low / entry_price - 1.0) * 100.0
             hold_minutes = (candle.close_time - entry_time) / 60000.0
-
-            atr_mode = cur.get("src") == "ATR"
-            sl_price = (entry_price - cur["sl"]) if atr_mode else entry_price * (1 - cur["sl"] / 100.0)
-            pnl_high_unit = candle.high - entry_price if atr_mode else pnl_high
-            if config["USE_BREAKEVEN"] and not be_active and pnl_high_unit >= cur["be_trig"]:
-                be_active = True
-                be_stop = entry_price + cur["be_lock"] if atr_mode else entry_price * (1 + cur["be_lock"] / 100.0)
-            if config["USE_TRAILING"]:
-                if not trailing_active and pnl_high_unit >= cur["tr_start"]:
-                    trailing_active = True
-                    trailing_stop = candle.high - cur["tr_step"] if atr_mode else candle.high * (1 - cur["tr_step"] / 100.0)
-                elif trailing_active:
-                    cand_stop = candle.high - cur["tr_step"] if atr_mode else candle.high * (1 - cur["tr_step"] / 100.0)
-                    if cand_stop > trailing_stop:
-                        trailing_stop = cand_stop
 
             exit_reason = None
             exit_price = None
-
-            sl_triggered = (candle.low <= sl_price if atr_mode else pnl_low <= -cur["sl"])
-            if config["USE_STOP_LOSS"] and sl_triggered:
-                exit_reason = "STOP_LOSS"
-                exit_price = min(sl_price, candle.open)
-            elif config["USE_TP"] and (candle.high >= entry_price + cur["tp"] if atr_mode else pnl_high >= cur["tp"]):
-                exit_reason = "TAKE_PROFIT"
-                exit_price = max(entry_price + cur["tp"] if atr_mode else entry_price * (1 + cur["tp"] / 100.0), candle.open)
-            elif be_active and candle.low <= be_stop:
-                exit_reason = "BREAKEVEN"
-                exit_price = min(be_stop, candle.open)
-            elif trailing_active and candle.low <= trailing_stop:
-                exit_reason = "TRAILING_STOP"
-                exit_price = min(trailing_stop, candle.open)
+            verdict = parity.evaluate_candle_exit(position, candle, config)
+            if verdict is not None:
+                exit_reason, exit_price = verdict
 
             is_last = (bi == total_bars - 1)
-            if exit_reason is None and is_last:
-                exit_reason = "END_OF_DATA"
-                exit_price = candle.close
-                warnings.append(
-                    "Posisi terakhir masih terbuka saat data habis (ditutup paksa di harga "
-                    "penutupan terakhir demi kelengkapan statistik, bukan exit sungguhan)."
-                )
+            if exit_reason is None:
+                mtm_equity = equity + position_notional * (candle.close / entry_price - 1.0)
+                entries_paused = controls.update(candle.close_time, mtm_equity)
+                if controls.force_close_due(entries_paused, True):
+                    exit_reason = parity.RISK_LIMIT_REASON
+                    exit_price = candle.close
+                elif is_last:
+                    exit_reason = "END_OF_DATA"
+                    exit_price = candle.close
+                    warnings.append(
+                        "Posisi terakhir masih terbuka saat data habis (ditutup paksa di harga "
+                        "penutupan terakhir demi kelengkapan statistik, bukan exit sungguhan)."
+                    )
 
             if exit_reason:
                 exit_price = strategy.backtest_sell_execution_price(
@@ -469,8 +458,8 @@ def run_portfolio_backtest(
                     exit_time=candle.close_time, exit_price=exit_price,
                     reason=exit_reason, hold_minutes=hold_minutes,
                     pnl_pct=pnl_pct, gross_pnl_pct=gross, fee_pct=fee_round_trip,
-                    sl_pct=cur["sl"], tp_pct=cur["tp"],
-                    exit_source=cur["src"],
+                    sl_pct=position.levels["sl"], tp_pct=position.levels["tp"],
+                    exit_source=position.levels["src"],
                     rank_at_entry=rank_at_entry, pct24h_at_entry=pct24h_at_entry,
                     candidates_at_entry=cands_at_entry,
                     position_notional=position_notional, equity_before=equity_before_entry,
@@ -479,11 +468,14 @@ def run_portfolio_backtest(
                 equity = equity_after
                 position_notional = 0.0
                 holding = None
-                be_active = False
-                trailing_active = False
-                next_entry_allowed_at = candle.close_time + cooldown_ms
+                position = None
+                next_entry_allowed_at = parity.next_entry_allowed(candle.close_time, config)
+                controls.update(candle.close_time, equity)
             continue
 
+        entries_paused = controls.update(t_now + bar_ms - 1, equity)
+        if entries_paused:
+            continue
         if t_now < first_allowed_time or t_now < next_entry_allowed_at:
             continue
 
@@ -498,7 +490,7 @@ def run_portfolio_backtest(
                 continue
             window_kl = kl[max(0, i - lookback + 1): i + 1]
             try:
-                setup = scanner.detect_pullback_retest(window_kl, config)
+                setup = scanner.detect_entry_setup(window_kl, config)
             except Exception:
                 continue
             if setup.ok:
@@ -539,10 +531,11 @@ def run_portfolio_backtest(
             raw_entry_price = entry_candle.open
             entry_time_value = entry_candle.open_time
         # Paritas open_position(): kunci level exit SEBELUM posisi dibuka,
-        # dan tolak entry yang akan ditolak bot live.
+        # dan tolak entry yang akan ditolak bot live. ATR diambil dari jendela
+        # konfirmasi yang sama dengan bot live (setup.atr_value).
         level_cfg = dict(config)
         if bool(config.get("USE_ATR_EXIT", False)):
-            atr_val = strategy.atr(kl[:i + 1], int(config.get("ATR_PERIOD", 14) or 14))
+            atr_val = setup_terpilih.atr_value
             if atr_val is None:
                 warnings.append(
                     f"Entry {sym} bar {i} dilewati: USE_ATR_EXIT aktif tetapi "
@@ -560,26 +553,23 @@ def run_portfolio_backtest(
                 f"terhadap harga acuan {raw_entry_price:.10g} "
                 "(paritas open_position). Cek ATR_MULT_SL/ATR.")
             continue
+        exec_entry_price = strategy.backtest_buy_execution_price(
+            raw_entry_price, execution_spread_pct, execution_slippage_pct)
+        if parity.chase_exceeded(exec_entry_price, setup_terpilih.signal_close, max_chase_pct):
+            chase_skips += 1
+            if len(skipped) < max_skipped_records:
+                skipped.append(SkippedSignal(
+                    time=t_now, symbol=sym, reason="FILTER_CHASE", holding=None))
+            continue
         holding = sym
+        position = parity.PositionState(exec_entry_price, lv)
         position_notional = sizing["notional"]
         equity_before_entry = equity
-        entry_price = strategy.backtest_buy_execution_price(
-            raw_entry_price, execution_spread_pct, execution_slippage_pct)
+        entry_price = exec_entry_price
         entry_time = entry_time_value
-        be_active = False
-        trailing_active = False
-        be_stop = 0.0
-        trailing_stop = 0.0
         rank_at_entry = rank
         pct24h_at_entry = pct
         cands_at_entry = len(eligible)
-
-        cur = {
-            "sl": lv["sl_pct"], "tp": lv["tp_pct"],
-            "be_trig": lv["be_trigger_pct"], "be_lock": lv["be_lock_pct"],
-            "tr_start": lv["trail_start_pct"], "tr_step": lv["trail_step_pct"],
-            "src": lv["source"],
-        }
 
     if progress_cb:
         progress_cb(1.0)
@@ -596,6 +586,8 @@ def run_portfolio_backtest(
         warnings=list(dict.fromkeys(warnings)),
         initial_equity=initial_equity,
         final_equity=equity,
+        risk_events=dict(controls.events),
+        chase_skips=chase_skips,
     )
 
 def summarize_portfolio(result: PortfolioResult) -> dict:
@@ -674,6 +666,9 @@ def summarize_portfolio(result: PortfolioResult) -> dict:
         "avg_rank_at_entry": (sum(t.rank_at_entry for t in trades) / total) if total else 0.0,
         "exposure_pct": exposure, "span_days": span_days,
         "trades_per_day": (total / span_days) if span_days > 0 else 0.0,
+        "risk_events": dict(result.risk_events),
+        "chase_skips": int(result.chase_skips),
+        **parity.per_trade_metrics(trades),
     }
 
 
@@ -706,7 +701,6 @@ def selftest() -> bool:
 
     cfg = {
         "CONFIRM_LOOKBACK_BARS": 48,
-        "MIN_CLOSE_POSITION_IN_RANGE": 0.0,
         "MIN_QUOTE_VOLUME_USDT_24H": 0, "TOP_N_CANDIDATES_TO_CONFIRM": 10,
         "COOLDOWN_MINUTES_AFTER_CLOSE": 0,
         "USE_STOP_LOSS": True, "USE_TP": True, "USE_BREAKEVEN": False,
@@ -718,11 +712,6 @@ def selftest() -> bool:
         "PUMP_MIN_24H_CHANGE_PCT": -1000.0, "PUMP_VOLUME_SURGE_MULT": 0.0,
         "ROLLING_VOLUME_FILTER_ENABLED": False,
     }
-    from config.config import PUMP_CONFIG as _PC
-    for _k in ("SWING_LOOKBACK_BARS", "SWING_PIVOT_WING_BARS",
-               "VWAP_MIN_BARS_AFTER_ANCHOR", "MAX_BARS_BREAKOUT_TO_RETEST",
-               "MAX_RETEST_TOUCHES"):
-        cfg[_k] = _PC[_k]
 
     from backtesting.synthetic_data import riwayat_harian, seri_banyak_setup
 
@@ -766,19 +755,17 @@ def selftest() -> bool:
           f"{len(res_cd.trades)} vs {len(res.trades)}")
 
     entry_pertama = res.trades[0].entry_time if res.trades else 0
+    # Candle ENTRY sendiri (open_time == entry_time) dibuat ekstrem: posisi sudah
+    # terbuka di open candle itu, jadi SL dan TP sama-sama kena di candle yang sama.
     seq_sl = []
-    tandai = False
     for k in up_a:
-        if tandai:
+        if k.open_time == entry_pertama:
             seq_sl.append(Kline(open_time=k.open_time, open=k.open,
                                 high=k.open * 1.12, low=k.open * 0.88, close=k.open,
                                 close_time=k.close_time, volume=k.volume,
                                 quote_volume=k.quote_volume))
-            tandai = False
-            continue
-        seq_sl.append(k)
-        if k.close_time == entry_pertama:
-            tandai = True
+        else:
+            seq_sl.append(k)
 
     res_sl = _jalankan({"AUSDT": seq_sl}, cfg)
     check("skenario SL-vs-TP benar-benar menghasilkan trade (tes tidak vakum)",
@@ -805,6 +792,51 @@ def selftest() -> bool:
     check("paritas alasan exit satu simbol vs portofolio",
           [t.reason for t in res_p1.trades] == [t.reason for t in res_p2.trades],
           f"{[t.reason for t in res_p1.trades]} vs {[t.reason for t in res_p2.trades]}")
+
+    # Paritas pada candle entry yang ekstrem: simbol tunggal dan portofolio harus sama.
+    res_ec_p = _bt.run_backtest(seq_sl, dict(cfg, _symbol="AUSDT"), warmup_bars=0,
+                                daily_klines=riwayat_harian(seq_sl))
+    ec_single = [(t.entry_time, t.reason, round(t.exit_price, 9)) for t in res_ec_p.trades[:3]]
+    ec_port = [(t.entry_time, t.reason, round(t.exit_price, 9)) for t in res_sl.trades[:3]]
+    check("paritas candle entry ekstrem satu simbol vs portofolio",
+          bool(ec_single) and ec_single == ec_port, f"{ec_single} vs {ec_port}")
+
+    # Filter BTC, MAX_CHASE_PCT, dan kontrol akun pada simulasi portofolio.
+    btc_cfg = dict(cfg, BTC_FILTER_ENABLED=True, BTC_MAX_DROP_PCT=1.0, BTC_LOOKBACK_BARS=3)
+
+    def _btc(closes):
+        return [_mk(i, c, c, c, c) for i, c in enumerate(closes)]
+
+    def _jalankan_btc(cfg_uji, btc_kl):
+        with KlineStore.from_klines({"AUSDT": up_a}, _harian({"AUSDT": up_a})) as _st:
+            return run_portfolio_backtest(_st, cfg_uji, "5m", btc_klines=btc_kl)
+
+    turun = [100.0 * 0.99 ** i for i in range(len(up_a))]
+    r_btc_turun = _jalankan_btc(btc_cfg, _btc(turun))
+    r_btc_datar = _jalankan_btc(btc_cfg, _btc([100.0] * len(up_a)))
+    r_btc_none = _jalankan_btc(btc_cfg, None)
+    check("filter BTC turun memblokir semua entry", len(r_btc_turun.trades) == 0,
+          len(r_btc_turun.trades))
+    check("filter BTC datar tidak mengubah hasil",
+          len(r_btc_datar.trades) == len(res.trades),
+          f"{len(r_btc_datar.trades)} trade")
+    check("tanpa data BTC ada peringatan eksplisit",
+          any("BTC" in w for w in r_btc_none.warnings) and len(r_btc_none.trades) > 0)
+    r_chase = _jalankan({"AUSDT": up_a}, dict(cfg, MAX_CHASE_PCT=0.0001))
+    check("MAX_CHASE_PCT melewati sinyal yang mengejar harga",
+          r_chase.chase_skips > 0 and len(r_chase.trades) < len(res.trades)
+          and any(sk.reason == "FILTER_CHASE" for sk in r_chase.skipped),
+          f"{r_chase.chase_skips} dilewati, {len(r_chase.trades)} trade")
+    cfg_risk = dict(cfg, USE_DAILY_STOP=True, MAX_DAILY_LOSS_PERCENT=0.01,
+                    DAILY_PROFIT_TARGET_PERCENT=1000.0, CLOSE_ALL_AT_LIMIT=True,
+                    BACKTEST_INITIAL_EQUITY_USDT=1000.0, MAX_POSITION_USDT=100.0)
+    r_risk = _jalankan({"AUSDT": up_a}, cfg_risk)
+    check("stop harian menjeda entry dan tercatat",
+          r_risk.risk_events.get("daily_loss_stop", 0) > 0
+          and len(r_risk.trades) < len(res.trades), r_risk.risk_events)
+    check("ringkasan memuat metrik per trade dan peristiwa risiko",
+          {"avg_trade_pct", "max_consecutive_losses", "risk_events", "chase_skips"}
+          <= set(summarize_portfolio(r_risk)))
 
     cfg_vol = dict(cfg)
     cfg_vol["MIN_QUOTE_VOLUME_USDT_24H"] = 1e15

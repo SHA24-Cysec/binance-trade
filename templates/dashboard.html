@@ -2261,20 +2261,22 @@ function renderSkipped(res){
     return;
   }
   box.innerHTML = '<div class="logbox" style="max-height:220px">' + sk.map(x=>
-    `<div class="logline INFO"><b>${esc(x.symbol)}</b> terlewat pada ${esc(x.time)}, bot sedang memegang ${esc(x.holding)}</div>`
+    (x.reason==='FILTER_CHASE'
+      ? `<div class="logline INFO"><b>${esc(x.symbol)}</b> dilewati pada ${esc(x.time)} oleh filter MAX_CHASE_PCT (harga eksekusi terlalu jauh di atas close sinyal)</div>`
+      : `<div class="logline INFO"><b>${esc(x.symbol)}</b> terlewat pada ${esc(x.time)}, bot sedang memegang ${esc(x.holding)}</div>`)
   ).join('') + '</div>';
 }
 
 function btReasonTagClass(r){
   const key=String(r===null||r===undefined?'':r).toUpperCase();
   const map={STOP_LOSS:'stop_loss',TAKE_PROFIT:'take_profit',BREAKEVEN:'breakeven',
-             TRAILING_STOP:'trailing_stop',END_OF_DATA:'end_of_data'};
+             TRAILING_STOP:'trailing_stop',END_OF_DATA:'end_of_data',RISK_LIMIT_TRIGGERED:'end_of_data'};
   return map[key] || 'dry';
 }
 function btReasonLabel(r){
   const key=String(r===null||r===undefined?'':r).toUpperCase();
   const map = {STOP_LOSS:'SL', TAKE_PROFIT:'TP', BREAKEVEN:'BE', TRAILING_STOP:'TRAIL',
-               END_OF_DATA:'DATA HABIS'};
+               END_OF_DATA:'DATA HABIS', RISK_LIMIT_TRIGGERED:'BATAS RISIKO'};
   return esc(map[key] || key);
 }
 
@@ -2286,11 +2288,36 @@ function renderBacktestResult(res){
   document.getElementById('btResultSymbolPanels').style.display = '';
   document.getElementById('btResultTradesPanel').style.display = '';
 
+  const pfText = (s.profit_factor===null||s.profit_factor===undefined)
+    ? (s.wins>0 && s.losses===0 ? '∞' : '-') : fmt(s.profit_factor,2);
+  const cardTone = v => v>0?'good':(v<0?'bad':'');
+  const re = s.risk_events || {};
+  const riskTotal = (re.dd_stop||0)+(re.daily_loss_stop||0)+(re.daily_profit_stop||0);
   const cardsHtml = `
-    <div class="card good"><div class="accent-bar"></div>
-      <div class="label">Trade dibuat</div>
-      <div class="value mono">0</div>
-      <div class="sub">backtest hanya memuat data</div></div>
+    <div class="card ${cardTone(s.total_return_pct)}"><div class="accent-bar"></div>
+      <div class="label">Return bersih</div>
+      <div class="value mono ${cls(s.total_return_pct)}">${sign(s.total_return_pct)}${fmt(s.total_return_pct,2)}%</div>
+      <div class="sub">${sign(s.total_pnl_quote)}${fmt(s.total_pnl_quote,2)} dari modal ${fmt(s.initial_equity,2)} · kotor ${sign(s.gross_return_pct)}${fmt(s.gross_return_pct,2)}%</div></div>
+    <div class="card"><div class="accent-bar"></div>
+      <div class="label">Trade selesai</div>
+      <div class="value mono">${fmt(s.total_trades,0)}</div>
+      <div class="sub"><span class="pos">${fmt(s.wins,0)}W</span> / <span class="neg">${fmt(s.losses,0)}L</span> · win rate ${fmt(s.win_rate,1)}% · ${fmt(s.trades_per_day,2)}/hari</div></div>
+    <div class="card warn"><div class="accent-bar"></div>
+      <div class="label">Max drawdown</div>
+      <div class="value mono">${fmt(s.max_drawdown_pct,2)}%</div>
+      <div class="sub">dari trade yang selesai, bukan mark-to-market</div></div>
+    <div class="card"><div class="accent-bar"></div>
+      <div class="label">Profit factor</div>
+      <div class="value mono">${pfText}</div>
+      <div class="sub">payoff ${s.payoff_ratio===null||s.payoff_ratio===undefined?'-':fmt(s.payoff_ratio,2)} · rugi beruntun maks ${fmt(s.max_consecutive_losses,0)}</div></div>
+    <div class="card ${cardTone(s.avg_trade_pct)}"><div class="accent-bar"></div>
+      <div class="label">Rata-rata per trade</div>
+      <div class="value mono ${cls(s.avg_trade_pct)}">${sign(s.avg_trade_pct)}${fmt(s.avg_trade_pct,3)}%</div>
+      <div class="sub">median ${sign(s.median_trade_pct)}${fmt(s.median_trade_pct,3)}% · terbaik ${sign(s.best_trade_pct)}${fmt(s.best_trade_pct,2)}% · terburuk ${fmt(s.worst_trade_pct,2)}%. Tidak bergantung skala modal</div></div>
+    <div class="card ${riskTotal||s.chase_skips?'warn':''}"><div class="accent-bar"></div>
+      <div class="label">Filter dan kontrol akun</div>
+      <div class="value mono">${fmt(riskTotal+(re.forced_close||0)+(s.chase_skips||0),0)}</div>
+      <div class="sub">DD stop ${fmt(re.dd_stop||0,0)} · stop rugi harian ${fmt(re.daily_loss_stop||0,0)} · target profit ${fmt(re.daily_profit_stop||0,0)} · tutup paksa ${fmt(re.forced_close||0,0)} · chase dilewati ${fmt(s.chase_skips||0,0)}</div></div>
     <div class="card"><div class="accent-bar"></div>
       <div class="label">Candle diproses</div>
       <div class="value mono">${fmt(res.bars_total,0)}</div>
@@ -2298,11 +2325,7 @@ function renderBacktestResult(res){
     <div class="card"><div class="accent-bar"></div>
       <div class="label">Simbol berhasil</div>
       <div class="value mono">${fmt(res.universe_with_data,0)}</div>
-      <div class="sub">dari ${fmt(res.universe_requested,0)} diminta</div></div>
-    <div class="card"><div class="accent-bar"></div>
-      <div class="label">Perubahan equity</div>
-      <div class="value mono">0.00%</div>
-      <div class="sub">tidak ada simulasi order</div></div>`;
+      <div class="sub">dari ${fmt(res.universe_requested,0)} diminta</div></div>`;
   document.getElementById('btCards').innerHTML = cardsHtml;
 
   const p = res.params_used;
@@ -2332,7 +2355,7 @@ function renderBacktestResult(res){
   document.getElementById('btTradeCount').textContent = trades.length ? '('+trades.length+' trade)' : '';
   const tb = document.getElementById('btTradeBody');
   if(!trades.length){
-    tb.innerHTML = '<tr><td colspan="9" class="empty">Tidak ada setup pullback retest yang sah pada rentang ini. Coba longgarkan parameter setup, perbanyak simbol, atau perpanjang rentang hari.</td></tr>';
+    tb.innerHTML = '<tr><td colspan="9" class="empty">Tidak ada entry yang sah pada rentang ini. Coba longgarkan parameter volume rolling, perbanyak simbol, atau perpanjang rentang hari.</td></tr>';
   } else {
     tb.innerHTML = trades.map(t=>`
       <tr>
