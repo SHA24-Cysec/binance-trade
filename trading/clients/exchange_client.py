@@ -58,6 +58,34 @@ class ExchangeClient(ABC):
     @abstractmethod
     def get_ticker_24hr_all(self) -> list: ...
 
+    def get_klines_many(self, symbols, interval: str, limit: int = 500,
+                        end_time_ms: Optional[int] = None,
+                        max_workers: Optional[int] = None) -> dict:
+        """Ambil candle banyak simbol sekaligus.
+
+        Implementasi default berjalan serial dan mengembalikan ``None`` untuk
+        simbol yang gagal, supaya satu kegagalan tidak menggagalkan sisanya.
+        Klien yang punya lapisan data pasar bersama menimpa ini dengan versi
+        paralel.
+        """
+        hasil: dict = {}
+        for symbol in dict.fromkeys(symbols or ()):
+            try:
+                hasil[symbol] = self.get_klines(symbol, interval, limit,
+                                                None, end_time_ms)
+            except Exception as exc:  # noqa: BLE001 - satu simbol gagal bukan fatal
+                logger.debug("Gagal mengambil candle %s %s: %s", symbol, interval, exc)
+                hasil[symbol] = None
+        return hasil
+
+    def prewarm_book_ticker(self, symbols) -> None:
+        """Minta harga terbaik kumpulan simbol disiapkan lebih awal.
+
+        Boleh diabaikan (default tidak melakukan apa-apa). Klien yang memakai
+        WebSocket menimpa ini untuk melangganan stream lebih awal.
+        """
+        return None
+
     @abstractmethod
     def get_price(self, symbol: str, max_retries: int = 3) -> float: ...
 

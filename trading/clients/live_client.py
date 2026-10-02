@@ -70,6 +70,16 @@ class LiveClient(ExchangeClient):
     def get_ticker_24hr_all(self) -> list:
         return self.market.get_ticker_24hr_all()
 
+    def get_klines_many(self, symbols, interval: str, limit: int = 500,
+                        end_time_ms: Optional[int] = None,
+                        max_workers: Optional[int] = None) -> dict:
+        return self.market.get_klines_many(symbols, interval, limit=limit,
+                                           end_time_ms=end_time_ms,
+                                           max_workers=max_workers)
+
+    def prewarm_book_ticker(self, symbols) -> None:
+        return self.market.prewarm_book_ticker(symbols)
+
     def get_price(self, symbol: str, max_retries: int = 3) -> float:
         return self.market.get_price(symbol, max_retries=max_retries)
 

@@ -87,9 +87,13 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "USE_WEBSOCKET": _field("Sistem", "Gunakan WebSocket", "WebSocket sebagai sumber data pasar primer.", "bool"),
     "WS_BASE_URL": _field("Sistem", "URL WebSocket", "Endpoint WebSocket produksi yang dikunci.", "str", read_only=True),
     "MAX_MARKET_DATA_AGE_SECONDS": _field("Sistem", "Usia maksimum data pasar", "Data lebih tua akan dianggap basi.", "float", minimum=0.1, maximum=300, unit="detik"),
+    "TICKER_SNAPSHOT_TTL_SECONDS": _field("Sistem", "Usia snapshot ticker 24 jam", "Daftar ticker 24 jam disegarkan di latar belakang oleh thread khusus, sehingga scan tidak perlu menunggu unduhan 1,9 MB itu. 0 berarti selalu menunggu unduhan segar seperti versi lama.", "int", minimum=0, maximum=3600, unit="detik"),
+    "WS_LAST_PRICE_OVERLAY_ENABLED": _field("Sistem", "Timpa harga terakhir dari WebSocket", "Harga terakhir pada snapshot ticker ditimpa dengan harga terbaru dari stream !miniTicker@arr. Hanya memengaruhi harga acuan cadangan, tidak pernah mengubah lolos atau tidaknya suatu kandidat.", "bool"),
 
     "MARKET_SCAN_INTERVAL_SECONDS": _field("Scan", "Interval scan pasar", "Jarak waktu pemindaian seluruh pasar.", "int", minimum=10, maximum=86400, unit="detik"),
     "LOOP_INTERVAL_SECONDS": _field("Scan", "Interval loop", "Jarak evaluasi posisi dan kontrol.", "int", minimum=1, maximum=300, unit="detik"),
+    "MARKET_DATA_WORKERS": _field("Scan", "Worker pengambilan data pasar", "Jumlah thread paralel untuk mengambil candle harian dan candle konfirmasi saat scan. 1 berarti serial seperti versi lama.", "int", minimum=1, maximum=32, unit="thread"),
+    "DAILY_KLINE_CACHE_TTL_SECONDS": _field("Scan", "Usia cache candle harian", "Candle harian disimpan selama ini sebelum diunduh ulang. Candle harian hanya berubah sekali sehari, jadi nilai besar aman dan menghemat banyak panggilan API.", "int", minimum=0, maximum=86400, unit="detik"),
     "MIN_QUOTE_VOLUME_USDT_24H": _field("Scan", "Minimum volume kuotasi", "Volume 24 jam minimum.", "float", minimum=0, maximum=1e15, unit="USDT"),
     "MARKET_DATA_INTERVAL": _field("Scan", "Interval data pasar", "Interval candle yang digunakan untuk monitoring pasar.", "str", editor="select", options=["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"]),
     "PUMP_MIN_24H_CHANGE_PCT": _field("Monitoring Pasar", "Minimum perubahan 24 jam", "Filter monitoring perubahan harga 24 jam.", "float", minimum=0, maximum=1000, unit="%"),

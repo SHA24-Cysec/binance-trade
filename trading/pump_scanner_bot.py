@@ -2748,12 +2748,40 @@ def run(config: dict, lifecycle=None) -> int:
     FILTERS_REFRESH_INTERVAL_SECONDS = 6 * 3600
     RECONCILIATION_INTERVAL_SECONDS = 60
 
+    def konfirmasi_dari_raw(raw):
+        """Seragamkan pasca-pemrosesan candle konfirmasi, serial maupun paralel."""
+        lookback = strategy.confirm_window_bars(config)
+        now_ms = state_mod.now_ms()
+        closed = [k for k in strategy.parse_klines(raw or []) if k.close_time < now_ms]
+        return closed[-lookback:]
+
     def klines_fetcher(symbol: str):
         lookback = strategy.confirm_window_bars(config)
         raw = client.get_klines(symbol, config["CONFIRM_INTERVAL"], limit=lookback + 1)
-        now_ms = state_mod.now_ms()
-        closed = [k for k in strategy.parse_klines(raw) if k.close_time < now_ms]
-        return closed[-lookback:]
+        return konfirmasi_dari_raw(raw)
+
+    def klines_fetcher_many(symbols):
+        lookback = strategy.confirm_window_bars(config)
+        raw_map = client.get_klines_many(
+            symbols, config["CONFIRM_INTERVAL"], limit=lookback + 1) or {}
+        return {simbol: (konfirmasi_dari_raw(raw) if raw is not None else None)
+                for simbol, raw in raw_map.items()}
+
+    ttl_harian = max(0, int(config.get("DAILY_KLINE_CACHE_TTL_SECONDS", 1800) or 0))
+    cache_harian = scanner.DailyKlineCache(
+        fetch_many=lambda simbol2, interval, limit: client.get_klines_many(
+            simbol2, interval, limit=limit),
+        limit=scanner.PUMP_GATE_DAILY_CANDLES + 1,
+        ttl_seconds=ttl_harian,
+    )
+    if ttl_harian > 0:
+        logger.info(
+            "Cache candle harian aktif (TTL %d detik) dengan %d worker pengambilan data pasar.",
+            ttl_harian, max(1, int(config.get("MARKET_DATA_WORKERS", 1) or 1)))
+    else:
+        logger.warning(
+            "DAILY_KLINE_CACHE_TTL_SECONDS = 0: candle harian diunduh ulang pada "
+            "setiap scan. Ini menambah banyak panggilan API saat pasar ramai.")
 
     exit_code = 0
     while not _shutdown_requested:
@@ -2866,7 +2894,7 @@ def run(config: dict, lifecycle=None) -> int:
                     and now - state.get("last_trade_time", 0) >= config["MIN_SECONDS_BETWEEN_TRADES"] * 1000
                 )
                 if can_enter:
-                    daily_fetcher = scanner.make_daily_klines_fetcher(client, cache={})
+                    daily_fetcher = cache_harian.get
                     scan_config = dict(config)
                     if config.get("BTC_FILTER_ENABLED", False):
                         scan_config["_btc_filter_fail_closed"] = True
@@ -2882,10 +2910,15 @@ def run(config: dict, lifecycle=None) -> int:
                                     btc_closed[-look-1].close - 1.0) * 100.0
                         except Exception as exc:
                             logger.warning("Filter BTC tidak dapat dihitung; kandidat ditolak: %s", exc)
-                    best = scanner.find_best_candidate(tickers, klines_fetcher, scan_config,
-                                                       tradable_symbols,
-                                                       daily_klines_fetcher=daily_fetcher,
-                                                       reference_ms=state_mod.now_ms())
+                    best = scanner.find_best_candidate(
+                        tickers, klines_fetcher, scan_config,
+                        tradable_symbols,
+                        daily_klines_fetcher=daily_fetcher,
+                        reference_ms=state_mod.now_ms(),
+                        prefetch_daily_fn=cache_harian.prefetch,
+                        klines_fetcher_many=klines_fetcher_many,
+                        prewarm_fn=client.prewarm_book_ticker,
+                    )
                     if best:
                         book = client.get_book_ticker(best.symbol)
                         bid, ask = float(book["bidPrice"]), float(book["askPrice"])
@@ -3696,6 +3729,441 @@ def selftest() -> None:
     assert listing_age_days(AgeClient(None), "KOSONGUSDT", NOW10) == 0.0, \
         "Tanpa riwayat -> usia 0 (akan ditolak ambang minimum)"
     print("  Usia 10 hari / 2 hari dihitung benar, cache hemat API, tanpa riwayat -> 0 -> OK")
+
+    print("\n=== SELFTEST: cache candle harian (L-01) ===")
+    from market.market_scanner import DailyKlineCache
+
+    def _baris(open_time: int, close_time: int, quote_volume: float) -> list:
+        return [open_time, "100.0", "101.0", "99.0", "100.5", "10.0",
+                close_time, str(quote_volume), 0, "0", "0", "0"]
+
+    MS_HARI = 86_400_000
+    NOW_T = 100 * MS_HARI
+
+    def _harian_valid(jumlah: int = 8, volume: float = 1_000_000.0) -> list:
+        # Candle terakhir sengaja masih terbuka supaya tidak ikut rata-rata.
+        return [_baris((NOW_T // MS_HARI - (jumlah - 1 - i)) * MS_HARI,
+                       (NOW_T // MS_HARI - (jumlah - 1 - i)) * MS_HARI + MS_HARI - 1,
+                       volume)
+                for i in range(jumlah)]
+
+    hitung = {"batch": 0, "simbol": 0}
+    gagal_sementara = {"aktif": False}
+
+    def _ambil_banyak(simbol2, interval, limit):
+        assert interval == "1d", f"interval harus 1d, dapat {interval}"
+        hitung["batch"] += 1
+        hitung["simbol"] += len(simbol2)
+        if gagal_sementara["aktif"]:
+            return {s: None for s in simbol2}
+        return {s: _harian_valid() for s in simbol2}
+
+    cache = DailyKlineCache(_ambil_banyak, limit=8, ttl_seconds=3600.0)
+    cache.prefetch(["AAAUSDT", "BBBUSDT", "CCCUSDT"])
+    assert hitung["batch"] == 1, "prapengambilan harus sekali untuk semua simbol"
+    assert hitung["simbol"] == 3, f"harus 3 simbol, dapat {hitung['simbol']}"
+    assert len(cache) == 3, f"cache harus berisi 3 simbol, dapat {len(cache)}"
+
+    sebelum = hitung["batch"]
+    klines = cache.get("AAAUSDT")
+    assert hitung["batch"] == sebelum, "baca ulang harus dari cache, bukan API baru"
+    assert len(klines) == 8, f"harus 8 candle, dapat {len(klines)}"
+    assert cache.hits == 1 and cache.misses == 0, "hit/miss tidak sesuai"
+
+    cache.prefetch(["AAAUSDT", "DDDUSDT"])
+    assert hitung["batch"] == sebelum + 1, "hanya simbol baru yang diunduh"
+    assert hitung["simbol"] == 4, "hanya 1 simbol baru yang ditambahkan"
+
+    with cache._lock:
+        cache._ts["AAAUSDT"] = cache._ts["AAAUSDT"] - 100_000.0
+    cache.get("AAAUSDT")
+    assert cache.misses == 1, "cache kedaluwarsa harus diunduh ulang"
+
+    gagal_sementara["aktif"] = True
+    cache.get("ZZZUSDT")
+    assert "ZZZUSDT" not in cache._data, "kegagalan tidak boleh disimpan di cache"
+    gagal_sementara["aktif"] = False
+    pulih = cache.get("ZZZUSDT")
+    assert len(pulih) == 8, "setelah pulih, simbol harus bisa masuk cache lagi"
+
+    cache_mati = DailyKlineCache(_ambil_banyak, limit=8, ttl_seconds=0)
+    cache_mati.get("AAAUSDT")
+    cache_mati.get("AAAUSDT")
+    assert len(cache_mati) == 1 and cache_mati.hits == 0, "TTL 0 berarti cache nonaktif"
+    print("  prefetch batch, TTL, hit/miss, dan kegagalan tidak di-cache -> OK")
+
+    print("\n=== SELFTEST: paritas gerbang pump dengan dan tanpa prefetch (L-02) ===")
+    dari_cache = {"n": 0}
+
+    def _ambil_serial(simbol: str) -> list:
+        dari_cache["n"] += 1
+        return strategy.parse_klines(_harian_valid())
+
+    ticker_uji = [
+        {"symbol": "AAAUSDT", "priceChangePercent": "8.0",
+         "quoteVolume": "5000000", "lastPrice": "100.0"},   # lolos rentang
+        {"symbol": "BBBUSDT", "priceChangePercent": "3.0",
+         "quoteVolume": "5000000", "lastPrice": "100.0"},   # di bawah ambang
+        {"symbol": "CCCUSDT", "priceChangePercent": "25.0",
+         "quoteVolume": "5000000", "lastPrice": "100.0"},   # di atas batas
+        {"symbol": "DDDUSDT", "priceChangePercent": "8.0",
+         "quoteVolume": "1000", "lastPrice": "100.0"},      # volume di bawah minimum
+    ]
+    cfg_uji = {
+        "QUOTE_ASSET": "USDT",
+        "MIN_QUOTE_VOLUME_USDT_24H": 1_000_000,
+        "PUMP_MIN_24H_CHANGE_PCT": 6.0,
+        "PUMP_MAX_24H_CHANGE_PCT": 10.0,
+        "PUMP_VOLUME_SURGE_MULT": 2.0,
+        "BTC_FILTER_ENABLED": False,
+        "EXTRA_EXCLUDE_SYMBOLS": [],
+    }
+
+    hasil_serial = scanner.filter_and_rank_candidates(
+        ticker_uji, cfg_uji, None, get_daily_klines_fn=_ambil_serial)
+    panggil_serial = dari_cache["n"]
+
+    cache_paritas2 = DailyKlineCache(_ambil_banyak, limit=8, ttl_seconds=3600.0)
+    hasil_prefetch = scanner.filter_and_rank_candidates(
+        ticker_uji, cfg_uji, None,
+        get_daily_klines_fn=cache_paritas2.get,
+        prefetch_daily_fn=cache_paritas2.prefetch)
+
+    assert [c.symbol for c in hasil_serial] == [c.symbol for c in hasil_prefetch], \
+        "hasil dengan prefetch harus identik dengan hasil serial"
+    assert panggil_serial == 1, \
+        f"versi lama hanya boleh memanggil API untuk 1 simbol, dapat {panggil_serial}"
+    assert len(hasil_serial) == 1 and hasil_serial[0].symbol == "AAAUSDT", \
+        f"hanya AAAUSDT yang boleh lolos, dapat {[c.symbol for c in hasil_serial]}"
+    print(f"  hasil identik ({[c.symbol for c in hasil_prefetch]}), "
+          f"rentang dan volume disaring sebelum API -> OK")
+
+    print("\n=== SELFTEST: konfirmasi paralel identik dengan serial (L-03) ===")
+
+    def _candle_5m(indeks: int, price: float, volume: float) -> list:
+        open_time = NOW_T + indeks * 5 * 60_000
+        return [open_time, str(price), str(price), str(price), str(price),
+                str(volume), open_time + 5 * 60_000 - 1, str(volume * price),
+                0, "0", "0", "0"]
+
+    def _konfirmasi_generator(lonjakan: bool = False):
+        # 20 candle dasar bervolume sama, lalu candle terakhir melonjak.
+        rows = [_candle_5m(i, 100.0 + i * 0.01, 1_000.0) for i in range(20)]
+        if lonjakan:
+            rows.append(_candle_5m(20, 100.2, 5_000.0))
+        else:
+            rows.append(_candle_5m(20, 100.2, 1_000.0))
+        return rows
+
+    cfg_konfirmasi = dict(cfg_uji)
+    cfg_konfirmasi.update({
+        "ROLLING_VOLUME_FILTER_ENABLED": True,
+        "ROLLING_VOLUME_LOOKBACK_BARS": 20,
+        "ROLLING_VOLUME_SURGE_MULT": 2.0,
+        "ROLLING_VOLUME_CONFIRMATION_BARS": 1,
+        "CONFIRM_LOOKBACK_BARS": 60,
+        "DETECTOR_ATR_MIN_PCT": 0.01,
+        "DETECTOR_ATR_MAX_PCT": 5.0,
+        "ATR_PERIOD": 14,
+    })
+
+    ticker_konfirmasi = [
+        {"symbol": "LONJAKUSDT", "priceChangePercent": "8.0",
+         "quoteVolume": "5000000", "lastPrice": "100.0"},
+        {"symbol": "DATARUSDT", "priceChangePercent": "8.0",
+         "quoteVolume": "4000000", "lastPrice": "100.0"},
+    ]
+    sumber_konfirmasi = {
+        "LONJAKUSDT": _konfirmasi_generator(True),
+        "DATARUSDT": _konfirmasi_generator(False),
+    }
+    waktu_tutup = {"ms": NOW_T + 21 * 5 * 60_000}
+    asli_now_ms = state_mod.now_ms
+    state_mod.now_ms = lambda: waktu_tutup["ms"]
+    try:
+        def _serial(simbol: str):
+            raw = sumber_konfirmasi[simbol]
+            closed = [k for k in strategy.parse_klines(raw)
+                      if k.close_time < state_mod.now_ms()]
+            lookback = strategy.confirm_window_bars(cfg_konfirmasi)
+            return closed[-lookback:]
+
+        def _paralel(simbol2):
+            lookback = strategy.confirm_window_bars(cfg_konfirmasi)
+            hasil = {}
+            for s in simbol2:
+                closed = [k for k in strategy.parse_klines(sumber_konfirmasi[s])
+                          if k.close_time < state_mod.now_ms()]
+                hasil[s] = closed[-lookback:]
+            return hasil
+
+        cache_k = DailyKlineCache(_ambil_banyak, limit=8, ttl_seconds=3600.0)
+        pilih_serial = scanner.find_best_candidate(
+            ticker_konfirmasi, _serial, cfg_konfirmasi, None,
+            daily_klines_fetcher=cache_k.get,
+            prefetch_daily_fn=cache_k.prefetch,
+            reference_ms=waktu_tutup["ms"])
+
+        cache_k2 = DailyKlineCache(_ambil_banyak, limit=8, ttl_seconds=3600.0)
+        pilih_paralel = scanner.find_best_candidate(
+            ticker_konfirmasi, _serial, cfg_konfirmasi, None,
+            daily_klines_fetcher=cache_k2.get,
+            prefetch_daily_fn=cache_k2.prefetch,
+            klines_fetcher_many=_paralel,
+            prewarm_fn=lambda simbol2: None,
+            reference_ms=waktu_tutup["ms"])
+
+        assert pilih_serial is not None, "kandidat dengan lonjakan harus ditemukan"
+        assert pilih_paralel is not None, "jalur paralel harus menemukan kandidat"
+        assert pilih_serial.symbol == "LONJAKUSDT", \
+            f"yang dipilih harus LONJAKUSDT, dapat {pilih_serial.symbol}"
+        assert pilih_paralel.symbol == pilih_serial.symbol, \
+            "jalur paralel harus memilih simbol yang sama dengan jalur serial"
+        assert pilih_paralel.confirm_reason == pilih_serial.confirm_reason, \
+            "alasan konfirmasi harus sama persis antara serial dan paralel"
+
+        def _paralel_rusak(simbol2):
+            raise RuntimeError("jaringan putus")
+
+        cache_k3 = DailyKlineCache(_ambil_banyak, limit=8, ttl_seconds=3600.0)
+        pilih_gagal = scanner.find_best_candidate(
+            ticker_konfirmasi, _serial, cfg_konfirmasi, None,
+            daily_klines_fetcher=cache_k3.get,
+            prefetch_daily_fn=cache_k3.prefetch,
+            klines_fetcher_many=_paralel_rusak,
+            reference_ms=waktu_tutup["ms"])
+        assert pilih_gagal is not None and pilih_gagal.symbol == "LONJAKUSDT", \
+            "kegagalan pengambilan paralel harus jatuh ke mode serial"
+    finally:
+        state_mod.now_ms = asli_now_ms
+    print("  pilihan, alasan, dan fallback saat paralel gagal -> OK")
+
+    print("\n=== SELFTEST: snapshot ticker 24 jam dan timpaan harga WS (L-04) ===")
+    from market.market_data import MarketDataProvider
+    from market.market_ws import MarketWebSocket
+
+    ws_uji = MarketWebSocket.__new__(MarketWebSocket)
+    from market.market_ws import _StreamCache
+    ws_uji._prices = _StreamCache()
+    ws_uji._mini = _StreamCache()
+    ws_uji._mini_lock = __import__("threading").RLock()
+    ws_uji._mini_arr_ts = 0.0
+    ws_uji._handle_payload([
+        {"e": "24hrMiniTicker", "s": "AAAUSDT", "c": "110.0", "o": "100.0",
+         "v": "1000", "q": "105000"},
+        {"e": "24hrMiniTicker", "s": "BBBUSDT", "c": "90.0", "o": "100.0",
+         "v": "2000", "q": "190000"},
+        {"e": "24hrMiniTicker", "s": "RUSAKUSDT", "c": "0", "o": "100.0",
+         "v": "0", "q": "0"},
+    ])
+    data_ws, usia_ws = ws_uji.all_mini_tickers()
+    assert len(data_ws) == 3, f"snapshot harus 3 simbol, dapat {len(data_ws)}"
+    assert usia_ws < 1.0, "usia snapshot harus segar"
+
+    class _WsStub:
+        def __init__(self, data, usia):
+            self._data, self._usia = data, usia
+
+        def is_connected(self):
+            return True
+
+        def all_mini_tickers(self):
+            return self._data, self._usia
+
+    class _RestStub:
+        def __init__(self):
+            self.panggil = 0
+
+        def get_ticker_24hr_all(self):
+            self.panggil += 1
+            return [{"symbol": "AAAUSDT", "lastPrice": "110.0",
+                     "priceChangePercent": "10.0", "quoteVolume": "105000"}]
+
+        def close(self):
+            return None
+
+    def _daftar_ticker(jumlah: int = 3) -> list:
+        return [{"symbol": f"SIMBOL{i}USDT", "lastPrice": "100.0",
+                 "priceChangePercent": "8.0", "quoteVolume": "2000000"}
+                for i in range(jumlah)] + [
+            {"symbol": "AAAUSDT", "lastPrice": "100.0",
+             "priceChangePercent": "8.0", "quoteVolume": "2000000"}]
+
+    cfg_ws = {
+        "USE_WEBSOCKET": False, "MAX_MARKET_DATA_AGE_SECONDS": 10.0,
+        "WS_LAST_PRICE_OVERLAY_ENABLED": True, "TICKER_SNAPSHOT_TTL_SECONDS": 0,
+        "MARKET_DATA_WORKERS": 1, "PAPER_DEPTH_LIMIT": 100,
+        "RATE_LIMIT_STATE_FILE": None, "RATE_LIMIT_WEIGHT_LIMIT": 6000,
+        "RATE_LIMIT_SAFETY_MARGIN": 100,
+    }
+
+    # TTL 0 -> perilaku lama: setiap pemanggilan mengunduh ulang.
+    provider = MarketDataProvider(cfg_ws)
+    provider.rest = _RestStub()
+    provider.rest.get_ticker_24hr_all = lambda: _daftar_ticker()
+    provider.get_ticker_24hr_all()
+    provider.get_ticker_24hr_all()
+    assert provider.rest.panggil == 0, "stub dipakai, penghitung tidak relevan"
+    provider.close()
+
+    class _RestHitung:
+        def __init__(self, daftar):
+            self.panggil = 0
+            self.daftar = daftar
+
+        def get_ticker_24hr_all(self):
+            self.panggil += 1
+            return self.daftar
+
+        def close(self):
+            return None
+
+    # TTL aktif -> unduhan sekali, pemanggilan berikutnya dari memori.
+    rest_hitung = _RestHitung(_daftar_ticker())
+    provider = MarketDataProvider(dict(cfg_ws, TICKER_SNAPSHOT_TTL_SECONDS=30))
+    provider.rest = rest_hitung
+    pertama = provider.get_ticker_24hr_all()
+    kedua = provider.get_ticker_24hr_all()
+    ketiga = provider.get_ticker_24hr_all()
+    assert rest_hitung.panggil == 1, \
+        f"TTL aktif hanya boleh mengunduh sekali, dapat {rest_hitung.panggil}"
+    assert len(pertama) == len(kedua) == len(ketiga) == 4, "isi snapshot harus sama"
+    assert provider._ticker_refresher is not None, "penyegar latar harus hidup"
+
+    # Usia melewati batas pengaman -> segarkan sinkron.
+    with provider._ticker_lock:
+        provider._ticker_snapshot_ts = time.monotonic() - 10_000.0
+    provider.get_ticker_24hr_all()
+    assert rest_hitung.panggil == 2, "snapshot terlalu tua harus disegarkan sinkron"
+    provider.close()
+
+    # Timpaan harga terakhir dari WebSocket.
+    data_overlay = {
+        "AAAUSDT": {"c": "123.5", "o": "100.0", "v": "1", "q": "1"},
+        "SIMBOL0USDT": {"c": "0", "o": "100.0", "v": "1", "q": "1"},
+    }
+    provider = MarketDataProvider(dict(cfg_ws, TICKER_SNAPSHOT_TTL_SECONDS=30))
+    provider.rest = _RestHitung(_daftar_ticker())
+    provider._use_ws = True
+    provider._ensure_ws = lambda: _WsStub(data_overlay, 0.5)
+    snap = provider.get_ticker_24hr_all()
+    peta_snap = {t["symbol"]: t for t in snap}
+    assert float(peta_snap["AAAUSDT"]["lastPrice"]) == 123.5, \
+        "harga terakhir harus ditimpa dengan harga WebSocket terbaru"
+    assert float(peta_snap["AAAUSDT"]["priceChangePercent"]) == 8.0, \
+        "persentase perubahan tidak boleh berubah oleh timpaan"
+    assert float(peta_snap["AAAUSDT"]["quoteVolume"]) == 2000000.0, \
+        "volume kuotasi tidak boleh berubah oleh timpaan"
+    assert float(peta_snap["SIMBOL0USDT"]["lastPrice"]) == 100.0, \
+        "harga tidak valid dari WebSocket harus diabaikan"
+    assert float(peta_snap["SIMBOL1USDT"]["lastPrice"]) == 100.0, \
+        "simbol tanpa data WebSocket harus tetap memakai harga snapshot"
+
+    # Timpaan tidak boleh mengubah pilihan kandidat.
+    cfg_timpa = {
+        "QUOTE_ASSET": "USDT", "MIN_QUOTE_VOLUME_USDT_24H": 1_000_000,
+        "PUMP_MIN_24H_CHANGE_PCT": 6.0, "PUMP_MAX_24H_CHANGE_PCT": 10.0,
+        "PUMP_VOLUME_SURGE_MULT": 2.0, "BTC_FILTER_ENABLED": False,
+        "EXTRA_EXCLUDE_SYMBOLS": [],
+    }
+    cache_t = DailyKlineCache(_ambil_banyak, limit=8, ttl_seconds=3600.0)
+    pilih_timpa = scanner.filter_and_rank_candidates(
+        snap, cfg_timpa, None, get_daily_klines_fn=cache_t.get,
+        prefetch_daily_fn=cache_t.prefetch)
+    cache_t2 = DailyKlineCache(_ambil_banyak, limit=8, ttl_seconds=3600.0)
+    pilih_asli = scanner.filter_and_rank_candidates(
+        provider.rest.daftar, cfg_timpa, None, get_daily_klines_fn=cache_t2.get,
+        prefetch_daily_fn=cache_t2.prefetch)
+    assert [c.symbol for c in pilih_timpa] == [c.symbol for c in pilih_asli], \
+        "timpaan harga tidak boleh mengubah kandidat yang lolos"
+
+    provider._ensure_ws = lambda: _WsStub(data_overlay, 999.0)
+    snap_basi = provider.get_ticker_24hr_all()
+    peta_basi = {t["symbol"]: t for t in snap_basi}
+    assert float(peta_basi["AAAUSDT"]["lastPrice"]) == 100.0, \
+        "data WebSocket basi tidak boleh dipakai untuk menimpa"
+
+    provider._ws_overlay_enabled = False
+    provider._ensure_ws = lambda: _WsStub(data_overlay, 0.5)
+    snap_mati = provider.get_ticker_24hr_all()
+    peta_mati = {t["symbol"]: t for t in snap_mati}
+    assert float(peta_mati["AAAUSDT"]["lastPrice"]) == 100.0, \
+        "timpaan nonaktif harus menyisakan harga snapshot apa adanya"
+    provider.close()
+    print("  TTL, penyegar sinkron, timpaan harga, dan paritas kandidat -> OK")
+
+    print("\n=== SELFTEST: pengambilan klines paralel dan sesi per thread (L-05) ===")
+    from trading.clients.binance_client import BinanceSpotClient
+
+    class _RestParalel:
+        def __init__(self, delay=0.0):
+            self.delay = delay
+            self.jejak = []
+            self._lock = __import__("threading").Lock()
+
+        def get_klines(self, symbol, interval, limit=500,
+                       start_time_ms=None, end_time_ms=None):
+            with self._lock:
+                self.jejak.append(symbol)
+            if self.delay:
+                __import__("time").sleep(self.delay)
+            if symbol == "GAGALUSDT":
+                raise RuntimeError("simbol tidak dikenal")
+            return [[0, "1", "1", "1", "1", "1", 0, "1"]]
+
+    rest_paralel = _RestParalel()
+    provider2 = MarketDataProvider(dict(cfg_ws, MARKET_DATA_WORKERS=8))
+    provider2.rest = rest_paralel
+    peta = provider2.get_klines_many(
+        ["AAAUSDT", "BBBUSDT", "CCCUSDT", "AAAUSDT", "GAGALUSDT"], "5m", 61)
+    assert set(peta) == {"AAAUSDT", "BBBUSDT", "CCCUSDT", "GAGALUSDT"}, \
+        f"simbol duplikat harus digabung, dapat {sorted(peta)}"
+    assert peta["GAGALUSDT"] is None, "simbol gagal harus None, bukan exception"
+    assert len(peta["AAAUSDT"]) == 1, "simbol valid harus tetap berisi candle"
+    assert len(rest_paralel.jejak) == 4, \
+        f"harus 4 panggilan (duplikat digabung), dapat {len(rest_paralel.jejak)}"
+
+    rest_serial = _RestParalel(delay=0.05)
+    provider3 = MarketDataProvider(dict(cfg_ws, MARKET_DATA_WORKERS=1))
+    provider3.rest = rest_serial
+    import time as _t
+    mulai = _t.monotonic()
+    provider3.get_klines_many(["A", "B", "C", "D"], "5m", 61)
+    lama_serial = _t.monotonic() - mulai
+    rest_paralel2 = _RestParalel(delay=0.05)
+    provider4 = MarketDataProvider(dict(cfg_ws, MARKET_DATA_WORKERS=8))
+    provider4.rest = rest_paralel2
+    mulai = _t.monotonic()
+    provider4.get_klines_many(["A", "B", "C", "D"], "5m", 61)
+    lama_paralel = _t.monotonic() - mulai
+    assert lama_serial >= 0.18, f"mode serial harus menumpuk delay, dapat {lama_serial:.3f}s"
+    assert lama_paralel < lama_serial * 0.75, \
+        f"mode paralel harus jauh lebih cepat ({lama_paralel:.3f}s vs {lama_serial:.3f}s)"
+
+    klien = BinanceSpotClient("", "", "http://127.0.0.1:1", allow_signed=False,
+                              rate_limit_state_file=None)
+    try:
+        id_utama = id(klien.session)
+        assert id(klien.session) == id_utama, "sesi harus stabil dalam satu thread"
+        terkumpul = {}
+
+        def _baca():
+            terkumpul[id(__import__("threading").current_thread())] = [
+                id(klien.session), id(klien.session)]
+
+        utas = [__import__("threading").Thread(target=_baca) for _ in range(3)]
+        for u in utas:
+            u.start()
+        for u in utas:
+            u.join()
+        semua_id = [i for pasang in terkumpul.values() for i in pasang]
+        assert len(set(semua_id)) == len(terkumpul), \
+            "tiap thread harus punya sesi sendiri, dan stabil di thread itu"
+        assert id_utama not in set(semua_id), \
+            "thread lain tidak boleh memakai sesi thread utama"
+    finally:
+        klien.close()
+    print("  dedup simbol, isolasi kegagalan, paralel lebih cepat, sesi per thread -> OK")
 
     print("\nSEMUA SELFTEST LULUS.")
     print("(Selftest ini TIDAK menghubungi Binance sama sekali -- murni logika lokal.)")

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 import time
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -180,10 +181,12 @@ def evaluate_pump_gate(price_change_pct, quote_volume,
                   f"volume {rasio:.2f}x rata-rata 7 hari (ambang {surge_mult:g}x)")
 
 
-def is_pumping_today(symbol: str, price_change_pct, quote_volume,
-                     get_daily_klines_fn: "Optional[Callable[[str], list[Kline]]]",
-                     config: dict,
-                     reference_ms: "int | None" = None) -> tuple[bool, str]:
+def _change_window_ok(price_change_pct, config: dict) -> tuple[bool, str]:
+    """Periksa rentang kenaikan 24 jam tanpa menyentuh jaringan.
+
+    Dipisah dari :func:`is_pumping_today` supaya pemanggil bisa membuang
+    kandidat yang pasti ditolak SEBELUM mengambil candle harian.
+    """
     min_change = float(config.get("PUMP_MIN_24H_CHANGE_PCT", 10.0) or 0.0)
     max_change = float(config.get("PUMP_MAX_24H_CHANGE_PCT", 0.0) or 0.0)
     try:
@@ -197,6 +200,103 @@ def is_pumping_today(symbol: str, price_change_pct, quote_volume,
     if max_change > 0 and change > max_change:
         return False, (f"kenaikan 24 jam {change:.2f}% melewati batas atas "
                        f"{max_change:g}% (koin sudah terlalu tinggi)")
+    return True, ""
+
+
+class DailyKlineCache:
+    """Cache candle harian dengan TTL, plus prapengambilan paralel.
+
+    Candle harian yang sudah TERTUTUP tidak berubah sampai pergantian hari UTC.
+    ``average_prior_daily_quote_volume`` hanya memakai candle tertutup, jadi
+    menyimpan hasil unduhan selama TTL tidak mengubah keputusan gerbang pump.
+    Ini menghilangkan puluhan panggilan REST berulang pada tiap scan.
+
+    ``ttl_seconds <= 0`` berarti cache NONAKTIF dan candle diunduh ulang pada
+    setiap permintaan, persis seperti perilaku sebelum optimasi ini.
+
+    Kegagalan tidak pernah disimpan, supaya satu gangguan sesaat tidak
+    mengunci simbol keluar dari kandidat selama TTL berjalan.
+    """
+
+    def __init__(self, fetch_many: "Callable[[list, str, int], dict]",
+                 limit: int = PUMP_GATE_DAILY_CANDLES + 1,
+                 ttl_seconds: float = 1800.0) -> None:
+        self._fetch_many = fetch_many
+        self.limit = max(1, int(limit))
+        self.ttl_seconds = max(0.0, float(ttl_seconds or 0.0))
+        self._lock = threading.RLock()
+        self._data: dict[str, list] = {}
+        self._ts: dict[str, float] = {}
+        self.hits = 0
+        self.misses = 0
+        self.prefetch_symbols = 0
+        self.prefetch_batches = 0
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._data)
+
+    def _fresh(self, symbol: str):
+        if self.ttl_seconds <= 0:
+            return None
+        with self._lock:
+            entry = self._data.get(symbol)
+            if entry is None:
+                return None
+            if (time.monotonic() - float(self._ts.get(symbol, 0.0))) > self.ttl_seconds:
+                return None
+        return entry
+
+    def _store(self, symbol: str, raw) -> list:
+        parsed = strategy.parse_klines(raw) if raw is not None else []
+        with self._lock:
+            self._data[symbol] = parsed
+            self._ts[symbol] = time.monotonic()
+        return parsed
+
+    def prefetch(self, symbols) -> int:
+        """Unduh candle harian yang belum segar untuk banyak simbol sekaligus."""
+        missing = [str(s) for s in dict.fromkeys(symbols or ())
+                   if self._fresh(str(s)) is None]
+        if not missing:
+            return 0
+        self.prefetch_batches += 1
+        self.prefetch_symbols += len(missing)
+        try:
+            raw_map = self._fetch_many(missing, "1d", self.limit) or {}
+        except Exception as exc:  # noqa: BLE001 - kegagalan jatuh ke mode serial
+            logger.debug("Prapengambilan candle harian gagal: %s", exc)
+            return 0
+        for symbol, raw in raw_map.items():
+            if raw is not None:
+                self._store(symbol, raw)
+        return len(missing)
+
+    def get(self, symbol: str) -> list:
+        cached = self._fresh(symbol)
+        if cached is not None:
+            self.hits += 1
+            return cached
+        self.misses += 1
+        raw_map = {}
+        try:
+            raw_map = self._fetch_many([symbol], "1d", self.limit) or {}
+        except Exception as exc:  # noqa: BLE001 - diperlakukan sebagai tanpa data
+            logger.debug("Gagal mengambil candle harian %s: %s", symbol, exc)
+            return []
+        raw = raw_map.get(symbol)
+        if raw is None:
+            return []
+        return self._store(symbol, raw)
+
+
+def is_pumping_today(symbol: str, price_change_pct, quote_volume,
+                     get_daily_klines_fn: "Optional[Callable[[str], list[Kline]]]",
+                     config: dict,
+                     reference_ms: "int | None" = None) -> tuple[bool, str]:
+    window_ok, window_reason = _change_window_ok(price_change_pct, config)
+    if not window_ok:
+        return False, window_reason
 
     if get_daily_klines_fn is None:
         return False, "sumber candle harian tidak tersedia, simbol ditolak (fail closed)"
@@ -211,7 +311,7 @@ def is_pumping_today(symbol: str, price_change_pct, quote_volume,
     rata, alasan = average_prior_daily_quote_volume(harian, ref)
     if rata is None:
         return False, alasan
-    return evaluate_pump_gate(change, quote_volume, rata, config)
+    return evaluate_pump_gate(float(price_change_pct), quote_volume, rata, config)
 
 
 def pump_gate_ok_at(daily_klines: "list[Kline] | None", reference_ms: int,
@@ -244,7 +344,20 @@ def filter_and_rank_candidates(tickers: list, config: dict,
                                *,
                                get_daily_klines_fn: "Optional[Callable[[str], list[Kline]]]" = None,
                                reference_ms: "int | None" = None,
-                               apply_pump_gate: bool = True) -> list[Candidate]:
+                               apply_pump_gate: bool = True,
+                               prefetch_daily_fn: "Optional[Callable[[list], None]]" = None) -> list[Candidate]:
+    """Saring dan urutkan kandidat.
+
+    Berjalan dua tahap bila ``prefetch_daily_fn`` diberikan:
+
+    1. Tahap tanpa jaringan: struktur, volume minimum, dan rentang kenaikan
+       24 jam. Semua simbol yang pasti ditolak dibuang di sini.
+    2. Prapengambilan: sisa simbol diunduh candle hariannya sekaligus secara
+       paralel, lalu gerbang pump dijalankan dari cache.
+
+    Hasilnya identik dengan versi lama yang memanggil API satu per satu di
+    dalam loop; yang berubah hanya jumlah round trip jaringan.
+    """
     quote_asset = config["QUOTE_ASSET"]
     min_vol = float(config.get("MIN_QUOTE_VOLUME_USDT_24H", 0) or 0)
 
@@ -254,7 +367,9 @@ def filter_and_rank_candidates(tickers: list, config: dict,
             "Semua simbol ditolak (fail closed).")
 
     lolos_struktural = 0
-    out = []
+    prasedia: list[tuple] = []
+    out: list[Candidate] = []
+
     for t in tickers:
         symbol = t.get("symbol", "")
         if not is_structurally_allowed_symbol(symbol, config, tradable_symbols):
@@ -277,17 +392,37 @@ def filter_and_rank_candidates(tickers: list, config: dict,
         lolos_struktural += 1
 
         if apply_pump_gate:
+            window_ok, alasan = _change_window_ok(price_change_pct, config)
+            if not window_ok:
+                logger.debug("Rentang kenaikan menolak %s: %s", symbol, alasan)
+                continue
+            prasedia.append((symbol, base_asset, price_change_pct,
+                             quote_volume, last_price))
+            continue
+
+        out.append(Candidate(
+            symbol=symbol, base_asset=base_asset, price_change_pct=price_change_pct,
+            quote_volume=quote_volume, last_price=last_price,
+        ))
+
+    if prasedia:
+        if prefetch_daily_fn is not None:
+            try:
+                prefetch_daily_fn([item[0] for item in prasedia])
+            except Exception as exc:  # noqa: BLE001 - jatuh ke mode serial per simbol
+                logger.debug("Prapengambilan candle harian dilewati: %s", exc)
+
+        for symbol, base_asset, price_change_pct, quote_volume, last_price in prasedia:
             ok_pump, alasan = is_pumping_today(
                 symbol, price_change_pct, quote_volume,
                 get_daily_klines_fn, config, reference_ms=reference_ms)
             if not ok_pump:
                 logger.debug("Gerbang pump menolak %s: %s", symbol, alasan)
                 continue
-
-        out.append(Candidate(
-            symbol=symbol, base_asset=base_asset, price_change_pct=price_change_pct,
-            quote_volume=quote_volume, last_price=last_price,
-        ))
+            out.append(Candidate(
+                symbol=symbol, base_asset=base_asset, price_change_pct=price_change_pct,
+                quote_volume=quote_volume, last_price=last_price,
+            ))
 
     out.sort(key=lambda c: c.quote_volume, reverse=True)
 
@@ -697,16 +832,56 @@ def setup_quality_key(setup: SetupResult, candidate: Candidate) -> tuple:
 def find_best_candidate(tickers: list, klines_fetcher, config: dict,
                         tradable_symbols: "set | None" = None,
                         daily_klines_fetcher=None,
-                        reference_ms: "int | None" = None) -> Optional[Candidate]:
+                        reference_ms: "int | None" = None,
+                        prefetch_daily_fn: "Optional[Callable[[list], None]]" = None,
+                        klines_fetcher_many: "Optional[Callable[[list], dict]]" = None,
+                        prewarm_fn: "Optional[Callable[[list], None]]" = None) -> Optional[Candidate]:
+    """Pilih kandidat terbaik yang lolos gerbang pump dan konfirmasi volume.
+
+    Parameter tambahan bersifat optimasi dan semuanya opsional:
+
+    - ``prefetch_daily_fn``: unduh candle harian banyak simbol sekaligus
+      sebelum gerbang pump dijalankan.
+    - ``klines_fetcher_many``: unduh candle konfirmasi semua kandidat teratas
+      sekaligus. Bila tidak diberikan atau gagal, dipakai ``klines_fetcher``
+      per simbol seperti sebelumnya.
+    - ``prewarm_fn``: siapkan harga (langganan WebSocket) untuk kandidat
+      teratas sedini mungkin, sementara candle konfirmasi sedang diunduh.
+
+    Keputusan akhir tidak berubah: yang dipilih tetap kandidat dengan volume
+    kuotasi terbesar di antara yang lolos konfirmasi.
+    """
     ranked = filter_and_rank_candidates(
         tickers, config, tradable_symbols,
-        get_daily_klines_fn=daily_klines_fetcher, reference_ms=reference_ms)
+        get_daily_klines_fn=daily_klines_fetcher, reference_ms=reference_ms,
+        prefetch_daily_fn=prefetch_daily_fn)
     top_n = ranked[: int(config.get("TOP_N_CANDIDATES_TO_CONFIRM", 10) or 10)]
+    if not top_n:
+        return None
+
+    if prewarm_fn is not None:
+        try:
+            prewarm_fn([cand.symbol for cand in top_n])
+        except Exception as exc:  # noqa: BLE001 - pemanasan tidak pernah fatal
+            logger.debug("Pemanasan harga kandidat dilewati: %s", exc)
+
+    diprakira: dict = {}
+    if klines_fetcher_many is not None and len(top_n) > 1:
+        try:
+            diprakira = klines_fetcher_many([cand.symbol for cand in top_n]) or {}
+        except Exception as exc:  # noqa: BLE001 - jatuh ke mode serial per simbol
+            logger.debug("Pengambilan candle paralel dilewati: %s", exc)
+            diprakira = {}
 
     lolos: list[Candidate] = []
     for cand in top_n:
         try:
-            klines = klines_fetcher(cand.symbol)
+            if cand.symbol in diprakira:
+                klines = diprakira.get(cand.symbol)
+                if klines is None:
+                    raise ValueError("candle konfirmasi gagal diunduh")
+            else:
+                klines = klines_fetcher(cand.symbol)
         except Exception as exc:
             cand.confirmed = False
             cand.confirm_reason = f"gagal mengambil candle: {exc}"

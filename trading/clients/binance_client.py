@@ -17,6 +17,7 @@ import hmac
 import logging
 import math
 import re
+import threading
 import time
 import urllib.parse
 from decimal import Decimal, ROUND_DOWN
@@ -99,9 +100,10 @@ class BinanceSpotClient:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.allow_signed = allow_signed
-        self.session = requests.Session()
-        if allow_signed and self.api_key:
-            self.session.headers.update({"X-MBX-APIKEY": self.api_key})
+        self._tls = threading.local()
+        self._sessions: list = []
+        self._sessions_lock = threading.Lock()
+        self._prime_session()
         self._time_offset_ms = 0
         self._rate_limiter = SharedRequestWeightLimiter(
             rate_limit_state_file,
@@ -113,6 +115,41 @@ class BinanceSpotClient:
         self.used_weight_ts = 0.0
         self.blocked_until = 0.0
 
+    def _new_session(self):
+        """Buat sesi HTTP baru dengan header yang sudah lengkap."""
+        session = requests.Session()
+        if self.allow_signed and self.api_key:
+            session.headers.update({"X-MBX-APIKEY": self.api_key})
+        with self._sessions_lock:
+            self._sessions.append(session)
+        return session
+
+    def _prime_session(self):
+        """Buat sesi untuk thread pemanggil pertama agar tetap kompatibel.
+
+        Sebelum perubahan ini atribut ``session`` dibuat di ``__init__``. Kode
+        dan pengujian yang membaca ``client.session`` tetap berfungsi karena
+        properti di bawah mengembalikan sesi milik thread yang sedang berjalan.
+        """
+        session = self._new_session()
+        self._tls.session = session
+        return session
+
+    @property
+    def session(self):
+        """Sesi HTTP khusus per thread.
+
+        Pengambilan data pasar kini berjalan paralel di beberapa thread.
+        Menggunakan satu ``requests.Session`` bersama dari banyak thread tidak
+        dijamin aman, jadi tiap thread mendapat sesi (connection pool) sendiri
+        sementara pembatas rate tetap dipakai bersama.
+        """
+        session = getattr(self._tls, "session", None)
+        if session is None:
+            session = self._new_session()
+            self._tls.session = session
+        return session
+
     def sync_time(self) -> None:
         server_time = self.get_server_time()
         local_time = int(time.time() * 1000)
@@ -120,7 +157,14 @@ class BinanceSpotClient:
         logger.info("Sinkronisasi waktu server selesai. Offset = %d ms", self._time_offset_ms)
 
     def close(self) -> None:
-        self.session.close()
+        with self._sessions_lock:
+            sessions = list(self._sessions)
+            self._sessions.clear()
+        for session in sessions:
+            try:
+                session.close()
+            except Exception:
+                pass
 
     def _timestamp(self) -> int:
         return int(time.time() * 1000) + self._time_offset_ms

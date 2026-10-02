@@ -61,6 +61,19 @@ class _StreamCache:
             self._data[key] = value
             self._ts[key] = time.monotonic()
 
+    def put_many(self, items: dict) -> None:
+        """Simpan banyak entri sekaligus dengan satu kali penguncian.
+
+        Stream ``!miniTicker@arr`` mengirim ribuan simbol tiap detik, jadi
+        pembaruan per simbol akan menghasilkan ribuan akuisisi lock per detik.
+        """
+        if not items:
+            return
+        now = time.monotonic()
+        with self._lock:
+            self._data.update(items)
+            self._ts.update(dict.fromkeys(items, now))
+
     def get(self, key: str) -> tuple[Optional[Any], float]:
         with self._lock:
             if key not in self._data:
@@ -90,6 +103,10 @@ class MarketWebSocket:
         self._prices = _StreamCache()
         self._book = _StreamCache()
         self._kline = _StreamCache()
+        self._mini = _StreamCache()
+
+        self._mini_lock = threading.RLock()
+        self._mini_arr_ts = 0.0
 
         self._sub_lock = threading.RLock()
         self._want_all_mini = False
@@ -158,6 +175,40 @@ class MarketWebSocket:
 
     def get_kline(self, symbol: str, interval: str) -> tuple[Optional[dict], float]:
         return self._kline.get(f"{symbol.upper()}@{interval}")
+
+    def subscribe_symbols(self, symbols, book_ticker: bool = True) -> None:
+        """Langganan banyak simbol sekaligus lewat satu pesan SUBSCRIBE.
+
+        Dipakai untuk "pemanasan" bookTicker para kandidat sedini mungkin agar
+        harga pertama sudah tersedia saat keputusan entry diambil.
+        """
+        new: list[str] = []
+        with self._sub_lock:
+            for symbol in symbols or ():
+                s = str(symbol).strip().lower()
+                if not s:
+                    continue
+                if book_ticker:
+                    name = f"{s}@bookTicker"
+                    if name not in self._want_streams:
+                        self._want_streams.add(name)
+                        new.append(name)
+        if new:
+            self._send({"method": "SUBSCRIBE", "params": new, "id": self._next_id()})
+
+    def all_mini_tickers(self) -> "tuple[dict[str, dict], float]":
+        """Ambil salinan snapshot !miniTicker@arr beserta usianya dalam detik.
+
+        Mengembalikan (data, usia). ``data`` berisi pemetaan SIMBOL -> payload
+        mini ticker (field ``c`` close, ``o`` open, ``v`` volume, ``q`` volume
+        kuotasi). Usia dihitung dari pesan array terakhir yang diterima, bukan
+        per simbol, supaya satu snapshot yang setengah terisi tidak dipakai.
+        """
+        with self._mini_lock:
+            if not self._mini_arr_ts:
+                return {}, float("inf")
+            age = time.monotonic() - self._mini_arr_ts
+        return self._mini.snapshot_all(), age
 
     def all_prices(self) -> dict[str, float]:
         return self._prices.snapshot_all()
@@ -256,15 +307,23 @@ class MarketWebSocket:
 
     def _handle_payload(self, data: Any) -> None:
         if isinstance(data, list):
+            prices: dict[str, float] = {}
+            minis: dict[str, Any] = {}
             for item in data:
                 if isinstance(item, dict) and item.get("e") == "24hrMiniTicker":
                     sym = item.get("s")
                     close = item.get("c")
                     if sym and close is not None:
                         try:
-                            self._prices.put(sym.upper(), float(close))
+                            prices[sym.upper()] = float(close)
                         except (TypeError, ValueError):
-                            pass
+                            continue
+                        minis[sym.upper()] = item
+            if minis:
+                self._prices.put_many(prices)
+                self._mini.put_many(minis)
+                with self._mini_lock:
+                    self._mini_arr_ts = time.monotonic()
             return
         if not isinstance(data, dict):
             return
