@@ -668,10 +668,11 @@ def selftest():
 
     btc_flat = [_mk(i, 100.0, 100.0, 100.0, 100.0) for i in range(309)]
     btc_crash = [_mk(i, c, c, c, c) for i, c in enumerate([100.0] * 305 + [98.0, 96.5, 95.0, 95.0])]
-    r_b0 = run_backtest(kl_setup, cfg, warmup_bars=0, btc_klines=btc_flat)
-    r_b1 = run_backtest(kl_setup, cfg, warmup_bars=0, btc_klines=btc_crash)
-    r_b2 = run_backtest(kl_setup, cfg, warmup_bars=0, btc_klines=btc_flat[:300])
-    r_b3 = run_backtest(kl_setup, cfg, warmup_bars=0)
+    cfg_btc = dict(cfg, BTC_FILTER_ENABLED=True)
+    r_b0 = run_backtest(kl_setup, cfg_btc, warmup_bars=0, btc_klines=btc_flat)
+    r_b1 = run_backtest(kl_setup, cfg_btc, warmup_bars=0, btc_klines=btc_crash)
+    r_b2 = run_backtest(kl_setup, cfg_btc, warmup_bars=0, btc_klines=btc_flat[:300])
+    r_b3 = run_backtest(kl_setup, cfg_btc, warmup_bars=0)
     assert len(r_b0.trades) == 1 and not any("BTC" in w for w in r_b0.warnings)
     assert len(r_b1.trades) == 0, "BTC turun 5 persen harus memblokir entry"
     assert len(r_b2.trades) == 0, "Data BTC tidak ada pada titik sinyal harus fail closed"

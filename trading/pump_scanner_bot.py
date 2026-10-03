@@ -2963,9 +2963,23 @@ def run(config: dict, lifecycle=None) -> int:
 def selftest() -> None:
     import tempfile
 
+    assert PUMP_CONFIG.get("PUMP_MIN_24H_CHANGE_PCT") == 3.0
+    assert PUMP_CONFIG.get("PUMP_MAX_24H_CHANGE_PCT") == 25.0
+    assert PUMP_CONFIG.get("BTC_FILTER_ENABLED") is False
+    assert PUMP_CONFIG.get("TOP_N_CANDIDATES_TO_CONFIRM") == 30
+    assert PUMP_CONFIG.get("ROLLING_VOLUME_SURGE_MULT") == 1.3
+    assert PUMP_CONFIG.get("MAX_CHASE_PCT") == 3.0
+    assert PUMP_CONFIG.get("DEPTH_FILTER_ENABLED") is False
+    assert PUMP_CONFIG.get("ORDERBOOK_FILTER_ENABLED") is False
+
     cfg = dict(PUMP_CONFIG)
     cfg["STATE_FILE"] = os.path.join(tempfile.gettempdir(), "pump_bot_selftest_state.json")
     cfg["MIN_QUOTE_VOLUME_USDT_24H"] = 1_000_000
+    cfg["PUMP_MIN_24H_CHANGE_PCT"] = 5.0
+    cfg["PUMP_MAX_24H_CHANGE_PCT"] = 10.0
+    cfg["ROLLING_VOLUME_SURGE_MULT"] = 2.0
+    cfg["DEPTH_FILTER_ENABLED"] = True
+    cfg["ORDERBOOK_FILTER_ENABLED"] = True
 
     print("=== SELFTEST: saringan semesta, gerbang pump, dan urutan volume ===")
     tickers = [
