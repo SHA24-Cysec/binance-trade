@@ -1,45 +1,3 @@
-#!/usr/bin/env python3
-"""
-Bot rotasi Binance Spot. Bot tetap memantau pair QUOTE, mengelola posisi yang
-sudah terbuka, dan mempertahankan logika Take Profit, Stop Loss, Breakeven,
-Trailing, serta rekonsiliasi. Entry baru dipicu oleh gerbang pump dan
-konfirmasi volume rolling, tanpa indikator teknikal.
-
-Nama file masih pump_scanner_bot.py demi kompatibilitas skrip dan layanan
-yang sudah ada. Pengurutan top gainer memang sudah dihapus (kandidat diurut
-berdasarkan volume kuotasi 24 jam terbesar), tetapi seleksi semesta kembali
-memakai GERBANG PUMP yang wajib: naik antara PUMP_MIN_24H_CHANGE_PCT dan
-PUMP_MAX_24H_CHANGE_PCT dalam 24 jam (koin yang sudah terlalu tinggi ditolak) DAN volume
-kuotasi 24 jam >= PUMP_VOLUME_SURGE_MULT x rata-rata 7 hari penuh sebelumnya.
-Lihat market_scanner.is_pumping_today(). Sebelum BUY, open_position() juga memeriksa
-kedalaman ask, ketimpangan bid/ask, dan sell wall (market_scanner.evaluate_orderbook);
-data order book gagal diambil = entry dibatalkan.
-
-INI BUKAN PREDIKSI. Bot ini bereaksi terhadap lonjakan yang SUDAH terjadi.
-Baca README.md bagian strategi sebelum menjalankan dengan uang sungguhan.
-
-CARA PAKAI (sama seperti bot.py):
-    pip install -r requirements.txt
-    set BINANCE_API_KEY / BINANCE_API_SECRET (lihat README.md)
-    python pump_scanner_bot.py --selftest      # audit logika, tanpa jaringan
-    python pump_scanner_bot.py                 # jalan (BOT_MODE=PAPER adalah default)
-
-MODE RUNTIME:
-    "PAPER" -> simulasi eksekusi lokal penuh; data pasar ASLI dari Binance
-               produksi publik (REST + WebSocket), tanpa API key. Saldo/order
-               virtual disimpan ke file. (default, aman)
-    "LIVE"  -> order sungguhan ke Binance produksi (uang asli)
-Mode dipilih lewat BOT_MODE di file .env dan berlaku setelah dashboard atau
-bot dijalankan ulang. Nilai config.py tetap menjadi default immutable.
-Keduanya memakai jalur LOGIKA STRATEGI yang SAMA PERSIS lewat antarmuka
-ExchangeClient; yang berbeda hanya lapisan eksekusi order dan sumber saldo.
-
-File state, log, dan kontrol otomatis DIPISAH per mode di folder khusus
-(contoh: data/pump_bot_state_paper.json vs data/pump_bot_state_live.json,
-logs/pump_bot_paper.log vs logs/pump_bot_live.log), dihitung di
-config.py, jadi data posisi/riwayat PAPER dan LIVE tidak pernah tercampur.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -138,8 +96,6 @@ def setup_logging(config: dict) -> None:
     console.setFormatter(fmt)
     setattr(console, _LOGGING_MARKER, True)
     root.addHandler(console)
-    # RotatingFileHandler tidak membuat folder induk sendiri, jadi pastikan
-    # folder logs/ (atau folder induk path LOG_FILE kustom) sudah ada.
     Path(str(config["LOG_FILE"])).parent.mkdir(parents=True, exist_ok=True)
     file_handler = logging.handlers.RotatingFileHandler(
         config["LOG_FILE"], maxBytes=5_000_000, backupCount=5, encoding="utf-8"
@@ -292,7 +248,6 @@ def _spot_api_key_permission_verified(account: dict) -> bool:
 
 
 def _effective_account_permissions(account: dict) -> set[str]:
-    """Gabungkan grup akun dengan izin SPOT yang diverifikasi secara resmi."""
     permissions: set[str] = set()
     raw = account.get("permissions")
     if isinstance(raw, list):
@@ -535,11 +490,6 @@ def maybe_force_close_at_risk_limit(client: ExchangeClient, config: dict,
 def reconcile_state_with_exchange(client: ExchangeClient, config: dict, state: dict,
                                   filters_cache: dict | None = None,
                                   *, check_open_orders: bool = False) -> bool:
-    """Cocokkan intent, state, saldo, order terbuka, dan proteksi exchange.
-
-    Fungsi mengembalikan True hanya jika seluruh data yang diperlukan berhasil
-    diverifikasi. Setiap ketidakpastian mempertahankan state dan memblokir entry.
-    """
     quote = config["QUOTE_ASSET"]
     live = str(config.get("MODE", "PAPER")).upper() == "LIVE"
     issues: list[str] = []
@@ -1941,7 +1891,6 @@ def _restore_pending_buy(config: dict, state: dict, pending: dict, order: dict,
 
 def _fresh_live_entry_filters(client: ExchangeClient, symbol: str,
                               account: dict) -> SymbolFilters:
-    """Ambil ulang metadata satu simbol dan verifikasi permission tepat sebelum entry."""
     exchange_info = client.get_exchange_info(symbol)
     if not isinstance(exchange_info, dict) or not isinstance(
         exchange_info.get("symbols"), list
@@ -1987,14 +1936,13 @@ def _fresh_live_entry_filters(client: ExchangeClient, symbol: str,
 
 def _entry_orderbook_ok(client: ExchangeClient, config: dict, symbol: str,
                         planned_notional: float) -> bool:
-    """Cek kedalaman dan order book sebelum BUY. Fail closed bila data gagal diambil."""
     if not (bool(config.get("DEPTH_FILTER_ENABLED", False))
             or bool(config.get("ORDERBOOK_FILTER_ENABLED", False))):
         return True
     limit = scanner.normalize_depth_limit(config.get("ORDERBOOK_DEPTH_LIMIT", 500))
     try:
         depth = client.get_depth(symbol, limit)
-    except Exception as exc:  # noqa: BLE001 - fail closed untuk error apa pun
+    except Exception as exc:
         logger.warning("Entry %s dibatalkan: order book gagal diambil (%s). Fail closed.",
                        symbol, str(exc)[:160])
         return False
@@ -2749,7 +2697,6 @@ def run(config: dict, lifecycle=None) -> int:
     RECONCILIATION_INTERVAL_SECONDS = 60
 
     def konfirmasi_dari_raw(raw):
-        """Seragamkan pasca-pemrosesan candle konfirmasi, serial maupun paralel."""
         lookback = strategy.confirm_window_bars(config)
         now_ms = state_mod.now_ms()
         closed = [k for k in strategy.parse_klines(raw or []) if k.close_time < now_ms]
@@ -2766,22 +2713,6 @@ def run(config: dict, lifecycle=None) -> int:
             symbols, config["CONFIRM_INTERVAL"], limit=lookback + 1) or {}
         return {simbol: (konfirmasi_dari_raw(raw) if raw is not None else None)
                 for simbol, raw in raw_map.items()}
-
-    ttl_harian = max(0, int(config.get("DAILY_KLINE_CACHE_TTL_SECONDS", 1800) or 0))
-    cache_harian = scanner.DailyKlineCache(
-        fetch_many=lambda simbol2, interval, limit: client.get_klines_many(
-            simbol2, interval, limit=limit),
-        limit=scanner.PUMP_GATE_DAILY_CANDLES + 1,
-        ttl_seconds=ttl_harian,
-    )
-    if ttl_harian > 0:
-        logger.info(
-            "Cache candle harian aktif (TTL %d detik) dengan %d worker pengambilan data pasar.",
-            ttl_harian, max(1, int(config.get("MARKET_DATA_WORKERS", 1) or 1)))
-    else:
-        logger.warning(
-            "DAILY_KLINE_CACHE_TTL_SECONDS = 0: candle harian diunduh ulang pada "
-            "setiap scan. Ini menambah banyak panggilan API saat pasar ramai.")
 
     exit_code = 0
     while not _shutdown_requested:
@@ -2894,7 +2825,6 @@ def run(config: dict, lifecycle=None) -> int:
                     and now - state.get("last_trade_time", 0) >= config["MIN_SECONDS_BETWEEN_TRADES"] * 1000
                 )
                 if can_enter:
-                    daily_fetcher = cache_harian.get
                     scan_config = dict(config)
                     if config.get("BTC_FILTER_ENABLED", False):
                         scan_config["_btc_filter_fail_closed"] = True
@@ -2913,9 +2843,6 @@ def run(config: dict, lifecycle=None) -> int:
                     best = scanner.find_best_candidate(
                         tickers, klines_fetcher, scan_config,
                         tradable_symbols,
-                        daily_klines_fetcher=daily_fetcher,
-                        reference_ms=state_mod.now_ms(),
-                        prefetch_daily_fn=cache_harian.prefetch,
                         klines_fetcher_many=klines_fetcher_many,
                         prewarm_fn=client.prewarm_book_ticker,
                     )
@@ -3050,60 +2977,33 @@ def selftest() -> None:
     cfg["MIN_QUOTE_VOLUME_USDT_24H"] = 1_000_000
 
     print("=== SELFTEST: saringan semesta, gerbang pump, dan urutan volume ===")
-    HARI_MS = 86_400_000
-
-    def _harian(quote_volume_harian: float):
-        return [strategy.Kline(open_time=i * HARI_MS, open=1.0, high=1.0, low=1.0,
-                               close=1.0, close_time=(i + 1) * HARI_MS - 1,
-                               volume=quote_volume_harian, quote_volume=quote_volume_harian)
-                for i in range(7)]
-
-    RATA_HARIAN = {
-        "AUSDT": 2_000_000.0, "BUSDT": 1_000_000.0, "CUSDT": 1_000_000.0,
-        "DUSDT": 1_000.0, "EUSDT": 4_000_000.0, "HIGHUSDT": 2_000_000.0, "BTCUPUSDT": 1_000.0,
-        "USDCUSDT": 1_000.0, "HALTUSDT": 1_000.0,
-    }
-
-    def daily_fetcher(symbol: str):
-        if symbol == "FUSDT":
-            return _harian(1_000.0)[:3]
-        if symbol == "GUSDT":
-            raise RuntimeError("timeout simulasi")
-        return _harian(RATA_HARIAN.get(symbol, 1_000.0))
-
-    ref_ms = 7 * HARI_MS + 1
-
     tickers = [
         {"symbol": "AUSDT", "priceChangePercent": "8.0", "quoteVolume": "6000000", "lastPrice": "1.0"},
         {"symbol": "BUSDT", "priceChangePercent": "10.0", "quoteVolume": "4000000", "lastPrice": "2.0"},
         {"symbol": "CUSDT", "priceChangePercent": "-3.0", "quoteVolume": "9000000", "lastPrice": "0.5"},
-        {"symbol": "DUSDT", "priceChangePercent": "40.0", "quoteVolume": "10000", "lastPrice": "0.1"},
-        {"symbol": "EUSDT", "priceChangePercent": "20.0", "quoteVolume": "4000000", "lastPrice": "1.0"},
-        {"symbol": "FUSDT", "priceChangePercent": "30.0", "quoteVolume": "8000000", "lastPrice": "1.0"},
-        {"symbol": "GUSDT", "priceChangePercent": "30.0", "quoteVolume": "8000000", "lastPrice": "1.0"},
-        {"symbol": "BTCUPUSDT", "priceChangePercent": "50.0", "quoteVolume": "9000000", "lastPrice": "3.0"},
-        {"symbol": "USDCUSDT", "priceChangePercent": "20.0", "quoteVolume": "9000000", "lastPrice": "1.0"},
+        {"symbol": "DUSDT", "priceChangePercent": "8.0", "quoteVolume": "10000", "lastPrice": "0.1"},
+        {"symbol": "EUSDT", "priceChangePercent": "3.0", "quoteVolume": "8000000", "lastPrice": "1.0"},
+        {"symbol": "BTCUPUSDT", "priceChangePercent": "8.0", "quoteVolume": "9000000", "lastPrice": "3.0"},
+        {"symbol": "USDCUSDT", "priceChangePercent": "8.0", "quoteVolume": "9000000", "lastPrice": "1.0"},
         {"symbol": "HALTUSDT", "priceChangePercent": "10.0", "quoteVolume": "8000000", "lastPrice": "1.0"},
         {"symbol": "HIGHUSDT", "priceChangePercent": "10.01", "quoteVolume": "7000000", "lastPrice": "1.0"},
     ]
-    tradable = {"AUSDT", "BUSDT", "CUSDT", "DUSDT", "EUSDT", "FUSDT", "GUSDT",
+    tradable = {"AUSDT", "BUSDT", "CUSDT", "DUSDT", "EUSDT",
                 "BTCUPUSDT", "USDCUSDT", "HIGHUSDT"}
-    ranked = scanner.filter_and_rank_candidates(
-        tickers, cfg, tradable, get_daily_klines_fn=daily_fetcher, reference_ms=ref_ms)
+    ranked = scanner.filter_and_rank_candidates(tickers, cfg, tradable)
     symbols = [c.symbol for c in ranked]
     print("  Lolos saringan + gerbang pump, urut volume kuotasi:", symbols)
     assert symbols == ["AUSDT", "BUSDT"], f"Hasil saringan/urutan salah: {symbols}"
     print("  -> OK (leveraged token, stablecoin, volume rendah, simbol non-TRADING,")
-    print("      koin yang TURUN 24 jam, volume yang tidak naik, koin baru listing,")
-    print("      dan simbol yang gagal diambil candle hariannya semuanya ter-exclude)")
+    print("      koin yang TURUN 24 jam, dan koin di luar rentang kenaikan ter-exclude)")
     print("  -> OK (batas atas 24 jam: 10.00% lolos, 10.01% ditolak walau volumenya terbesar)")
     assert cfg.get("PUMP_MAX_24H_CHANGE_PCT") == 10.0
-    ok_hi, why_hi = scanner.evaluate_pump_gate(12.0, 6_000_000.0, 2_000_000.0, cfg)
+    ok_hi, why_hi = scanner.evaluate_pump_gate(12.0, 6_000_000.0, cfg)
     assert not ok_hi and "batas atas" in why_hi, why_hi
-    ok_lo, _ = scanner.evaluate_pump_gate(6.0, 6_000_000.0, 2_000_000.0, cfg)
+    ok_lo, _ = scanner.evaluate_pump_gate(6.0, 6_000_000.0, cfg)
     assert ok_lo, "batas bawah 6.0% harus lolos (inklusif)"
     cfg_nocap = dict(cfg, PUMP_MAX_24H_CHANGE_PCT=0.0)
-    assert scanner.evaluate_pump_gate(40.0, 6_000_000.0, 2_000_000.0, cfg_nocap)[0]
+    assert scanner.evaluate_pump_gate(40.0, 6_000_000.0, cfg_nocap)[0]
     print("  -> OK (rentang 6.0% sampai 10.0% inklusif, 0 = batas atas nonaktif)")
 
     print("=== SELFTEST: kedalaman dan order book sebelum entry ===")
@@ -3112,32 +3012,25 @@ def selftest() -> None:
         return {"asks": [[str(p), str(q)] for p, q in ask_levels],
                 "bids": [[str(p), str(q)] for p, q in bid_levels]}
 
-    # Harga 1.0. Ask: 50 level x 400 USDT di 1.000 sampai 1.0049, total 20.000 dalam 0.5%.
     flat_asks = [(1.0 + i * 0.0001, 400.0 / (1.0 + i * 0.0001)) for i in range(1, 60)]
     flat_bids = [(1.0 - i * 0.0001, 400.0 / (1.0 - i * 0.0001)) for i in range(1, 60)]
     book_ok = _book(flat_asks, flat_bids)
     ok, why, m = scanner.evaluate_orderbook(book_ok, 1000.0, cfg)
     assert ok, why
-    # order 3000 butuh 30.000, ask 0.5% hanya sekitar 20.000, jadi ditolak
     ok, why, m = scanner.evaluate_orderbook(book_ok, 3000.0, cfg)
     assert not ok and "kedalaman" in why, why
-    # bid tipis: 100 USDT per level, rasio 0.25
     thin_bids = [(1.0 - i * 0.0001, 100.0 / (1.0 - i * 0.0001)) for i in range(1, 60)]
     ok, why, m = scanner.evaluate_orderbook(_book(flat_asks, thin_bids), 1000.0, cfg)
     assert not ok and "tekanan jual" in why, why
-    # sell wall: satu level 12.000 USDT di antara level 400, share > 30% di rentang 1%
     wall_asks = list(flat_asks)
     wall_asks[20] = (wall_asks[20][0], 12_000.0 / wall_asks[20][0])
     ok, why, m = scanner.evaluate_orderbook(_book(wall_asks, flat_bids), 1000.0, cfg)
     assert not ok and "sell wall" in why, why
-    # data kosong atau rusak: fail closed
     for bad in (None, {}, {"asks": [], "bids": []}, {"asks": [["x", "y"]], "bids": [["1", "1"]]},
                 _book([(1.0, 5.0)], [(1.1, 5.0)])):
         assert not scanner.evaluate_orderbook(bad, 1000.0, cfg)[0], bad
-    # filter nonaktif: lolos tanpa data
     off = dict(cfg, DEPTH_FILTER_ENABLED=False, ORDERBOOK_FILTER_ENABLED=False)
     assert scanner.evaluate_orderbook(None, 1000.0, off)[0]
-    # hanya depth aktif: bid tipis tidak masalah
     only_depth = dict(cfg, ORDERBOOK_FILTER_ENABLED=False)
     assert scanner.evaluate_orderbook(_book(flat_asks, thin_bids), 1000.0, only_depth)[0]
     assert scanner.normalize_depth_limit(50) == 100 and scanner.normalize_depth_limit(101) == 500 \
@@ -3150,38 +3043,30 @@ def selftest() -> None:
     det_bids = [(1.0 - i * 0.0001, 400.0 / (1.0 - i * 0.0001)) for i in range(1, 60)]
     book_good = scanner.orderbook_metrics(_book(det_asks, det_bids), 100.0, det_cfg)
     assert book_good is not None and book_good["ask_depth_notional"] > 1000
-    # 40 candle 5m: volume datar 1000, candle terakhir 3x, harga 1.0, rentang high-low 0.6%
     k5 = [strategy.Kline(open_time=i * 300_000, open=1.0, high=1.003, low=0.997, close=1.0,
                          close_time=i * 300_000 + 299_999,
                          volume=1000.0, quote_volume=1000.0) for i in range(40)]
     k5[-1] = strategy.Kline(open_time=39 * 300_000, open=1.0, high=1.003, low=0.997, close=1.0,
                             close_time=39 * 300_000 + 299_999, volume=3000.0, quote_volume=3000.0)
-    full = scanner.compute_detector_score(8.0, 6_000_000.0, 2_000_000.0, k5, 1.0, book_good, det_cfg)
+    full = scanner.compute_detector_score(8.0, k5, 1.0, book_good, det_cfg)
     assert full["score"] == 100.0 and not full["partial"], full
-    # data hilang dihitung 0 dan ditandai, skor turun
-    miss = scanner.compute_detector_score(8.0, 6_000_000.0, 2_000_000.0, None, 1.0, None, det_cfg)
+    miss = scanner.compute_detector_score(8.0, None, 1.0, None, det_cfg)
     assert miss["partial"] and set(miss["missing"]) == {"volume5m", "orderbook", "atr"}, miss["missing"]
-    assert abs(miss["score"] - 40.0) < 0.2, miss["score"]
-    # di atas batas atas 24 jam skor komponen kenaikan turun, di 2x batas atas jadi 0
-    hi = scanner.compute_detector_score(20.0, 6_000_000.0, 2_000_000.0, k5, 1.0, book_good, det_cfg)
-    assert hi["components"]["change"]["sub"] == 0.0 and hi["score"] == 80.0, hi["score"]
-    # volume lemah menurunkan skor
-    weak = scanner.compute_detector_score(8.0, 2_000_000.0, 2_000_000.0, k5, 1.0, book_good, det_cfg)
-    assert abs(weak["components"]["volume24"]["sub"] - 0.5) < 1e-9
-    # bobot tidak valid (semua nol) tidak membagi nol
-    zero = dict(det_cfg, DETECTOR_WEIGHT_CHANGE=0, DETECTOR_WEIGHT_VOLUME24=0, DETECTOR_WEIGHT_VOLUME5M=0,
+    assert abs(miss["score"] - 25.0) < 0.2, miss["score"]
+    hi = scanner.compute_detector_score(20.0, k5, 1.0, book_good, det_cfg)
+    assert hi["components"]["change"]["sub"] == 0.0 and hi["score"] == 75.0, hi["score"]
+    k5_weak = list(k5)
+    k5_weak[-1] = strategy.Kline(open_time=39 * 300_000, open=1.0, high=1.003, low=0.997, close=1.0,
+                                 close_time=39 * 300_000 + 299_999, volume=1000.0, quote_volume=1000.0)
+    weak = scanner.compute_detector_score(8.0, k5_weak, 1.0, book_good, det_cfg)
+    assert abs(weak["components"]["volume5m"]["sub"] - 0.5) < 1e-9
+    zero = dict(det_cfg, DETECTOR_WEIGHT_CHANGE=0, DETECTOR_WEIGHT_VOLUME5M=0,
                 DETECTOR_WEIGHT_ORDERBOOK=0, DETECTOR_WEIGHT_ATR=0)
-    assert scanner.compute_detector_score(8.0, 1.0, 1.0, k5, 1.0, book_good, zero)["score"] == 0.0
-    # skor tidak dipakai jalur entry: tidak ada rujukan di find_best_candidate/open_position
+    assert scanner.compute_detector_score(8.0, k5, 1.0, book_good, zero)["score"] == 0.0
     import inspect
     assert "detector" not in inspect.getsource(scanner.find_best_candidate).lower()
     assert "detector" not in inspect.getsource(open_position).lower()
     print("  -> OK (skor 100 untuk data ideal, data hilang dihitung 0, bobot nol aman, tidak masuk jalur entry)")
-
-    tanpa_sumber = scanner.filter_and_rank_candidates(tickers, cfg, tradable)
-    assert tanpa_sumber == [], \
-        "Tanpa sumber candle harian, gerbang pump harus menolak semua simbol (fail closed)"
-    print("  -> OK (tanpa sumber candle harian, gerbang pump fail closed)")
 
     print("\n=== SELFTEST: konfirmasi entry (volume rolling, tanpa indikator) ===")
 
@@ -3227,7 +3112,7 @@ def selftest() -> None:
         def get_book_ticker(self, symbol, max_retries=3):
             return {"symbol": symbol, "bidPrice": str(self.price), "askPrice": str(self.price)}
 
-        depth_mode = "deep"  # "deep", "thin_ask", "wall", "error"
+        depth_mode = "deep"
 
         def get_depth(self, symbol, limit=100):
             if self.depth_mode == "error":
@@ -3730,115 +3615,9 @@ def selftest() -> None:
         "Tanpa riwayat -> usia 0 (akan ditolak ambang minimum)"
     print("  Usia 10 hari / 2 hari dihitung benar, cache hemat API, tanpa riwayat -> 0 -> OK")
 
-    print("\n=== SELFTEST: cache candle harian (L-01) ===")
-    from market.market_scanner import DailyKlineCache
-
-    def _baris(open_time: int, close_time: int, quote_volume: float) -> list:
-        return [open_time, "100.0", "101.0", "99.0", "100.5", "10.0",
-                close_time, str(quote_volume), 0, "0", "0", "0"]
-
+    print("\n=== SELFTEST: konfirmasi paralel identik dengan serial (L-03) ===")
     MS_HARI = 86_400_000
     NOW_T = 100 * MS_HARI
-
-    def _harian_valid(jumlah: int = 8, volume: float = 1_000_000.0) -> list:
-        # Candle terakhir sengaja masih terbuka supaya tidak ikut rata-rata.
-        return [_baris((NOW_T // MS_HARI - (jumlah - 1 - i)) * MS_HARI,
-                       (NOW_T // MS_HARI - (jumlah - 1 - i)) * MS_HARI + MS_HARI - 1,
-                       volume)
-                for i in range(jumlah)]
-
-    hitung = {"batch": 0, "simbol": 0}
-    gagal_sementara = {"aktif": False}
-
-    def _ambil_banyak(simbol2, interval, limit):
-        assert interval == "1d", f"interval harus 1d, dapat {interval}"
-        hitung["batch"] += 1
-        hitung["simbol"] += len(simbol2)
-        if gagal_sementara["aktif"]:
-            return {s: None for s in simbol2}
-        return {s: _harian_valid() for s in simbol2}
-
-    cache = DailyKlineCache(_ambil_banyak, limit=8, ttl_seconds=3600.0)
-    cache.prefetch(["AAAUSDT", "BBBUSDT", "CCCUSDT"])
-    assert hitung["batch"] == 1, "prapengambilan harus sekali untuk semua simbol"
-    assert hitung["simbol"] == 3, f"harus 3 simbol, dapat {hitung['simbol']}"
-    assert len(cache) == 3, f"cache harus berisi 3 simbol, dapat {len(cache)}"
-
-    sebelum = hitung["batch"]
-    klines = cache.get("AAAUSDT")
-    assert hitung["batch"] == sebelum, "baca ulang harus dari cache, bukan API baru"
-    assert len(klines) == 8, f"harus 8 candle, dapat {len(klines)}"
-    assert cache.hits == 1 and cache.misses == 0, "hit/miss tidak sesuai"
-
-    cache.prefetch(["AAAUSDT", "DDDUSDT"])
-    assert hitung["batch"] == sebelum + 1, "hanya simbol baru yang diunduh"
-    assert hitung["simbol"] == 4, "hanya 1 simbol baru yang ditambahkan"
-
-    with cache._lock:
-        cache._ts["AAAUSDT"] = cache._ts["AAAUSDT"] - 100_000.0
-    cache.get("AAAUSDT")
-    assert cache.misses == 1, "cache kedaluwarsa harus diunduh ulang"
-
-    gagal_sementara["aktif"] = True
-    cache.get("ZZZUSDT")
-    assert "ZZZUSDT" not in cache._data, "kegagalan tidak boleh disimpan di cache"
-    gagal_sementara["aktif"] = False
-    pulih = cache.get("ZZZUSDT")
-    assert len(pulih) == 8, "setelah pulih, simbol harus bisa masuk cache lagi"
-
-    cache_mati = DailyKlineCache(_ambil_banyak, limit=8, ttl_seconds=0)
-    cache_mati.get("AAAUSDT")
-    cache_mati.get("AAAUSDT")
-    assert len(cache_mati) == 1 and cache_mati.hits == 0, "TTL 0 berarti cache nonaktif"
-    print("  prefetch batch, TTL, hit/miss, dan kegagalan tidak di-cache -> OK")
-
-    print("\n=== SELFTEST: paritas gerbang pump dengan dan tanpa prefetch (L-02) ===")
-    dari_cache = {"n": 0}
-
-    def _ambil_serial(simbol: str) -> list:
-        dari_cache["n"] += 1
-        return strategy.parse_klines(_harian_valid())
-
-    ticker_uji = [
-        {"symbol": "AAAUSDT", "priceChangePercent": "8.0",
-         "quoteVolume": "5000000", "lastPrice": "100.0"},   # lolos rentang
-        {"symbol": "BBBUSDT", "priceChangePercent": "3.0",
-         "quoteVolume": "5000000", "lastPrice": "100.0"},   # di bawah ambang
-        {"symbol": "CCCUSDT", "priceChangePercent": "25.0",
-         "quoteVolume": "5000000", "lastPrice": "100.0"},   # di atas batas
-        {"symbol": "DDDUSDT", "priceChangePercent": "8.0",
-         "quoteVolume": "1000", "lastPrice": "100.0"},      # volume di bawah minimum
-    ]
-    cfg_uji = {
-        "QUOTE_ASSET": "USDT",
-        "MIN_QUOTE_VOLUME_USDT_24H": 1_000_000,
-        "PUMP_MIN_24H_CHANGE_PCT": 6.0,
-        "PUMP_MAX_24H_CHANGE_PCT": 10.0,
-        "PUMP_VOLUME_SURGE_MULT": 2.0,
-        "BTC_FILTER_ENABLED": False,
-        "EXTRA_EXCLUDE_SYMBOLS": [],
-    }
-
-    hasil_serial = scanner.filter_and_rank_candidates(
-        ticker_uji, cfg_uji, None, get_daily_klines_fn=_ambil_serial)
-    panggil_serial = dari_cache["n"]
-
-    cache_paritas2 = DailyKlineCache(_ambil_banyak, limit=8, ttl_seconds=3600.0)
-    hasil_prefetch = scanner.filter_and_rank_candidates(
-        ticker_uji, cfg_uji, None,
-        get_daily_klines_fn=cache_paritas2.get,
-        prefetch_daily_fn=cache_paritas2.prefetch)
-
-    assert [c.symbol for c in hasil_serial] == [c.symbol for c in hasil_prefetch], \
-        "hasil dengan prefetch harus identik dengan hasil serial"
-    assert panggil_serial == 1, \
-        f"versi lama hanya boleh memanggil API untuk 1 simbol, dapat {panggil_serial}"
-    assert len(hasil_serial) == 1 and hasil_serial[0].symbol == "AAAUSDT", \
-        f"hanya AAAUSDT yang boleh lolos, dapat {[c.symbol for c in hasil_serial]}"
-    print(f"  hasil identik ({[c.symbol for c in hasil_prefetch]}), "
-          f"rentang dan volume disaring sebelum API -> OK")
-
-    print("\n=== SELFTEST: konfirmasi paralel identik dengan serial (L-03) ===")
 
     def _candle_5m(indeks: int, price: float, volume: float) -> list:
         open_time = NOW_T + indeks * 5 * 60_000
@@ -3847,7 +3626,6 @@ def selftest() -> None:
                 0, "0", "0", "0"]
 
     def _konfirmasi_generator(lonjakan: bool = False):
-        # 20 candle dasar bervolume sama, lalu candle terakhir melonjak.
         rows = [_candle_5m(i, 100.0 + i * 0.01, 1_000.0) for i in range(20)]
         if lonjakan:
             rows.append(_candle_5m(20, 100.2, 5_000.0))
@@ -3855,8 +3633,13 @@ def selftest() -> None:
             rows.append(_candle_5m(20, 100.2, 1_000.0))
         return rows
 
-    cfg_konfirmasi = dict(cfg_uji)
-    cfg_konfirmasi.update({
+    cfg_konfirmasi = {
+        "QUOTE_ASSET": "USDT",
+        "MIN_QUOTE_VOLUME_USDT_24H": 1_000_000,
+        "PUMP_MIN_24H_CHANGE_PCT": 6.0,
+        "PUMP_MAX_24H_CHANGE_PCT": 10.0,
+        "BTC_FILTER_ENABLED": False,
+        "EXTRA_EXCLUDE_SYMBOLS": [],
         "ROLLING_VOLUME_FILTER_ENABLED": True,
         "ROLLING_VOLUME_LOOKBACK_BARS": 20,
         "ROLLING_VOLUME_SURGE_MULT": 2.0,
@@ -3865,7 +3648,7 @@ def selftest() -> None:
         "DETECTOR_ATR_MIN_PCT": 0.01,
         "DETECTOR_ATR_MAX_PCT": 5.0,
         "ATR_PERIOD": 14,
-    })
+    }
 
     ticker_konfirmasi = [
         {"symbol": "LONJAKUSDT", "priceChangePercent": "8.0",
@@ -3897,21 +3680,13 @@ def selftest() -> None:
                 hasil[s] = closed[-lookback:]
             return hasil
 
-        cache_k = DailyKlineCache(_ambil_banyak, limit=8, ttl_seconds=3600.0)
         pilih_serial = scanner.find_best_candidate(
-            ticker_konfirmasi, _serial, cfg_konfirmasi, None,
-            daily_klines_fetcher=cache_k.get,
-            prefetch_daily_fn=cache_k.prefetch,
-            reference_ms=waktu_tutup["ms"])
+            ticker_konfirmasi, _serial, cfg_konfirmasi, None)
 
-        cache_k2 = DailyKlineCache(_ambil_banyak, limit=8, ttl_seconds=3600.0)
         pilih_paralel = scanner.find_best_candidate(
             ticker_konfirmasi, _serial, cfg_konfirmasi, None,
-            daily_klines_fetcher=cache_k2.get,
-            prefetch_daily_fn=cache_k2.prefetch,
             klines_fetcher_many=_paralel,
-            prewarm_fn=lambda simbol2: None,
-            reference_ms=waktu_tutup["ms"])
+            prewarm_fn=lambda simbol2: None)
 
         assert pilih_serial is not None, "kandidat dengan lonjakan harus ditemukan"
         assert pilih_paralel is not None, "jalur paralel harus menemukan kandidat"
@@ -3925,13 +3700,9 @@ def selftest() -> None:
         def _paralel_rusak(simbol2):
             raise RuntimeError("jaringan putus")
 
-        cache_k3 = DailyKlineCache(_ambil_banyak, limit=8, ttl_seconds=3600.0)
         pilih_gagal = scanner.find_best_candidate(
             ticker_konfirmasi, _serial, cfg_konfirmasi, None,
-            daily_klines_fetcher=cache_k3.get,
-            prefetch_daily_fn=cache_k3.prefetch,
-            klines_fetcher_many=_paralel_rusak,
-            reference_ms=waktu_tutup["ms"])
+            klines_fetcher_many=_paralel_rusak)
         assert pilih_gagal is not None and pilih_gagal.symbol == "LONJAKUSDT", \
             "kegagalan pengambilan paralel harus jatuh ke mode serial"
     finally:
@@ -3997,7 +3768,6 @@ def selftest() -> None:
         "RATE_LIMIT_SAFETY_MARGIN": 100,
     }
 
-    # TTL 0 -> perilaku lama: setiap pemanggilan mengunduh ulang.
     provider = MarketDataProvider(cfg_ws)
     provider.rest = _RestStub()
     provider.rest.get_ticker_24hr_all = lambda: _daftar_ticker()
@@ -4018,7 +3788,6 @@ def selftest() -> None:
         def close(self):
             return None
 
-    # TTL aktif -> unduhan sekali, pemanggilan berikutnya dari memori.
     rest_hitung = _RestHitung(_daftar_ticker())
     provider = MarketDataProvider(dict(cfg_ws, TICKER_SNAPSHOT_TTL_SECONDS=30))
     provider.rest = rest_hitung
@@ -4030,14 +3799,12 @@ def selftest() -> None:
     assert len(pertama) == len(kedua) == len(ketiga) == 4, "isi snapshot harus sama"
     assert provider._ticker_refresher is not None, "penyegar latar harus hidup"
 
-    # Usia melewati batas pengaman -> segarkan sinkron.
     with provider._ticker_lock:
         provider._ticker_snapshot_ts = time.monotonic() - 10_000.0
     provider.get_ticker_24hr_all()
     assert rest_hitung.panggil == 2, "snapshot terlalu tua harus disegarkan sinkron"
     provider.close()
 
-    # Timpaan harga terakhir dari WebSocket.
     data_overlay = {
         "AAAUSDT": {"c": "123.5", "o": "100.0", "v": "1", "q": "1"},
         "SIMBOL0USDT": {"c": "0", "o": "100.0", "v": "1", "q": "1"},
@@ -4059,21 +3826,14 @@ def selftest() -> None:
     assert float(peta_snap["SIMBOL1USDT"]["lastPrice"]) == 100.0, \
         "simbol tanpa data WebSocket harus tetap memakai harga snapshot"
 
-    # Timpaan tidak boleh mengubah pilihan kandidat.
     cfg_timpa = {
         "QUOTE_ASSET": "USDT", "MIN_QUOTE_VOLUME_USDT_24H": 1_000_000,
         "PUMP_MIN_24H_CHANGE_PCT": 6.0, "PUMP_MAX_24H_CHANGE_PCT": 10.0,
-        "PUMP_VOLUME_SURGE_MULT": 2.0, "BTC_FILTER_ENABLED": False,
+        "BTC_FILTER_ENABLED": False,
         "EXTRA_EXCLUDE_SYMBOLS": [],
     }
-    cache_t = DailyKlineCache(_ambil_banyak, limit=8, ttl_seconds=3600.0)
-    pilih_timpa = scanner.filter_and_rank_candidates(
-        snap, cfg_timpa, None, get_daily_klines_fn=cache_t.get,
-        prefetch_daily_fn=cache_t.prefetch)
-    cache_t2 = DailyKlineCache(_ambil_banyak, limit=8, ttl_seconds=3600.0)
-    pilih_asli = scanner.filter_and_rank_candidates(
-        provider.rest.daftar, cfg_timpa, None, get_daily_klines_fn=cache_t2.get,
-        prefetch_daily_fn=cache_t2.prefetch)
+    pilih_timpa = scanner.filter_and_rank_candidates(snap, cfg_timpa, None)
+    pilih_asli = scanner.filter_and_rank_candidates(provider.rest.daftar, cfg_timpa, None)
     assert [c.symbol for c in pilih_timpa] == [c.symbol for c in pilih_asli], \
         "timpaan harga tidak boleh mengubah kandidat yang lolos"
 

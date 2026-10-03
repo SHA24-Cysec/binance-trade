@@ -1,15 +1,3 @@
-"""
-Klien REST Binance Spot minimal, dibuat manual (bukan pakai SDK pihak ketiga).
-
-Klien manual ini dipertahankan untuk membatasi dependensi dan membuat endpoint,
-parameter, retry, serta perhitungan request weight dapat diaudit langsung.
-Semua endpoint mengikuti kontrak resmi di developers.binance.com.
-
-Untuk endpoint bertanda tangan, HMAC SHA256 dihitung atas query string yang
-sama dengan payload percent-encoded yang dikirim. Fungsi `_build_query` di
-bawah menjaga payload tanda tangan dan payload HTTP tetap identik.
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -51,7 +39,6 @@ class BinanceRateLimitError(BinanceAPIError):
 
 
 class BinanceTransportError(BinanceAPIError):
-    """Gangguan transport/format respons dengan status eksekusi tidak pasti."""
 
     def __init__(self, msg: str):
         super().__init__(0, None, msg)
@@ -116,7 +103,6 @@ class BinanceSpotClient:
         self.blocked_until = 0.0
 
     def _new_session(self):
-        """Buat sesi HTTP baru dengan header yang sudah lengkap."""
         session = requests.Session()
         if self.allow_signed and self.api_key:
             session.headers.update({"X-MBX-APIKEY": self.api_key})
@@ -125,25 +111,12 @@ class BinanceSpotClient:
         return session
 
     def _prime_session(self):
-        """Buat sesi untuk thread pemanggil pertama agar tetap kompatibel.
-
-        Sebelum perubahan ini atribut ``session`` dibuat di ``__init__``. Kode
-        dan pengujian yang membaca ``client.session`` tetap berfungsi karena
-        properti di bawah mengembalikan sesi milik thread yang sedang berjalan.
-        """
         session = self._new_session()
         self._tls.session = session
         return session
 
     @property
     def session(self):
-        """Sesi HTTP khusus per thread.
-
-        Pengambilan data pasar kini berjalan paralel di beberapa thread.
-        Menggunakan satu ``requests.Session`` bersama dari banyak thread tidak
-        dijamin aman, jadi tiap thread mendapat sesi (connection pool) sendiri
-        sementara pembatas rate tetap dipakai bersama.
-        """
         session = getattr(self._tls, "session", None)
         if session is None:
             session = self._new_session()
@@ -177,9 +150,6 @@ class BinanceSpotClient:
         if path == "/api/v3/ticker/24hr":
             return 2 if params.get("symbol") else 80
         if path == "/api/v3/exchangeInfo":
-            # Docs resmi Binance (General endpoints, akses 2026-10-01):
-            # bobot 20 untuk SEMUA kombinasi parameter, termasuk saat
-            # difilter per symbol (sejak 2023-08-25, naik dari 10 ke 20).
             return 20
         if path == "/api/v3/klines":
             return 2
@@ -409,9 +379,6 @@ class BinanceSpotClient:
         return self._request("GET", "/api/v3/depth",
                              {"symbol": symbol, "limit": limit}, max_retries=max_retries)
 
-    def get_book_ticker_all(self) -> list:
-        return self._request("GET", "/api/v3/ticker/bookTicker")
-
     def get_price(self, symbol: str, max_retries: int = 3) -> float:
         data = self._request("GET", "/api/v3/ticker/price", {"symbol": symbol},
                              max_retries=max_retries)
@@ -421,7 +388,6 @@ class BinanceSpotClient:
         return self._request("GET", "/api/v3/account", signed=True)
 
     def get_api_key_permissions(self) -> dict:
-        """Ambil izin API key dari endpoint Wallet USER_DATA resmi."""
         return self._request(
             "GET", "/sapi/v1/account/apiRestrictions", signed=True
         )
@@ -564,11 +530,6 @@ class BinanceSpotClient:
 def parse_symbol_permission_sets(
     sym_data: dict,
 ) -> tuple[tuple[frozenset[str], ...], bool]:
-    """Normalisasi permissionSets simbol dengan semantik AND antar-set.
-
-    Setiap inner list memakai OR. Seluruh inner list harus terpenuhi. Field
-    legacy ``permissions`` hanya dipakai bila permissionSets tidak tersedia.
-    """
     if "permissionSets" in sym_data:
         raw_sets = sym_data.get("permissionSets")
         if not isinstance(raw_sets, list) or not raw_sets:
@@ -600,19 +561,11 @@ def permission_sets_allow(
     permission_sets: tuple[frozenset[str], ...],
     account_permissions: set[str] | frozenset[str],
 ) -> bool:
-    """True bila akun memenuhi satu permission dari setiap inner set."""
     normalized = {str(item).strip().upper() for item in account_permissions if item}
     return bool(permission_sets) and all(bool(group & normalized) for group in permission_sets)
 
 
 class SymbolFilters:
-    """Filter statis simbol yang sudah diverifikasi dari exchangeInfo.
-
-    Field lama ``step_size/min_qty/max_qty/min_notional/max_notional`` tetap
-    mewakili aturan MARKET agar pemanggil lama tetap kompatibel. Filter
-    LOT_SIZE dan notional untuk order non-MARKET disimpan terpisah untuk order
-    proteksi STOP/OCO.
-    """
 
     def __init__(self, step_size: Decimal, min_qty: Decimal, min_notional: Decimal,
                  tick_size: Decimal, max_qty: Decimal = Decimal("0"),
@@ -830,7 +783,6 @@ def build_trading_symbols(
     exchange_info: dict,
     account_permissions: set[str] | frozenset[str] | None = None,
 ) -> set:
-    """Bangun simbol TRADING, opsional dibatasi permission efektif akun."""
     out = set()
     for sym_data in exchange_info.get("symbols", []):
         symbol = sym_data.get("symbol")

@@ -1,27 +1,3 @@
-"""
-Lapisan abstraksi klien exchange.
-
-Logika strategi bot (pump_scanner_bot.py) HANYA bicara ke antarmuka
-`ExchangeClient` di sini, tidak pernah tahu mode mana yang aktif. Ada dua
-implementasi konkret:
-
-- `LiveClient` (live_client.py)  -> order & saldo SUNGGUHAN lewat endpoint
-                                    Binance bertanda tangan (uang asli).
-- `PaperClient` (paper_client.py) -> order, fee, dan saldo DISIMULASIKAN
-                                    lokal; data pasar tetap ASLI dari produksi.
-
-Satu-satunya perbedaan antara PAPER dan LIVE ada di lapisan eksekusi order dan
-sumber saldo. Data pasar (harga, order book, kline, exchangeInfo) identik dan
-berasal dari Binance produksi publik untuk KEDUA mode (lihat market_data.py).
-
-Factory `create_exchange_client(config)` memilih implementasi berdasarkan MODE
-di config. MODE yang tidak dikenal / kosong / typo membuat bot BERHENTI dengan
-pesan jelas (via require_valid_mode di config.py), tidak pernah diam-diam jatuh
-ke LIVE.
-
-Versi acuan: Python 3.10+ (memakai typing modern + abc).
-"""
-
 from __future__ import annotations
 
 import logging
@@ -30,8 +6,6 @@ from typing import Optional
 
 logger = logging.getLogger("exchange_client")
 
-# Metadata internal yang hanya ditambahkan oleh LiveClient setelah endpoint
-# resmi API-key permission Binance mengonfirmasi izin Spot trading.
 ACCOUNT_SPOT_PERMISSION_VERIFIED = "_pump_bot_spot_permission_verified"
 ACCOUNT_SPOT_PERMISSION_SOURCE = "_pump_bot_spot_permission_source"
 
@@ -61,29 +35,17 @@ class ExchangeClient(ABC):
     def get_klines_many(self, symbols, interval: str, limit: int = 500,
                         end_time_ms: Optional[int] = None,
                         max_workers: Optional[int] = None) -> dict:
-        """Ambil candle banyak simbol sekaligus.
-
-        Implementasi default berjalan serial dan mengembalikan ``None`` untuk
-        simbol yang gagal, supaya satu kegagalan tidak menggagalkan sisanya.
-        Klien yang punya lapisan data pasar bersama menimpa ini dengan versi
-        paralel.
-        """
         hasil: dict = {}
         for symbol in dict.fromkeys(symbols or ()):
             try:
                 hasil[symbol] = self.get_klines(symbol, interval, limit,
                                                 None, end_time_ms)
-            except Exception as exc:  # noqa: BLE001 - satu simbol gagal bukan fatal
+            except Exception as exc:
                 logger.debug("Gagal mengambil candle %s %s: %s", symbol, interval, exc)
                 hasil[symbol] = None
         return hasil
 
     def prewarm_book_ticker(self, symbols) -> None:
-        """Minta harga terbaik kumpulan simbol disiapkan lebih awal.
-
-        Boleh diabaikan (default tidak melakukan apa-apa). Klien yang memakai
-        WebSocket menimpa ini untuk melangganan stream lebih awal.
-        """
         return None
 
     @abstractmethod
@@ -103,16 +65,6 @@ class ExchangeClient(ABC):
                          quantity: Optional[float] = None,
                          quote_order_qty: Optional[float] = None,
                          new_client_order_id: Optional[str] = None) -> dict: ...
-
-    @abstractmethod
-    def new_order(self, symbol: str, side: str, order_type: str,
-                  quantity: Optional[float] = None,
-                  price: Optional[float] = None,
-                  stop_price: Optional[float] = None,
-                  time_in_force: Optional[str] = None,
-                  quote_order_qty: Optional[float] = None,
-                  new_client_order_id: Optional[str] = None) -> dict:
-        pass
 
     def place_native_stop_loss(self, symbol: str, quantity: float,
                                stop_price: float,

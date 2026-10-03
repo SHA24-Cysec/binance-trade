@@ -1,21 +1,3 @@
-"""
-PaperClient: implementasi ExchangeClient untuk mode PAPER.
-
-- Data pasar: ASLI dari Binance produksi publik lewat MarketDataProvider
-  (REST keyless + WebSocket). Tidak ada API key, tidak ada tanda tangan.
-- Eksekusi order, fee, dan saldo: DISIMULASIKAN lokal oleh PaperMatchingEngine,
-  disimpan persisten oleh PaperStore.
-- Pengaman keras: endpoint bertanda tangan (akun/order/dust asli) TIDAK PERNAH
-  dipanggil. get_dust_convertible/convert_dust melempar SignedEndpointBlockedError.
-  MarketDataProvider sendiri memakai klien REST allow_signed=False, jadi bahkan
-  jika ada kode nakal yang mencoba, request signed gagal keras.
-
-Bentuk respons dibuat identik dengan REST Binance agar bot tidak perlu cabang
-khusus PAPER.
-
-Versi acuan: Python 3.10+.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -132,21 +114,6 @@ class PaperClient(ExchangeClient):
         order = self.engine.place_order(
             symbol=symbol, side=side, order_type="MARKET",
             quantity=quantity, quote_order_qty=quote_order_qty,
-            client_order_id=new_client_order_id,
-        )
-        return self._public_order(order)
-
-    def new_order(self, symbol: str, side: str, order_type: str,
-                  quantity: Optional[float] = None,
-                  price: Optional[float] = None,
-                  stop_price: Optional[float] = None,
-                  time_in_force: Optional[str] = None,
-                  quote_order_qty: Optional[float] = None,
-                  new_client_order_id: Optional[str] = None) -> dict:
-        order = self.engine.place_order(
-            symbol=symbol, side=side, order_type=order_type,
-            quantity=quantity, price=price, stop_price=stop_price,
-            time_in_force=time_in_force, quote_order_qty=quote_order_qty,
             client_order_id=new_client_order_id,
         )
         return self._public_order(order)

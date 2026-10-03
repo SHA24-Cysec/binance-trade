@@ -1,5 +1,3 @@
-"""Lock bot, lifecycle status, dan pengelola subprocess dashboard."""
-
 from __future__ import annotations
 
 import json
@@ -108,7 +106,6 @@ def lifecycle_owner(mode: str) -> dict:
 
 
 def _strict_position_snapshot(mode: str) -> dict:
-    """Baca posisi mode secara fail-closed tanpa mengubah file yang rusak."""
     normalized = _mode(mode)
     result = {
         "mode": normalized,
@@ -170,7 +167,6 @@ def _strict_position_snapshot(mode: str) -> dict:
 
 
 def mode_switch_guard(target_mode: str) -> dict:
-    """Pastikan mode lain berhenti dan tidak menyimpan posisi terbuka."""
     target = _mode(target_mode)
     other = "LIVE" if target == "PAPER" else "PAPER"
     owner = lock_owner(other) or lifecycle_owner(other)
@@ -397,9 +393,6 @@ class BotProcessManager:
 
     def __init__(self):
         self._lock = threading.RLock()
-        # START/STOP harus berurutan, tetapi status dashboard tidak boleh ikut
-        # terkunci selama STOP menunggu child keluar. Lock operasi hanya
-        # menserialkan mutasi proses; _lock tetap dipakai singkat untuk snapshot.
         self._operation_lock = threading.Lock()
         self._proc = None
         self._tree: procctl.ProcessTreeHandle | None = None
@@ -619,7 +612,7 @@ class BotProcessManager:
                 env["PUMP_BOT_MANAGED"] = "1"
                 env["PUMP_BOT_MANAGED_MODE"] = mode
                 proc, tree = procctl.spawn_python(
-                    PROJECT_ROOT / "pump_scanner_bot.py", cwd=PROJECT_ROOT, env=env,
+                    "-m", args=["trading.pump_scanner_bot"], cwd=PROJECT_ROOT, env=env,
                 )
                 self._proc = proc
                 self._tree = tree
@@ -680,12 +673,6 @@ class BotProcessManager:
 
     def stop(self, *, position_policy: str = "REQUIRE_EMPTY",
              graceful_timeout: float = 25.0, signal_timeout: float = 8.0) -> dict:
-        """Hentikan bot tanpa membekukan pembacaan status dashboard.
-
-        Menunggu close posisi, shutdown graceful, sinyal, atau kill dapat berlangsung
-        lama. Karena itu hanya satu mutasi proses yang diizinkan lewat
-        ``_operation_lock``, sedangkan ``_lock`` dilepas selama semua penantian.
-        """
         cfgmod = self._config()
         with self._operation_lock:
             try:
@@ -706,8 +693,6 @@ class BotProcessManager:
                             "Ada posisi terbuka. Pilih SELL_FIRST atau KEEP_OPEN."
                         )
 
-                # SELL_FIRST menunggu loop bot dan dapat memakan waktu beberapa
-                # interval. Jangan pegang _lock agar endpoint status tetap responsif.
                 if position["has_position"] and policy == "SELL_FIRST":
                     self._sell_first(
                         cfg,
@@ -715,7 +700,6 @@ class BotProcessManager:
                     )
 
                 with self._lock:
-                    # Ambil snapshot baru setelah kemungkinan penjualan posisi.
                     status = self.status(mode)
                     if status["status"] in ("STOPPED", "CRASHED"):
                         return status
@@ -775,8 +759,6 @@ class BotProcessManager:
                     self._finish_stop(mode, forced=True)
                     return self.status(mode)
             except Exception:
-                # Jika STOP gagal sebelum proses benar-benar berhenti, pertahankan
-                # fungsi supervisor untuk crash berikutnya.
                 with self._lock:
                     self._intentional_stop = False
                 raise

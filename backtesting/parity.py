@@ -1,23 +1,3 @@
-"""Komponen simulasi yang meniru perilaku bot live.
-
-Modul ini dipakai bersama oleh backtest simbol tunggal (backtest.py) dan backtest
-portofolio (portfolio_backtest.py) supaya keduanya tidak punya salinan logika
-sendiri yang bisa berbeda diam-diam dari bot:
-
-* PositionState dan evaluate_candle_exit(): mesin exit per candle.
-* AccountRiskControls: equity stop (drawdown), stop harian, dan CLOSE_ALL_AT_LIMIT,
-  meniru update_equity_controls() dan maybe_force_close_at_risk_limit() di bot.
-* BtcDropLookup: filter BTC berbasis candle historis BTCUSDT.
-* chase_exceeded() dan next_entry_allowed(): gerbang MAX_CHASE_PCT, cooldown, dan
-  MIN_SECONDS_BETWEEN_TRADES.
-* per_trade_metrics(): metrik per trade yang tidak bergantung pada skala equity.
-
-Ambang <= 0 dianggap nonaktif (bot live selalu memvalidasi ambang positif).
-
-Batasan yang disengaja: kontrol akun dievaluasi pada penutupan candle, bukan tiap
-LOOP_INTERVAL_SECONDS seperti bot live.
-"""
-
 from __future__ import annotations
 
 import math
@@ -54,19 +34,6 @@ class PositionState:
 
 def evaluate_candle_exit(pos: PositionState, candle: Kline,
                          config: dict) -> Optional[tuple[str, float]]:
-    """Evaluasi satu candle terhadap posisi terbuka.
-
-    Return (alasan, harga_exit_mentah) atau None bila posisi bertahan. Harga exit
-    belum memuat spread/slippage, pemanggil yang menerapkannya.
-
-    Urutan prioritas (konservatif, karena urutan high dan low dalam satu candle
-    tidak diketahui):
-    1. Stop pelindung BE/trailing yang sudah aktif dari candle SEBELUMNYA. Level ini
-       selalu di atas SL, jadi harga pasti melewatinya lebih dulu daripada SL.
-    2. STOP_LOSS.
-    3. TAKE_PROFIT.
-    4. BE/trailing yang baru aktif pada candle yang sama.
-    """
     entry = pos.entry_price
     lv = pos.levels
     atr_mode = lv["src"] == "ATR"
@@ -114,7 +81,6 @@ def evaluate_candle_exit(pos: PositionState, candle: Kline,
 
 
 class AccountRiskControls:
-    """Peniru update_equity_controls() dan maybe_force_close_at_risk_limit()."""
 
     def __init__(self, config: dict, initial_equity: float) -> None:
         self.use_equity_stop = bool(config.get("USE_EQUITY_STOP", False))
@@ -138,7 +104,6 @@ class AccountRiskControls:
                        "daily_profit_stop": 0, "forced_close": 0}
 
     def update(self, now_ms: int, equity: float) -> bool:
-        """Perbarui kontrol dengan equity saat ini. Return True bila entry dijeda."""
         equity = float(equity)
         day = int(now_ms) // MS_PER_DAY
         if self.day_index != day:
@@ -195,11 +160,6 @@ class AccountRiskControls:
 
 
 class BtcDropLookup:
-    """Perubahan harga BTC selama N candle, sama dengan filter BTC bot live.
-
-    Bot menghitung close candle tertutup terakhir dibagi close N candle sebelumnya.
-    Titik tanpa data yang lengkap mengembalikan None (bot menolak simbol, fail closed).
-    """
 
     def __init__(self, klines: Sequence[Kline], bar_ms: int, lookback_bars: int) -> None:
         self._klines = sorted(klines, key=lambda k: int(k.open_time))
@@ -258,7 +218,6 @@ def next_entry_allowed(close_time_ms: int, config: dict) -> int:
 
 
 def per_trade_metrics(trades: Sequence) -> dict:
-    """Metrik per trade (persen dari nominal posisi), tidak bergantung skala equity."""
     pcts = [float(t.pnl_pct) for t in trades]
     if not pcts:
         return {"avg_trade_pct": 0.0, "median_trade_pct": 0.0, "best_trade_pct": 0.0,

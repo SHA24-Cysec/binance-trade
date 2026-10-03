@@ -1,26 +1,3 @@
-"""
-Lapisan data pasar publik BERSAMA untuk PAPER dan LIVE.
-
-Mode HYBRID (keputusan desain):
-- WebSocket = sumber PRIMER data real-time (harga, bookTicker, kline).
-- REST publik (keyless, unsigned) dipakai untuk yang tidak punya padanan WS
-  atau saat WS basi/putus:
-    * exchangeInfo (tidak ada stream WS-nya) -> di-cache + refresh berkala.
-    * kline historis (WS hanya candle live) -> untuk backfill.
-    * depth snapshot (untuk mengisi market order simulasi) -> selalu segar.
-    * fallback harga/bookTicker saat WS basi atau belum panas.
-
-Semua request REST di sini KEYLESS (allow_signed=False), sehingga lapisan ini
-tidak mungkin menyentuh endpoint bertanda tangan -- aman dipakai bersama oleh
-PAPER (yang dilarang keras memakai signed) maupun LIVE.
-
-Staleness guard: data WS yang lebih tua dari MAX_MARKET_DATA_AGE_SECONDS tidak
-dipakai; provider jatuh ke REST. Bila REST juga gagal, exception diteruskan ke
-pemanggil (PaperClient akan menolak mengisi order di atas data basi).
-
-Versi acuan: requests>=2.32.4, websocket-client>=1.7, Python 3.10+.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -143,14 +120,6 @@ class MarketDataProvider:
         return self.rest.get_klines(symbol, interval, limit, start_time_ms, end_time_ms)
 
     def prewarm_book_ticker(self, symbols) -> None:
-        """Langganan bookTicker lebih awal untuk sekumpulan simbol.
-
-        Tanpa pemanasan, pemanggilan ``get_book_ticker`` untuk simbol yang baru
-        pertama kali dilihat selalu jatuh ke REST karena cache WebSocket masih
-        kosong. Melangganan sedini mungkin memberi kesempatan data stream sudah
-        tersedia saat harga entry dibutuhkan. Kegagalan tidak pernah fatal:
-        pemanggil tetap memakai jalur REST bila data belum ada.
-        """
         if not self._use_ws or not symbols:
             return
         try:
@@ -164,13 +133,6 @@ class MarketDataProvider:
     def get_klines_many(self, symbols, interval: str, limit: int = 500,
                         end_time_ms: Optional[int] = None,
                         max_workers: Optional[int] = None) -> dict:
-        """Ambil candle banyak simbol sekaligus, paralel bila memungkinkan.
-
-        Mengembalikan pemetaan SIMBOL -> klines. Nilai ``None`` menandai
-        kegagalan pada simbol itu, sehingga pemanggil bisa membedakan antara
-        "gagal mengambil" dan "bursa mengembalikan daftar kosong". Satu simbol
-        yang gagal tidak menggagalkan simbol lain.
-        """
         unique = [str(s) for s in dict.fromkeys(symbols or ())]
         if not unique:
             return {}
@@ -195,11 +157,10 @@ class MarketDataProvider:
         return out
 
     def _ticker_refresh_loop(self) -> None:
-        """Segarkan snapshot ticker 24 jam secara berkala di latar belakang."""
         while not self._stop.wait(self._ticker_ttl):
             try:
                 self._refresh_ticker_snapshot()
-            except Exception as exc:  # noqa: BLE001 - thread penyegar tidak boleh mati
+            except Exception as exc:
                 logger.debug("Penyegaran snapshot ticker gagal: %s", exc)
         logger.debug("Thread penyegar snapshot ticker berhenti.")
 
@@ -218,7 +179,6 @@ class MarketDataProvider:
                 "menunggu unduhan daftar ticker 24 jam.", self._ticker_ttl)
 
     def _refresh_ticker_snapshot(self) -> list:
-        """Unduh daftar ticker 24 jam dan simpan sebagai snapshot."""
         tickers = self.rest.get_ticker_24hr_all()
         if isinstance(tickers, list) and tickers:
             with self._ticker_lock:
@@ -227,12 +187,6 @@ class MarketDataProvider:
         return tickers
 
     def _overlay_last_price(self, tickers: list) -> list:
-        """Timpa harga terakhir dengan harga terbaru dari stream miniTicker.
-
-        Hanya ``lastPrice`` yang disentuh. Persentase perubahan 24 jam dan
-        volume kuotasi tetap dari snapshot REST, sehingga keputusan lolos atau
-        tidaknya kandidat tidak pernah berubah oleh timpaan ini.
-        """
         if not self._use_ws or not self._ws_overlay_enabled or not tickers:
             return tickers
         try:
@@ -242,7 +196,7 @@ class MarketDataProvider:
             data, age = ws.all_mini_tickers()
             if not data or age > self._max_age:
                 return tickers
-        except Exception as exc:  # noqa: BLE001 - timpaan tidak pernah fatal
+        except Exception as exc:
             logger.debug("Timpaan harga WebSocket dilewati: %s", exc)
             return tickers
 
@@ -262,13 +216,6 @@ class MarketDataProvider:
         return out
 
     def get_ticker_24hr_all(self) -> list:
-        """Statistik 24 jam semua simbol.
-
-        Unduhan daftar ini memakan sekitar 1,9 MB dan ratusan milidetik, jadi
-        ia disegarkan oleh thread latar belakang dan dibaca dari memori saat
-        scan berjalan. TTL 0 mengembalikan perilaku lama (selalu menunggu
-        unduhan segar pada setiap pemanggilan).
-        """
         if self._ticker_ttl <= 0:
             return self._refresh_ticker_snapshot()
 
@@ -279,15 +226,13 @@ class MarketDataProvider:
         if not snapshot:
             snapshot = self._refresh_ticker_snapshot()
         elif usia > max(self._ticker_ttl * 3.0, self._ticker_ttl + 30.0):
-            # Penyegar latar gagal terlalu lama. Ambil segar agar keputusan
-            # tidak pernah dibuat dari data yang usianya tidak terkendali.
             logger.warning(
                 "Snapshot ticker berusia %.0f detik (TTL %g detik). Menyegarkan "
                 "secara sinkron karena penyegar latar tidak berhasil.",
                 usia, self._ticker_ttl)
             try:
                 snapshot = self._refresh_ticker_snapshot()
-            except Exception as exc:  # noqa: BLE001 - pakai snapshot terakhir
+            except Exception as exc:
                 logger.error("Penyegaran sinkron snapshot ticker gagal: %s", exc)
         return self._overlay_last_price(snapshot)
 

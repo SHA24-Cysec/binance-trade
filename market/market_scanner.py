@@ -1,29 +1,15 @@
-"""Scanner pasar dan filter operasional Binance Spot.
-
-Modul ini menyediakan filter semesta, gerbang pump, likuiditas, spread, usia
-listing, dan korelasi BTC, serta konfirmasi volume rolling yang dipakai bot
-dan backtest untuk membuka posisi baru. Tidak ada indikator teknikal (EMA,
-RSI, MACD, higher low) pada jalur entry.
-"""
-
 from __future__ import annotations
 
 import logging
 import math
-import threading
-import time
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Optional
 
 
 from strategy import indicators as strategy
 from strategy.indicators import Kline
 
 logger = logging.getLogger(__name__)
-
-PUMP_GATE_DAILY_CANDLES = 7
-
-MS_PER_DAY = 86_400_000
 
 STABLE_BASE_ASSETS = {
     "USDC", "BUSD", "TUSD", "FDUSD", "DAI", "USDP", "EUR", "GBP", "TRY",
@@ -82,111 +68,7 @@ def _angka_wajar(nilai) -> bool:
     return angka >= 0.0
 
 
-def aggregate_to_daily(klines: list[Kline]) -> list[Kline]:
-    ember: dict[int, list[Kline]] = {}
-    for k in klines:
-        ember.setdefault(int(k.open_time) // MS_PER_DAY, []).append(k)
-
-    harian: list[Kline] = []
-    for hari in sorted(ember):
-        isi = ember[hari]
-        harian.append(Kline(
-            open_time=hari * MS_PER_DAY,
-            open=isi[0].open,
-            high=max(x.high for x in isi),
-            low=min(x.low for x in isi),
-            close=isi[-1].close,
-            close_time=hari * MS_PER_DAY + MS_PER_DAY - 1,
-            volume=sum(x.volume for x in isi),
-            quote_volume=sum(x.quote_volume for x in isi),
-        ))
-    return harian
-
-
-def average_prior_daily_quote_volume(
-    daily_klines: "list[Kline] | None",
-    reference_ms: int,
-    need: int = PUMP_GATE_DAILY_CANDLES,
-) -> tuple[Optional[float], str]:
-    if not daily_klines:
-        return None, "tidak ada candle harian"
-
-    tertutup = [k for k in daily_klines if int(k.close_time) <= int(reference_ms)]
-    if len(tertutup) < need:
-        return None, (f"riwayat harian kurang: {len(tertutup)} candle tertutup, "
-                      f"minimum {need} (kemungkinan koin baru listing)")
-
-    dipakai = tertutup[-need:]
-    volumes: list[float] = []
-    for k in dipakai:
-        if not _angka_wajar(k.quote_volume):
-            return None, ("quote_volume candle harian tidak wajar "
-                          f"({k.quote_volume!r}), data bursa rusak")
-        volumes.append(float(k.quote_volume))
-
-    return sum(volumes) / float(need), f"rata-rata {need} hari penuh terakhir"
-
-
-def evaluate_pump_gate(price_change_pct, quote_volume,
-                       avg_daily_quote_volume: Optional[float],
-                       config: dict, btc_drop_pct: float | None = None) -> tuple[bool, str]:
-    min_change = float(config.get("PUMP_MIN_24H_CHANGE_PCT", 10.0) or 0.0)
-    max_change = float(config.get("PUMP_MAX_24H_CHANGE_PCT", 0.0) or 0.0)
-    surge_mult = float(config.get("PUMP_VOLUME_SURGE_MULT", 1.5) or 0.0)
-
-    if btc_drop_pct is None:
-        btc_drop_pct = config.get("_btc_drop_pct")
-    if config.get("BTC_FILTER_ENABLED", False):
-        if btc_drop_pct is None:
-            if config.get("_btc_filter_fail_closed", False):
-                return False, "data filter BTC tidak tersedia, simbol ditolak (fail closed)"
-        else:
-            max_drop = abs(float(config.get("BTC_MAX_DROP_PCT", 5.0) or 0.0))
-            if float(btc_drop_pct) <= -max_drop:
-                return False, (f"BTC turun {float(btc_drop_pct):.2f}% dalam "
-                               f"{int(config.get("BTC_LOOKBACK_BARS", 3) or 3)} candle")
-
-    if not _angka_wajar(quote_volume):
-        return False, f"quote_volume 24 jam tidak wajar ({quote_volume!r})"
-    try:
-        change = float(price_change_pct)
-    except (TypeError, ValueError):
-        return False, f"priceChangePercent tidak bisa dibaca ({price_change_pct!r})"
-    if math.isnan(change) or math.isinf(change):
-        return False, f"priceChangePercent tidak wajar ({price_change_pct!r})"
-
-    if change < min_change:
-        return False, (f"kenaikan 24 jam {change:.2f}% di bawah ambang "
-                       f"{min_change:g}%")
-    if max_change > 0 and change > max_change:
-        return False, (f"kenaikan 24 jam {change:.2f}% melewati batas atas "
-                       f"{max_change:g}% (koin sudah terlalu tinggi)")
-
-    if avg_daily_quote_volume is None:
-        return False, "rata-rata volume harian tidak tersedia"
-    if not _angka_wajar(avg_daily_quote_volume):
-        return False, f"rata-rata volume harian tidak wajar ({avg_daily_quote_volume!r})"
-    if avg_daily_quote_volume <= 0:
-        return False, "rata-rata volume harian nol, perbandingan volume tidak bermakna"
-
-    butuh = surge_mult * float(avg_daily_quote_volume)
-    rasio = float(quote_volume) / float(avg_daily_quote_volume)
-    if float(quote_volume) < butuh:
-        return False, (f"volume 24 jam {float(quote_volume):.0f} hanya {rasio:.2f}x "
-                       f"rata-rata 7 hari {float(avg_daily_quote_volume):.0f}, "
-                       f"minimum {surge_mult:g}x")
-
-    rentang = f"{min_change:g}% sampai {max_change:g}%" if max_change > 0 else f">= {min_change:g}%"
-    return True, (f"pump sah: naik {change:.2f}% (rentang {rentang}), "
-                  f"volume {rasio:.2f}x rata-rata 7 hari (ambang {surge_mult:g}x)")
-
-
 def _change_window_ok(price_change_pct, config: dict) -> tuple[bool, str]:
-    """Periksa rentang kenaikan 24 jam tanpa menyentuh jaringan.
-
-    Dipisah dari :func:`is_pumping_today` supaya pemanggil bisa membuang
-    kandidat yang pasti ditolak SEBELUM mengambil candle harian.
-    """
     min_change = float(config.get("PUMP_MIN_24H_CHANGE_PCT", 10.0) or 0.0)
     max_change = float(config.get("PUMP_MAX_24H_CHANGE_PCT", 0.0) or 0.0)
     try:
@@ -203,171 +85,55 @@ def _change_window_ok(price_change_pct, config: dict) -> tuple[bool, str]:
     return True, ""
 
 
-class DailyKlineCache:
-    """Cache candle harian dengan TTL, plus prapengambilan paralel.
+def evaluate_pump_gate(price_change_pct, quote_volume,
+                       config: dict, btc_drop_pct: float | None = None) -> tuple[bool, str]:
+    min_change = float(config.get("PUMP_MIN_24H_CHANGE_PCT", 10.0) or 0.0)
+    max_change = float(config.get("PUMP_MAX_24H_CHANGE_PCT", 0.0) or 0.0)
 
-    Candle harian yang sudah TERTUTUP tidak berubah sampai pergantian hari UTC.
-    ``average_prior_daily_quote_volume`` hanya memakai candle tertutup, jadi
-    menyimpan hasil unduhan selama TTL tidak mengubah keputusan gerbang pump.
-    Ini menghilangkan puluhan panggilan REST berulang pada tiap scan.
+    if btc_drop_pct is None:
+        btc_drop_pct = config.get("_btc_drop_pct")
+    if config.get("BTC_FILTER_ENABLED", False):
+        if btc_drop_pct is None:
+            if config.get("_btc_filter_fail_closed", False):
+                return False, "data filter BTC tidak tersedia, simbol ditolak (fail closed)"
+        else:
+            max_drop = abs(float(config.get("BTC_MAX_DROP_PCT", 5.0) or 0.0))
+            if float(btc_drop_pct) <= -max_drop:
+                return False, (f"BTC turun {float(btc_drop_pct):.2f}% dalam "
+                               f"{int(config.get('BTC_LOOKBACK_BARS', 3) or 3)} candle")
 
-    ``ttl_seconds <= 0`` berarti cache NONAKTIF dan candle diunduh ulang pada
-    setiap permintaan, persis seperti perilaku sebelum optimasi ini.
+    if not _angka_wajar(quote_volume):
+        return False, f"quote_volume 24 jam tidak wajar ({quote_volume!r})"
 
-    Kegagalan tidak pernah disimpan, supaya satu gangguan sesaat tidak
-    mengunci simbol keluar dari kandidat selama TTL berjalan.
-    """
-
-    def __init__(self, fetch_many: "Callable[[list, str, int], dict]",
-                 limit: int = PUMP_GATE_DAILY_CANDLES + 1,
-                 ttl_seconds: float = 1800.0) -> None:
-        self._fetch_many = fetch_many
-        self.limit = max(1, int(limit))
-        self.ttl_seconds = max(0.0, float(ttl_seconds or 0.0))
-        self._lock = threading.RLock()
-        self._data: dict[str, list] = {}
-        self._ts: dict[str, float] = {}
-        self.hits = 0
-        self.misses = 0
-        self.prefetch_symbols = 0
-        self.prefetch_batches = 0
-
-    def __len__(self) -> int:
-        with self._lock:
-            return len(self._data)
-
-    def _fresh(self, symbol: str):
-        if self.ttl_seconds <= 0:
-            return None
-        with self._lock:
-            entry = self._data.get(symbol)
-            if entry is None:
-                return None
-            if (time.monotonic() - float(self._ts.get(symbol, 0.0))) > self.ttl_seconds:
-                return None
-        return entry
-
-    def _store(self, symbol: str, raw) -> list:
-        parsed = strategy.parse_klines(raw) if raw is not None else []
-        with self._lock:
-            self._data[symbol] = parsed
-            self._ts[symbol] = time.monotonic()
-        return parsed
-
-    def prefetch(self, symbols) -> int:
-        """Unduh candle harian yang belum segar untuk banyak simbol sekaligus."""
-        missing = [str(s) for s in dict.fromkeys(symbols or ())
-                   if self._fresh(str(s)) is None]
-        if not missing:
-            return 0
-        self.prefetch_batches += 1
-        self.prefetch_symbols += len(missing)
-        try:
-            raw_map = self._fetch_many(missing, "1d", self.limit) or {}
-        except Exception as exc:  # noqa: BLE001 - kegagalan jatuh ke mode serial
-            logger.debug("Prapengambilan candle harian gagal: %s", exc)
-            return 0
-        for symbol, raw in raw_map.items():
-            if raw is not None:
-                self._store(symbol, raw)
-        return len(missing)
-
-    def get(self, symbol: str) -> list:
-        cached = self._fresh(symbol)
-        if cached is not None:
-            self.hits += 1
-            return cached
-        self.misses += 1
-        raw_map = {}
-        try:
-            raw_map = self._fetch_many([symbol], "1d", self.limit) or {}
-        except Exception as exc:  # noqa: BLE001 - diperlakukan sebagai tanpa data
-            logger.debug("Gagal mengambil candle harian %s: %s", symbol, exc)
-            return []
-        raw = raw_map.get(symbol)
-        if raw is None:
-            return []
-        return self._store(symbol, raw)
-
-
-def is_pumping_today(symbol: str, price_change_pct, quote_volume,
-                     get_daily_klines_fn: "Optional[Callable[[str], list[Kline]]]",
-                     config: dict,
-                     reference_ms: "int | None" = None) -> tuple[bool, str]:
     window_ok, window_reason = _change_window_ok(price_change_pct, config)
     if not window_ok:
         return False, window_reason
 
-    if get_daily_klines_fn is None:
-        return False, "sumber candle harian tidak tersedia, simbol ditolak (fail closed)"
-
-    ref = int(reference_ms) if reference_ms is not None else int(time.time() * 1000)
-
-    try:
-        harian = get_daily_klines_fn(symbol)
-    except Exception as exc:
-        return False, f"gagal mengambil candle harian: {str(exc)[:160]}"
-
-    rata, alasan = average_prior_daily_quote_volume(harian, ref)
-    if rata is None:
-        return False, alasan
-    return evaluate_pump_gate(float(price_change_pct), quote_volume, rata, config)
+    change = float(price_change_pct)
+    rentang = f"{min_change:g}% sampai {max_change:g}%" if max_change > 0 else f">= {min_change:g}%"
+    return True, f"pump sah: naik {change:.2f}% (rentang {rentang})"
 
 
-def pump_gate_ok_at(daily_klines: "list[Kline] | None", reference_ms: int,
-                    price_change_pct, quote_volume, config: dict,
+def is_pumping_today(symbol: str, price_change_pct, quote_volume,
+                     config: dict) -> tuple[bool, str]:
+    return evaluate_pump_gate(price_change_pct, quote_volume, config)
+
+
+def pump_gate_ok_at(price_change_pct, quote_volume, config: dict,
                     btc_drop_pct: "float | None" = None) -> bool:
-    rata, _alasan = average_prior_daily_quote_volume(daily_klines, reference_ms)
-    ok, _r = evaluate_pump_gate(price_change_pct, quote_volume, rata, config,
+    ok, _r = evaluate_pump_gate(price_change_pct, quote_volume, config,
                                 btc_drop_pct=btc_drop_pct)
     return ok
-
-
-def make_daily_klines_fetcher(client, *, limit: int = PUMP_GATE_DAILY_CANDLES + 1,
-                              end_time_ms: "int | None" = None,
-                              cache: "dict | None" = None):
-    def _fetch(symbol: str) -> list[Kline]:
-        if cache is not None and symbol in cache:
-            return cache[symbol]
-        raw = client.get_klines(symbol, interval="1d", limit=limit,
-                                end_time_ms=end_time_ms)
-        parsed = strategy.parse_klines(raw)
-        if cache is not None:
-            cache[symbol] = parsed
-        return parsed
-
-    return _fetch
 
 
 def filter_and_rank_candidates(tickers: list, config: dict,
                                tradable_symbols: "set | None" = None,
                                *,
-                               get_daily_klines_fn: "Optional[Callable[[str], list[Kline]]]" = None,
-                               reference_ms: "int | None" = None,
-                               apply_pump_gate: bool = True,
-                               prefetch_daily_fn: "Optional[Callable[[list], None]]" = None) -> list[Candidate]:
-    """Saring dan urutkan kandidat.
-
-    Berjalan dua tahap bila ``prefetch_daily_fn`` diberikan:
-
-    1. Tahap tanpa jaringan: struktur, volume minimum, dan rentang kenaikan
-       24 jam. Semua simbol yang pasti ditolak dibuang di sini.
-    2. Prapengambilan: sisa simbol diunduh candle hariannya sekaligus secara
-       paralel, lalu gerbang pump dijalankan dari cache.
-
-    Hasilnya identik dengan versi lama yang memanggil API satu per satu di
-    dalam loop; yang berubah hanya jumlah round trip jaringan.
-    """
+                               apply_pump_gate: bool = True) -> list[Candidate]:
     quote_asset = config["QUOTE_ASSET"]
     min_vol = float(config.get("MIN_QUOTE_VOLUME_USDT_24H", 0) or 0)
 
-    if apply_pump_gate and get_daily_klines_fn is None:
-        logger.warning(
-            "Gerbang pump aktif tetapi sumber candle harian tidak diberikan. "
-            "Semua simbol ditolak (fail closed).")
-
     lolos_struktural = 0
-    prasedia: list[tuple] = []
     out: list[Candidate] = []
 
     for t in tickers:
@@ -392,37 +158,16 @@ def filter_and_rank_candidates(tickers: list, config: dict,
         lolos_struktural += 1
 
         if apply_pump_gate:
-            window_ok, alasan = _change_window_ok(price_change_pct, config)
-            if not window_ok:
-                logger.debug("Rentang kenaikan menolak %s: %s", symbol, alasan)
+            ok_pump, alasan = is_pumping_today(
+                symbol, price_change_pct, quote_volume, config)
+            if not ok_pump:
+                logger.debug("Gerbang pump menolak %s: %s", symbol, alasan)
                 continue
-            prasedia.append((symbol, base_asset, price_change_pct,
-                             quote_volume, last_price))
-            continue
 
         out.append(Candidate(
             symbol=symbol, base_asset=base_asset, price_change_pct=price_change_pct,
             quote_volume=quote_volume, last_price=last_price,
         ))
-
-    if prasedia:
-        if prefetch_daily_fn is not None:
-            try:
-                prefetch_daily_fn([item[0] for item in prasedia])
-            except Exception as exc:  # noqa: BLE001 - jatuh ke mode serial per simbol
-                logger.debug("Prapengambilan candle harian dilewati: %s", exc)
-
-        for symbol, base_asset, price_change_pct, quote_volume, last_price in prasedia:
-            ok_pump, alasan = is_pumping_today(
-                symbol, price_change_pct, quote_volume,
-                get_daily_klines_fn, config, reference_ms=reference_ms)
-            if not ok_pump:
-                logger.debug("Gerbang pump menolak %s: %s", symbol, alasan)
-                continue
-            out.append(Candidate(
-                symbol=symbol, base_asset=base_asset, price_change_pct=price_change_pct,
-                quote_volume=quote_volume, last_price=last_price,
-            ))
 
     out.sort(key=lambda c: c.quote_volume, reverse=True)
 
@@ -432,27 +177,20 @@ def filter_and_rank_candidates(tickers: list, config: dict,
                         "saringan likuiditas.", len(out), lolos_struktural)
         else:
             logger.info("Gerbang pump: 0 kandidat lolos gerbang pump (dari %d simbol "
-                        "yang lolos saringan likuiditas). Ambang: naik %g%% sampai %s "
-                        "dan volume >= %gx rata-rata 7 hari.",
+                        "yang lolos saringan likuiditas). Ambang: naik %g%% sampai %s.",
                         lolos_struktural,
                         float(config.get("PUMP_MIN_24H_CHANGE_PCT", 10.0) or 0.0),
                         (f"{float(config.get('PUMP_MAX_24H_CHANGE_PCT', 0.0) or 0.0):g}%"
                          if float(config.get("PUMP_MAX_24H_CHANGE_PCT", 0.0) or 0.0) > 0
-                         else "tanpa batas atas"),
-                        float(config.get("PUMP_VOLUME_SURGE_MULT", 1.5) or 0.0))
+                         else "tanpa batas atas"))
     return out
 
-
-# ---------------------------------------------------------------------------
-# Kedalaman dan order book (hanya PAPER dan LIVE, tidak ada di backtest)
-# ---------------------------------------------------------------------------
 
 SELL_WALL_MIN_LEVELS = 3
 VALID_DEPTH_LIMITS = (100, 500, 1000)
 
 
 def normalize_depth_limit(value) -> int:
-    """Bulatkan ke atas ke limit depth yang valid di Binance (100, 500, 1000)."""
     try:
         v = int(float(value))
     except (TypeError, ValueError):
@@ -464,7 +202,6 @@ def normalize_depth_limit(value) -> int:
 
 
 def _parse_levels(raw) -> list[tuple[float, float]]:
-    """Ubah daftar [harga, qty] jadi tuple float. Level rusak dibuang."""
     out: list[tuple[float, float]] = []
     for lvl in raw or []:
         try:
@@ -479,19 +216,6 @@ def _parse_levels(raw) -> list[tuple[float, float]]:
 
 
 def evaluate_orderbook(depth, planned_notional: float, config: dict) -> tuple[bool, str, dict]:
-    """Nilai snapshot order book sebelum entry BUY.
-
-    Tiga pemeriksaan, semuanya fail closed bila data kosong atau rusak:
-    1. Kedalaman: total nilai ask dalam DEPTH_RANGE_PCT dari ask terbaik
-       harus >= DEPTH_MIN_ASK_NOTIONAL_MULT x nilai order.
-    2. Ketimpangan: total nilai bid di ORDERBOOK_LEVELS level teratas harus
-       >= ORDERBOOK_MIN_BID_ASK_RATIO x total nilai ask di level teratas.
-    3. Sell wall: tidak ada satu level ask di dalam SELL_WALL_RANGE_PCT yang
-       bernilai lebih dari SELL_WALL_MAX_SHARE_PCT dari total ask di rentang itu
-       (hanya dinilai bila ada minimal SELL_WALL_MIN_LEVELS level di rentang).
-
-    Mengembalikan (lolos, alasan, metrik).
-    """
     depth_on = bool(config.get("DEPTH_FILTER_ENABLED", False))
     book_on = bool(config.get("ORDERBOOK_FILTER_ENABLED", False))
     metrics: dict = {}
@@ -569,13 +293,8 @@ def evaluate_orderbook(depth, planned_notional: float, config: dict) -> tuple[bo
                   f"wall {metrics.get('wall_share', 0) * 100:.0f}%"), metrics
 
 
-# ---------------------------------------------------------------------------
-# Skor detector (hanya tampilan di dashboard, TIDAK mempengaruhi keputusan entry)
-# ---------------------------------------------------------------------------
-
 DETECTOR_COMPONENTS = (
     ("change", "DETECTOR_WEIGHT_CHANGE", "Kenaikan 24j"),
-    ("volume24", "DETECTOR_WEIGHT_VOLUME24", "Volume 24j"),
     ("volume5m", "DETECTOR_WEIGHT_VOLUME5M", "Volume 5m"),
     ("orderbook", "DETECTOR_WEIGHT_ORDERBOOK", "Order book"),
     ("atr", "DETECTOR_WEIGHT_ATR", "ATR"),
@@ -589,7 +308,6 @@ def _clamp01(x: float) -> float:
 
 
 def _closed_volume_ratio(klines: "list[Kline] | None", config: dict) -> Optional[float]:
-    """Volume candle tertutup terakhir dibanding rata-rata ROLLING_VOLUME_LOOKBACK_BARS sebelumnya."""
     lookback = max(1, int(config.get("ROLLING_VOLUME_LOOKBACK_BARS", 20) or 20))
     if not klines or len(klines) < lookback + 1:
         return None
@@ -609,7 +327,6 @@ def _closed_volume_ratio(klines: "list[Kline] | None", config: dict) -> Optional
 
 
 def orderbook_metrics(depth, planned_notional: float, config: dict) -> Optional[dict]:
-    """Metrik order book tanpa keputusan lolos atau tidak (untuk tampilan skor)."""
     if not isinstance(depth, dict):
         return None
     asks = sorted(_parse_levels(depth.get("asks")), key=lambda x: x[0])
@@ -643,20 +360,12 @@ def orderbook_metrics(depth, planned_notional: float, config: dict) -> Optional[
     }
 
 
-def compute_detector_score(change_pct, quote_volume, avg_daily_quote_volume,
+def compute_detector_score(change_pct,
                            klines_5m: "list[Kline] | None", last_price,
                            book: Optional[dict], config: dict) -> dict:
-    """Skor detector 0 sampai 100 dari lima komponen, hanya untuk tampilan.
-
-    Tiap komponen bernilai 0 sampai 1 relatif terhadap ambang yang dipakai bot,
-    lalu dibobot (DETECTOR_WEIGHT_*). Data yang tidak tersedia dihitung 0 dan
-    dicatat di ``missing``, jadi skor tidak pernah terlihat lebih baik dari
-    kenyataan. Tidak ada indikator teknikal (EMA, RSI, MACD).
-    """
     comps: dict = {}
     missing: list = []
 
-    # 1. Kenaikan 24 jam: penuh di dalam rentang gerbang pump, turun di luar rentang.
     lo = float(config.get("PUMP_MIN_24H_CHANGE_PCT", 6.0) or 0.0)
     hi = float(config.get("PUMP_MAX_24H_CHANGE_PCT", 0.0) or 0.0)
     try:
@@ -674,19 +383,6 @@ def compute_detector_score(change_pct, quote_volume, avg_daily_quote_volume,
         comps["change"] = {"sub": 0.0, "value": None, "unit": "%"}
         missing.append("change")
 
-    # 2. Lonjakan volume 24 jam dibanding rata-rata 7 hari.
-    surge = float(config.get("PUMP_VOLUME_SURGE_MULT", 2.0) or 0.0)
-    try:
-        ratio24 = float(quote_volume) / float(avg_daily_quote_volume)
-        if not math.isfinite(ratio24) or ratio24 < 0:
-            raise ValueError
-        comps["volume24"] = {"sub": _clamp01(ratio24 / surge) if surge > 0 else 1.0,
-                             "value": ratio24, "unit": "x"}
-    except (TypeError, ValueError, ZeroDivisionError):
-        comps["volume24"] = {"sub": 0.0, "value": None, "unit": "x"}
-        missing.append("volume24")
-
-    # 3. Lonjakan volume candle 5m terakhir.
     mult5 = float(config.get("ROLLING_VOLUME_SURGE_MULT", 2.0) or 0.0)
     r5 = _closed_volume_ratio(klines_5m, config)
     if r5 is None:
@@ -696,7 +392,6 @@ def compute_detector_score(change_pct, quote_volume, avg_daily_quote_volume,
         comps["volume5m"] = {"sub": _clamp01(r5 / mult5) if mult5 > 0 else 1.0,
                              "value": r5, "unit": "x"}
 
-    # 4. Kualitas order book: kedalaman 40%, bid/ask 30%, sell wall 30%.
     if book is None:
         comps["orderbook"] = {"sub": 0.0, "value": None, "unit": ""}
         missing.append("orderbook")
@@ -721,7 +416,6 @@ def compute_detector_score(change_pct, quote_volume, avg_daily_quote_volume,
             "bid_ask_ratio": ratio, "wall_share": share,
         }
 
-    # 5. ATR/harga: penuh di pita sehat, turun linear di luar pita.
     band_lo = float(config.get("DETECTOR_ATR_MIN_PCT", 0.3) or 0.0)
     band_hi = float(config.get("DETECTOR_ATR_MAX_PCT", 1.2) or 0.0)
     atr_val = None
@@ -831,30 +525,9 @@ def setup_quality_key(setup: SetupResult, candidate: Candidate) -> tuple:
 
 def find_best_candidate(tickers: list, klines_fetcher, config: dict,
                         tradable_symbols: "set | None" = None,
-                        daily_klines_fetcher=None,
-                        reference_ms: "int | None" = None,
-                        prefetch_daily_fn: "Optional[Callable[[list], None]]" = None,
                         klines_fetcher_many: "Optional[Callable[[list], dict]]" = None,
                         prewarm_fn: "Optional[Callable[[list], None]]" = None) -> Optional[Candidate]:
-    """Pilih kandidat terbaik yang lolos gerbang pump dan konfirmasi volume.
-
-    Parameter tambahan bersifat optimasi dan semuanya opsional:
-
-    - ``prefetch_daily_fn``: unduh candle harian banyak simbol sekaligus
-      sebelum gerbang pump dijalankan.
-    - ``klines_fetcher_many``: unduh candle konfirmasi semua kandidat teratas
-      sekaligus. Bila tidak diberikan atau gagal, dipakai ``klines_fetcher``
-      per simbol seperti sebelumnya.
-    - ``prewarm_fn``: siapkan harga (langganan WebSocket) untuk kandidat
-      teratas sedini mungkin, sementara candle konfirmasi sedang diunduh.
-
-    Keputusan akhir tidak berubah: yang dipilih tetap kandidat dengan volume
-    kuotasi terbesar di antara yang lolos konfirmasi.
-    """
-    ranked = filter_and_rank_candidates(
-        tickers, config, tradable_symbols,
-        get_daily_klines_fn=daily_klines_fetcher, reference_ms=reference_ms,
-        prefetch_daily_fn=prefetch_daily_fn)
+    ranked = filter_and_rank_candidates(tickers, config, tradable_symbols)
     top_n = ranked[: int(config.get("TOP_N_CANDIDATES_TO_CONFIRM", 10) or 10)]
     if not top_n:
         return None
@@ -862,14 +535,14 @@ def find_best_candidate(tickers: list, klines_fetcher, config: dict,
     if prewarm_fn is not None:
         try:
             prewarm_fn([cand.symbol for cand in top_n])
-        except Exception as exc:  # noqa: BLE001 - pemanasan tidak pernah fatal
+        except Exception as exc:
             logger.debug("Pemanasan harga kandidat dilewati: %s", exc)
 
     diprakira: dict = {}
     if klines_fetcher_many is not None and len(top_n) > 1:
         try:
             diprakira = klines_fetcher_many([cand.symbol for cand in top_n]) or {}
-        except Exception as exc:  # noqa: BLE001 - jatuh ke mode serial per simbol
+        except Exception as exc:
             logger.debug("Pengambilan candle paralel dilewati: %s", exc)
             diprakira = {}
 

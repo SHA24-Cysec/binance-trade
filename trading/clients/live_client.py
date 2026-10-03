@@ -1,24 +1,10 @@
-"""
-LiveClient: implementasi ExchangeClient untuk mode LIVE.
-
-- Data pasar: sama seperti PAPER, lewat MarketDataProvider (REST publik keyless
-  + WebSocket). Dipakai bersama supaya sumber data identik antar mode.
-- Akun & order: SUNGGUHAN lewat BinanceSpotClient bertanda tangan (uang asli).
-- Dust sweep: didukung (endpoint /sapi/* bertanda tangan) -- hanya relevan LIVE.
-
-Perbedaan satu-satunya dari PAPER ada di lapisan eksekusi & sumber saldo; logika
-strategi di pump_scanner_bot.py identik.
-
-Versi acuan: requests>=2.32.4, Python 3.10+.
-"""
-
 from __future__ import annotations
 
 import logging
 import time
 from typing import Optional
 
-from trading.clients.binance_client import BinanceAPIError, BinanceSpotClient, _fmt_num
+from trading.clients.binance_client import BinanceAPIError, BinanceSpotClient
 from config.config import get_base_url
 from trading.clients.exchange_client import (
     ACCOUNT_SPOT_PERMISSION_SOURCE,
@@ -90,13 +76,6 @@ class LiveClient(ExchangeClient):
         return self.market.get_depth(symbol, limit=limit)
 
     def _verify_api_key_spot_permission(self) -> None:
-        """Verifikasi izin trading milik API key, bukan hanya status akun.
-
-        ``GET /api/v3/account`` pada sebagian respons produksi dapat tidak
-        menyertakan ``permissions`` walaupun ``canTrade`` dan ``accountType``
-        valid. Endpoint apiRestrictions adalah sumber resmi untuk izin API key.
-        Hasil di-cache singkat agar tiap pembacaan saldo tidak menambah request.
-        """
         now = time.monotonic()
         if now < self._spot_permission_verified_until:
             return
@@ -133,7 +112,6 @@ class LiveClient(ExchangeClient):
 
     @classmethod
     def _safe_permission_diagnostic(cls, account: dict) -> str:
-        """Ringkas field permission tanpa saldo, UID, atau karakter kontrol."""
         if "permissions" not in account:
             return "<field tidak ada>"
         raw = account.get("permissions")
@@ -176,29 +154,6 @@ class LiveClient(ExchangeClient):
             symbol, side, quantity=quantity, quote_order_qty=quote_order_qty,
             new_client_order_id=new_client_order_id,
         )
-
-    def new_order(self, symbol: str, side: str, order_type: str,
-                  quantity: Optional[float] = None,
-                  price: Optional[float] = None,
-                  stop_price: Optional[float] = None,
-                  time_in_force: Optional[str] = None,
-                  quote_order_qty: Optional[float] = None,
-                  new_client_order_id: Optional[str] = None) -> dict:
-        params = {"symbol": symbol, "side": side, "type": order_type}
-        if quantity is not None:
-            params["quantity"] = _fmt_num(quantity)
-        if quote_order_qty is not None:
-            params["quoteOrderQty"] = _fmt_num(quote_order_qty)
-        if price is not None:
-            params["price"] = _fmt_num(price)
-        if stop_price is not None:
-            params["stopPrice"] = _fmt_num(stop_price)
-        if time_in_force is not None:
-            params["timeInForce"] = time_in_force
-        if new_client_order_id is not None:
-            params["newClientOrderId"] = new_client_order_id
-        return self.signed._request("POST", "/api/v3/order", params,
-                                    signed=True, max_retries=1)
 
     def place_native_stop_loss(self, symbol: str, quantity: float,
                                stop_price: float,

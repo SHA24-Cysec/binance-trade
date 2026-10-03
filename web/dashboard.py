@@ -1,21 +1,3 @@
-#!/usr/bin/env python3
-"""Dashboard pemantauan dan kontrol Pump Scanner Bot Binance Spot.
-
-Dashboard menyediakan Resume Bot dan Stop Bot untuk child process bot.
-Kontrol perubahan mode, kredensial, settings, reset PAPER, dan restart manual
-tidak disediakan. Mode aktif dibaca dari BOT_MODE di .env saat dashboard
-mulai. File state, log, lock, dan lifecycle tetap dipisahkan untuk PAPER dan
-LIVE; Resume ditolak jika mode lain berjalan atau masih memiliki posisi.
-
-Keamanan sengaja berlapis: bind default 127.0.0.1, validasi Host dan Origin,
-token admin per proses untuk semua request tulis, pembatasan request, dan
-mode read-only otomatis jika bind bukan loopback. Dashboard tidak memiliki
-login dan tidak ditujukan untuk diekspos ke internet.
-
-Menjalankan ``python dashboard.py`` atau ``python run.py`` membuka dashboard
-dengan bot STOPPED. Bot baru berjalan setelah tombol Resume Bot ditekan.
-"""
-
 from __future__ import annotations
 
 import ipaddress
@@ -118,8 +100,6 @@ _rate_lock = threading.RLock()
 _last_dangerous_action: dict[str, float] = {}
 _write_attempts: dict[str, list[float]] = {}
 
-# Aksi proses dijalankan di worker agar request HTTP langsung mendapat jawaban.
-# STOP dapat menunggu penjualan posisi dan shutdown graceful cukup lama.
 _control_operation_lock = threading.RLock()
 _control_operation: dict | None = None
 _CONTROL_ACTIVE_STATUSES = frozenset(("PENDING", "RUNNING"))
@@ -302,7 +282,6 @@ PRICE_TTL = 5.0
 BALANCE_TTL = 30.0
 
 DETECTOR_TTL = 120.0
-DETECTOR_DAILY_TTL = 3600.0
 DETECTOR_WORKERS = 4
 
 
@@ -611,19 +590,10 @@ def _bt_cleanup_old_jobs():
 
 
 def _bt_simulation_interval(cfg: dict) -> str:
-    """Interval candle simulasi backtest portofolio.
-
-    Harus sama dengan interval konfirmasi bot (CONFIRM_INTERVAL) supaya
-    jendela setup yang dievaluasi backtest identik dengan bot; lihat
-    pump_scanner_bot (get_klines pakai CONFIRM_INTERVAL) dan backtest CLI
-    (backtest.py juga CONFIRM_INTERVAL). MARKET_DATA_INTERVAL hanya mengatur
-    monitoring pasar, bukan simulasi.
-    """
     return str(cfg.get("CONFIRM_INTERVAL", "5m") or "5m")
 
 
 def _bt_estimate_requests(days: int, max_symbols: int, cfg: dict) -> int:
-    """Perkiraan jumlah request unduh klines: simbol x halaman (1000 bar)."""
     interval = _bt_simulation_interval(cfg)
     bars_per_hari = 1440 // bt.INTERVAL_MINUTES.get(interval, 5)
     halaman = max(1, -(-(days + 1) * bars_per_hari // 1000))
@@ -708,15 +678,6 @@ def _bt_prepare_universe(job_id: str, cfg: dict, days: int, max_symbols: int,
                 "Periksa koneksi ke Binance."
             )
 
-        set_progress(0.80, "mengunduh volume harian untuk gerbang pump...")
-        pbt.fetch_universe_daily_klines(
-            client, symbols_with_data,
-            fetch_start_ms - 8 * bt.MS_PER_DAY, end_ms, store,
-            progress_cb=lambda frac, sym: set_progress(
-                0.80 + frac * 0.02, f"volume harian {sym}"),
-            cancel_cb=cancelled,
-        )
-
         btc_klines = None
         btc_error = ""
         if cfg.get("BTC_FILTER_ENABLED", False):
@@ -755,12 +716,6 @@ def _bt_prepare_universe(job_id: str, cfg: dict, days: int, max_symbols: int,
 
 
 def _json_safe(value):
-    """Ganti nilai tak hingga/NaN dengan None.
-
-    Flask menulis float('inf') sebagai `Infinity` yang BUKAN JSON sah, sehingga
-    JSON.parse di browser gagal dan seluruh hasil backtest tidak tampil. Kasus ini
-    nyata: profit factor bernilai inf bila tidak ada trade rugi.
-    """
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     if isinstance(value, dict):
@@ -1300,12 +1255,10 @@ def index():
 
 
 _detector_cache: dict = {"data": None, "ts": 0.0, "error": None}
-_detector_daily_cache: dict = {}
 _detector_state: dict = {"running": False}
 
 
 def _detector_planned_notional() -> float:
-    """Ukuran order acuan untuk menilai kedalaman order book."""
     for key in ("MAX_POSITION_USDT", "POSITION_SIZE_USDT"):
         try:
             v = float(PUMP_CONFIG.get(key, 0) or 0)
@@ -1316,30 +1269,11 @@ def _detector_planned_notional() -> float:
     return 100.0
 
 
-def _detector_daily_avg(client, symbol: str, now_ms: int):
-    now = time.time()
-    with _cache_lock:
-        hit = _detector_daily_cache.get(symbol)
-    if hit and now - hit[0] < DETECTOR_DAILY_TTL:
-        return hit[1], hit[2]
-    try:
-        raw = client.get_klines(symbol, "1d", limit=scanner.PUMP_GATE_DAILY_CANDLES + 1)
-        avg, why = scanner.average_prior_daily_quote_volume(
-            strategy_ind.parse_klines(raw), now_ms)
-    except Exception as exc:
-        return None, f"gagal mengambil candle harian: {str(exc)[:80]}"
-    with _cache_lock:
-        _detector_daily_cache[symbol] = (now, avg, why)
-    return avg, why
-
-
 def _detector_score_symbol(client, symbol: str, ticker: dict, planned: float) -> dict:
     now_ms = int(time.time() * 1000)
     price = float(ticker.get("lastPrice", 0) or 0)
     chg = float(ticker.get("priceChangePercent", 0) or 0)
     qv = float(ticker.get("quoteVolume", 0) or 0)
-
-    avg, avg_why = _detector_daily_avg(client, symbol, now_ms)
 
     klines = None
     try:
@@ -1358,9 +1292,9 @@ def _detector_score_symbol(client, symbol: str, ticker: dict, planned: float) ->
         depth = None
 
     book = scanner.orderbook_metrics(depth, planned, PUMP_CONFIG)
-    det = scanner.compute_detector_score(chg, qv, avg, klines, price, book, PUMP_CONFIG)
+    det = scanner.compute_detector_score(chg, klines, price, book, PUMP_CONFIG)
 
-    gate_ok, gate_reason = scanner.evaluate_pump_gate(chg, qv, avg, PUMP_CONFIG)
+    gate_ok, gate_reason = scanner.evaluate_pump_gate(chg, qv, PUMP_CONFIG)
     if depth is None:
         book_ok, book_reason = False, "order book gagal diambil"
     else:
@@ -1382,7 +1316,6 @@ def _detector_score_symbol(client, symbol: str, ticker: dict, planned: float) ->
 
 
 def _detector_rebuild() -> None:
-    """Hitung ulang skor di thread latar belakang, hasil disimpan di cache."""
     try:
         client = get_client()
         if client is None:
@@ -1456,7 +1389,6 @@ def _detector_rebuild() -> None:
 
 
 def build_detector() -> dict:
-    """Skor detector (hanya tampilan). Tidak pernah memblokir request: hitung di latar belakang."""
     if not detector_enabled(PUMP_CONFIG):
         return {"enabled": False, "items": [], "summary": {}, "error": None}
     now = time.time()
@@ -1477,20 +1409,6 @@ def build_detector() -> dict:
     out = dict(data)
     out.update(loading=running, error=error, updated_at=ts)
     return out
-
-
-def _bot_has_open_position() -> bool:
-    try:
-        st = load_state()
-    except Exception:
-        return True
-    if not isinstance(st, dict):
-        return True
-    try:
-        qty = float(st.get("qty", 0) or 0)
-    except (TypeError, ValueError):
-        return True
-    return bool(st.get("current_symbol")) and qty > 0
 
 
 @app.route("/api/detector")
@@ -1704,8 +1622,6 @@ def api_control_execute():
     if payload.get("mode") != get_mode(PUMP_CONFIG):
         return jsonify({"error": "Mode berubah sejak konfirmasi. Ulangi aksi."}), 409
 
-    # Pemeriksaan dan pembuatan operation harus atomik agar klik ganda tidak
-    # pernah meluncurkan dua worker START/STOP.
     with _control_operation_lock:
         if (
             _control_operation
@@ -1770,8 +1686,6 @@ def api_control_execute():
         )
         return jsonify({"error": "Worker kontrol gagal dimulai."}), 500
 
-    # Jangan tunggu proses bot selesai di request HTTP. Browser mendapat ACK
-    # cepat dan memantau hasil akhirnya melalui /api/control/status.
     return jsonify({
         "ok": True,
         "accepted": True,

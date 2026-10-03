@@ -1,34 +1,3 @@
-"""
-Persistensi state akun simulasi PAPER.
-
-Menyimpan saldo virtual per aset, order terbuka, riwayat order, riwayat trade,
-total fee, dan versi skema ke satu file JSON. Dipisah dari file state posisi bot
-(data/pump_bot_state_*.json) dan TIDAK pernah dipakai di LIVE, sehingga data
-PAPER dan LIVE tidak mungkin tercampur.
-
-Kenapa JSON, bukan SQLite?
-- Konsisten dengan state.py yang sudah memakai JSON atomik.
-- Volume tulis rendah (satu posisi aktif per rotasi, order jarang).
-- Mudah diperiksa/di-reset manusia (cukup hapus/pindahkan file).
-- Tanpa dependensi tambahan.
-Trade-off: query historis besar kurang efisien -- dapat diterima karena
-riwayat kecil. Bila kelak butuh analitik berat, migrasi ke SQLite mudah karena
-akses state sudah terbungkus di kelas ini.
-
-Ketahanan:
-- Tulis atomik: tulis ke file .tmp lalu os.replace (atomik di POSIX & Windows),
-  jadi file tidak pernah setengah-tertulis walau proses mati mendadak.
-- Semua akses dijaga threading.RLock (loop bot + thread WS + dashboard).
-- File korup saat load: dibuat cadangan *.corrupt-<ts> lalu diberi tahu lewat
-  log, TIDAK ditimpa diam-diam. State direset ke saldo awal.
-- schema_version + migrasi sederhana (registry fungsi per versi).
-
-Semua nilai uang/qty disimpan sebagai STRING desimal (mempertahankan presisi)
-dan dipakai sebagai Decimal di memori.
-
-Versi acuan: Python 3.10+ (Decimal, os.replace).
-"""
-
 from __future__ import annotations
 
 import json
@@ -192,10 +161,6 @@ class PaperStore:
     def get_free(self, asset: str) -> Decimal:
         with self.lock:
             return _d(self._bal(asset)["free"])
-
-    def get_locked(self, asset: str) -> Decimal:
-        with self.lock:
-            return _d(self._bal(asset)["locked"])
 
     def credit(self, asset: str, amount: Decimal) -> None:
         with self.lock:

@@ -1,11 +1,3 @@
-"""
-Struktur candle, parser klines, interval pasar, ATR, dan level exit.
-Modul ini juga menyediakan sizing posisi dan model harga eksekusi backtest
-yang dipakai jalur pembukaan posisi bot maupun backtest.
-
-Array candle memakai urutan kronologis, index 0 adalah candle paling lama.
-"""
-
 from __future__ import annotations
 
 import math

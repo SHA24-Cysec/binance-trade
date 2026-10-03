@@ -1,14 +1,3 @@
-#!/usr/bin/env python3
-"""
-Backtest simbol tunggal dengan simulasi eksekusi penuh.
-
-run_backtest() mengevaluasi sinyal entry (gerbang pump, konfirmasi volume
-rolling, likuiditas) lalu menyimulasikan siklus BUY/SELL: latency entry (OPEN
-bar berikutnya secara default), spread/slippage eksekusi, fee, cooldown
-setelah close, dan level exit FIXED/ATR. Tidak ada order nyata yang
-dikirim; semua berbasis data historis.
-"""
-
 from __future__ import annotations
 
 import copy
@@ -76,12 +65,6 @@ def bars_per_day(interval: str) -> int:
 
 
 def initial_backtest_equity(config: dict) -> float:
-    """Modal awal simulasi.
-
-    BACKTEST_INITIAL_EQUITY_USDT bernilai 0 (default) berarti mengikuti saldo awal
-    PAPER (PAPER_INITIAL_BALANCES), supaya persen return dan drawdown sebanding
-    dengan bot. Isi angka positif untuk memakai modal lain.
-    """
     paper = (config.get("PAPER_INITIAL_BALANCES", {}) or {}).get(
         config.get("QUOTE_ASSET", "USDT"), 10_000.0)
     value = float(config.get("BACKTEST_INITIAL_EQUITY_USDT", 0.0) or 0.0)
@@ -91,18 +74,12 @@ def initial_backtest_equity(config: dict) -> float:
 
 
 def entry_execution_params(config: dict) -> tuple:
-    """Parameter simulasi eksekusi entry (spread, slippage, delay bar).
-
-    Fallback SATU sumber kebenaran: bila kunci tidak ada di config (misalnya
-    config parsial dari grid search), pakai PUMP_DEFAULTS, bukan angka lokal,
-    supaya default backtest identik dengan default bot di config.py.
-    """
     try:
         from config.config import PUMP_DEFAULTS
         d_spread = PUMP_DEFAULTS.get("BACKTEST_ENTRY_SPREAD_PCT", 0.10)
         d_slip = PUMP_DEFAULTS.get("BACKTEST_SLIPPAGE_PCT", 0.05)
         d_delay = PUMP_DEFAULTS.get("BACKTEST_ENTRY_DELAY_BARS", 1)
-    except ImportError:  # config tidak tersedia (misal dipakai sebagai pustaka)
+    except ImportError:
         d_spread, d_slip, d_delay = 0.10, 0.05, 1
 
     spread = max(0.0, float(config.get("BACKTEST_ENTRY_SPREAD_PCT", d_spread) or 0.0))
@@ -183,12 +160,10 @@ def fetch_full_klines(
 
 def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
                   progress_cb: Optional[Callable[[float], None]] = None,
-                  daily_klines: Optional[list[Kline]] = None,
                   btc_klines: Optional[list[Kline]] = None) -> BacktestResult:
     interval = config.get("CONFIRM_INTERVAL", "5m")
     window = bars_per_day(interval)
     stats = compute_rolling_24h_stats(klines, window)
-    daily_series = daily_klines if daily_klines else scanner.aggregate_to_daily(klines)
 
     lookback = strategy.confirm_window_bars(config)
     min_vol = config["MIN_QUOTE_VOLUME_USDT_24H"]
@@ -248,7 +223,7 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
             if not entries_paused and st is not None and st["vol24h"] >= min_vol \
                     and candle.open_time >= next_entry_allowed_at \
                     and scanner.pump_gate_ok_at(
-                        daily_series, candle.close_time, st["pct24h"], st["vol24h"], gate_cfg,
+                        st["pct24h"], st["vol24h"], gate_cfg,
                         btc_drop_pct=(btc_lookup.drop_pct_at(candle.open_time)
                                       if btc_lookup is not None else None)):
                 window_klines = klines[max(0, i - lookback + 1): i + 1]
@@ -271,12 +246,7 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
                         entry_candle = klines[entry_idx]
                         raw_entry_price = entry_candle.open
                         entry_time_value = entry_candle.open_time
-                        # Posisi sudah terbuka di open candle ini, jadi rentang
-                        # high/low candle entry ikut dievaluasi (seperti bot live).
                         first_exit_idx = entry_idx
-                    # Paritas open_position(): kunci level exit SEBELUM posisi
-                    # dibuka, dan tolak entry yang akan ditolak bot live. ATR
-                    # diambil dari jendela konfirmasi yang sama dengan bot live.
                     level_cfg = dict(config)
                     if bool(config.get("USE_ATR_EXIT", False)):
                         atr_val = setup.atr_value
@@ -552,9 +522,7 @@ def selftest():
 
     print("\n=== SELFTEST backtest.py: entry konfirmasi volume + TP ===")
     from config.config import PUMP_CONFIG
-    from backtesting.synthetic_data import (
-        cfg_gerbang_pump_nonaktif, riwayat_harian,
-    )
+    from backtesting.synthetic_data import cfg_gerbang_pump_nonaktif
     cfg = cfg_gerbang_pump_nonaktif(PUMP_CONFIG)
     cfg["MIN_QUOTE_VOLUME_USDT_24H"] = 1_000_000
     cfg["BACKTEST_ENTRY_DELAY_BARS"] = 0
@@ -575,7 +543,7 @@ def selftest():
     kl_setup = [_make_candle(i * 300_000, v, v + 1, max(0.01, v - 1), v,
                              vol=(10_000_000.0 if i >= len(vals) - 2 else 5_000_000.0))
                 for i, v in enumerate(vals)]
-    result = run_backtest(kl_setup, cfg, warmup_bars=0, daily_klines=riwayat_harian(kl_setup))
+    result = run_backtest(kl_setup, cfg, warmup_bars=0)
     assert len(result.trades) >= 1, "Backtest harus mendeteksi minimal 1 entry pada skenario sah"
     first = result.trades[0]
     assert first.reason in ("STOP_LOSS", "TAKE_PROFIT", "BREAKEVEN", "TRAILING_STOP", "END_OF_DATA")
@@ -586,7 +554,7 @@ def selftest():
     print("\n=== SELFTEST backtest.py: tidak ada entry kalau gerbang likuiditas tidak lolos ===")
     cfg2 = dict(cfg)
     cfg2["MIN_QUOTE_VOLUME_USDT_24H"] = 1e18
-    result2 = run_backtest(kl_setup, cfg2, warmup_bars=0, daily_klines=riwayat_harian(kl_setup))
+    result2 = run_backtest(kl_setup, cfg2, warmup_bars=0)
     assert len(result2.trades) == 0, "Harusnya tidak ada entry kalau gerbang volume mustahil"
     assert len(result.trades) > 0, "Kontrol positif gagal: data wajar harus menghasilkan trade"
     print("  -> OK")
@@ -626,7 +594,7 @@ def selftest():
     sl_cfg["TP_PCT"] = 999.0
     sl_cfg["USE_STOP_LOSS"] = True
     sl_cfg["SL_PCT"] = 3.0
-    sl_result = run_backtest(sl_klines, sl_cfg, warmup_bars=0, daily_klines=riwayat_harian(sl_klines))
+    sl_result = run_backtest(sl_klines, sl_cfg, warmup_bars=0)
     assert len(sl_result.trades) >= 1, "Skenario Stop Loss harus menghasilkan entry"
     sl_trade = sl_result.trades[0]
     assert sl_trade.reason == "STOP_LOSS", f"Harusnya keluar karena STOP_LOSS, dapat: {sl_trade.reason}"
@@ -655,20 +623,18 @@ def selftest():
     def _mk(i, o, h, l, c, vol=10_000_000.0):
         return _make_candle(i * 300_000, o, h, l, c, vol=vol)
 
-    # 1) Candle ENTRY dievaluasi: crash di candle entry harus kena SL, tidak lolos diam-diam.
     cfg_d1 = dict(cfg, BACKTEST_ENTRY_DELAY_BARS=1)
     k_crash = list(kl_setup)
     k_crash[308] = _mk(308, 100.5, 101.5, 70.0, 100.5)
-    r_ec = run_backtest(k_crash, cfg_d1, warmup_bars=0, daily_klines=riwayat_harian(k_crash))
+    r_ec = run_backtest(k_crash, cfg_d1, warmup_bars=0)
     assert len(r_ec.trades) == 1, "Crash di candle entry harus menghasilkan satu trade SL"
     t_ec = r_ec.trades[0]
     assert t_ec.reason == "STOP_LOSS" and t_ec.entry_time == 308 * 300_000 and t_ec.exit_price < 81.0, \
         (t_ec.reason, t_ec.entry_time, t_ec.exit_price)
-    r_ok = run_backtest(kl_setup, cfg_d1, warmup_bars=0, daily_klines=riwayat_harian(kl_setup))
+    r_ok = run_backtest(kl_setup, cfg_d1, warmup_bars=0)
     assert [t.reason for t in r_ok.trades] == ["END_OF_DATA"], "Kontrol positif tanpa crash"
     print("  candle entry dievaluasi (SL kena di candle entry) -> OK")
 
-    # 2) Urutan exit pada satu candle: BE yang sudah aktif lebih dulu daripada SL, gap ke bawah SL.
     lv_pct = {"sl_pct": 2.0, "tp_pct": 10.0, "be_trigger_pct": 1.0, "be_lock_pct": 0.1,
               "trail_start_pct": 5.0, "trail_step_pct": 1.0, "source": "FIXED"}
     cfg_x = {"USE_STOP_LOSS": True, "USE_TP": True, "USE_BREAKEVEN": True, "USE_TRAILING": False}
@@ -688,9 +654,7 @@ def selftest():
     assert verdict == ("TAKE_PROFIT", 115.0), verdict
     print("  urutan exit BE-sebelum-SL, gap SL, SL-vs-TP, gap TP -> OK")
 
-    # 3) Filter MAX_CHASE_PCT, MIN_SECONDS_BETWEEN_TRADES dan cooldown.
-    r_ch = run_backtest(kl_setup, dict(cfg_d1, MAX_CHASE_PCT=0.1), warmup_bars=0,
-                        daily_klines=riwayat_harian(kl_setup))
+    r_ch = run_backtest(kl_setup, dict(cfg_d1, MAX_CHASE_PCT=0.1), warmup_bars=0)
     assert len(r_ch.trades) == 0 and r_ch.chase_skips >= 1, (len(r_ch.trades), r_ch.chase_skips)
     assert parity.chase_exceeded(101.6, 100.0, 1.5) and not parity.chase_exceeded(101.4, 100.0, 1.5)
     assert not parity.chase_exceeded(150.0, 100.0, 0.0)
@@ -700,16 +664,12 @@ def selftest():
                                             "MIN_SECONDS_BETWEEN_TRADES": 600}) == 1000 + 600_000
     print("  MAX_CHASE_PCT dan jeda antar trade -> OK")
 
-    # 4) Filter BTC: turun melewati ambang memblokir entry, data hilang ditolak (fail closed).
     btc_flat = [_mk(i, 100.0, 100.0, 100.0, 100.0) for i in range(309)]
     btc_crash = [_mk(i, c, c, c, c) for i, c in enumerate([100.0] * 305 + [98.0, 96.5, 95.0, 95.0])]
-    r_b0 = run_backtest(kl_setup, cfg, warmup_bars=0, daily_klines=riwayat_harian(kl_setup),
-                        btc_klines=btc_flat)
-    r_b1 = run_backtest(kl_setup, cfg, warmup_bars=0, daily_klines=riwayat_harian(kl_setup),
-                        btc_klines=btc_crash)
-    r_b2 = run_backtest(kl_setup, cfg, warmup_bars=0, daily_klines=riwayat_harian(kl_setup),
-                        btc_klines=btc_flat[:300])
-    r_b3 = run_backtest(kl_setup, cfg, warmup_bars=0, daily_klines=riwayat_harian(kl_setup))
+    r_b0 = run_backtest(kl_setup, cfg, warmup_bars=0, btc_klines=btc_flat)
+    r_b1 = run_backtest(kl_setup, cfg, warmup_bars=0, btc_klines=btc_crash)
+    r_b2 = run_backtest(kl_setup, cfg, warmup_bars=0, btc_klines=btc_flat[:300])
+    r_b3 = run_backtest(kl_setup, cfg, warmup_bars=0)
     assert len(r_b0.trades) == 1 and not any("BTC" in w for w in r_b0.warnings)
     assert len(r_b1.trades) == 0, "BTC turun 5 persen harus memblokir entry"
     assert len(r_b2.trades) == 0, "Data BTC tidak ada pada titik sinyal harus fail closed"
@@ -717,7 +677,6 @@ def selftest():
         "Tanpa data BTC harus ada peringatan eksplisit"
     print("  filter BTC (lolos, blokir, fail closed, peringatan) -> OK")
 
-    # 5) Kontrol akun: DD stop, stop harian, penutupan paksa satu kali per episode.
     ctl = parity.AccountRiskControls({"USE_EQUITY_STOP": True, "MAX_DRAWDOWN_PERCENT": 10.0,
                                       "DD_COOLDOWN_HOURS": 1, "USE_DAILY_STOP": False,
                                       "CLOSE_ALL_AT_LIMIT": True}, 1000.0)
@@ -742,16 +701,14 @@ def selftest():
     cfg_fc = dict(cfg, BACKTEST_INITIAL_EQUITY_USDT=1000.0, MAX_DAILY_LOSS_PERCENT=1.0)
     k_fc = list(kl_setup)
     k_fc[308] = _mk(308, 100.0, 100.2, 84.0, 85.0)
-    r_fc = run_backtest(k_fc, cfg_fc, warmup_bars=0, daily_klines=riwayat_harian(k_fc))
+    r_fc = run_backtest(k_fc, cfg_fc, warmup_bars=0)
     assert len(r_fc.trades) == 1 and r_fc.trades[0].reason == "RISK_LIMIT_TRIGGERED", \
         [t.reason for t in r_fc.trades]
     assert r_fc.trades[0].exit_price == 85.0 and r_fc.risk_events["forced_close"] == 1
-    r_nf = run_backtest(k_fc, dict(cfg_fc, CLOSE_ALL_AT_LIMIT=False), warmup_bars=0,
-                        daily_klines=riwayat_harian(k_fc))
+    r_nf = run_backtest(k_fc, dict(cfg_fc, CLOSE_ALL_AT_LIMIT=False), warmup_bars=0)
     assert r_nf.trades[0].reason == "END_OF_DATA", "CLOSE_ALL_AT_LIMIT=False tidak menutup posisi"
     print("  kontrol akun (DD, harian, force close, reset) -> OK")
 
-    # 6) Modal awal mengikuti PAPER, metrik per trade, lookup BTC.
     base_eq = {"QUOTE_ASSET": "USDT", "PAPER_INITIAL_BALANCES": {"USDT": 1000.0}}
     assert initial_backtest_equity(dict(base_eq, BACKTEST_INITIAL_EQUITY_USDT=0.0)) == 1000.0
     assert initial_backtest_equity(dict(base_eq)) == 1000.0
@@ -862,12 +819,6 @@ def main():
     if len(klines) < warmup + 50:
         raise BacktestError(f"Data terlalu sedikit ({len(klines)} candle) untuk backtest yang berarti.")
 
-    daily_raw = client.get_klines(args.symbol, interval="1d", limit=1000,
-                                  start_time_ms=start_ms - 8 * MS_PER_DAY,
-                                  end_time_ms=end_ms)
-    daily_klines = strategy.parse_klines(daily_raw)
-    print(f"Dapat {len(daily_klines)} candle harian untuk gerbang pump.")
-
     btc_klines = None
     if cfg.get("BTC_FILTER_ENABLED", False):
         btc_symbol = "BTC" + str(cfg.get("QUOTE_ASSET", "USDT"))
@@ -899,7 +850,7 @@ def main():
 
         try:
             hasil = run_grid_search(
-                klines, cfg, spec, warmup, daily_klines=daily_klines,
+                klines, cfg, spec, warmup,
                 metrik=args.grid_metric, rasio_latih=args.grid_train,
                 min_trades=args.grid_min_trades, progress_cb=_progress,
                 btc_klines=btc_klines)
@@ -910,8 +861,7 @@ def main():
         cetak_tabel(hasil, top_n=args.grid_top)
         return
 
-    result = run_backtest(klines, cfg, warmup, daily_klines=daily_klines,
-                          btc_klines=btc_klines)
+    result = run_backtest(klines, cfg, warmup, btc_klines=btc_klines)
     print_single_result(result)
 
 

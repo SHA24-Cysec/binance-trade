@@ -1,10 +1,3 @@
-"""Kontrol proses lintas Windows dan POSIX untuk bot.
-
-Semua cabang spesifik OS sengaja dikumpulkan di modul ini. Jalur shutdown
-utama tetap file kontrol kooperatif. Fungsi sinyal di sini hanya cadangan
-setelah timeout.
-"""
-
 from __future__ import annotations
 
 import os

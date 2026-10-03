@@ -1,26 +1,3 @@
-"""Skema, validasi, dan pembacaan konfigurasi runtime bot.
-
-Override konfigurasi per mode dapat disimpan dalam ``data/settings.json``
-dengan struktur:
-
-    {
-      "overrides": {
-        "PAPER": {"LOOP_INTERVAL_SECONDS": 9},
-        "LIVE": {}
-      }
-    }
-
-Mode aktif tidak dibaca dari file ini. Mode dipilih melalui ``BOT_MODE`` di
-``.env`` dan diterapkan setelah dashboard dijalankan ulang. Kunci lama
-``active_mode`` masih diterima tetapi sengaja diabaikan untuk kompatibilitas.
-File yang rusak diarsipkan sebagai ``settings.json.corrupt-<ts>`` lalu ditandai
-di ``settings.error.json``; bot selalu jatuh ke default aman (PAPER) dan tidak
-pernah menimpa file rusak secara diam-diam.
-
-Modul ini tidak meng-from config import config.py agar config.py dapat memakainya saat
-proses import tanpa circular import. Semua path runtime berakar di folder repo.
-"""
-
 from __future__ import annotations
 
 import json
@@ -92,13 +69,11 @@ PARAMETER_SCHEMA: dict[str, dict] = {
 
     "MARKET_SCAN_INTERVAL_SECONDS": _field("Scan", "Interval scan pasar", "Jarak waktu pemindaian seluruh pasar.", "int", minimum=10, maximum=86400, unit="detik"),
     "LOOP_INTERVAL_SECONDS": _field("Scan", "Interval loop", "Jarak evaluasi posisi dan kontrol.", "int", minimum=1, maximum=300, unit="detik"),
-    "MARKET_DATA_WORKERS": _field("Scan", "Worker pengambilan data pasar", "Jumlah thread paralel untuk mengambil candle harian dan candle konfirmasi saat scan. 1 berarti serial seperti versi lama.", "int", minimum=1, maximum=32, unit="thread"),
-    "DAILY_KLINE_CACHE_TTL_SECONDS": _field("Scan", "Usia cache candle harian", "Candle harian disimpan selama ini sebelum diunduh ulang. Candle harian hanya berubah sekali sehari, jadi nilai besar aman dan menghemat banyak panggilan API.", "int", minimum=0, maximum=86400, unit="detik"),
+    "MARKET_DATA_WORKERS": _field("Scan", "Worker pengambilan data pasar", "Jumlah thread paralel untuk mengambil candle konfirmasi saat scan. 1 berarti serial seperti versi lama.", "int", minimum=1, maximum=32, unit="thread"),
     "MIN_QUOTE_VOLUME_USDT_24H": _field("Scan", "Minimum volume kuotasi", "Volume 24 jam minimum.", "float", minimum=0, maximum=1e15, unit="USDT"),
     "MARKET_DATA_INTERVAL": _field("Scan", "Interval data pasar", "Interval candle yang digunakan untuk monitoring pasar.", "str", editor="select", options=["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"]),
     "PUMP_MIN_24H_CHANGE_PCT": _field("Monitoring Pasar", "Minimum perubahan 24 jam", "Filter monitoring perubahan harga 24 jam.", "float", minimum=0, maximum=1000, unit="%"),
     "PUMP_MAX_24H_CHANGE_PCT": _field("Monitoring Pasar", "Maksimum perubahan 24 jam", "Koin yang sudah naik lebih dari persen ini dalam 24 jam ditolak agar bot tidak membeli di pucuk. Harus lebih besar dari minimum. 0 = nonaktif.", "float", minimum=0, maximum=1000, unit="%", dangerous=True),
-    "PUMP_VOLUME_SURGE_MULT": _field("Monitoring Pasar", "Pengali volume monitoring", "Filter monitoring volume kuotasi dibandingkan rata-rata 7 hari.", "float", minimum=1, maximum=100, unit="x"),
     "BTC_FILTER_ENABLED": _field("Monitoring Pasar", "Filter kondisi BTC", "Filter monitoring kondisi BTC pada jendela candle tertutup.", "bool"),
     "BTC_MAX_DROP_PCT": _field("Monitoring Pasar", "Penurunan BTC maksimum", "Batas penurunan BTC untuk filter monitoring.", "float", minimum=0.1, maximum=50, unit="%"),
     "BTC_LOOKBACK_BARS": _field("Monitoring Pasar", "Lookback BTC", "Jumlah candle tertutup untuk mengukur penurunan BTC.", "int", minimum=1, maximum=1000, unit="candle"),
@@ -115,7 +90,6 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "DETECTOR_ENABLED": _field("Skor Detector", "Aktifkan skor detector", "Menampilkan panel skor detector di dashboard. Hanya tampilan: skor TIDAK mempengaruhi keputusan entry bot.", "bool"),
     "DETECTOR_TOP_N": _field("Skor Detector", "Jumlah pair dinilai", "Berapa pair likuid dengan kenaikan 24 jam terbesar yang dinilai skornya. Makin banyak, makin banyak panggilan API (order book 25 bobot per pair).", "int", minimum=1, maximum=30),
     "DETECTOR_WEIGHT_CHANGE": _field("Skor Detector", "Bobot kenaikan 24 jam", "Bobot relatif komponen kenaikan 24 jam terhadap rentang gerbang pump.", "float", minimum=0, maximum=100),
-    "DETECTOR_WEIGHT_VOLUME24": _field("Skor Detector", "Bobot lonjakan volume 24 jam", "Bobot relatif volume 24 jam dibanding rata-rata 7 hari.", "float", minimum=0, maximum=100),
     "DETECTOR_WEIGHT_VOLUME5M": _field("Skor Detector", "Bobot lonjakan volume 5m", "Bobot relatif volume candle 5m terakhir dibanding rata-rata candle sebelumnya.", "float", minimum=0, maximum=100),
     "DETECTOR_WEIGHT_ORDERBOOK": _field("Skor Detector", "Bobot kualitas order book", "Bobot relatif kedalaman ask, rasio bid/ask, dan sell wall.", "float", minimum=0, maximum=100),
     "DETECTOR_WEIGHT_ATR": _field("Skor Detector", "Bobot volatilitas ATR", "Bobot relatif ATR/harga candle 5m terhadap pita sehat.", "float", minimum=0, maximum=100),
@@ -214,12 +188,6 @@ def _clear_error_marker() -> bool:
 
 
 def _read_doc_unlocked() -> tuple[dict, list[str]]:
-    """Baca dokumen settings gabungan. WAJIB dipanggil di dalam lock file.
-
-    Return (doc, errors). doc kosong berarti file belum ada atau rusak, sehingga
-    pemanggil wajib memakai nilai default. Setiap kegagalan struktur mengarsipkan
-    file ke settings.json.corrupt-<ts> supaya tidak ada data hilang diam-diam.
-    """
     errors: list[str] = []
     if SETTINGS_ERROR_FILE.exists():
         try:
@@ -269,6 +237,8 @@ REMOVED_PARAMETERS = frozenset({
     "WATCHLIST_ENTRY_EMA_GAP_PCT", "WATCHLIST_ENTRY_RSI_DECAY_PTS",
     "WATCHLIST_ENTRY_SCORE_TTL_SECONDS", "WATCHLIST_ENTRY_MIN_HEADROOM",
     "WATCHLIST_ENABLED", "WATCHLIST_TOP_N",
+    "PUMP_VOLUME_SURGE_MULT", "DETECTOR_WEIGHT_VOLUME24",
+    "DAILY_KLINE_CACHE_TTL_SECONDS",
 })
 
 
@@ -291,8 +261,6 @@ def load_mode_override(mode: str) -> tuple[dict, list[str]]:
         payload = doc.get("overrides", {}).get(raw_mode)
         if payload is None:
             return {}, errors
-        # Parameter sinyal entry lama sudah dihapus. Override lama yang masih
-        # memuatnya dibuang diam-diam supaya file settings.json tidak dianggap rusak.
         payload = {k: v for k, v in payload.items() if k not in REMOVED_PARAMETERS}
         try:
             _validate_override_payload(payload)
@@ -446,12 +414,10 @@ def validate_candidate(candidate: dict, mode: str) -> tuple[dict, dict[str, str]
                  "harus lebih besar dari DETECTOR_ATR_MIN_PCT")
         relation("DETECTOR_WEIGHT_CHANGE",
                  sum(float(cleaned[k]) for k in (
-                     "DETECTOR_WEIGHT_CHANGE", "DETECTOR_WEIGHT_VOLUME24",
+                     "DETECTOR_WEIGHT_CHANGE",
                      "DETECTOR_WEIGHT_VOLUME5M", "DETECTOR_WEIGHT_ORDERBOOK",
                      "DETECTOR_WEIGHT_ATR")) > 0,
                  "total bobot detector harus lebih dari 0")
-        relation("PUMP_VOLUME_SURGE_MULT", cleaned["PUMP_VOLUME_SURGE_MULT"] >= 1.0,
-                 "harus minimal 1 kali rata-rata 7 hari, di bawah itu berarti volume justru turun")
         relation("ATR_MULT_TRAIL", cleaned["ATR_MULT_TRAIL"] <= cleaned["ATR_MULT_SL"],
                  "tidak boleh melebihi ATR_MULT_SL agar invariant trailing <= SL terjaga")
         relation("ATR_MULT_BE_TRIGGER", cleaned["ATR_MULT_BE_TRIGGER"] <= cleaned["ATR_MULT_TRAIL_START"],
@@ -468,9 +434,6 @@ def validate_candidate(candidate: dict, mode: str) -> tuple[dict, dict[str, str]
                             "praktis mati dan koin yang turun ikut menjadi kandidat.")
         if cleaned["PUMP_MIN_24H_CHANGE_PCT"] >= 50:
             warnings.append("PUMP_MIN_24H_CHANGE_PCT sangat tinggi, kandidat bisa nol "
-                            "untuk waktu yang lama.")
-        if cleaned["PUMP_VOLUME_SURGE_MULT"] >= 5:
-            warnings.append("PUMP_VOLUME_SURGE_MULT sangat tinggi, kandidat bisa nol "
                             "untuk waktu yang lama.")
         if cleaned["USE_STOP_LOSS"]:
             relation("SL_PCT", cleaned["SL_PCT"] > 0, "harus lebih besar dari nol saat Stop Loss aktif")

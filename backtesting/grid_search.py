@@ -1,64 +1,3 @@
-#!/usr/bin/env python3
-"""
-Grid search parameter untuk backtest Pump Scanner Bot.
-======================================================
-
-Ditambahkan 1 Oktober 2026 atas permintaan pemilik repositori.
-
-APA YANG DILAKUKAN MODUL INI
-----------------------------
-Menjalankan `backtest.run_backtest()` berkali kali pada DATA CANDLE YANG SAMA
-memakai banyak kombinasi parameter exit, lalu memeringkat hasilnya. Data hanya
-diunduh sekali oleh pemanggil dan dipakai ulang untuk semua kombinasi, jadi
-tidak ada tambahan beban request ke Binance sama sekali.
-
-PERINGATAN PALING PENTING: OVERFITTING
---------------------------------------
-Mencari parameter terbaik pada satu potong data historis hampir selalu
-menghasilkan angka yang terlalu bagus untuk dipercaya. Semakin banyak
-kombinasi yang dicoba, semakin besar peluang satu di antaranya terlihat hebat
-murni karena kebetulan. Ini bukan pendapat, ini konsekuensi statistik dari
-pengujian berganda.
-
-Karena itu modul ini SENGAJA tidak pernah menyodorkan satu "pemenang" tunggal
-tanpa konteks. Yang dilakukan:
-
-1. Data dibelah menjadi periode LATIH (in-sample) dan periode UJI
-   (out-of-sample) yang tidak pernah dipakai saat memilih.
-2. Peringkat disusun berdasarkan hasil periode LATIH.
-3. Setiap baris hasil JUGA menampilkan hasil periode UJI.
-4. Selisih keduanya dilaporkan sebagai `degradasi`. Kombinasi dengan
-   degradasi besar berarti hasil latihnya tidak bertahan pada data baru,
-   dan itu tanda overfitting.
-5. Kombinasi dengan jumlah trade di bawah `min_trades` ditandai tidak andal,
-   karena rata rata dari 3 trade tidak berarti apa apa.
-
-Cara membaca hasilnya secara jujur: kombinasi yang layak dipertimbangkan
-adalah yang hasil UJI-nya tetap wajar DAN degradasinya kecil, bukan yang
-hasil LATIH-nya paling tinggi.
-
-PEMANGKASAN KOMBINASI MUBAZIR
------------------------------
-Bot memakai dua mode exit yang saling meniadakan. Saat `USE_ATR_EXIT` bernilai
-True, seluruh parameter persen (SL_PCT, TP_PCT, dan kawan kawan) tidak dipakai
-sama sekali, begitu pula sebaliknya. Tanpa pemangkasan, grid akan menjalankan
-ratusan kombinasi yang hasilnya identik. `expand_grid()` membuang duplikat itu
-lebih dulu, sehingga waktu komputasi tidak terbuang.
-
-Mode aktif diambil dari konfigurasi dasar lewat argumen `pakai_atr` (pelari
-grid meneruskannya dari `base_config`). Bila mode tidak diketahui, pemangkasan
-mode tidak dilakukan sama sekali: lebih aman menjalankan kombinasi mubazir
-daripada salah memangkas kombinasi yang sebenarnya berbeda. Sapuan lintas mode
-(USE_ATR_EXIT di dalam spec, jalur CLI) tetap menilai mode per kandidat.
-
-KOMBINASI YANG MELANGGAR RELASI WAJIB
-------------------------------------
-`cek_relasi_exit()` memeriksa relasi antar parameter exit (trailing <= SL,
-TP > SL, dan kawan kawan; cermin dari settings_schema). Kombinasi pelanggar
-tidak bisa disimpan ke Pengaturan, jadi pelari grid melewatkannya dan mereka
-dihitung sebagai dilewati, bukan diperingkat.
-"""
-
 from __future__ import annotations
 
 import itertools
@@ -160,20 +99,6 @@ def _normalkan_spec(spec: dict) -> dict[str, list]:
 
 def expand_grid(spec: dict, max_kombinasi: Optional[int] = None,
                 pakai_atr: Optional[bool] = None) -> tuple[list[dict], int]:
-    """Bentangkan spec menjadi daftar kombinasi, buang duplikat mubazir.
-
-    ``pakai_atr`` adalah mode exit aktif dari konfigurasi dasar. Pemangkasan
-    duplikat memakainya untuk menentukan kunci mana yang efektif: saat exit
-    ATR aktif, parameter persen tidak dipakai mesin (begitu pula sebaliknya),
-    jadi kombinasi yang hanya beda di kunci mati itu dianggap duplikat.
-
-    - ``None``: mode tidak diketahui pemanggil. TIDAK ADA pemangkasan mode
-      (aman: lebih baik menjalankan kombinasi mubazir daripada salah
-      memangkas kombinasi yang sebenarnya berbeda).
-    - ``True``/``False``: mode pasti dari konfigurasi dasar.
-    - Bila ``USE_ATR_EXIT`` ada di dalam spec (sapuan lintas mode, CLI),
-      nilai per kandidat menang atas ``pakai_atr``.
-    """
     batas = MAX_KOMBINASI if max_kombinasi is None else int(max_kombinasi)
     if batas < 1:
         raise GridSearchError("Batas kombinasi harus lebih besar dari nol.")
@@ -218,14 +143,6 @@ def expand_grid(spec: dict, max_kombinasi: Optional[int] = None,
 
 
 def cek_relasi_exit(cfg: dict) -> Optional[str]:
-    """Periksa relasi antar parameter exit; kembalikan pesan bila dilanggar.
-
-    Cermin relasi wajib di config/settings_schema.py. Kombinasi yang
-    melanggar (misal trailing lebih lebar dari stop loss) tidak bisa
-    disimpan ke Pengaturan sama sekali, jadi tidak ada gunanya
-    memeringkatnya: pelari grid melewatkannya dan menghitungnya sebagai
-    dilewati.
-    """
     if bool(cfg.get("USE_ATR_EXIT", False)):
         sl = float(cfg.get("ATR_MULT_SL", 0.0))
         tp = float(cfg.get("ATR_MULT_TP", 0.0))
@@ -281,7 +198,6 @@ def run_grid_search(
     base_config: dict,
     spec: dict,
     warmup_bars: int,
-    daily_klines: Optional[Sequence[Kline]] = None,
     metrik: str = "total_return_pct",
     rasio_latih: float = 0.7,
     min_trades: int = 10,
@@ -326,12 +242,6 @@ def run_grid_search(
             f"Periode uji hanya {hasil_grid.bar_uji} bar. Terlalu pendek untuk "
             f"memvalidasi apa pun. Perpanjang rentang hari atau turunkan rasio_latih.")
 
-    def _harian_untuk(potongan: Sequence[Kline]) -> Optional[list[Kline]]:
-        if not daily_klines or not potongan:
-            return None
-        batas = potongan[-1].close_time
-        return [d for d in daily_klines if d.close_time <= batas]
-
     mulai = time.time()
     dilewati = 0
 
@@ -356,7 +266,6 @@ def run_grid_search(
 
         try:
             r_latih = bt.run_backtest(kl_latih, cfg, warmup_bars,
-                                      daily_klines=_harian_untuk(kl_latih),
                                       btc_klines=btc_klines)
             s_latih = bt.summarize(r_latih)
         except Exception:
@@ -377,7 +286,6 @@ def run_grid_search(
         if kl_uji:
             try:
                 r_uji = bt.run_backtest(kl_uji, cfg, warmup_bars,
-                                        daily_klines=_harian_untuk(kl_uji),
                                         btc_klines=btc_klines)
                 s_uji = bt.summarize(r_uji)
                 item.uji = s_uji
@@ -429,14 +337,6 @@ def run_portfolio_grid_search(
     cancel_cb: Optional[Callable[[], bool]] = None,
     btc_klines: Optional[Sequence[Kline]] = None,
 ) -> HasilGridSearch:
-    """Grid search di atas simulasi PORTOFOLIO (semesta multi-simbol).
-
-    Data diambil satu kali dari store, lalu setiap kombinasi parameter
-    dijalankan pada dua jendela waktu: periode latih (awal data sampai
-    titik potong) dan periode uji (sesudah titik potong, dengan tumpang
-    tindik warmup agar indikator siap). Meniru semantik run_grid_search
-    versi simbol tunggal, tetapi pada mesin run_portfolio_backtest.
-    """
     from backtesting import portfolio_backtest as pbt
 
     mulai = time.time()

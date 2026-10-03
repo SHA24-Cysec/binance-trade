@@ -1,32 +1,3 @@
-"""
-Lapisan WebSocket market data Binance Spot (produksi publik).
-
-Menjadi SUMBER PRIMER data pasar real-time dalam mode hybrid: harga semua pair
-(!miniTicker@arr), bookTicker per simbol, dan kline per simbol. Data ini
-dikonsumsi MarketDataProvider (market_data.py), yang jatuh ke REST bila WS
-basi/putus.
-
-Referensi resmi (dicek 2026-09-24):
-  developers.binance.com/docs/binance-spot-api-docs/web-socket-streams
-- Base endpoint: wss://stream.binance.com:9443 (atau :443). Mirror khusus
-  market data: wss://data-stream.binance.vision.
-- Raw stream: /ws/<streamName>. Combined: /stream?streams=a/b/c (payload
-  dibungkus {"stream": name, "data": ...}).
-- Semua nama simbol pada stream HARUS huruf kecil.
-- Satu koneksi valid maksimal 24 jam lalu diputus server; klien harus
-  menyambung ulang.
-- Langganan dinamis via pesan JSON {"method":"SUBSCRIBE","params":[...],"id":n}.
-
-Kesengajaan desain: order book untuk MENGISI order simulasi TIDAK dibangun dari
-depth-diff WS (yang rawan salah bila ada event terlewat). Sebagai gantinya
-PaperEngine mengambil snapshot depth REST yang SEGAR pada saat order dikirim
-(lihat market_data.get_depth). Ini lebih setia untuk simulasi fill daripada
-order book lokal yang mungkin sudah basi. WS di sini fokus ke harga/bookTicker/
-kline yang memang cocok untuk streaming.
-
-Dependensi: websocket-client>=1.7 (diuji dengan 1.9.0).
-"""
-
 from __future__ import annotations
 
 import json
@@ -62,11 +33,6 @@ class _StreamCache:
             self._ts[key] = time.monotonic()
 
     def put_many(self, items: dict) -> None:
-        """Simpan banyak entri sekaligus dengan satu kali penguncian.
-
-        Stream ``!miniTicker@arr`` mengirim ribuan simbol tiap detik, jadi
-        pembaruan per simbol akan menghasilkan ribuan akuisisi lock per detik.
-        """
         if not items:
             return
         now = time.monotonic()
@@ -102,7 +68,6 @@ class MarketWebSocket:
 
         self._prices = _StreamCache()
         self._book = _StreamCache()
-        self._kline = _StreamCache()
         self._mini = _StreamCache()
 
         self._mini_lock = threading.RLock()
@@ -135,11 +100,7 @@ class MarketWebSocket:
         if t and t.is_alive():
             t.join(timeout=5.0)
 
-    def wait_connected(self, timeout: float = 10.0) -> bool:
-        return self._connected.wait(timeout=timeout)
-
-    def subscribe_symbol(self, symbol: str, book_ticker: bool = True,
-                         kline_interval: Optional[str] = None) -> None:
+    def subscribe_symbol(self, symbol: str, book_ticker: bool = True) -> None:
         s = symbol.lower()
         new: list[str] = []
         with self._sub_lock:
@@ -148,24 +109,8 @@ class MarketWebSocket:
                 if name not in self._want_streams:
                     self._want_streams.add(name)
                     new.append(name)
-            if kline_interval:
-                name = f"{s}@kline_{kline_interval}"
-                if name not in self._want_streams:
-                    self._want_streams.add(name)
-                    new.append(name)
         if new:
             self._send({"method": "SUBSCRIBE", "params": new, "id": self._next_id()})
-
-    def unsubscribe_symbol(self, symbol: str) -> None:
-        s = symbol.lower()
-        remove: list[str] = []
-        with self._sub_lock:
-            for name in list(self._want_streams):
-                if name.startswith(f"{s}@"):
-                    self._want_streams.discard(name)
-                    remove.append(name)
-        if remove:
-            self._send({"method": "UNSUBSCRIBE", "params": remove, "id": self._next_id()})
 
     def get_price(self, symbol: str) -> tuple[Optional[float], float]:
         return self._prices.get(symbol.upper())
@@ -173,15 +118,7 @@ class MarketWebSocket:
     def get_book_ticker(self, symbol: str) -> tuple[Optional[dict], float]:
         return self._book.get(symbol.upper())
 
-    def get_kline(self, symbol: str, interval: str) -> tuple[Optional[dict], float]:
-        return self._kline.get(f"{symbol.upper()}@{interval}")
-
     def subscribe_symbols(self, symbols, book_ticker: bool = True) -> None:
-        """Langganan banyak simbol sekaligus lewat satu pesan SUBSCRIBE.
-
-        Dipakai untuk "pemanasan" bookTicker para kandidat sedini mungkin agar
-        harga pertama sudah tersedia saat keputusan entry diambil.
-        """
         new: list[str] = []
         with self._sub_lock:
             for symbol in symbols or ():
@@ -197,21 +134,11 @@ class MarketWebSocket:
             self._send({"method": "SUBSCRIBE", "params": new, "id": self._next_id()})
 
     def all_mini_tickers(self) -> "tuple[dict[str, dict], float]":
-        """Ambil salinan snapshot !miniTicker@arr beserta usianya dalam detik.
-
-        Mengembalikan (data, usia). ``data`` berisi pemetaan SIMBOL -> payload
-        mini ticker (field ``c`` close, ``o`` open, ``v`` volume, ``q`` volume
-        kuotasi). Usia dihitung dari pesan array terakhir yang diterima, bukan
-        per simbol, supaya satu snapshot yang setengah terisi tidak dipakai.
-        """
         with self._mini_lock:
             if not self._mini_arr_ts:
                 return {}, float("inf")
             age = time.monotonic() - self._mini_arr_ts
         return self._mini.snapshot_all(), age
-
-    def all_prices(self) -> dict[str, float]:
-        return self._prices.snapshot_all()
 
     def is_connected(self) -> bool:
         return self._connected.is_set()
@@ -339,18 +266,6 @@ class MarketWebSocket:
                         "askQty": float(data.get("A", 0) or 0),
                     })
                     self._prices.put(sym.upper(), (bid + ask) / 2.0)
-                except (TypeError, ValueError, KeyError):
-                    pass
-            return
-        if etype == "kline":
-            k = data.get("k")
-            sym = data.get("s")
-            if isinstance(k, dict) and sym:
-                interval = k.get("i")
-                if interval:
-                    self._kline.put(f"{sym.upper()}@{interval}", k)
-                try:
-                    self._prices.put(sym.upper(), float(k["c"]))
                 except (TypeError, ValueError, KeyError):
                     pass
             return

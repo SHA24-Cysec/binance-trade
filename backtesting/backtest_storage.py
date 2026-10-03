@@ -1,50 +1,3 @@
-#!/usr/bin/env python3
-"""
-Penyimpanan candle backtest portofolio berbasis SQLite temporary.
-=================================================================
-
-Kenapa modul ini ada
---------------------
-Backtest portofolio (portfolio_backtest.py) menjalankan simulasi di atas
-SELURUH semesta simbol USDT sekaligus. Versi lama menyimpan hasil unduhan
-sebagai ``dict[str, list[Kline]]`` penuh di RAM: untuk 150 simbol x 8.640
-candle 5 menit (30 hari) itu berarti sekitar 1,3 JUTA objek Kline hidup
-bersamaan, ditambah satu dict index dan satu dict statistik per candle.
-Pemakaian RAM itulah yang membuat job backtest besar mencekik VPS kecil.
-
-Modul ini memindahkan candle ke satu file SQLite temporary per job. Yang
-tetap tinggal di RAM hanyalah:
-
-  1. deret ringkas per simbol (:class:`SymbolSeries`) berisi ``array``
-     bertipe int64/float64: open_time, close_time, pct24h, vol24h, dan
-     penanda kesiapan statistik. Sekitar 41 byte per bar per simbol, bukan
-     ~600 byte seperti kombinasi Kline + dict index + dict statistik.
-  2. cache LRU kecil berisi list[Kline] PENUH untuk beberapa simbol yang
-     sedang aktif (simbol yang dipegang, dan simbol yang sedang masuk papan
-     kandidat top-N). Ukurannya bisa diatur; lihat ``cache_size``.
-
-Simbol yang tidak sedang aktif dibaca ulang dari SQLite saat dibutuhkan.
-
-Referensi API yang dipakai
---------------------------
-Dokumentasi resmi ``sqlite3`` (standard library, TANPA dependency baru)
-dicek 2026-09-26 di https://docs.python.org/3/library/sqlite3.html :
-  - ``sqlite3.connect(path, check_same_thread=False)`` mematikan penjagaan
-    "satu koneksi satu thread" bawaan modul; dokumentasi menegaskan bahwa
-    setelah itu serialisasi antar-thread menjadi tanggung jawab pemanggil,
-    maka di sini SEMUA akses koneksi dibungkus ``threading.RLock``.
-  - ``Cursor.executemany()`` untuk insert massal dengan placeholder ``?``.
-  - ``Cursor.fetchmany()`` untuk membaca bertahap, supaya satu simbol besar
-    pun tidak pernah dimaterialisasi dua kali di RAM.
-  - Kontrol transaksi default masih ``LEGACY_TRANSACTION_CONTROL`` (atribut
-    ``Connection.autocommit`` baru sejak Python 3.12 dan sengaja TIDAK
-    dipakai supaya modul ini tetap jalan di Python 3.10 seperti sisa repo),
-    jadi ``commit()`` dipanggil eksplisit setelah fase tulis.
-
-Semua query memakai placeholder ``?``. Tidak ada satu pun SQL yang dirakit
-dari f-string, ``.format()``, atau concatenation variabel.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -65,8 +18,6 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SYMBOL_CACHE_SIZE = 8
 
-DEFAULT_DAILY_CACHE_SIZE = 4
-
 _INSERT_BATCH = 2_000
 
 
@@ -75,12 +26,8 @@ _KLINE_PLACEHOLDERS = "?, ?, ?, ?, ?, ?, ?, ?"
 
 _SQL_INSERT_KLINES = ("INSERT OR REPLACE INTO klines (symbol, " + _KLINE_COLUMNS
                       + ") VALUES (?, " + _KLINE_PLACEHOLDERS + ")")
-_SQL_INSERT_DAILY = ("INSERT OR REPLACE INTO daily_klines (symbol, " + _KLINE_COLUMNS
-                     + ") VALUES (?, " + _KLINE_PLACEHOLDERS + ")")
 _SQL_SELECT_KLINES = ("SELECT " + _KLINE_COLUMNS
                       + " FROM klines WHERE symbol = ? ORDER BY open_time")
-_SQL_SELECT_DAILY = ("SELECT " + _KLINE_COLUMNS
-                     + " FROM daily_klines WHERE symbol = ? ORDER BY open_time")
 
 
 def _row_to_kline(row: Sequence) -> Kline:
@@ -124,19 +71,6 @@ CREATE TABLE IF NOT EXISTS klines (
     PRIMARY KEY (symbol, open_time)
 );
 
-CREATE TABLE IF NOT EXISTS daily_klines (
-    symbol      TEXT    NOT NULL,
-    open_time   INTEGER NOT NULL,
-    open        REAL    NOT NULL,
-    high        REAL    NOT NULL,
-    low         REAL    NOT NULL,
-    close       REAL    NOT NULL,
-    close_time  INTEGER NOT NULL,
-    volume      REAL    NOT NULL DEFAULT 0,
-    quote_volume REAL   NOT NULL DEFAULT 0,
-    PRIMARY KEY (symbol, open_time)
-);
-
 CREATE TABLE IF NOT EXISTS symbols (
     symbol TEXT PRIMARY KEY,
     seq    INTEGER NOT NULL,
@@ -152,23 +86,20 @@ class StorageError(RuntimeError):
 class SymbolSeries:
 
     __slots__ = ("symbol", "_open_times", "_close_times", "_pct24h",
-                 "_vol24h", "_ready", "_daily_close_times")
+                 "_vol24h", "_ready")
 
     def __init__(self, symbol: str, open_times: array, close_times: array,
-                 pct24h: array, vol24h: array, ready: bytearray,
-                 daily_close_times: array) -> None:
+                 pct24h: array, vol24h: array, ready: bytearray) -> None:
         self.symbol = str(symbol)
         self._open_times = open_times
         self._close_times = close_times
         self._pct24h = pct24h
         self._vol24h = vol24h
         self._ready = ready
-        self._daily_close_times = daily_close_times
 
     @classmethod
     def build(cls, symbol: str, klines: Sequence[Kline],
-              stats: Sequence[Optional[dict]],
-              daily_close_times: Sequence[int] = ()) -> "SymbolSeries":
+              stats: Sequence[Optional[dict]]) -> "SymbolSeries":
         n = len(klines)
         if len(stats) != n:
             raise StorageError(
@@ -186,8 +117,7 @@ class SymbolSeries:
             pct[i] = float(st["pct24h"])
             vol[i] = float(st["vol24h"])
             ready[i] = 1
-        return cls(symbol, open_times, close_times, pct, vol, ready,
-                   array("q", [int(t) for t in daily_close_times]))
+        return cls(symbol, open_times, close_times, pct, vol, ready)
 
     def __len__(self) -> int:
         return len(self._open_times)
@@ -219,21 +149,18 @@ class SymbolSeries:
 
     def board_arrays(self) -> tuple:
         return (self._open_times, self._close_times, self._pct24h,
-                self._vol24h, self._ready, self._daily_close_times)
+                self._vol24h, self._ready)
 
 
 class KlineStore:
 
     def __init__(self, db_path: str, *, temp_dir: Optional[str] = None,
-                 cache_size: int = DEFAULT_SYMBOL_CACHE_SIZE,
-                 daily_cache_size: int = DEFAULT_DAILY_CACHE_SIZE) -> None:
+                 cache_size: int = DEFAULT_SYMBOL_CACHE_SIZE) -> None:
         self.db_path = str(db_path)
         self._temp_dir = str(temp_dir) if temp_dir else None
         self._cache_size = max(1, int(cache_size))
-        self._daily_cache_size = max(1, int(daily_cache_size))
         self._lock = threading.RLock()
         self._cache: "OrderedDict[str, list[Kline]]" = OrderedDict()
-        self._daily_cache: "OrderedDict[str, list[Kline]]" = OrderedDict()
         self._closed = False
 
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
@@ -246,23 +173,18 @@ class KlineStore:
 
     @classmethod
     def create_temp(cls, *, prefix: str = "binance_backtest_",
-                    cache_size: int = DEFAULT_SYMBOL_CACHE_SIZE,
-                    daily_cache_size: int = DEFAULT_DAILY_CACHE_SIZE) -> "KlineStore":
+                    cache_size: int = DEFAULT_SYMBOL_CACHE_SIZE) -> "KlineStore":
         temp_dir = tempfile.mkdtemp(prefix=prefix)
         db_path = str(Path(temp_dir) / "klines.sqlite3")
-        return cls(db_path, temp_dir=temp_dir, cache_size=cache_size,
-                   daily_cache_size=daily_cache_size)
+        return cls(db_path, temp_dir=temp_dir, cache_size=cache_size)
 
     @classmethod
     def from_klines(cls, data: Mapping[str, Sequence[Kline]],
-                    daily_klines: Optional[Mapping[str, Sequence[Kline]]] = None,
                     *, cache_size: int = DEFAULT_SYMBOL_CACHE_SIZE) -> "KlineStore":
         store = cls.create_temp(cache_size=cache_size)
         try:
             for symbol, klines in data.items():
                 store.write_symbol(symbol, klines)
-            for symbol, klines in (daily_klines or {}).items():
-                store.write_daily(symbol, klines)
             store.finish_writing()
         except Exception:
             store.cleanup()
@@ -296,19 +218,6 @@ class KlineStore:
             self._cache.pop(sym, None)
         return len(rows)
 
-    def write_daily(self, symbol: str, klines: Sequence[Kline]) -> int:
-        sym = str(symbol)
-        rows = [_kline_to_row(sym, k) for k in klines]
-        if not rows:
-            return 0
-        with self._lock:
-            self._require_open()
-            cur = self._conn.cursor()
-            cur.executemany(_SQL_INSERT_DAILY, rows)
-            self._conn.commit()
-            self._daily_cache.pop(sym, None)
-        return len(rows)
-
     def finish_writing(self) -> None:
         with self._lock:
             self._require_open()
@@ -324,14 +233,6 @@ class KlineStore:
             self._require_open()
             cur = self._conn.execute("SELECT symbol FROM symbols ORDER BY seq")
             return [str(row[0]) for row in cur.fetchall()]
-
-    def daily_count(self, symbol: str) -> int:
-        with self._lock:
-            self._require_open()
-            cur = self._conn.execute(
-                "SELECT COUNT(*) FROM daily_klines WHERE symbol = ?", (str(symbol),))
-            row = cur.fetchone()
-            return int(row[0]) if row else 0
 
     def load_klines(self, symbol: str) -> list[Kline]:
         sym = str(symbol)
@@ -356,32 +257,6 @@ class KlineStore:
                 self._cache.popitem(last=False)
         return data
 
-    def daily_klines(self, symbol: str) -> list[Kline]:
-        sym = str(symbol)
-        with self._lock:
-            cached = self._daily_cache.get(sym)
-            if cached is not None:
-                self._daily_cache.move_to_end(sym)
-                return cached
-            self._require_open()
-            cur = self._conn.execute(_SQL_SELECT_DAILY, (sym,))
-            rows = cur.fetchall()
-        data = [_row_to_kline(r) for r in rows]
-        with self._lock:
-            self._daily_cache[sym] = data
-            self._daily_cache.move_to_end(sym)
-            while len(self._daily_cache) > self._daily_cache_size:
-                self._daily_cache.popitem(last=False)
-        return data
-
-    def daily_close_times(self, symbol: str) -> list[int]:
-        with self._lock:
-            self._require_open()
-            cur = self._conn.execute(
-                "SELECT close_time FROM daily_klines WHERE symbol = ? "
-                "ORDER BY open_time", (str(symbol),))
-            return [int(r[0]) for r in cur.fetchall()]
-
     def set_cache_size(self, size: int) -> None:
         with self._lock:
             self._cache_size = max(1, int(size))
@@ -392,10 +267,6 @@ class KlineStore:
     def cache_size(self) -> int:
         return self._cache_size
 
-    def cached_symbols(self) -> list[str]:
-        with self._lock:
-            return list(self._cache.keys())
-
     def file_size_bytes(self) -> int:
         try:
             return Path(self.db_path).stat().st_size
@@ -405,7 +276,6 @@ class KlineStore:
     def close(self) -> None:
         with self._lock:
             self._cache.clear()
-            self._daily_cache.clear()
             if self._closed:
                 return
             self._closed = True

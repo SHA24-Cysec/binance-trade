@@ -1,11 +1,3 @@
-"""Utilitas I/O atomik lintas Windows dan POSIX.
-
-Semua file teks ditulis sebagai UTF-8. Penggantian target memakai os.replace
-karena atomik jika temporary file berada pada filesystem yang sama. Windows
-dapat menolak replace sementara bila target sedang dibuka proses lain, jadi
-replace dicoba ulang dengan backoff singkat.
-"""
-
 from __future__ import annotations
 
 import json
@@ -180,13 +172,3 @@ def archive_corrupt(path: os.PathLike | str) -> Path | None:
         index += 1
     replace_with_retry(source, backup)
     return backup
-
-
-def append_json_line(path: os.PathLike | str, data: Any) -> None:
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    line = json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n"
-    with open(target, "a", encoding="utf-8", newline="") as handle:
-        handle.write(line)
-        handle.flush()
-        os.fsync(handle.fileno())

@@ -1,4 +1,3 @@
-# === Kredensial & rahasia (JANGAN pernah di-commit) ===
 .env
 .env.*
 !.env.example
@@ -7,19 +6,15 @@
 secrets.json
 credentials.json
 
-# === State & log runtime bot ===
-# Folder khusus artefak runtime (lihat infrastructure/paths.py).
 logs/
 data/
 tests/
-# Folder lokal warisan versi lama, tetap diabaikan kalau masih ada.
 Data/
 *.json
 *.json.*
 *.log
 *.log.*
 
-# === Python ===
 __pycache__/
 *.py[cod]
 *$py.class
@@ -44,7 +39,6 @@ wheels/
 .mypy_cache/
 .ruff_cache/
 
-# === Virtual environment ===
 .venv/
 venv/
 env/
@@ -52,7 +46,6 @@ ENV/
 env.bak/
 venv.bak/
 
-# === Editor / OS ===
 .vscode/
 .idea/
 *.swp
@@ -61,6 +54,5 @@ venv.bak/
 .DS_Store
 Thumbs.db
 
-# === Arsip yang dibuat lokal ===
 *.zip
 Data/

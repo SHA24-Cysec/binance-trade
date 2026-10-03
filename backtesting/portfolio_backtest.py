@@ -1,20 +1,9 @@
-#!/usr/bin/env python3
-"""
-Backtest portofolio multi-simbol dengan simulasi eksekusi.
-
-Modul ini mengunduh dan menyimpan candle multi-simbol, memilih semesta
-berdasarkan filter pasar, lalu menyimulasikan bot satu posisi berurutan:
-kandidat bersaing via volume kuotasi 24 jam terbesar, entry disimulasikan dengan
-latency, spread/slippage, fee, cooldown, dan level exit FIXED/ATR. Tidak
-ada order nyata yang dikirim.
-"""
-
 from __future__ import annotations
 
 import logging
 import sqlite3
 import time
-from bisect import bisect_left, bisect_right
+from bisect import bisect_left
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -39,8 +28,6 @@ from backtesting.backtest import (
     fetch_full_klines,
     initial_backtest_equity,
 )
-
-_BELUM_DIHITUNG = object()
 
 
 @dataclass
@@ -190,47 +177,6 @@ def _klines_untuk_simbol(client, symbol: str, interval: str, start_ms: int,
     return cache.read(symbol, interval, start_ms, end_ms)
 
 
-def fetch_universe_daily_klines(
-    client,
-    symbols: list[str],
-    start_ms: int,
-    end_ms: int,
-    store: KlineStore,
-    progress_cb: Optional[Callable[[float, str], None]] = None,
-    cancel_cb: Optional[Callable[[], bool]] = None,
-) -> list[str]:
-    from strategy.indicators import parse_klines
-
-    tersimpan: list[str] = []
-    total = max(1, len(symbols))
-    for idx, sym in enumerate(symbols):
-        if cancel_cb is not None and cancel_cb():
-            raise BacktestError("Backtest dibatalkan.")
-        try:
-            raw = client.get_klines(sym, interval="1d", limit=1000,
-                                    start_time_ms=start_ms, end_time_ms=end_ms)
-            harian = parse_klines(raw)
-            if harian:
-                store.write_daily(sym, harian)
-                tersimpan.append(sym)
-        except Exception as exc:
-            logger.warning("Candle harian %s gagal diunduh (%s). Gerbang pump "
-                           "akan memakai agregasi candle intraday simbol ini.",
-                           sym, str(exc)[:120])
-        if progress_cb:
-            progress_cb((idx + 1) / total, sym)
-    return tersimpan
-
-
-def ensure_daily_series(store: KlineStore, symbols: list[str]) -> None:
-    for sym in symbols:
-        if store.daily_count(sym) > 0:
-            continue
-        harian = scanner.aggregate_to_daily(store.load_klines(sym))
-        if harian:
-            store.write_daily(sym, harian)
-
-
 def build_timeline(store: KlineStore, interval: str,
                    symbols: Optional[list[str]] = None,
                    ) -> tuple[list[int], dict[str, SymbolSeries]]:
@@ -244,32 +190,13 @@ def build_timeline(store: KlineStore, interval: str,
         if not klines:
             continue
         stats = compute_rolling_24h_stats(klines, window)
-        series = SymbolSeries.build(sym, klines, stats,
-                                    store.daily_close_times(sym))
+        series = SymbolSeries.build(sym, klines, stats)
         series_of[sym] = series
         all_times.update(series.open_times())
         del klines, stats
 
     timeline = sorted(all_times)
     return timeline, series_of
-
-
-class _PumpGateAverages:
-
-    __slots__ = ("_store", "_memo")
-
-    def __init__(self, store: KlineStore) -> None:
-        self._store = store
-        self._memo: dict[str, dict[int, Optional[float]]] = {}
-
-    def memo_for(self, symbol: str) -> dict:
-        return self._memo.setdefault(str(symbol), {})
-
-    def compute(self, symbol: str, reference_ms: int, key: int) -> Optional[float]:
-        rata, _alasan = scanner.average_prior_daily_quote_volume(
-            self._store.daily_klines(symbol), reference_ms)
-        self.memo_for(symbol)[int(key)] = rata
-        return rata
 
 
 def _resolve_symbol_cache_size(config: dict, top_n: int) -> int:
@@ -303,9 +230,6 @@ def run_portfolio_backtest(
     if not symbols:
         raise BacktestError("Tidak ada data yang lolos policy semesta bersama.")
     lolos_policy = len(symbols)
-
-    ensure_daily_series(store, symbols)
-    gate_averages = _PumpGateAverages(store)
 
     if prebuilt is not None:
         timeline, series_of = prebuilt
@@ -380,9 +304,8 @@ def run_portfolio_backtest(
 
     papan_input = []
     for sym in symbols:
-        ot, ct, pct_arr, vol_arr, ready_arr, daily_ct = series_of[sym].board_arrays()
-        papan_input.append((sym, ot, ct, pct_arr, vol_arr, ready_arr, daily_ct,
-                            gate_averages.memo_for(sym), len(ot)))
+        ot, ct, pct_arr, vol_arr, ready_arr = series_of[sym].board_arrays()
+        papan_input.append((sym, ot, ct, pct_arr, vol_arr, ready_arr, len(ot)))
 
     for bi, t_now in enumerate(timeline):
         if progress_cb and bi % 50 == 0:
@@ -392,7 +315,7 @@ def run_portfolio_backtest(
 
         btc_drop = btc_lookup.drop_pct_at(t_now) if btc_lookup is not None else None
         board = []
-        for (sym, ot, ct, pct_arr, vol_arr, ready_arr, daily_ct, memo, n_bar) in papan_input:
+        for (sym, ot, ct, pct_arr, vol_arr, ready_arr, n_bar) in papan_input:
             pos = bisect_left(ot, t_now)
             if pos >= n_bar or ot[pos] != t_now:
                 continue
@@ -401,14 +324,9 @@ def run_portfolio_backtest(
             vol24 = vol_arr[pos]
             if vol24 < min_vol:
                 continue
-            ref_ms = ct[pos]
-            kunci_memo = bisect_right(daily_ct, ref_ms)
-            rata_harian = memo.get(kunci_memo, _BELUM_DIHITUNG)
-            if rata_harian is _BELUM_DIHITUNG:
-                rata_harian = gate_averages.compute(sym, ref_ms, kunci_memo)
             pct24 = pct_arr[pos]
             gate_ok, _gate_reason = scanner.evaluate_pump_gate(
-                pct24, vol24, rata_harian, gate_cfg, btc_drop_pct=btc_drop)
+                pct24, vol24, gate_cfg, btc_drop_pct=btc_drop)
             if not gate_ok:
                 continue
             board.append((vol24, sym, pos, pct24))
@@ -530,9 +448,6 @@ def run_portfolio_backtest(
             entry_candle = kl[entry_idx]
             raw_entry_price = entry_candle.open
             entry_time_value = entry_candle.open_time
-        # Paritas open_position(): kunci level exit SEBELUM posisi dibuka,
-        # dan tolak entry yang akan ditolak bot live. ATR diambil dari jendela
-        # konfirmasi yang sama dengan bot live (setup.atr_value).
         level_cfg = dict(config)
         if bool(config.get("USE_ATR_EXIT", False)):
             atr_val = setup_terpilih.atr_value
@@ -709,17 +624,14 @@ def selftest() -> bool:
         "TRAILING_START_PCT": 1.5, "TRAILING_STEP_PCT": 0.6,
         "TAKER_FEE_PCT": 0.1,
         "QUOTE_ASSET": "USDT",
-        "PUMP_MIN_24H_CHANGE_PCT": -1000.0, "PUMP_VOLUME_SURGE_MULT": 0.0,
+        "PUMP_MIN_24H_CHANGE_PCT": -1000.0,
         "ROLLING_VOLUME_FILTER_ENABLED": False,
     }
 
-    from backtesting.synthetic_data import riwayat_harian, seri_banyak_setup
-
-    def _harian(data_dict: dict) -> dict:
-        return {sym: riwayat_harian(kl) for sym, kl in data_dict.items()}
+    from backtesting.synthetic_data import seri_banyak_setup
 
     def _jalankan(data_dict: dict, cfg_uji: dict) -> PortfolioResult:
-        with KlineStore.from_klines(data_dict, _harian(data_dict)) as _st:
+        with KlineStore.from_klines(data_dict) as _st:
             return run_portfolio_backtest(_st, cfg_uji, "5m")
 
     up_a = seri_banyak_setup(harga=100.0, siklus=10, volume=9_000_000.0)
@@ -755,8 +667,6 @@ def selftest() -> bool:
           f"{len(res_cd.trades)} vs {len(res.trades)}")
 
     entry_pertama = res.trades[0].entry_time if res.trades else 0
-    # Candle ENTRY sendiri (open_time == entry_time) dibuat ekstrem: posisi sudah
-    # terbuka di open candle itu, jadi SL dan TP sama-sama kena di candle yang sama.
     seq_sl = []
     for k in up_a:
         if k.open_time == entry_pertama:
@@ -783,8 +693,7 @@ def selftest() -> bool:
     from backtesting.synthetic_data import seri_dengan_setup
     cfg_par = dict(cfg)
     par_kl = seri_dengan_setup(harga=100.0, ekor="naik", panjang_ekor=20)
-    res_p1 = _bt.run_backtest(par_kl, dict(cfg_par, _symbol="AUSDT"), warmup_bars=0,
-                              daily_klines=riwayat_harian(par_kl))
+    res_p1 = _bt.run_backtest(par_kl, dict(cfg_par, _symbol="AUSDT"), warmup_bars=0)
     res_p2 = _jalankan({"AUSDT": par_kl}, cfg_par)
     check("paritas entry satu simbol vs portofolio",
           [t.entry_time for t in res_p1.trades] == [t.entry_time for t in res_p2.trades],
@@ -793,22 +702,19 @@ def selftest() -> bool:
           [t.reason for t in res_p1.trades] == [t.reason for t in res_p2.trades],
           f"{[t.reason for t in res_p1.trades]} vs {[t.reason for t in res_p2.trades]}")
 
-    # Paritas pada candle entry yang ekstrem: simbol tunggal dan portofolio harus sama.
-    res_ec_p = _bt.run_backtest(seq_sl, dict(cfg, _symbol="AUSDT"), warmup_bars=0,
-                                daily_klines=riwayat_harian(seq_sl))
+    res_ec_p = _bt.run_backtest(seq_sl, dict(cfg, _symbol="AUSDT"), warmup_bars=0)
     ec_single = [(t.entry_time, t.reason, round(t.exit_price, 9)) for t in res_ec_p.trades[:3]]
     ec_port = [(t.entry_time, t.reason, round(t.exit_price, 9)) for t in res_sl.trades[:3]]
     check("paritas candle entry ekstrem satu simbol vs portofolio",
           bool(ec_single) and ec_single == ec_port, f"{ec_single} vs {ec_port}")
 
-    # Filter BTC, MAX_CHASE_PCT, dan kontrol akun pada simulasi portofolio.
     btc_cfg = dict(cfg, BTC_FILTER_ENABLED=True, BTC_MAX_DROP_PCT=1.0, BTC_LOOKBACK_BARS=3)
 
     def _btc(closes):
         return [_mk(i, c, c, c, c) for i, c in enumerate(closes)]
 
     def _jalankan_btc(cfg_uji, btc_kl):
-        with KlineStore.from_klines({"AUSDT": up_a}, _harian({"AUSDT": up_a})) as _st:
+        with KlineStore.from_klines({"AUSDT": up_a}) as _st:
             return run_portfolio_backtest(_st, cfg_uji, "5m", btc_klines=btc_kl)
 
     turun = [100.0 * 0.99 ** i for i in range(len(up_a))]

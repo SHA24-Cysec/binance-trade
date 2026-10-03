@@ -1,11 +1,3 @@
-"""Shared Binance REQUEST_WEIGHT limiter.
-
-Binance menghitung REQUEST_WEIGHT per IP, bukan per instance Python. Modul ini
-memakai state bersama dan lock file ketika diberi path, sehingga bot, dashboard,
-dan proses backtest pada host yang sama tidak menganggap kuota IP sebagai kuota
-masing-masing.
-"""
-
 from __future__ import annotations
 
 import json
@@ -193,10 +185,3 @@ class SharedRequestWeightLimiter:
                 float(state.get("blocked_until", 0.0)),
                 time.time() + max(1.0, float(seconds)),
             )
-
-    def headroom(self) -> float:
-        with self._locked_state() as state:
-            now = time.time()
-            if state["blocked_until"] > now:
-                return 0.0
-            return max(0.0, 1.0 - state["used"] / float(self.limit))

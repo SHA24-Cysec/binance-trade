@@ -1,26 +1,8 @@
-"""
-Konfigurasi bot Binance Spot.
-
-Bot memindai pasar, membuka posisi baru saat konfirmasi volume rolling lolos
-semua filter (gerbang pump, likuiditas, spread, usia listing, rem risiko),
-lalu mengelola exit (SL/TP/BE/trailing, mode FIXED atau ATR). Mode PAPER
-dan LIVE dipisah per file state. Mode aktif dibaca dari BOT_MODE di file .env
-saat proses dimulai.
-
-Semua artefak runtime ditulis ke dua folder khusus (definisi ada di
-infrastructure/paths.py): file log ke logs/, file state/kontrol/settings ke
-data/. Nama file per mode (mis. pump_bot_state_paper.json) tetap dipisah
-supaya data PAPER dan LIVE tidak pernah tercampur.
-"""
-
 import os
 from copy import deepcopy
 
 from infrastructure.paths import PROJECT_ROOT
 
-# Nilai ini ditangkap sebelum .env dimuat. Dashboard mengisinya pada child bot
-# agar perubahan .env setelah dashboard hidup tidak dapat membuat mode child
-# berbeda dari mode yang sudah diperiksa oleh parent.
 _MANAGED_MODE_OVERRIDE = os.environ.get("PUMP_BOT_MANAGED_MODE", "")
 
 try:
@@ -58,13 +40,11 @@ PUMP_CONFIG = {
     "MARKET_SCAN_INTERVAL_SECONDS": 60,
     "LOOP_INTERVAL_SECONDS": 5,
     "MARKET_DATA_WORKERS": 8,
-    "DAILY_KLINE_CACHE_TTL_SECONDS": 1800,
     "MIN_QUOTE_VOLUME_USDT_24H": 10000000,
     "MARKET_DATA_INTERVAL": "5m",
 
     "PUMP_MIN_24H_CHANGE_PCT": 6.0,
     "PUMP_MAX_24H_CHANGE_PCT": 10.0,
-    "PUMP_VOLUME_SURGE_MULT": 2.0,
     "BTC_FILTER_ENABLED": True,
     "BTC_MAX_DROP_PCT": 3.0,
     "BTC_LOOKBACK_BARS": 3,
@@ -72,23 +52,22 @@ PUMP_CONFIG = {
 
     "USE_ATR_EXIT": True,
     "ATR_PERIOD": 14,
-    "ATR_MULT_SL": 10.0,
-    "ATR_MULT_TP": 20.0,
-    "ATR_MULT_TRAIL": 6.0,
-    "ATR_MULT_BE_TRIGGER": 6.0,
-    "ATR_MULT_BE_LOCK": 0.8,
-    "ATR_MULT_TRAIL_START": 6.0,
+    "ATR_MULT_SL": 14.0,
+    "ATR_MULT_TP": 28.0,
+    "ATR_MULT_TRAIL": 12.0,
+    "ATR_MULT_BE_TRIGGER": 10.0,
+    "ATR_MULT_BE_LOCK": 0.5,
+    "ATR_MULT_TRAIL_START": 18.0,
 
     "EXTRA_EXCLUDE_SYMBOLS": [],
 
 
     "DETECTOR_ENABLED": True,
     "DETECTOR_TOP_N": 15,
-    "DETECTOR_WEIGHT_CHANGE": 20.0,
-    "DETECTOR_WEIGHT_VOLUME24": 20.0,
-    "DETECTOR_WEIGHT_VOLUME5M": 20.0,
-    "DETECTOR_WEIGHT_ORDERBOOK": 25.0,
-    "DETECTOR_WEIGHT_ATR": 15.0,
+    "DETECTOR_WEIGHT_CHANGE": 25.0,
+    "DETECTOR_WEIGHT_VOLUME5M": 25.0,
+    "DETECTOR_WEIGHT_ORDERBOOK": 30.0,
+    "DETECTOR_WEIGHT_ATR": 20.0,
     "DETECTOR_ATR_MIN_PCT": 0.3,
     "DETECTOR_ATR_MAX_PCT": 1.2,
 
@@ -176,12 +155,6 @@ MODE_SOURCE = "default"
 
 
 def _mode_from_environment(default: str) -> tuple[str, str, list[str]]:
-    """Pilih mode secara deterministik dari parent terkelola atau .env.
-
-    PUMP_BOT_MANAGED_MODE hanya diisi oleh dashboard untuk child bot. Pengguna
-    memilih mode lewat BOT_MODE di .env. MODE tetap diterima sebagai alias lama.
-    Dua nilai pengguna yang berbeda ditolak agar tidak ada pilihan diam-diam.
-    """
     managed = str(_MANAGED_MODE_OVERRIDE or "").strip()
     if managed:
         return managed, "managed-parent", []
@@ -247,10 +220,7 @@ def _load_runtime_layers(explicit_mode: str | None = None) -> None:
 _load_runtime_layers()
 
 
-# Satu sumber kebenaran: didefinisikan di settings_schema dan diimpor di sini
-# supaya get_mode/require_valid_mode
-# tidak punya salinan sendiri yang bisa berbeda diam-diam.
-from config.settings_schema import VALID_MODES  # noqa: E402
+from config.settings_schema import VALID_MODES
 
 
 class InvalidModeError(ValueError):
@@ -362,12 +332,6 @@ def _finalize_config_dict(cfg: dict) -> dict:
         str(cfg.get("BACKTEST_CACHE_FILE", "data/backtest_cache.sqlite3"))
     )
     return cfg
-
-
-def reload_config(explicit_mode: str | None = None) -> dict:
-    _load_runtime_layers(explicit_mode)
-    _finalize_config_dict(PUMP_CONFIG)
-    return PUMP_CONFIG
 
 
 def default_config_for_mode(mode: str) -> dict:

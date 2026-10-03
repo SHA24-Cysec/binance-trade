@@ -1,20 +1,3 @@
-"""Generator data candle sintetis yang deterministik untuk tes dan selftest.
-
-SATU sumber data sintetis dipakai bersama oleh tests/ dan
-selftest di pump_scanner_bot.py, backtest.py, serta portfolio_backtest.py.
-Alasannya sederhana: kalau setiap file membuat candle sendiri, mudah sekali
-satu di antaranya lupa mengisi volume, dan deteksi setup yang memakai anchored
-VWAP diam-diam selalu gagal di file itu saja.
-
-ATURAN WAJIB di modul ini: setiap candle SELALU punya volume dan quote_volume
-yang konsisten, dengan quote_volume = volume x harga rata-rata candle
-(rata-rata high, low, close). Nilai default Kline.volume dan
-Kline.quote_volume adalah 0.0, dan VWAP dari volume nol tidak terdefinisi.
-
-Semua angka di sini dipilih supaya skenario mudah dibaca manusia, bukan untuk
-mewakili perilaku pasar sungguhan. Jangan memakainya untuk menilai strategi.
-"""
-
 from __future__ import annotations
 
 from strategy.indicators import Kline
@@ -112,32 +95,8 @@ def seri_banyak_setup(harga: float = 100.0, siklus: int = 10, bar_datar: int = 2
     return out
 
 
-def riwayat_harian(klines: list[Kline], hari: int = 7,
-                   quote_volume_harian: float = 1_000_000.0,
-                   harga: float = 1.0) -> list[Kline]:
-    ms_per_day = 86_400_000
-    mulai = int(klines[0].open_time) if klines else 0
-    out: list[Kline] = []
-    for n in range(hari, 0, -1):
-        open_time = mulai - n * ms_per_day
-        out.append(Kline(
-            open_time=open_time,
-            open=harga, high=harga, low=harga, close=harga,
-            close_time=open_time + ms_per_day - 1,
-            volume=quote_volume_harian / max(harga, 1e-9),
-            quote_volume=float(quote_volume_harian),
-        ))
-    return out
-
-
 def cfg_gerbang_pump_nonaktif(config: dict) -> dict:
     out = dict(config)
     out["PUMP_MIN_24H_CHANGE_PCT"] = -1000.0
     out["PUMP_MAX_24H_CHANGE_PCT"] = 0.0
-    out["PUMP_VOLUME_SURGE_MULT"] = 0.0
     return out
-
-
-def seri_data(harga: float = 100.0, bars: int = 400,
-              volume: float = 5_000_000.0) -> list[Kline]:
-    return seri_dengan_setup(harga=harga, bar_datar=max(1, bars - 12), volume=volume)

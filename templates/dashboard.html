@@ -414,9 +414,9 @@
       <table class="det" id="detTable">
         <thead><tr>
           <th>Simbol</th><th>Harga</th><th>24 Jam</th><th>Skor</th>
-          <th>Kenaikan</th><th>Vol 24J</th><th>Vol 5m</th><th>Order Book</th><th>ATR</th><th>Status</th>
+          <th>Kenaikan</th><th>Vol 5m</th><th>Order Book</th><th>ATR</th><th>Status</th>
         </tr></thead>
-        <tbody id="detBody"><tr><td colspan="10" class="empty">Memuat skor detector…</td></tr></tbody>
+        <tbody id="detBody"><tr><td colspan="9" class="empty">Memuat skor detector…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -719,10 +719,7 @@
           </table>
         </div>
       </div>
-    </div><!-- /btResult -->
-  </div><!-- /panel Backtest -->
-  </div><!-- /paneBacktest -->
-
+    </div>  </div>  </div>
   <div class="modal-overlay" id="botActionModal">
     <div class="modal-box">
       <h3 id="botActionTitle">Konfirmasi Aksi Bot</h3>
@@ -1186,14 +1183,14 @@ function renderDetector(d){
     (items.length?'Daftar memakai data terakhir yang berhasil dihitung.<br>':''):'';
   note.innerHTML=warn+
     `Skor 0 sampai 100 untuk ${fmt(cfg.top_n||15,0)} pair ${esc(cfg.quote_asset||'USDT')} dengan kenaikan 24 jam terbesar `+
-    `(volume 24 jam ≥ ${detVol(cfg.min_quote_volume_24h)}). Lima komponen dinilai terhadap ambang bot: kenaikan 24 jam, `+
-    `lonjakan volume 24 jam, lonjakan volume 5m, kualitas order book, dan ATR. Angka kecil di bawah nilai adalah poin / poin maksimum. `+
+    `(volume 24 jam ≥ ${detVol(cfg.min_quote_volume_24h)}). Empat komponen dinilai terhadap ambang bot: kenaikan 24 jam, `+
+    `lonjakan volume 5m, kualitas order book, dan ATR. Angka kecil di bawah nilai adalah poin / poin maksimum. `+
     `<b>Hanya tampilan</b>, skor tidak mengubah keputusan entry bot. Data yang gagal diambil dihitung 0. `+
     `Status LOLOS berarti gerbang pump dan filter order book terpenuhi saat ini; entry tetap butuh konfirmasi volume 5m, spread, chase, dan usia listing.`;
 
   const tb=document.getElementById('detBody');
   if(!items.length){
-    tb.innerHTML=`<tr><td colspan="10" class="empty">${d.loading?'Menghitung skor detector…':'Belum ada pair yang memenuhi semesta scanner (atau data pasar belum terambil).'}</td></tr>`;
+    tb.innerHTML=`<tr><td colspan="9" class="empty">${d.loading?'Menghitung skor detector…':'Belum ada pair yang memenuhi semesta scanner (atau data pasar belum terambil).'}</td></tr>`;
     return;
   }
 
@@ -1207,7 +1204,6 @@ function renderDetector(d){
       <td class="mono ${cls(r.change_24h)}">${sign(r.change_24h)}${fmt(r.change_24h,2)}%</td>
       <td><span class="det-score mono">${fmt(sc,1)}</span><div class="det-bar${detBarCls(sc)}"><span style="width:${Math.max(0,Math.min(100,sc)).toFixed(1)}%"></span></div></td>
       ${detCell(c.change, x=>x.value===null?null:sign(x.value)+fmt(x.value,2)+'%')}
-      ${detCell(c.volume24, x=>x.value===null?null:fmt(x.value,2)+'x')}
       ${detCell(c.volume5m, x=>x.value===null?null:fmt(x.value,2)+'x')}
       ${detCell(c.orderbook, x=>{
         if(x.bid_ask_ratio===undefined) return null;
@@ -1880,7 +1876,7 @@ async function loadBtGridDefaults(){
   try{
     const r = await fetch('/api/backtest/defaults', {cache:'no-store'});
     if(r.ok) _btGridDefaults = await r.json();
-  }catch(e){ /* tetap pakai default lokal */ }
+  }catch(e){  }
   btGridSeedDefaultRow();
   btGridUpdateEstimate();
 }

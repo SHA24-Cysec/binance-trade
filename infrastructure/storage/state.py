@@ -1,9 +1,3 @@
-"""
-Persistensi state bot ke file JSON, supaya kalau bot restart (crash, reboot
-VPS, dsb) posisi yang sedang berjalan, level breakeven/trailing, dan
-tracking equity harian tidak hilang.
-"""
-
 from __future__ import annotations
 
 import json
@@ -60,7 +54,6 @@ def _load_state_checked_unlocked(path: str) -> tuple[dict, bool, str]:
 
 
 def load_state_checked(path: str) -> tuple[dict, bool, str]:
-    """Baca state beserta status integritas untuk keputusan fail-closed."""
     with interprocess_lock(path):
         return _load_state_checked_unlocked(path)
 
