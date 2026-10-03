@@ -490,7 +490,7 @@ def run_portfolio_backtest(
         board = []
         if entry_signal_cache is None:
             btc_drop = btc_lookup.drop_pct_at(t_now) if btc_lookup is not None else None
-            for (sym, ot, ct, pct_arr, vol_arr, ready_arr, n_bar) in papan_input:
+            for (sym, ot, _ct, pct_arr, vol_arr, ready_arr, n_bar) in papan_input:
                 pos = bisect_left(ot, t_now)
                 if pos >= n_bar or ot[pos] != t_now:
                     continue
@@ -785,9 +785,9 @@ def summarize_portfolio(result: PortfolioResult) -> dict:
     }
 
 
-def _mk(t, o, h, l, c, qv=5_000_000.0):
+def _mk(t, o, h, low, c, qv=5_000_000.0):
     ms = t * 5 * MS_PER_MIN
-    return Kline(open_time=ms, open=o, high=h, low=l, close=c,
+    return Kline(open_time=ms, open=o, high=h, low=low, close=c,
                  close_time=ms + 5 * MS_PER_MIN - 1, volume=1000.0, quote_volume=qv)
 
 

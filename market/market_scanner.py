@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 
 from strategy import indicators as strategy
@@ -448,7 +448,7 @@ def compute_detector_score(change_pct,
         total_w += w
         acc += w * comps[key]["sub"]
     score = (acc / total_w * 100.0) if total_w > 0 else 0.0
-    for key, wkey, _label in DETECTOR_COMPONENTS:
+    for key, _wkey, _label in DETECTOR_COMPONENTS:
         w = comps[key]["weight"]
         comps[key]["points"] = (w * comps[key]["sub"] / total_w * 100.0) if total_w > 0 else 0.0
         comps[key]["max_points"] = (w / total_w * 100.0) if total_w > 0 else 0.0

@@ -494,7 +494,6 @@ def reconcile_state_with_exchange(client: ExchangeClient, config: dict, state: d
     live = str(config.get("MODE", "PAPER")).upper() == "LIVE"
     issues: list[str] = []
     issue_assets: set[str] = set()
-    changed = False
 
     def issue(reason: str, *assets: str) -> None:
         issues.append(reason)
@@ -546,7 +545,6 @@ def reconcile_state_with_exchange(client: ExchangeClient, config: dict, state: d
                         pending.get("side"), symbol_pending, age_ms / 1000.0,
                     )
                     state["pending_order"] = None
-                    changed = True
                 else:
                     issue("PENDING_ORDER_UNVERIFIED", symbol_pending)
                     logger.critical(
@@ -593,7 +591,6 @@ def reconcile_state_with_exchange(client: ExchangeClient, config: dict, state: d
                                 symbol_pending,
                             )
                             state["pending_order"] = None
-                            changed = True
                         else:
                             issue("FILLED_BUY_STATE_UNRESTORABLE", symbol_pending)
                 elif terminal:
@@ -618,10 +615,8 @@ def reconcile_state_with_exchange(client: ExchangeClient, config: dict, state: d
                                 )
                                 state["last_trade_time"] = state_mod.now_ms()
                             state["pending_order"] = None
-                            changed = True
                     else:
                         state["pending_order"] = None
-                        changed = True
                 elif status in _NONTERMINAL_ORDER_STATUSES:
                     pending["last_status"] = status
                     pending["executed_qty"] = executed_qty
@@ -629,11 +624,9 @@ def reconcile_state_with_exchange(client: ExchangeClient, config: dict, state: d
                         order.get("cummulativeQuoteQty", 0.0) or 0.0
                     )
                     issue("PENDING_ORDER_NONTERMINAL", symbol_pending)
-                    changed = True
                 else:
                     pending["last_status"] = status or "UNKNOWN"
                     issue("PENDING_ORDER_STATUS_UNKNOWN", symbol_pending)
-                    changed = True
 
     symbol = state.get("current_symbol")
     qty_state = float(state.get("qty") or 0.0)
@@ -649,7 +642,6 @@ def reconcile_state_with_exchange(client: ExchangeClient, config: dict, state: d
                 symbol, qty_state, base_asset,
             )
             reset_position(state)
-            changed = True
         elif total_base <= 0 and pending_unresolved:
             issue("POSITION_BALANCE_ZERO_WITH_PENDING", base_asset)
         elif total_base < qty_state:
@@ -659,7 +651,6 @@ def reconcile_state_with_exchange(client: ExchangeClient, config: dict, state: d
             )
             state["qty"] = total_base
             qty_state = total_base
-            changed = True
 
         expected_native_lock = (
             not pending_unresolved

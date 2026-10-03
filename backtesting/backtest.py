@@ -495,10 +495,10 @@ def validate_params(cfg: dict) -> None:
         )
 
 
-def _make_candle(t, o, h, l, c, vol=1_000_000.0, qvol=None):
+def _make_candle(t, o, h, low, c, vol=1_000_000.0, qvol=None):
     if qvol is None:
         qvol = vol * ((o + c) / 2.0)
-    return Kline(open_time=t, open=o, high=h, low=l, close=c,
+    return Kline(open_time=t, open=o, high=h, low=low, close=c,
                  close_time=t + 299_999, volume=vol, quote_volume=qvol)
 
 
@@ -620,8 +620,8 @@ def selftest():
     print("\n=== SELFTEST backtest.py: paritas dengan bot live (exit, filter, kontrol akun) ===")
     from types import SimpleNamespace
 
-    def _mk(i, o, h, l, c, vol=10_000_000.0):
-        return _make_candle(i * 300_000, o, h, l, c, vol=vol)
+    def _mk(i, o, h, low, c, vol=10_000_000.0):
+        return _make_candle(i * 300_000, o, h, low, c, vol=vol)
 
     cfg_d1 = dict(cfg, BACKTEST_ENTRY_DELAY_BARS=1)
     k_crash = list(kl_setup)

@@ -579,9 +579,11 @@ class PaperMatchingEngine:
             target = None
             for o in self.store.get_open_orders(symbol):
                 if order_id is not None and o.get("orderId") == order_id:
-                    target = o; break
+                    target = o
+                    break
                 if orig_client_order_id is not None and o.get("clientOrderId") == orig_client_order_id:
-                    target = o; break
+                    target = o
+                    break
             if target is None:
                 raise BinanceAPIError(400, -2011, "Unknown order sent.")
             target["status"] = "CANCELED"

@@ -55,20 +55,25 @@ def blok_setup(harga: float, mulai_index: int, volume: float = 5_000_000.0):
     for j in range(12):
         o = harga
         h = harga * 1.004
-        l = harga * 0.996
+        low = harga * 0.996
         c = harga * 1.001
         if j == 6:
             h = harga * 1.012
             c = harga * 1.006
-        out.append(make_candle(i, o, h, l, c, volume))
+        out.append(make_candle(i, o, h, low, c, volume))
         i += 1
 
     level = harga * 1.012
-    out.append(make_candle(i, harga * 1.002, level * 1.013, harga * 0.999, level * 1.012, volume)); i += 1
-    out.append(make_candle(i, level * 1.012, level * 1.014, level * 1.006, level * 1.008, volume)); i += 1
-    out.append(make_candle(i, level * 1.008, level * 1.010, level * 1.004, level * 1.006, volume)); i += 1
-    out.append(make_candle(i, level * 1.006, level * 1.008, level * 1.002, level * 1.004, volume)); i += 1
-    out.append(make_candle(i, level * 1.001, level * 1.009, level * 0.997, level * 1.008, volume)); i += 1
+    out.append(make_candle(i, harga * 1.002, level * 1.013, harga * 0.999, level * 1.012, volume))
+    i += 1
+    out.append(make_candle(i, level * 1.012, level * 1.014, level * 1.006, level * 1.008, volume))
+    i += 1
+    out.append(make_candle(i, level * 1.008, level * 1.010, level * 1.004, level * 1.006, volume))
+    i += 1
+    out.append(make_candle(i, level * 1.006, level * 1.008, level * 1.002, level * 1.004, volume))
+    i += 1
+    out.append(make_candle(i, level * 1.001, level * 1.009, level * 0.997, level * 1.008, volume))
+    i += 1
     return out, level * 1.008, i
 
 

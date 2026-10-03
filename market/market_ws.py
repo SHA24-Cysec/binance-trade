@@ -259,7 +259,8 @@ class MarketWebSocket:
             sym = data.get("s")
             if sym:
                 try:
-                    bid = float(data["b"]); ask = float(data["a"])
+                    bid = float(data["b"])
+                    ask = float(data["a"])
                     self._book.put(sym.upper(), {
                         "bid": bid, "ask": ask,
                         "bidQty": float(data.get("B", 0) or 0),

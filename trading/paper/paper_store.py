@@ -179,7 +179,8 @@ class PaperStore:
     def lock_funds(self, asset: str, amount: Decimal) -> None:
         with self.lock:
             b = self._bal(asset)
-            free = _d(b["free"]); amt = _d(amount)
+            free = _d(b["free"])
+            amt = _d(amount)
             if amt > free:
                 raise ValueError(f"Saldo {asset} tidak cukup untuk dikunci: {amt} > {free}")
             b["free"] = str(free - amt)
@@ -188,7 +189,8 @@ class PaperStore:
     def unlock_funds(self, asset: str, amount: Decimal) -> None:
         with self.lock:
             b = self._bal(asset)
-            locked = _d(b["locked"]); amt = _d(amount)
+            locked = _d(b["locked"])
+            amt = _d(amount)
             take = amt if amt <= locked else locked
             b["locked"] = str(locked - take)
             b["free"] = str(_d(b["free"]) + take)
@@ -196,7 +198,8 @@ class PaperStore:
     def consume_locked(self, asset: str, amount: Decimal) -> None:
         with self.lock:
             b = self._bal(asset)
-            locked = _d(b["locked"]); amt = _d(amount)
+            locked = _d(b["locked"])
+            amt = _d(amount)
             if amt > locked:
                 raise ValueError(f"Locked {asset} tidak cukup: {amt} > {locked}")
             b["locked"] = str(locked - amt)

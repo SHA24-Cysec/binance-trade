@@ -154,11 +154,15 @@ def _remote_is_loopback() -> bool:
 @app.before_request
 def _security_gate():
     host = (request.host or "").lower()
-    expected = _expected_hosts()
-    if app.config.get("TESTING"):
-        expected.update({"localhost", "127.0.0.1"})
-    if host not in expected:
-        return jsonify({"error": "Host dashboard tidak diizinkan."}), 400
+    if _bind_is_loopback():
+        expected = _expected_hosts()
+        if app.config.get("TESTING"):
+            expected.update({"localhost", "127.0.0.1"})
+        if host not in expected:
+            return jsonify({"error": "Host dashboard tidak diizinkan."}), 400
+    # Saat diikat ke alamat non-loopback, dashboard memang dimaksudkan sebagai
+    # pantauan baca-saja untuk perangkat lain di jaringan: pemeriksaan Host
+    # dilewati, tetapi SEMUA endpoint tulis sudah diblokir terpisah di bawah.
 
     if request.method in ("POST", "PUT", "PATCH", "DELETE"):
         if not _bind_is_loopback():
@@ -366,7 +370,8 @@ def get_live_balance():
 
 
 _RE_BUY = re.compile(
-    r"^(?P<ts>[\d\-]+ [\d:]+).*?BUY FILLED (?P<sym>\w+): qty=(?P<qty>[\d.]+) @ avg (?P<price>[\d.]+)"
+    r"^(?P<ts>[\d\-]+ [\d:]+).*?BUY FILLED (?P<sym>\w+): qty=(?P<qty>[\d.]+)"
+    r"(?: managed=(?P<managed>[\d.]+))? @ avg (?P<price>[\d.]+)"
     r".*?24h=(?P<pct>[+\-\d.]+)%"
 )
 _RE_SELL = re.compile(
@@ -424,6 +429,7 @@ def parse_log(max_lines: int = 4000):
             })
             if "buy_price" not in t:
                 t["buy_price"] = float(d["entry"])
+            t.setdefault("qty", float(d["qty"]))
             t["pnl_pct"] = (t["sell_price"] / t["buy_price"] - 1.0) * 100.0 if t.get("buy_price") else 0.0
             trades.append(t)
             open_pos = None
@@ -434,9 +440,9 @@ def parse_log(max_lines: int = 4000):
         if not ln.strip():
             continue
         lvl = "INFO"
-        for l in ("CRITICAL", "ERROR", "WARNING", "INFO"):
-            if f"| {l}" in ln:
-                lvl = l
+        for nama_level in ("CRITICAL", "ERROR", "WARNING", "INFO"):
+            if f"| {nama_level}" in ln:
+                lvl = nama_level
                 break
         events.append({"raw": ln, "level": lvl})
 
@@ -1316,8 +1322,10 @@ def _detector_score_symbol(client, symbol: str, ticker: dict, planned: float) ->
 
 
 def _detector_candidates(tickers: list, config: dict) -> list[tuple[float, float, str, dict]]:
-    """Return every detector-eligible pair, without a top-N display cap."""
+    """Detector-eligible pairs: lolos filter simbol, volume, dan rentang gerbang pump."""
     min_vol = float(config.get("MIN_QUOTE_VOLUME_USDT_24H", 0) or 0)
+    min_change = float(config.get("PUMP_MIN_24H_CHANGE_PCT", 0) or 0)
+    max_change = float(config.get("PUMP_MAX_24H_CHANGE_PCT", 0) or 0)
     picked: list[tuple[float, float, str, dict]] = []
     for ticker in tickers:
         if not isinstance(ticker, dict) or "symbol" not in ticker:
@@ -1333,6 +1341,10 @@ def _detector_candidates(tickers: list, config: dict) -> list[tuple[float, float
             continue
         if (not all(math.isfinite(value) for value in (quote_volume, price, change))
                 or price <= 0 or quote_volume < min_vol):
+            continue
+        if change < min_change:
+            continue
+        if max_change > 0 and change > max_change:
             continue
         picked.append((change, quote_volume, symbol, ticker))
     picked.sort(key=lambda row: (-row[0], -row[1]))
@@ -1377,6 +1389,8 @@ def _detector_rebuild() -> None:
                 "eligible_symbols": len(picked),
                 "scored_symbols": len(items),
                 "min_quote_volume_24h": min_vol,
+                "min_change_pct": float(PUMP_CONFIG.get("PUMP_MIN_24H_CHANGE_PCT", 0) or 0),
+                "max_change_pct": float(PUMP_CONFIG.get("PUMP_MAX_24H_CHANGE_PCT", 0) or 0),
                 "planned_notional": planned,
                 "weights": {key: PUMP_CONFIG.get(wkey) for key, wkey, _l in scanner.DETECTOR_COMPONENTS},
             },
@@ -1699,10 +1713,14 @@ def api_control_execute():
 
 def main(*, auto_start_bot: bool = False) -> int:
     if not _bind_is_loopback():
-        trusted = list(app.config.get("TRUSTED_HOSTS") or [])
-        if _DASHBOARD_HOST not in ("0.0.0.0", "::"):
+        if _DASHBOARD_HOST in ("0.0.0.0", "::"):
+            # Mode baca-saja di semua antarmuka: Host apa pun boleh membuka
+            # halaman (lapisan Werkzeug), kontrol tulis tetap diblokir total.
+            app.config["TRUSTED_HOSTS"] = None
+        else:
+            trusted = list(app.config.get("TRUSTED_HOSTS") or [])
             trusted.append(_DASHBOARD_HOST)
-        app.config["TRUSTED_HOSTS"] = trusted
+            app.config["TRUSTED_HOSTS"] = trusted
         print("=" * 68)
         print("PERINGATAN: DASHBOARD_HOST bukan loopback.")
         print("Semua endpoint tulis dinonaktifkan. Dashboard hanya read-only.")

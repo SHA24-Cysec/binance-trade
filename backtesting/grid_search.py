@@ -117,7 +117,7 @@ def expand_grid(spec: dict, max_kombinasi: Optional[int] = None,
     dipangkas = 0
 
     for nilai in itertools.product(*(dinormalkan[k] for k in kunci)):
-        calon = dict(zip(kunci, nilai))
+        calon = dict(zip(kunci, nilai, strict=True))
         if "USE_ATR_EXIT" in calon:
             aktif = bool(calon["USE_ATR_EXIT"])
         else:
