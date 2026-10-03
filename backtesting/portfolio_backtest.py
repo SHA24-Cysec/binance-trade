@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor
 from bisect import bisect_left
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -135,30 +136,60 @@ def fetch_universe_klines(
     sleep_between_symbols: float = 0.0,
     cancel_cb: Optional[Callable[[], bool]] = None,
     cache: Optional[KlineCache] = None,
+    max_workers: int = 1,
 ) -> tuple[list[str], list]:
     ok_symbols: list[str] = []
     failed: list = []
     total = max(1, len(symbols))
+    workers = max(1, int(max_workers or 1))
 
-    for idx, sym in enumerate(symbols):
-        if cancel_cb is not None and cancel_cb():
-            raise BacktestError("Backtest dibatalkan.")
-        try:
-            kl = _klines_untuk_simbol(client, sym, interval, start_ms, end_ms,
-                                      cache)
-            if kl:
-                store.write_symbol(sym, kl)
-                ok_symbols.append(sym)
-            else:
-                failed.append({"symbol": sym, "error": "tidak ada data candle pada rentang ini"})
-            del kl
-        except Exception as exc:
-            failed.append({"symbol": sym, "error": str(exc)[:160]})
+    def _download(sym: str) -> list[Kline]:
+        return _klines_untuk_simbol(client, sym, interval, start_ms, end_ms, cache)
 
-        if progress_cb:
-            progress_cb((idx + 1) / total, sym)
-        if sleep_between_symbols:
-            time.sleep(sleep_between_symbols)
+    # Fetch in small ordered batches: network I/O can overlap, while storage
+    # insertion remains in the original universe order. The latter preserves
+    # deterministic tie-breaking in portfolio simulations.
+    if workers == 1 or len(symbols) <= 1:
+        batches = [symbols]
+        executor = None
+    else:
+        batches = [symbols[i:i + workers] for i in range(0, len(symbols), workers)]
+        executor = ThreadPoolExecutor(max_workers=workers,
+                                      thread_name_prefix="backtest-klines")
+
+    done = 0
+    try:
+        for batch in batches:
+            if cancel_cb is not None and cancel_cb():
+                raise BacktestError("Backtest dibatalkan.")
+            futures = ({sym: executor.submit(_download, sym) for sym in batch}
+                       if executor is not None else {})
+            for sym in batch:
+                if cancel_cb is not None and cancel_cb():
+                    for future in futures.values():
+                        future.cancel()
+                    raise BacktestError("Backtest dibatalkan.")
+                try:
+                    kl = futures[sym].result() if executor is not None else _download(sym)
+                    if kl:
+                        store.write_symbol(sym, kl)
+                        ok_symbols.append(sym)
+                    else:
+                        failed.append({
+                            "symbol": sym,
+                            "error": "tidak ada data candle pada rentang ini",
+                        })
+                except Exception as exc:
+                    failed.append({"symbol": sym, "error": str(exc)[:160]})
+
+                done += 1
+                if progress_cb:
+                    progress_cb(done / total, sym)
+                if sleep_between_symbols:
+                    time.sleep(sleep_between_symbols)
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
 
     return ok_symbols, failed
 
@@ -179,6 +210,7 @@ def _klines_untuk_simbol(client, symbol: str, interval: str, start_ms: int,
 
 def build_timeline(store: KlineStore, interval: str,
                    symbols: Optional[list[str]] = None,
+                   *, include_ohlcv: bool = False,
                    ) -> tuple[list[int], dict[str, SymbolSeries]]:
     window = bars_per_day(interval)
     daftar = list(symbols) if symbols is not None else store.symbols()
@@ -190,13 +222,125 @@ def build_timeline(store: KlineStore, interval: str,
         if not klines:
             continue
         stats = compute_rolling_24h_stats(klines, window)
-        series = SymbolSeries.build(sym, klines, stats)
+        series = SymbolSeries.build(sym, klines, stats, include_ohlcv=include_ohlcv)
         series_of[sym] = series
         all_times.update(series.open_times())
         del klines, stats
 
     timeline = sorted(all_times)
     return timeline, series_of
+
+
+EntrySignal = tuple[int, float, str, int, float, scanner.SetupResult]
+EntrySignalCache = dict[int, tuple[int, list[EntrySignal]]]
+
+
+def precompute_entry_signals(
+    store: KlineStore,
+    config: dict,
+    interval: str,
+    warmup_ms: int = 0,
+    *,
+    prebuilt: Optional[tuple] = None,
+    progress_cb: Optional[Callable[[float], None]] = None,
+    cancel_cb: Optional[Callable[[], bool]] = None,
+    btc_klines: Optional[list[Kline]] = None,
+) -> EntrySignalCache:
+    """Precompute entry candidates when only exit multipliers will vary.
+
+    Entry qualification depends on market data, scanner filters, and ATR_PERIOD,
+    not on ATR exit multipliers. Reusing these signals makes multi-parameter
+    exit searches much faster without changing the portfolio simulator's fills.
+    """
+    all_symbols = store.symbols()
+    if not all_symbols:
+        raise BacktestError("Tidak ada data candle untuk memproses sinyal.")
+
+    tradable_meta = config.get("_historical_tradable_symbols")
+    symbols = [sym for sym in all_symbols
+               if scanner.is_structurally_allowed_symbol(sym, config, tradable_meta)]
+    if not symbols:
+        raise BacktestError("Tidak ada data yang lolos policy semesta bersama.")
+
+    if prebuilt is not None:
+        timeline, series_of = prebuilt
+    else:
+        timeline, series_of = build_timeline(store, interval, symbols)
+    if not timeline:
+        raise BacktestError("Garis waktu kosong, tidak ada candle yang bisa diproses.")
+    symbols = [sym for sym in symbols if sym in series_of]
+
+    lookback = strategy.confirm_window_bars(config)
+    min_vol = float(config["MIN_QUOTE_VOLUME_USDT_24H"])
+    top_n = int(config.get("TOP_N_CANDIDATES_TO_CONFIRM", 10))
+    bar_ms = INTERVAL_MINUTES.get(interval, 5) * MS_PER_MIN
+    btc_lookup = parity.make_btc_lookup(btc_klines, config, bar_ms)
+    gate_cfg = parity.gate_config(config, btc_lookup)
+    first_allowed_time = timeline[0] + int(warmup_ms)
+
+    papan_input = []
+    for sym in symbols:
+        ot, _ct, pct_arr, vol_arr, ready_arr = series_of[sym].board_arrays()
+        papan_input.append((sym, ot, pct_arr, vol_arr, ready_arr, len(ot)))
+
+    signals: EntrySignalCache = {}
+    total_bars = len(timeline)
+    for bi, t_now in enumerate(timeline):
+        if cancel_cb is not None and bi % 200 == 0 and cancel_cb():
+            raise BacktestError("Backtest dibatalkan.")
+        if progress_cb and bi % 50 == 0:
+            progress_cb(bi / max(1, total_bars))
+        if t_now < first_allowed_time:
+            continue
+
+        btc_drop = btc_lookup.drop_pct_at(t_now) if btc_lookup is not None else None
+        board = []
+        for sym, ot, pct_arr, vol_arr, ready_arr, n_bar in papan_input:
+            pos = bisect_left(ot, t_now)
+            if pos >= n_bar or ot[pos] != t_now or not ready_arr[pos]:
+                continue
+            vol24 = vol_arr[pos]
+            if vol24 < min_vol:
+                continue
+            pct24 = pct_arr[pos]
+            gate_ok, _gate_reason = scanner.evaluate_pump_gate(
+                pct24, vol24, gate_cfg, btc_drop_pct=btc_drop)
+            if gate_ok:
+                board.append((vol24, sym, pos, pct24))
+        board.sort(key=lambda x: -x[0])
+        if not board:
+            continue
+
+        lolos: list[EntrySignal] = []
+        for rank, (vol24, sym, index, pct24) in enumerate(board[:top_n], start=1):
+            if index + 1 < lookback:
+                continue
+            symbol_series = series_of[sym]
+            try:
+                if symbol_series.has_ohlcv:
+                    window_klines = symbol_series.klines_slice(
+                        max(0, index - lookback + 1), index + 1)
+                else:
+                    klines = store.klines(sym)
+                    window_klines = klines[max(0, index - lookback + 1): index + 1]
+                setup = scanner.detect_entry_setup(window_klines, config)
+            except Exception:
+                continue
+            if setup.ok:
+                lolos.append((rank, pct24, sym, index, vol24, setup))
+
+        if not lolos:
+            continue
+        lolos.sort(key=lambda row: scanner.setup_quality_key(
+            row[5], scanner.Candidate(
+                row[2], "", row[1], row[4], series_of[row[2]].kline_at(row[3]).close
+                if series_of[row[2]].has_ohlcv
+                else store.klines(row[2])[row[3]].close)))
+        signals[int(t_now)] = (len(board), lolos)
+
+    if progress_cb:
+        progress_cb(1.0)
+    return signals
 
 
 def _resolve_symbol_cache_size(config: dict, top_n: int) -> int:
@@ -218,6 +362,7 @@ def run_portfolio_backtest(
     end_ms: Optional[int] = None,
     prebuilt: Optional[tuple] = None,
     btc_klines: Optional[list] = None,
+    entry_signal_cache: Optional[EntrySignalCache] = None,
 ) -> PortfolioResult:
     semua_simbol = store.symbols()
     if not semua_simbol:
@@ -249,7 +394,13 @@ def run_portfolio_backtest(
     lookback = strategy.confirm_window_bars(config)
     min_vol = float(config["MIN_QUOTE_VOLUME_USDT_24H"])
     top_n = int(config.get("TOP_N_CANDIDATES_TO_CONFIRM", 10))
-    store.set_cache_size(_resolve_symbol_cache_size(config, top_n))
+    if entry_signal_cache is None:
+        store.set_cache_size(_resolve_symbol_cache_size(config, top_n))
+    else:
+        cache_size = int(config.get("BACKTEST_SYMBOL_CACHE_SIZE",
+                                   storage.DEFAULT_SYMBOL_CACHE_SIZE)
+                         or storage.DEFAULT_SYMBOL_CACHE_SIZE)
+        store.set_cache_size(max(1, cache_size))
     _pre_warnings: list = []
     if lolos_policy != original_count:
         _pre_warnings.append("Sebagian data dibuang oleh policy semesta bersama (stablecoin, leveraged token, blacklist, quote, atau status metadata).")
@@ -307,37 +458,64 @@ def run_portfolio_backtest(
         ot, ct, pct_arr, vol_arr, ready_arr = series_of[sym].board_arrays()
         papan_input.append((sym, ot, ct, pct_arr, vol_arr, ready_arr, len(ot)))
 
-    for bi, t_now in enumerate(timeline):
-        if progress_cb and bi % 50 == 0:
-            progress_cb(bi / total_bars)
-        if cancel_cb is not None and bi % 200 == 0 and cancel_cb():
+    signal_times = (sorted(int(value) for value in entry_signal_cache)
+                    if entry_signal_cache is not None else [])
+    signal_cursor = 0
+    bi = 0
+    while bi < total_bars:
+        if entry_signal_cache is not None and holding is None:
+            while (signal_cursor < len(signal_times)
+                   and signal_times[signal_cursor] < timeline[bi]):
+                signal_cursor += 1
+            if signal_cursor >= len(signal_times):
+                break
+            next_signal = signal_times[signal_cursor]
+            next_index = bisect_left(timeline, next_signal)
+            if next_index >= total_bars:
+                break
+            if timeline[next_index] != next_signal:
+                signal_cursor += 1
+                continue
+            if next_index > bi:
+                bi = next_index
+
+        current_bi = bi
+        t_now = timeline[current_bi]
+        bi = current_bi + 1
+        if progress_cb and current_bi % 50 == 0:
+            progress_cb(current_bi / total_bars)
+        if cancel_cb is not None and current_bi % 200 == 0 and cancel_cb():
             raise BacktestError("Backtest dibatalkan.")
 
-        btc_drop = btc_lookup.drop_pct_at(t_now) if btc_lookup is not None else None
         board = []
-        for (sym, ot, ct, pct_arr, vol_arr, ready_arr, n_bar) in papan_input:
-            pos = bisect_left(ot, t_now)
-            if pos >= n_bar or ot[pos] != t_now:
-                continue
-            if not ready_arr[pos]:
-                continue
-            vol24 = vol_arr[pos]
-            if vol24 < min_vol:
-                continue
-            pct24 = pct_arr[pos]
-            gate_ok, _gate_reason = scanner.evaluate_pump_gate(
-                pct24, vol24, gate_cfg, btc_drop_pct=btc_drop)
-            if not gate_ok:
-                continue
-            board.append((vol24, sym, pos, pct24))
-        board.sort(key=lambda x: -x[0])
+        if entry_signal_cache is None:
+            btc_drop = btc_lookup.drop_pct_at(t_now) if btc_lookup is not None else None
+            for (sym, ot, ct, pct_arr, vol_arr, ready_arr, n_bar) in papan_input:
+                pos = bisect_left(ot, t_now)
+                if pos >= n_bar or ot[pos] != t_now:
+                    continue
+                if not ready_arr[pos]:
+                    continue
+                vol24 = vol_arr[pos]
+                if vol24 < min_vol:
+                    continue
+                pct24 = pct_arr[pos]
+                gate_ok, _gate_reason = scanner.evaluate_pump_gate(
+                    pct24, vol24, gate_cfg, btc_drop_pct=btc_drop)
+                if not gate_ok:
+                    continue
+                board.append((vol24, sym, pos, pct24))
+            board.sort(key=lambda x: -x[0])
 
         if holding is not None:
             hi = series_of[holding].index_at(t_now)
             if hi is None:
                 continue
 
-            candle = store.klines(holding)[hi]
+            held_series = series_of[holding]
+            candle = (held_series.kline_at(hi)
+                      if entry_signal_cache is not None and held_series.has_ohlcv
+                      else store.klines(holding)[hi])
             if candle.open_time < entry_time:
                 continue
             hold_minutes = (candle.close_time - entry_time) / 60000.0
@@ -348,7 +526,7 @@ def run_portfolio_backtest(
             if verdict is not None:
                 exit_reason, exit_price = verdict
 
-            is_last = (bi == total_bars - 1)
+            is_last = (current_bi == total_bars - 1)
             if exit_reason is None:
                 mtm_equity = equity + position_notional * (candle.close / entry_price - 1.0)
                 entries_paused = controls.update(candle.close_time, mtm_equity)
@@ -397,29 +575,38 @@ def run_portfolio_backtest(
         if t_now < first_allowed_time or t_now < next_entry_allowed_at:
             continue
 
-        eligible = board
-        if not eligible:
-            continue
-
-        lolos = []
-        for rank, (vol24, sym, i, pct) in enumerate(eligible[:top_n], start=1):
-            kl = store.klines(sym)
-            if i + 1 < lookback:
+        if entry_signal_cache is None:
+            eligible = board
+            if not eligible:
                 continue
-            window_kl = kl[max(0, i - lookback + 1): i + 1]
-            try:
-                setup = scanner.detect_entry_setup(window_kl, config)
-            except Exception:
+
+            lolos = []
+            for rank, (vol24, sym, i, pct) in enumerate(eligible[:top_n], start=1):
+                kl = store.klines(sym)
+                if i + 1 < lookback:
+                    continue
+                window_kl = kl[max(0, i - lookback + 1): i + 1]
+                try:
+                    setup = scanner.detect_entry_setup(window_kl, config)
+                except Exception:
+                    continue
+                if setup.ok:
+                    lolos.append((rank, pct, sym, i, vol24, setup))
+
+            if not lolos:
                 continue
-            if setup.ok:
-                lolos.append((rank, pct, sym, i, vol24, setup))
 
-        if not lolos:
-            continue
-
-        lolos.sort(key=lambda row: scanner.setup_quality_key(row[5],
-                                                             scanner.Candidate(row[2], "", row[1], row[4],
-                                                                               store.klines(row[2])[row[3]].close)))
+            lolos.sort(key=lambda row: scanner.setup_quality_key(
+                row[5], scanner.Candidate(
+                    row[2], "", row[1], row[4], store.klines(row[2])[row[3]].close)))
+            eligible_count = len(eligible)
+        else:
+            cached_entry = entry_signal_cache.get(int(t_now))
+            if cached_entry is None:
+                continue
+            eligible_count, lolos = cached_entry
+            if not lolos:
+                continue
         rank, pct, sym, i, _vol24, setup_terpilih = lolos[0]
         sizing = strategy.resolve_position_notional(config, equity)
         if sizing["notional"] <= 0 or sizing["notional"] > equity:
@@ -436,16 +623,27 @@ def run_portfolio_backtest(
                 if len(skipped) >= max_skipped_records:
                     break
 
-        kl = store.klines(sym)
+        entry_series = series_of[sym]
         entry_idx = i + entry_delay_bars
-        if entry_idx >= len(kl):
-            warnings.append(f"Sinyal {sym} terakhir tidak memiliki bar eksekusi setelah latency entry; trade dilewati.")
-            continue
-        if entry_delay_bars == 0:
-            raw_entry_price = kl[i].close
-            entry_time_value = kl[i].close_time
+        if entry_signal_cache is not None and entry_series.has_ohlcv:
+            series_length = len(entry_series)
+            if entry_idx >= series_length:
+                warnings.append(f"Sinyal {sym} terakhir tidak memiliki bar eksekusi setelah latency entry; trade dilewati.")
+                continue
+            signal_candle = entry_series.kline_at(i)
+            entry_candle = entry_series.kline_at(entry_idx)
         else:
+            kl = store.klines(sym)
+            series_length = len(kl)
+            if entry_idx >= series_length:
+                warnings.append(f"Sinyal {sym} terakhir tidak memiliki bar eksekusi setelah latency entry; trade dilewati.")
+                continue
+            signal_candle = kl[i]
             entry_candle = kl[entry_idx]
+        if entry_delay_bars == 0:
+            raw_entry_price = signal_candle.close
+            entry_time_value = signal_candle.close_time
+        else:
             raw_entry_price = entry_candle.open
             entry_time_value = entry_candle.open_time
         level_cfg = dict(config)
@@ -484,7 +682,7 @@ def run_portfolio_backtest(
         entry_time = entry_time_value
         rank_at_entry = rank
         pct24h_at_entry = pct
-        cands_at_entry = len(eligible)
+        cands_at_entry = eligible_count
 
     if progress_cb:
         progress_cb(1.0)

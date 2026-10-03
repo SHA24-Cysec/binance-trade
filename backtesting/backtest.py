@@ -629,8 +629,10 @@ def selftest():
     r_ec = run_backtest(k_crash, cfg_d1, warmup_bars=0)
     assert len(r_ec.trades) == 1, "Crash di candle entry harus menghasilkan satu trade SL"
     t_ec = r_ec.trades[0]
-    assert t_ec.reason == "STOP_LOSS" and t_ec.entry_time == 308 * 300_000 and t_ec.exit_price < 81.0, \
-        (t_ec.reason, t_ec.entry_time, t_ec.exit_price)
+    assert (t_ec.reason == "STOP_LOSS"
+            and t_ec.entry_time == 308 * 300_000
+            and abs(t_ec.exit_price - (t_ec.entry_price - t_ec.sl_pct)) < 1e-9), \
+        (t_ec.reason, t_ec.entry_time, t_ec.exit_price, t_ec.entry_price, t_ec.sl_pct)
     r_ok = run_backtest(kl_setup, cfg_d1, warmup_bars=0)
     assert [t.reason for t in r_ok.trades] == ["END_OF_DATA"], "Kontrol positif tanpa crash"
     print("  candle entry dievaluasi (SL kena di candle entry) -> OK")

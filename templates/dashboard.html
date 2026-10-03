@@ -1181,9 +1181,11 @@ function renderDetector(d){
   const note=document.getElementById('detNote');
   const warn=d.error?`<b style="color:var(--amber)">⚠️ ${esc(d.error)}</b><br>`+
     (items.length?'Daftar memakai data terakhir yang berhasil dihitung.<br>':''):'';
+  const eligibleSymbols = (cfg.eligible_symbols===undefined) ? items.length : cfg.eligible_symbols;
   note.innerHTML=warn+
-    `Skor 0 sampai 100 untuk ${fmt(cfg.top_n||15,0)} pair ${esc(cfg.quote_asset||'USDT')} dengan kenaikan 24 jam terbesar `+
-    `(volume 24 jam ≥ ${detVol(cfg.min_quote_volume_24h)}). Empat komponen dinilai terhadap ambang bot: kenaikan 24 jam, `+
+    `Skor 0 sampai 100 dihitung untuk ${fmt(items.length,0)} dari ${fmt(eligibleSymbols,0)} pair ${esc(cfg.quote_asset||'USDT')} `+
+    `yang lolos filter simbol dan volume 24 jam ≥ ${detVol(cfg.min_quote_volume_24h)}. Semua pair yang memenuhi filter ditampilkan, tanpa pemotongan Top-N; urutan dimulai dari skor tertinggi. `+
+    `Jumlah pair yang lebih banyak memerlukan lebih banyak request data pasar. Empat komponen dinilai terhadap ambang bot: kenaikan 24 jam, `+
     `lonjakan volume 5m, kualitas order book, dan ATR. Angka kecil di bawah nilai adalah poin / poin maksimum. `+
     `<b>Hanya tampilan</b>, skor tidak mengubah keputusan entry bot. Data yang gagal diambil dihitung 0. `+
     `Status LOLOS berarti gerbang pump dan filter order book terpenuhi saat ini; entry tetap butuh konfirmasi volume 5m, spread, chase, dan usia listing.`;

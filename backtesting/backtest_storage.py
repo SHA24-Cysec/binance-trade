@@ -86,20 +86,34 @@ class StorageError(RuntimeError):
 class SymbolSeries:
 
     __slots__ = ("symbol", "_open_times", "_close_times", "_pct24h",
-                 "_vol24h", "_ready")
+                 "_vol24h", "_ready", "_open", "_high", "_low", "_close",
+                 "_volume", "_quote_volume")
 
     def __init__(self, symbol: str, open_times: array, close_times: array,
-                 pct24h: array, vol24h: array, ready: bytearray) -> None:
+                 pct24h: array, vol24h: array, ready: bytearray,
+                 open_prices: Optional[array] = None,
+                 high_prices: Optional[array] = None,
+                 low_prices: Optional[array] = None,
+                 close_prices: Optional[array] = None,
+                 volumes: Optional[array] = None,
+                 quote_volumes: Optional[array] = None) -> None:
         self.symbol = str(symbol)
         self._open_times = open_times
         self._close_times = close_times
         self._pct24h = pct24h
         self._vol24h = vol24h
         self._ready = ready
+        self._open = open_prices
+        self._high = high_prices
+        self._low = low_prices
+        self._close = close_prices
+        self._volume = volumes
+        self._quote_volume = quote_volumes
 
     @classmethod
     def build(cls, symbol: str, klines: Sequence[Kline],
-              stats: Sequence[Optional[dict]]) -> "SymbolSeries":
+              stats: Sequence[Optional[dict]],
+              include_ohlcv: bool = False) -> "SymbolSeries":
         n = len(klines)
         if len(stats) != n:
             raise StorageError(
@@ -117,7 +131,46 @@ class SymbolSeries:
             pct[i] = float(st["pct24h"])
             vol[i] = float(st["vol24h"])
             ready[i] = 1
-        return cls(symbol, open_times, close_times, pct, vol, ready)
+        raw_arrays = ()
+        if include_ohlcv:
+            raw_arrays = (
+                array("d", [float(k.open) for k in klines]),
+                array("d", [float(k.high) for k in klines]),
+                array("d", [float(k.low) for k in klines]),
+                array("d", [float(k.close) for k in klines]),
+                array("d", [float(k.volume) for k in klines]),
+                array("d", [float(k.quote_volume) for k in klines]),
+            )
+        return cls(symbol, open_times, close_times, pct, vol, ready, *raw_arrays)
+
+    @property
+    def has_ohlcv(self) -> bool:
+        return all(values is not None for values in (
+            self._open, self._high, self._low, self._close,
+            self._volume, self._quote_volume,
+        ))
+
+    def kline_at(self, index: int) -> Kline:
+        if not self.has_ohlcv:
+            raise StorageError(f"OHLCV untuk {self.symbol} tidak dimuat dalam SymbolSeries.")
+        i = int(index)
+        return Kline(
+            open_time=int(self._open_times[i]),
+            open=self._open[i],
+            high=self._high[i],
+            low=self._low[i],
+            close=self._close[i],
+            close_time=int(self._close_times[i]),
+            volume=self._volume[i],
+            quote_volume=self._quote_volume[i],
+        )
+
+    def klines_slice(self, start: int, end: int) -> list[Kline]:
+        if not self.has_ohlcv:
+            raise StorageError(f"OHLCV untuk {self.symbol} tidak dimuat dalam SymbolSeries.")
+        lo = max(0, int(start))
+        hi = min(len(self), max(lo, int(end)))
+        return [self.kline_at(i) for i in range(lo, hi)]
 
     def __len__(self) -> int:
         return len(self._open_times)

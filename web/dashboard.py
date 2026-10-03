@@ -1315,6 +1315,30 @@ def _detector_score_symbol(client, symbol: str, ticker: dict, planned: float) ->
     }
 
 
+def _detector_candidates(tickers: list, config: dict) -> list[tuple[float, float, str, dict]]:
+    """Return every detector-eligible pair, without a top-N display cap."""
+    min_vol = float(config.get("MIN_QUOTE_VOLUME_USDT_24H", 0) or 0)
+    picked: list[tuple[float, float, str, dict]] = []
+    for ticker in tickers:
+        if not isinstance(ticker, dict) or "symbol" not in ticker:
+            continue
+        symbol = str(ticker["symbol"])
+        if not scanner.is_structurally_allowed_symbol(symbol, config):
+            continue
+        try:
+            quote_volume = float(ticker.get("quoteVolume", 0) or 0)
+            price = float(ticker.get("lastPrice", 0) or 0)
+            change = float(ticker.get("priceChangePercent", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if (not all(math.isfinite(value) for value in (quote_volume, price, change))
+                or price <= 0 or quote_volume < min_vol):
+            continue
+        picked.append((change, quote_volume, symbol, ticker))
+    picked.sort(key=lambda row: (-row[0], -row[1]))
+    return picked
+
+
 def _detector_rebuild() -> None:
     try:
         client = get_client()
@@ -1324,28 +1348,7 @@ def _detector_rebuild() -> None:
             raise RuntimeError("Batas rate Binance sedang aktif, skor ditunda.")
         raw = client.get_ticker_24hr_all()
         min_vol = float(PUMP_CONFIG.get("MIN_QUOTE_VOLUME_USDT_24H", 0) or 0)
-        try:
-            top_n = max(1, int(PUMP_CONFIG.get("DETECTOR_TOP_N", 15) or 15))
-        except (TypeError, ValueError):
-            top_n = 15
-        picked = []
-        for t in raw:
-            if not isinstance(t, dict) or "symbol" not in t:
-                continue
-            sym = str(t["symbol"])
-            if not scanner.is_structurally_allowed_symbol(sym, PUMP_CONFIG):
-                continue
-            try:
-                qv = float(t.get("quoteVolume", 0) or 0)
-                price = float(t.get("lastPrice", 0) or 0)
-                chg = float(t.get("priceChangePercent", 0) or 0)
-            except (TypeError, ValueError):
-                continue
-            if price <= 0 or qv < min_vol:
-                continue
-            picked.append((chg, qv, sym, t))
-        picked.sort(key=lambda x: (-x[0], -x[1]))
-        picked = picked[:top_n]
+        picked = _detector_candidates(raw, PUMP_CONFIG)
 
         planned = _detector_planned_notional()
         items = []
@@ -1371,7 +1374,8 @@ def _detector_rebuild() -> None:
             },
             "config": {
                 "quote_asset": PUMP_CONFIG.get("QUOTE_ASSET", "USDT"),
-                "top_n": top_n,
+                "eligible_symbols": len(picked),
+                "scored_symbols": len(items),
                 "min_quote_volume_24h": min_vol,
                 "planned_notional": planned,
                 "weights": {key: PUMP_CONFIG.get(wkey) for key, wkey, _l in scanner.DETECTOR_COMPONENTS},

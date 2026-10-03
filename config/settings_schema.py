@@ -88,7 +88,6 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "EXTRA_EXCLUDE_SYMBOLS": _field("Scan", "Blacklist simbol", "Simbol tambahan yang tidak boleh dipilih.", "list", editor="symbols"),
 
     "DETECTOR_ENABLED": _field("Skor Detector", "Aktifkan skor detector", "Menampilkan panel skor detector di dashboard. Hanya tampilan: skor TIDAK mempengaruhi keputusan entry bot.", "bool"),
-    "DETECTOR_TOP_N": _field("Skor Detector", "Jumlah pair dinilai", "Berapa pair likuid dengan kenaikan 24 jam terbesar yang dinilai skornya. Makin banyak, makin banyak panggilan API (order book 25 bobot per pair).", "int", minimum=1, maximum=30),
     "DETECTOR_WEIGHT_CHANGE": _field("Skor Detector", "Bobot kenaikan 24 jam", "Bobot relatif komponen kenaikan 24 jam terhadap rentang gerbang pump.", "float", minimum=0, maximum=100),
     "DETECTOR_WEIGHT_VOLUME5M": _field("Skor Detector", "Bobot lonjakan volume 5m", "Bobot relatif volume candle 5m terakhir dibanding rata-rata candle sebelumnya.", "float", minimum=0, maximum=100),
     "DETECTOR_WEIGHT_ORDERBOOK": _field("Skor Detector", "Bobot kualitas order book", "Bobot relatif kedalaman ask, rasio bid/ask, dan sell wall.", "float", minimum=0, maximum=100),
@@ -237,7 +236,7 @@ REMOVED_PARAMETERS = frozenset({
     "WATCHLIST_ENTRY_EMA_GAP_PCT", "WATCHLIST_ENTRY_RSI_DECAY_PTS",
     "WATCHLIST_ENTRY_SCORE_TTL_SECONDS", "WATCHLIST_ENTRY_MIN_HEADROOM",
     "WATCHLIST_ENABLED", "WATCHLIST_TOP_N",
-    "PUMP_VOLUME_SURGE_MULT", "DETECTOR_WEIGHT_VOLUME24",
+    "PUMP_VOLUME_SURGE_MULT", "DETECTOR_WEIGHT_VOLUME24", "DETECTOR_TOP_N",
     "DAILY_KLINE_CACHE_TTL_SECONDS",
 })
 
