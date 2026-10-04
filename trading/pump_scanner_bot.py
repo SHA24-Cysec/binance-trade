@@ -36,6 +36,66 @@ logger = logging.getLogger("pump_bot")
 _shutdown_requested = False
 _shutdown_event = threading.Event()
 
+
+class TrendCache:
+    """Penyedia candle trend timeframe tinggi (default H1) untuk gerbang entry.
+
+    Perilaku yang dijaga:
+      * hanya candle yang SUDAH TUTUP yang dikembalikan (tanpa repaint),
+      * jendela yang dikembalikan persis TREND_LOOKBACK_BARS candle, sama
+        seperti potongan jendela di backtest,
+      * hasil disimpan selama candle trend terakhir belum berganti, jadi satu
+        simbol tidak diunduh berulang tiap scan,
+      * kegagalan pengambilan tidak pernah menghilangkan riwayat lama lalu
+        diam-diam meloloskan entry: pemanggil menerima None dan scanner
+        menolak kandidat (fail closed).
+    """
+
+    def __init__(self, client, config: dict) -> None:
+        self._client = client
+        self._config = config
+        self._lock = threading.RLock()
+        self._cache: dict[str, tuple[int, list]] = {}
+
+    def _interval_ms(self) -> int:
+        return strategy.trend_interval_minutes(self._config) * 60_000
+
+    def _last_closed_open_time(self, now_ms: int) -> int:
+        step = self._interval_ms()
+        return ((int(now_ms) // step) - 1) * step
+
+    def window_klines(self, symbol: str, now_ms: int) -> list:
+        jendela = strategy.trend_window_bars(self._config)
+        terakhir_tutup = self._last_closed_open_time(now_ms)
+        with self._lock:
+            tersimpan = self._cache.get(symbol)
+            if tersimpan is not None and tersimpan[0] >= terakhir_tutup:
+                return list(tersimpan[1])
+
+        raw = self._client.get_klines(
+            symbol, strategy.trend_interval(self._config),
+            limit=min(strategy.TREND_KLINE_LIMIT, jendela + 1))
+        closed = [k for k in strategy.parse_klines(raw or [])
+                  if int(k.close_time) < int(now_ms)]
+        siap = closed[-jendela:]
+
+        if siap:
+            with self._lock:
+                self._cache[symbol] = (int(siap[-1].open_time), siap)
+        return list(siap)
+
+    def verdict(self, symbol: str, now_ms: int) -> dict:
+        jendela = self.window_klines(symbol, now_ms)
+        return strategy.evaluate_trend_filter(jendela, self._config)
+
+    def provider(self, symbol: str) -> list:
+        """Callable yang dipakai scanner.find_best_candidate()."""
+        return self.window_klines(symbol, state_mod.now_ms())
+
+    def clear(self) -> None:
+        with self._lock:
+            self._cache.clear()
+
 DEFAULT_STATE = {
     "current_symbol": None,
     "entry_price": 0.0,
@@ -2639,6 +2699,36 @@ def run(config: dict, lifecycle=None) -> int:
             "benar-benar memakai angka yang sama.",
             have_bars, need_setup, strategy.confirm_window_bars(config),
         )
+    if config.get("TREND_FILTER_ENABLED", False):
+        butuh_trend = strategy.trend_required_bars(config)
+        jendela_trend = strategy.trend_window_bars(config)
+        if int(config.get("TREND_LOOKBACK_BARS", 0) or 0) < butuh_trend:
+            logger.warning(
+                "TREND_LOOKBACK_BARS=%s lebih kecil dari %d candle yang dibutuhkan EMA "
+                "dan ADX pada %s. Gerbang trend otomatis memakai %d candle, dan kandidat "
+                "tetap ditolak selama riwayat belum cukup. Perbaiki nilai config ini "
+                "supaya live dan backtest memakai jendela yang sama.",
+                config.get("TREND_LOOKBACK_BARS"), butuh_trend,
+                strategy.trend_interval(config), jendela_trend,
+            )
+        try:
+            strategy.trend_warmup_bars(config, config["CONFIRM_INTERVAL"])
+        except ValueError as exc:
+            logger.warning("%s Backtest akan menolak kombinasi ini sampai diperbaiki.", exc)
+        logger.info(
+            "Gerbang trend AKTIF (%s): entry lolos hanya kalau candle %s terakhir yang sudah "
+            "tutup memenuhi close > EMA%d, EMA%d > EMA%d, dan ADX%d >= %g. Kalau candle trend "
+            "gagal diambil atau riwayatnya kurang, kandidat DITOLAK (fail closed).",
+            config.get("TREND_INTERVAL", "1h"), config.get("TREND_INTERVAL", "1h"),
+            int(config.get("TREND_EMA_FAST", 20) or 20),
+            int(config.get("TREND_EMA_FAST", 20) or 20),
+            int(config.get("TREND_EMA_SLOW", 50) or 50),
+            int(config.get("TREND_ADX_PERIOD", 14) or 14),
+            float(config.get("TREND_ADX_MIN", 0.0) or 0.0),
+        )
+    else:
+        logger.info("Gerbang trend NONAKTIF: entry hanya memakai konfirmasi %s.",
+                    config.get("CONFIRM_INTERVAL", "5m"))
     logger.info("=" * 70)
 
     client = None
@@ -2729,6 +2819,20 @@ def run(config: dict, lifecycle=None) -> int:
             symbols, config["CONFIRM_INTERVAL"], limit=lookback + 1) or {}
         return {simbol: (konfirmasi_dari_raw(raw) if raw is not None else None)
                 for simbol, raw in raw_map.items()}
+
+    trend_cache = TrendCache(client, config)
+    trend_provider = trend_cache.provider if config.get("TREND_FILTER_ENABLED", False) else None
+    if trend_provider is None:
+        logger.warning(
+            "Gerbang trend timeframe tinggi NONAKTIF (TREND_FILTER_ENABLED=False). "
+            "Entry hanya memakai konfirmasi %s.", config["CONFIRM_INTERVAL"])
+    else:
+        logger.info(
+            "Gerbang trend %s AKTIF: close > EMA%d > EMA%d dan ADX%d >= %g "
+            "(jendela %d candle tertutup, fail closed bila data trend gagal diambil).",
+            strategy.trend_interval(config), int(config.get("TREND_EMA_FAST", 20)),
+            int(config.get("TREND_EMA_SLOW", 50)), int(config.get("TREND_ADX_PERIOD", 14)),
+            float(config.get("TREND_ADX_MIN", 20.0) or 0.0), strategy.trend_window_bars(config))
 
     exit_code = 0
     while not _shutdown_requested:
@@ -2861,6 +2965,7 @@ def run(config: dict, lifecycle=None) -> int:
                         tradable_symbols,
                         klines_fetcher_many=klines_fetcher_many,
                         prewarm_fn=client.prewarm_book_ticker,
+                        trend_provider=trend_provider,
                     )
                     if best:
                         book = client.get_book_ticker(best.symbol)
@@ -2883,10 +2988,18 @@ def run(config: dict, lifecycle=None) -> int:
                                 signal_close, max_chase,
                             )
                         if spread_pct <= config["MAX_SPREAD_PCT"] and chase_ok:
+                            trend_info = ""
+                            if best.trend is not None:
+                                nilai = best.trend.get("values") or {}
+                                trend_info = " | trend %s: %s" % (
+                                    best.trend.get("interval") or strategy.trend_interval(config),
+                                    best.trend.get("reason"))
+                                if nilai.get("adx") is not None:
+                                    trend_info += " (ADX %.1f)" % float(nilai["adx"])
                             logger.info(
-                                "Kandidat terpilih: %s (vol24h=%.0f, 24h=%.2f%%, spread=%.3f%%) | %s",
+                                "Kandidat terpilih: %s (vol24h=%.0f, 24h=%.2f%%, spread=%.3f%%) | %s%s",
                                 best.symbol, best.quote_volume, best.price_change_pct,
-                                spread_pct, best.confirm_reason,
+                                spread_pct, best.confirm_reason, trend_info,
                             )
                             min_age = float(config.get("MIN_LISTING_AGE_DAYS", 0) or 0)
                             if min_age > 0:
@@ -2913,7 +3026,15 @@ def run(config: dict, lifecycle=None) -> int:
                             logger.info("Kandidat %s dilewati: spread %.3f%% > batas %.3f%%.",
                                         best.symbol, spread_pct, config["MAX_SPREAD_PCT"])
                     else:
-                        logger.info("Tidak ada kandidat yang lolos konfirmasi volume rolling pada scan ini.")
+                        if trend_provider is not None:
+                            logger.info(
+                                "Tidak ada kandidat yang lolos konfirmasi %s dan gerbang "
+                                "trend %s pada scan ini.",
+                                config["CONFIRM_INTERVAL"], strategy.trend_interval(config))
+                        else:
+                            logger.info(
+                                "Tidak ada kandidat yang lolos konfirmasi volume rolling "
+                                "pada scan ini.")
 
             if time.time() - last_heartbeat >= config["HEARTBEAT_INTERVAL_SECONDS"]:
                 last_heartbeat = time.time()
@@ -2997,6 +3118,11 @@ def selftest() -> None:
     assert PUMP_CONFIG.get("DEPTH_FILTER_ENABLED") is True
     assert PUMP_CONFIG.get("ORDERBOOK_FILTER_ENABLED") is True
     assert PUMP_CONFIG.get("DEMAND_ZONE_FILTER_ENABLED") is True
+    assert PUMP_CONFIG.get("TREND_FILTER_ENABLED") is True
+    assert PUMP_CONFIG.get("TREND_INTERVAL") == "1h"
+    assert PUMP_CONFIG.get("TREND_EMA_FAST") == 20 and PUMP_CONFIG.get("TREND_EMA_SLOW") == 50
+    assert PUMP_CONFIG.get("TREND_ADX_PERIOD") == 14 and PUMP_CONFIG.get("TREND_ADX_MIN") == 20.0
+    assert PUMP_CONFIG.get("TREND_LOOKBACK_BARS") == 120
 
     cfg = dict(PUMP_CONFIG)
     cfg["STATE_FILE"] = os.path.join(tempfile.gettempdir(), "pump_bot_selftest_state.json")
@@ -3975,6 +4101,137 @@ def selftest() -> None:
     finally:
         klien.close()
     print("  dedup simbol, isolasi kegagalan, paralel lebih cepat, sesi per thread -> OK")
+
+    print("\n=== SELFTEST: gerbang trend timeframe tinggi (cache H1 + integrasi scanner) ===")
+    MS_JAM = 3_600_000
+    # Memakai ulang fixture konfirmasi 5m dari selftest paritas (L-03) supaya yang
+    # benar-benar diuji di sini hanya gerbang trend-nya.
+    cfg_trend = dict(cfg_konfirmasi, CONFIRM_INTERVAL="5m",
+                     TREND_FILTER_ENABLED=True, TREND_INTERVAL="1h",
+                     TREND_EMA_FAST=20, TREND_EMA_SLOW=50, TREND_ADX_PERIOD=14,
+                     TREND_ADX_MIN=20.0, TREND_LOOKBACK_BARS=120)
+
+    def _baris_h1(arah: float, jumlah: int = 130, sekarang_ms: int = 0) -> list:
+        """Baris klines H1 format Binance, berakhir di bucket terakhir yang tutup."""
+        batas = ((int(sekarang_ms) // MS_JAM) - 1) * MS_JAM
+        rows = []
+        p = 100.0
+        for i in range(jumlah):
+            p *= (1.0 + arah * 0.002)
+            open_time = batas - (jumlah - 1 - i) * MS_JAM
+            rows.append([open_time, str(p * 0.999), str(p * 1.003), str(p * 0.997),
+                         str(p), "1000", open_time + MS_JAM - 1, str(p * 1000),
+                         10, "500", "500000", "0"])
+        return rows
+
+    class KlienH1:
+        def __init__(self, rows, gagal: bool = False):
+            self.rows = rows
+            self.calls = 0
+            self.gagal = gagal
+            self.limit_terakhir = None
+
+        def get_klines(self, symbol, interval, limit=500, start_time_ms=None,
+                       end_time_ms=None):
+            self.calls += 1
+            self.limit_terakhir = limit
+            if self.gagal:
+                raise RuntimeError("rate limit Binance")
+            assert interval == "1h", interval
+            return [list(r) for r in self.rows][-limit:]
+
+    NOW_H1 = NOW_T + 21 * 5 * 60_000  # jam pindai yang sama dengan fixture konfirmasi
+    klien_naik = KlienH1(_baris_h1(1.0, 130, NOW_H1))
+    cache_trend = TrendCache(klien_naik, cfg_trend)
+    jendela = cache_trend.window_klines("NAIKUSDT", NOW_H1)
+    assert len(jendela) == 120, len(jendela)
+    assert all(k.close_time < NOW_H1 for k in jendela), "hanya candle tertutup yang boleh dipakai"
+    assert jendela[-1].open_time == (NOW_H1 // MS_JAM - 1) * MS_JAM, jendela[-1].open_time
+    assert jendela[-1].close_time < NOW_H1, "candle terakhir harus benar-benar sudah tutup"
+    assert klien_naik.limit_terakhir == 121, \
+        f"unduhan dibatasi jendela + 1 candle, dapat {klien_naik.limit_terakhir}"
+    assert klien_naik.calls == 1, f"panggilan pertama harus 1, dapat {klien_naik.calls}"
+    cache_trend.window_klines("NAIKUSDT", NOW_H1 + 60_000)
+    assert klien_naik.calls == 1, "masih dalam jam yang sama tidak perlu unduh ulang"
+    cache_trend.window_klines("NAIKUSDT", NOW_H1 + MS_JAM)
+    assert klien_naik.calls == 2, f"jam berikutnya harus unduh ulang, dapat {klien_naik.calls}"
+    verdict_naik = cache_trend.verdict("NAIKUSDT", NOW_H1)
+    assert verdict_naik["ok"] and verdict_naik["bars"] == 120, verdict_naik["reason"]
+
+    cache_turun = TrendCache(KlienH1(_baris_h1(-1.0, 130, NOW_H1)), cfg_trend)
+    verdict_turun = cache_turun.verdict("TURUNUSDT", NOW_H1)
+    assert not verdict_turun["ok"] and "di bawah" in verdict_turun["reason"], verdict_turun["reason"]
+
+    cache_pendek = TrendCache(KlienH1(_baris_h1(1.0, 40, NOW_H1)), cfg_trend)
+    verdict_pendek = cache_pendek.verdict("BARUUSDT", NOW_H1)
+    assert not verdict_pendek["ok"] and "kurang" in verdict_pendek["reason"], verdict_pendek["reason"]
+
+    cache_rusak = TrendCache(KlienH1([], gagal=True), cfg_trend)
+    try:
+        cache_rusak.provider("GAGALUSDT")
+        raise AssertionError("gagal ambil candle trend harus melempar error ke pemanggil")
+    except RuntimeError:
+        pass
+    print("  cache: hanya candle tutup, jendela 120, hemat API per jam, gagal -> error terlihat")
+
+    asli_now = state_mod.now_ms
+    state_mod.now_ms = lambda: NOW_H1
+    try:
+        hasil_naik = scanner.trend_verdict(
+            "NAIKUSDT", cfg_trend, lambda s: cache_trend.window_klines(s, NOW_H1))
+        hasil_turun_scanner = scanner.trend_verdict(
+            "TURUNUSDT", cfg_trend, lambda s: cache_turun.window_klines(s, NOW_H1))
+
+        def _rusak(_simbol):
+            raise RuntimeError("jaringan putus")
+
+        hasil_rusak = scanner.trend_verdict("XUSDT", cfg_trend, _rusak)
+        hasil_nonaktif = scanner.trend_verdict("XUSDT", dict(cfg_trend, TREND_FILTER_ENABLED=False), _rusak)
+        assert hasil_naik["ok"] and not hasil_turun_scanner["ok"]
+        assert not hasil_rusak["ok"] and "gagal diambil" in hasil_rusak["reason"], hasil_rusak["reason"]
+        assert hasil_nonaktif["ok"], "filter nonaktif tidak boleh memanggil penyedia trend"
+
+        # integrasi di jalur pemilihan kandidat: konfirmasi 5m lolos, trend yang menentukan
+        panggilan = {"n": 0}
+
+        def provider_naik(_simbol):
+            panggilan["n"] += 1
+            return cache_trend.window_klines(_simbol, NOW_H1)
+
+        pilih_ok = scanner.find_best_candidate(
+            ticker_konfirmasi, _serial, cfg_trend, None, trend_provider=provider_naik)
+        assert pilih_ok is not None and pilih_ok.symbol == "LONJAKUSDT", pilih_ok
+        assert "trend 1h" in pilih_ok.confirm_reason, pilih_ok.confirm_reason
+        assert pilih_ok.trend is not None and pilih_ok.trend["ok"]
+
+        pilih_tolak = scanner.find_best_candidate(
+            ticker_konfirmasi, _serial, cfg_trend, None,
+            trend_provider=lambda s: cache_turun.window_klines(s, NOW_H1))
+        assert pilih_tolak is None, "trend H1 turun harus membuat semua kandidat ditolak"
+
+        pilih_gagal = scanner.find_best_candidate(
+            ticker_konfirmasi, _serial, cfg_trend, None, trend_provider=_rusak)
+        assert pilih_gagal is None, "penyedia trend error harus fail closed"
+
+        panggilan["n"] = 0
+        pilih_mati = scanner.find_best_candidate(
+            ticker_konfirmasi, _serial, dict(cfg_trend, TREND_FILTER_ENABLED=False), None,
+            trend_provider=provider_naik)
+        assert pilih_mati is not None and panggilan["n"] == 0, \
+            "filter nonaktif tidak boleh menambah panggilan API trend"
+
+        pilih_tanpa_provider = scanner.find_best_candidate(
+            ticker_konfirmasi, _serial, cfg_trend, None)
+        assert pilih_tanpa_provider is None, \
+            "filter trend aktif tanpa penyedia candle harus fail closed, bukan lolos"
+        pilih_lama = scanner.find_best_candidate(
+            ticker_konfirmasi, _serial, dict(cfg_trend, TREND_FILTER_ENABLED=False), None)
+        assert pilih_lama is not None, \
+            "pemanggil lama tanpa penyedia trend tetap jalan selama filter nonaktif"
+    finally:
+        state_mod.now_ms = asli_now
+    print("  scanner: lolos saat trend naik, ditolak saat turun, fail closed saat error,")
+    print("           tanpa panggilan API tambahan saat filter nonaktif -> OK")
 
     print("\nSEMUA SELFTEST LULUS.")
     print("(Selftest ini TIDAK menghubungi Binance sama sekali -- murni logika lokal.)")

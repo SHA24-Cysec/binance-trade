@@ -30,6 +30,7 @@ class Candidate:
     confirmed: bool = False
     confirm_reason: str = ""
     setup: "Optional[SetupResult]" = None
+    trend: "Optional[dict]" = None
 
 
 def _looks_leveraged(base_asset: str) -> bool:
@@ -548,10 +549,43 @@ def detect_entry_setup(klines: list[Kline], config: dict) -> SetupResult:
 def setup_quality_key(setup: SetupResult, candidate: Candidate) -> tuple:
     return (-float(candidate.quote_volume),)
 
+def trend_verdict(symbol: str, config: dict, trend_provider) -> dict:
+    """Gerbang trend timeframe tinggi untuk satu kandidat.
+
+    Aturan fail closed yang sama seperti filter BTC: kalau candle trend tidak
+    bisa diambil atau riwayatnya kurang, kandidat DITOLAK, bukan diloloskan.
+    """
+    from strategy import indicators as strategy_mod
+
+    interval = str(config.get("TREND_INTERVAL", "1h") or "1h")
+    kosong = {"interval": interval, "bars": 0,
+              "required": strategy_mod.trend_required_bars(config),
+              "window": strategy_mod.trend_window_bars(config), "close": None,
+              "ema_fast": None, "ema_slow": None, "adx": None,
+              "checks": {}, "values": {}}
+    if not bool(config.get("TREND_FILTER_ENABLED", False)):
+        return {"ok": True, "reason": "filter trend nonaktif", **kosong}
+    if trend_provider is None:
+        return {"ok": False,
+                "reason": (f"filter trend {interval} aktif tetapi penyedia candle trend "
+                           "tidak tersedia (fail closed)"),
+                **kosong}
+    try:
+        klines = trend_provider(symbol)
+    except Exception as exc:
+        return {"ok": False,
+                "reason": f"candle trend {interval} {symbol} gagal diambil: {exc}",
+                **kosong}
+    if not klines:
+        return {"ok": False, "reason": f"candle trend {interval} {symbol} kosong",
+                **kosong}
+    return strategy_mod.evaluate_trend_filter(list(klines), config)
+
 def find_best_candidate(tickers: list, klines_fetcher, config: dict,
                         tradable_symbols: "set | None" = None,
                         klines_fetcher_many: "Optional[Callable[[list], dict]]" = None,
-                        prewarm_fn: "Optional[Callable[[list], None]]" = None) -> Optional[Candidate]:
+                        prewarm_fn: "Optional[Callable[[list], None]]" = None,
+                        trend_provider: "Optional[Callable[[str], list]]" = None) -> Optional[Candidate]:
     ranked = filter_and_rank_candidates(tickers, config, tradable_symbols)
     top_n = ranked[: int(config.get("TOP_N_CANDIDATES_TO_CONFIRM", 10) or 10)]
     if not top_n:
@@ -588,8 +622,19 @@ def find_best_candidate(tickers: list, klines_fetcher, config: dict,
         cand.confirmed = hasil.ok
         cand.confirm_reason = hasil.reason
         cand.setup = hasil
-        if hasil.ok:
-            lolos.append(cand)
+        if not hasil.ok:
+            continue
+        if bool(config.get("TREND_FILTER_ENABLED", False)):
+            trend = trend_verdict(cand.symbol, config, trend_provider)
+            cand.trend = trend
+            if not trend["ok"]:
+                cand.confirmed = False
+                cand.confirm_reason = (
+                    f"trend {trend.get('interval') or 'HTF'} ditolak: {trend['reason']}"
+                )
+                continue
+            cand.confirm_reason = f"{hasil.reason} | {trend['reason']}"
+        lolos.append(cand)
 
     if not lolos:
         return None

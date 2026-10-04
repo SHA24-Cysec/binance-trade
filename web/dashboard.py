@@ -7,6 +7,7 @@ import math
 import os
 import re
 import secrets
+import sys
 import threading
 import time
 import uuid
@@ -578,9 +579,17 @@ BT_PARAM_KEYS = (
     "ATR_MULT_BE_TRIGGER", "ATR_MULT_BE_LOCK", "ATR_MULT_TRAIL_START",
     "ATR_MULT_TRAIL", "SL_PCT", "TP_PCT", "BE_TRIGGER_PCT", "BE_LOCK_PCT",
     "TRAILING_START_PCT", "TRAILING_STEP_PCT",
+    "TREND_FILTER_ENABLED", "TREND_INTERVAL", "TREND_EMA_FAST", "TREND_EMA_SLOW",
+    "TREND_ADX_PERIOD", "TREND_ADX_MIN", "TREND_LOOKBACK_BARS",
 )
 
-GRID_PARAM_KEYS = tuple(k for k in BT_PARAM_KEYS if k != "USE_ATR_EXIT")
+# Grid parameter SENGAJA hanya berisi parameter exit: sinyal entry (konfirmasi 5m
+# dan gerbang trend) dihitung sekali dari candle yang sama, jadi mengubah
+# parameter entry di dalam grid tidak akan mengubah hasil apa pun selain
+# menyesatkan. Untuk membandingkan setelan trend, jalankan backtest portofolio
+# biasa dengan nilai TREND_* yang berbeda.
+GRID_PARAM_KEYS = tuple(k for k in BT_PARAM_KEYS
+                        if k != "USE_ATR_EXIT" and not k.startswith("TREND_"))
 
 _bt_jobs: dict = {}
 _bt_jobs_lock = threading.Lock()
@@ -606,12 +615,42 @@ def _bt_estimate_requests(days: int, max_symbols: int, cfg: dict) -> int:
     return max_symbols * halaman
 
 
+def _bt_trend_warmup_note(cfg: dict, interval: str) -> str:
+    """Kalimat keterangan berapa lama rentang yang habis untuk pemanasan trend."""
+    if not bool(cfg.get("TREND_FILTER_ENABLED", False)):
+        return ("Gerbang trend sedang NONAKTIF, jadi candle trend tidak diambil dan tidak ada "
+                "sinyal yang disaring di atas.")
+    try:
+        hari = pbt.parity.trend_warmup_ms(cfg, interval) / float(bt.MS_PER_DAY)
+    except ValueError:
+        return ("Gerbang trend aktif, tetapi interval trend tidak sepadan dengan interval "
+                "simulasi sehingga backtest ini akan menolak berjalan.")
+    return (f"Gerbang trend aktif: pemanasan gerbang ini memakai sekitar {hari:.1f} hari pertama "
+            f"dari rentang yang diunduh pada interval {interval}, sehingga rentang yang benar-benar "
+            "diperdagangkan dimulai setelah pemanasan itu. Pakai rentang hari yang lebih panjang "
+            "(misalnya 14 hari ke atas) supaya jumlah trade tidak terlalu tipis, dan bandingkan "
+            "penghitung sinyal yang disaring gerbang trend pada ringkasan di atas.")
+
+
 def _bt_prepare_universe(job_id: str, cfg: dict, days: int, max_symbols: int,
                          set_progress, cancelled) -> dict:
     interval = _bt_simulation_interval(cfg)
     bt.bars_per_day(interval)
     bar_ms = bt.INTERVAL_MINUTES[interval] * 60_000
     warmup_ms = bt.MS_PER_DAY + 30 * bar_ms
+    if bool(cfg.get("TREND_FILTER_ENABLED", False)):
+        try:
+            butuh_trend_ms = pbt.parity.trend_warmup_ms(cfg, interval)
+        except ValueError as exc:
+            raise bt.BacktestError(str(exc)) from exc
+        if butuh_trend_ms > warmup_ms:
+            logger.info(
+                "Warmup backtest dinaikkan dari %.1f jam menjadi %.1f jam karena "
+                "gerbang trend %s butuh %d candle trend tertutup.",
+                warmup_ms / 3_600_000.0, butuh_trend_ms / 3_600_000.0,
+                cfg.get("TREND_INTERVAL", "1h"), int(cfg.get("TREND_LOOKBACK_BARS", 120) or 120),
+            )
+            warmup_ms = butuh_trend_ms
 
     end_ms = int(time.time() * 1000)
     start_ms = end_ms - days * bt.MS_PER_DAY
@@ -731,6 +770,20 @@ def _json_safe(value):
     return value
 
 
+def _bt_days_guard(cfg: dict, days: int) -> None:
+    """Tolak rentang hari yang seluruhnya habis untuk pemanasan.
+
+    Tanpa ini, pengguna memilih 2 hari dengan gerbang trend 1h aktif dan hasilnya
+    selalu nol trade tanpa penjelasan.
+    """
+    interval = _bt_simulation_interval(cfg)
+    minimal, catatan = _bt_min_days_note(cfg, interval)
+    if int(days) < minimal:
+        raise bt.BacktestError(
+            f"Jumlah hari minimal {minimal} untuk setelan ini, sedangkan yang diminta "
+            f"{int(days)} hari. {catatan}".strip())
+
+
 def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
     def set_progress(frac, stage=""):
         with _bt_jobs_lock:
@@ -751,6 +804,7 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
     try:
         cfg = bt.apply_overrides(PUMP_CONFIG, overrides)
         bt.validate_params(cfg)
+        _bt_days_guard(cfg, days)
 
         prep = _bt_prepare_universe(job_id, cfg, days, max_symbols,
                                     set_progress, cancelled)
@@ -807,6 +861,19 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
             "end_time": (_ts(result.end_time) or "") + " UTC" if result.end_time else None,
             "params_used": {k: cfg.get(k) for k in BT_PARAM_KEYS},
             "summary": summary,
+            # Setelan gerbang trend yang BENAR-BENAR dipakai simulasi ini, supaya
+            # angka di layar bisa diverifikasi tanpa menebak dari config.py.
+            "trend": {
+                "enabled": bool(cfg.get("TREND_FILTER_ENABLED", False)),
+                "interval": cfg.get("TREND_INTERVAL", "1h"),
+                "ema_fast": int(cfg.get("TREND_EMA_FAST", 20) or 20),
+                "ema_slow": int(cfg.get("TREND_EMA_SLOW", 50) or 50),
+                "adx_period": int(cfg.get("TREND_ADX_PERIOD", 14) or 14),
+                "adx_min": float(cfg.get("TREND_ADX_MIN", 0.0) or 0.0),
+                "lookback_bars": int(cfg.get("TREND_LOOKBACK_BARS", 120) or 120),
+                "skips": int(getattr(result, "trend_skips", 0)),
+                "scans": int(getattr(result, "trend_scans", 0)),
+            },
             "trades": trades_out,
             "skipped": skipped_out,
             "warnings": (list(result.warnings) + (
@@ -840,6 +907,16 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "Filter kedalaman, ketimpangan bid/ask, dan sell wall juga hanya berlaku di "
                 "PAPER dan LIVE (snapshot order book tidak tersedia historis). Batas atas "
                 "kenaikan 24 jam (PUMP_MAX_24H_CHANGE_PCT) SUDAH diterapkan di backtest.",
+                "Gerbang trend timeframe tinggi (TREND_FILTER_ENABLED) SUDAH disimulasikan dan "
+                "memakai aturan yang sama dengan bot live: TREND_LOOKBACK_BARS candle trend "
+                "terakhir yang sudah tutup pada saat candle sinyal ditutup, lalu close > EMA cepat, "
+                "EMA cepat > EMA lambat, dan ADX >= TREND_ADX_MIN. Candle trend di backtest "
+                "dirangkai dari candle " + prep["interval"] + " yang diunduh (nilai OHLCV-nya sama "
+                "dengan candle timeframe tinggi asli Binance), jadi tidak ada unduhan tambahan. "
+                "Bedanya dengan live: candle trend yang jamnya bolong sebagian (data tidak lengkap) "
+                "dibuang, sedangkan live memakai candle asli dari bursa; dan riwayat EMA/ADX di "
+                "backtest dimulai dari awal rentang data yang diunduh, bukan riwayat penuh simbol. "
+                + _bt_trend_warmup_note(cfg, prep["interval"]) +
                 "Filter live yang SUDAH disimulasikan dari candle: filter BTC (BTC_MAX_DROP_PCT, "
                 "memakai candle BTC historis), MAX_CHASE_PCT, MIN_SECONDS_BETWEEN_TRADES, "
                 "COOLDOWN_MINUTES_AFTER_CLOSE, equity stop (drawdown), stop harian, dan "
@@ -886,7 +963,7 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
 
 def _bt_run_grid_job(job_id: str, days: int, max_symbols: int, spec: dict,
                      rasio_latih: float, metrik: str, min_trades: int,
-                     total_kombinasi: int):
+                     total_kombinasi: int, overrides: dict | None = None):
     def set_progress(frac, stage=""):
         with _bt_jobs_lock:
             if job_id in _bt_jobs:
@@ -904,8 +981,12 @@ def _bt_run_grid_job(job_id: str, days: int, max_symbols: int, spec: dict,
     kline_cache = None
 
     try:
-        cfg = bt.apply_overrides(PUMP_CONFIG, {})
+        # Nilai di luar kunci yang disapu grid (termasuk gerbang trend dan interval
+        # konfirmasi) mengikuti form backtest supaya gate entry di grid sama dengan
+        # yang dijalankan form itu, bukan diam-diam memakai nilai default config.py.
+        cfg = bt.apply_overrides(PUMP_CONFIG, overrides or {})
         bt.validate_params(cfg)
+        _bt_days_guard(cfg, days)
 
         prep = _bt_prepare_universe(job_id, cfg, days, max_symbols,
                                     set_progress, cancelled)
@@ -975,6 +1056,10 @@ def _bt_run_grid_job(job_id: str, days: int, max_symbols: int, spec: dict,
                 "Split latih/uji di sini satu kali berdasarkan urutan waktu (bukan "
                 "walk-forward bergulir). Untuk keyakinan lebih, ulangi dengan beberapa "
                 "rasio dan rentang hari yang berbeda.",
+                "Yang disapu grid hanya parameter EXIT. Gerbang trend (TREND_*) dan "
+                "USE_ATR_EXIT tidak ikut disapu: nilainya diambil dari form backtest karena "
+                "sinyal entry dihitung sekali lalu dipakai ulang oleh semua kombinasi. Untuk "
+                "membandingkan setelan trend, jalankan backtest portofolio terpisah per setelan.",
                 "Statistik 24 jam DIREKONSTRUKSI dari candle, bukan snapshot "
                 "ticker/24hr historis. Volume itulah yang menentukan simbol mana yang "
                 "masuk top-N kandidat per bar.",
@@ -1016,6 +1101,25 @@ def _bt_run_grid_job(job_id: str, days: int, max_symbols: int, spec: dict,
             kline_cache.close()
 
 
+def _bt_min_days_note(cfg: dict, interval: str) -> tuple[int, str]:
+    """Berapa hari minimal supaya backtest masih menyisakan bar yang bisa ditradingkan.
+
+    Statistik 24 jam butuh satu hari, dan gerbang trend (kalau aktif) butuh
+    TREND_LOOKBACK_BARS candle trend tertutup. Tanpa rentang tambahan itu,
+    simulasi hanya berisi pemanasan dan hasilnya nol trade tanpa penjelasan.
+    """
+    dasar = 2
+    if not bool(cfg.get("TREND_FILTER_ENABLED", False)):
+        return dasar, ""
+    try:
+        hari_warmup = pbt.parity.trend_warmup_ms(cfg, interval) / float(bt.MS_PER_DAY)
+    except ValueError as exc:
+        return dasar, str(exc)
+    minimal = max(dasar, int(math.ceil(hari_warmup)) + 1)
+    return minimal, (f"Gerbang trend {cfg.get('TREND_INTERVAL', '1h')} butuh sekitar "
+                     f"{hari_warmup:.1f} hari riwayat sebelum bar pertama bisa dievaluasi.")
+
+
 @app.route("/api/backtest/start", methods=["POST"])
 def api_backtest_start():
     blocked = _reject_if_backtest_disabled()
@@ -1030,6 +1134,19 @@ def api_backtest_start():
         return jsonify({"error": "Jumlah hari tidak valid."}), 400
     if days < 2:
         return jsonify({"error": "Jumlah hari minimal 2 (satu hari pertama dipakai warmup statistik 24 jam)."}), 400
+
+    # Rentang bisa perlu lebih panjang kalau gerbang trend aktif: tanpa pemeriksaan ini
+    # pengguna memilih 2 hari dan hasilnya nol trade karena seluruh rentang habis
+    # untuk pemanasan.
+    try:
+        cfg_hari = bt.apply_overrides(
+            PUMP_CONFIG, {k: data.get(k) for k in BT_PARAM_KEYS if k in data})
+    except bt.BacktestError:
+        cfg_hari = PUMP_CONFIG  # galat nilainya dilaporkan di pemeriksaan parameter di bawah
+    minimal_hari, catatan_hari = _bt_min_days_note(cfg_hari, _bt_simulation_interval(cfg_hari))
+    if days < minimal_hari:
+        return jsonify({"error": (f"Jumlah hari minimal {minimal_hari} untuk setelan ini, "
+                                  f"sedangkan yang diminta {days} hari. {catatan_hari}").strip()}), 400
 
     try:
         max_symbols = int(data.get("max_symbols", 150))
@@ -1125,7 +1242,19 @@ def api_backtest_grid_start():
     if not isinstance(spec_raw, dict) or not spec_raw:
         return jsonify({"error": "Spec grid kosong. Pilih minimal satu parameter "
                                  "beserta nilai rentangnya."}), 400
-    pakai_atr = bool(PUMP_CONFIG.get("USE_ATR_EXIT", False))
+    overrides = {k: data.get(k) for k in BT_PARAM_KEYS if k in data}
+    try:
+        cfg_preview = bt.apply_overrides(PUMP_CONFIG, overrides)
+        bt.validate_params(cfg_preview)
+    except bt.BacktestError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    minimal_hari, catatan_hari = _bt_min_days_note(cfg_preview, _bt_simulation_interval(cfg_preview))
+    if days < minimal_hari:
+        return jsonify({"error": (f"Jumlah hari minimal {minimal_hari} untuk setelan ini, "
+                                  f"sedangkan yang diminta {days} hari. {catatan_hari}").strip()}), 400
+
+    pakai_atr = bool(cfg_preview.get("USE_ATR_EXIT", False))
     spec = {}
     for key, values in spec_raw.items():
         if key not in GRID_PARAM_KEYS:
@@ -1189,7 +1318,7 @@ def api_backtest_grid_start():
     thread = threading.Thread(
         target=_bt_run_grid_job,
         args=(job_id, days, max_symbols, spec, rasio_latih, metrik,
-              min_trades, total),
+              min_trades, total, overrides),
         daemon=True)
     thread.start()
     return jsonify({"job_id": job_id})
@@ -1301,6 +1430,23 @@ def _detector_score_symbol(client, symbol: str, ticker: dict, planned: float) ->
     det = scanner.compute_detector_score(chg, klines, price, book, PUMP_CONFIG)
     demand = strategy_ind.detect_demand_zone(klines or [], PUMP_CONFIG)
 
+    trend = None
+    if PUMP_CONFIG.get("TREND_FILTER_ENABLED", False):
+        try:
+            jendela_trend = strategy_ind.trend_window_bars(PUMP_CONFIG)
+            raw_trend = client.get_klines(
+                symbol, strategy_ind.trend_interval(PUMP_CONFIG),
+                limit=min(strategy_ind.TREND_KLINE_LIMIT, jendela_trend + 1))
+            closed_trend = [k for k in strategy_ind.parse_klines(raw_trend)
+                            if k.close_time < now_ms]
+            trend = strategy_ind.evaluate_trend_filter(
+                closed_trend[-jendela_trend:], PUMP_CONFIG)
+        except Exception as exc:
+            trend = {"ok": False, "interval": str(PUMP_CONFIG.get("TREND_INTERVAL", "1h")),
+                     "reason": f"candle trend gagal diambil: {exc}", "bars": 0,
+                     "close": None, "ema_fast": None, "ema_slow": None, "adx": None,
+                     "values": {}, "checks": {}}
+
     gate_ok, gate_reason = scanner.evaluate_pump_gate(chg, qv, PUMP_CONFIG)
     if depth is None:
         book_ok, book_reason = False, "order book gagal diambil"
@@ -1314,12 +1460,16 @@ def _detector_score_symbol(client, symbol: str, ticker: dict, planned: float) ->
         verdict, reason = "DITOLAK ORDER BOOK", book_reason
     elif not demand["ok"]:
         verdict, reason = "DITOLAK DEMAND", demand["reason"]
+    elif trend is not None and not trend.get("ok"):
+        verdict, reason = "DITOLAK TREND", trend.get("reason", "trend tidak mendukung")
     else:
-        verdict, reason = "LOLOS", f"lolos gerbang pump, order book, dan {demand['reason']}"
+        tambahan = f", dan {trend['reason']}" if trend is not None else ""
+        verdict, reason = "LOLOS", (
+            f"lolos gerbang pump, order book, dan {demand['reason']}{tambahan}")
     return {
         "symbol": symbol, "price": price, "change_24h": chg, "quote_volume_24h": qv,
         "score": det["score"], "components": det["components"],
-        "demand": demand,
+        "demand": demand, "trend": trend,
         "missing": det["missing"], "partial": det["partial"],
         "verdict": verdict, "reason": reason,
     }
@@ -1397,6 +1547,12 @@ def _detector_rebuild() -> None:
                 "max_change_pct": float(PUMP_CONFIG.get("PUMP_MAX_24H_CHANGE_PCT", 0) or 0),
                 "planned_notional": planned,
                 "weights": {key: PUMP_CONFIG.get(wkey) for key, wkey, _l in scanner.DETECTOR_COMPONENTS},
+                "trend_enabled": bool(PUMP_CONFIG.get("TREND_FILTER_ENABLED", False)),
+                "trend_interval": str(PUMP_CONFIG.get("TREND_INTERVAL", "1h")),
+                "trend_ema_fast": PUMP_CONFIG.get("TREND_EMA_FAST"),
+                "trend_ema_slow": PUMP_CONFIG.get("TREND_EMA_SLOW"),
+                "trend_adx_period": PUMP_CONFIG.get("TREND_ADX_PERIOD"),
+                "trend_adx_min": PUMP_CONFIG.get("TREND_ADX_MIN"),
             },
         }
         with _cache_lock:
@@ -1715,6 +1871,310 @@ def api_control_execute():
     }), 202
 
 
+def selftest() -> int:
+    """Uji lokal dashboard: gerbang trend di detektor, kunci parameter, dan warmup.
+
+    Tidak menghubungi Binance sama sekali. Klien bursa diganti klien palsu.
+    """
+    print("=== SELFTEST web/dashboard.py: kunci parameter backtest dan gerbang trend ===")
+    gagal = 0
+
+    def cek(nama: str, syarat: bool, info: str = "") -> None:
+        nonlocal gagal
+        if not syarat:
+            gagal += 1
+        print(("  LULUS " if syarat else "  GAGAL ") + nama + (f"  -> {info}" if info else ""))
+
+    cek("form backtest memuat semua kunci trend",
+        {"TREND_FILTER_ENABLED", "TREND_INTERVAL", "TREND_EMA_FAST", "TREND_EMA_SLOW",
+         "TREND_ADX_PERIOD", "TREND_ADX_MIN", "TREND_LOOKBACK_BARS"} <= set(BT_PARAM_KEYS))
+    cek("pencarian grid tidak menyapu parameter trend (sinyal entry dihitung sekali)",
+        not any("TREND" in k for k in GRID_PARAM_KEYS) and "USE_ATR_EXIT" not in GRID_PARAM_KEYS)
+
+    from backtesting.synthetic_data import (
+        blok_setup_volume, make_candle, seri_5m_trend,
+    )
+
+    volume = 5_000_000.0
+    datar = [make_candle(i, 100.0, 100.4, 99.6, 100.0, volume) for i in range(45)]
+    tren = seri_5m_trend(harga=100.0, jam_trend=1, arah=1.0, volume=volume, mulai_index=45)
+    blok, _harga, _i = blok_setup_volume(tren[-1].close, 45 + len(tren), volume)
+    kl5 = datar + tren + blok
+    sekarang = (len(kl5) + 2) * 300_000
+
+    def baris_5m() -> list:
+        return [[int(k.open_time), str(k.open), str(k.high), str(k.low), str(k.close),
+                 str(k.volume), int(k.close_time), str(k.quote_volume), 10, "1", "1", "0"]
+                for k in kl5 if int(k.close_time) < sekarang]
+
+    def baris_h1(arah: float, jumlah: int = 130) -> list:
+        batas = ((sekarang // 3_600_000) - 1) * 3_600_000
+        rows, harga = [], 100.0
+        for i in range(jumlah):
+            harga *= (1.0 + arah * 0.002)
+            buka = batas - (jumlah - 1 - i) * 3_600_000
+            rows.append([buka, str(harga * 0.999), str(harga * 1.003), str(harga * 0.997),
+                         str(harga), "1000", buka + 3_599_999, str(harga * 1000),
+                         10, "500", "500000", "0"])
+        return rows
+
+    class KlienDetektor:
+        def __init__(self, arah: float = 1.0, gagal_trend: bool = False) -> None:
+            self.arah = arah
+            self.gagal_trend = gagal_trend
+            self.panggilan_trend = 0
+
+        def get_klines(self, symbol, interval, limit=500, start_time_ms=None,
+                       end_time_ms=None):
+            if interval == PUMP_CONFIG.get("TREND_INTERVAL", "1h"):
+                self.panggilan_trend += 1
+                if self.gagal_trend:
+                    raise RuntimeError("HTTP 429 rate limit")
+                return baris_h1(self.arah)[-limit:]
+            return baris_5m()[-limit:]
+
+        def get_depth(self, symbol, limit=100):
+            return {"lastUpdateId": 1,
+                    "bids": [[str(99.95 - i * 0.01), "5000"] for i in range(20)],
+                    "asks": [[str(100.05 + i * 0.01), "5000"] for i in range(20)]}
+
+    ticker = {"symbol": "UJIUSDT", "priceChangePercent": "8.0",
+              "quoteVolume": "5000000", "lastPrice": "100.0"}
+    asli = {k: PUMP_CONFIG.get(k) for k in
+            ("TREND_FILTER_ENABLED", "TREND_INTERVAL", "TREND_EMA_FAST", "TREND_EMA_SLOW",
+             "TREND_ADX_PERIOD", "TREND_ADX_MIN", "TREND_LOOKBACK_BARS",
+             "CONFIRM_INTERVAL", "DEMAND_ZONE_FILTER_ENABLED")}
+    try:
+        PUMP_CONFIG.update({"TREND_FILTER_ENABLED": True, "TREND_INTERVAL": "1h",
+                            "TREND_EMA_FAST": 20, "TREND_EMA_SLOW": 50,
+                            "TREND_ADX_PERIOD": 14, "TREND_ADX_MIN": 20.0,
+                            "TREND_LOOKBACK_BARS": 120})
+
+        klien_naik = KlienDetektor(arah=1.0)
+        hasil_naik = _detector_score_symbol(klien_naik, "UJIUSDT", ticker, 100.0)
+        cek("detektor meloloskan simbol saat trend H1 naik dan kuat",
+            hasil_naik.get("verdict") == "LOLOS", f"{hasil_naik.get('verdict')} | "
+            f"{str(hasil_naik.get('reason'))[:70]}")
+        cek("detektor memakai candle trend untuk menilai (1 kali ambil per simbol)",
+            klien_naik.panggilan_trend == 1, klien_naik.panggilan_trend)
+        cek("baris tabel trend tersedia untuk ditampilkan",
+            bool((hasil_naik.get("trend") or {}).get("reason")), hasil_naik.get("trend"))
+
+        klien_turun = KlienDetektor(arah=-1.0)
+        hasil_turun = _detector_score_symbol(klien_turun, "UJIUSDT", ticker, 100.0)
+        cek("detektor menolak simbol saat trend H1 turun",
+            hasil_turun.get("verdict") == "DITOLAK TREND",
+            f"{hasil_turun.get('verdict')} | {str(hasil_turun.get('reason'))[:70]}")
+
+        klien_rusak = KlienDetektor(gagal_trend=True)
+        hasil_rusak = _detector_score_symbol(klien_rusak, "UJIUSDT", ticker, 100.0)
+        cek("detektor fail closed saat candle trend gagal diambil",
+            hasil_rusak.get("verdict") == "DITOLAK TREND"
+            and "gagal diambil" in str(hasil_rusak.get("reason")),
+            f"{hasil_rusak.get('verdict')} | {str(hasil_rusak.get('reason'))[:70]}")
+
+        PUMP_CONFIG["TREND_FILTER_ENABLED"] = False
+        klien_mati = KlienDetektor(arah=-1.0)
+        hasil_mati = _detector_score_symbol(klien_mati, "UJIUSDT", ticker, 100.0)
+        cek("filter trend nonaktif tidak mengambil candle trend dan tidak menolak",
+            klien_mati.panggilan_trend == 0 and hasil_mati.get("verdict") == "LOLOS",
+            f"{klien_mati.panggilan_trend} panggilan | {hasil_mati.get('verdict')}")
+        PUMP_CONFIG["TREND_FILTER_ENABLED"] = True
+    finally:
+        for kunci, nilai in asli.items():
+            if nilai is None:
+                PUMP_CONFIG.pop(kunci, None)
+            else:
+                PUMP_CONFIG[kunci] = nilai
+
+    # warmup backtest: dinaikkan sebelum jaringan disentuh, dan galat interval dibungkus rapi
+    import logging as _logging
+
+    kelas_log = []
+
+    class Perekam(_logging.Handler):
+        def emit(self, record):
+            kelas_log.append(record.getMessage())
+
+    perekam = Perekam()
+    logger.addHandler(perekam)
+    level_asli = logger.level
+    logger.setLevel(_logging.INFO)
+    asli_klien, asli_ada = globals().get("BinanceSpotClient"), _HAS_CLIENT
+    try:
+        globals()["_HAS_CLIENT"] = True
+
+        class KlienGagal:
+            def __init__(self, *a, **k):
+                pass
+
+            def get_ticker_24hr_all(self):
+                raise RuntimeError("jaringan uji putus")
+
+        globals()["BinanceSpotClient"] = KlienGagal
+        cfg_uji = dict(PUMP_CONFIG, CONFIRM_INTERVAL="5m")
+        try:
+            _bt_prepare_universe("uji", cfg_uji, 30, 5, lambda *a: None, lambda: False)
+            cek("warmup trend memblokir sebelum jaringan?", False, "tidak melempar apa pun")
+        except bt.BacktestError as exc:
+            cek("warmup trend dinaikkan sebelum jaringan dan pesannya jelas",
+                any("Warmup backtest dinaikkan" in m and "gerbang trend" in m for m in kelas_log)
+                and "jaringan uji putus" in str(exc),
+                f"{len(kelas_log)} catatan log")
+
+        try:
+            _bt_prepare_universe("uji", dict(PUMP_CONFIG, CONFIRM_INTERVAL="5m",
+                                             TREND_INTERVAL="3m"), 30, 5,
+                                 lambda *a: None, lambda: False)
+            cek("interval trend tidak sepadan ditolak", False, "tidak melempar apa pun")
+        except bt.BacktestError as exc:
+            cek("interval trend tidak sepadan ditolak dengan pesan yang bisa dibaca",
+                "TREND_INTERVAL" in str(exc) or "kelipatan" in str(exc), str(exc)[:70])
+    finally:
+        logger.removeHandler(perekam)
+        logger.setLevel(level_asli)
+        globals()["_HAS_CLIENT"] = asli_ada
+        if asli_klien is not None:
+            globals()["BinanceSpotClient"] = asli_klien
+
+    # tanggal minimum: rentang hari tidak boleh habis untuk pemanasan saja
+    cfg_hari = dict(PUMP_CONFIG, TREND_FILTER_ENABLED=True, TREND_INTERVAL="1h",
+                    TREND_LOOKBACK_BARS=120, CONFIRM_INTERVAL="5m")
+    minimal, catatan = _bt_min_days_note(cfg_hari, "5m")
+    cek("rentang hari minimum dihitung dari kebutuhan pemanasan gerbang trend",
+        minimal >= 6 and "hari" in catatan, f"minimal {minimal} hari | {catatan[:60]}")
+    try:
+        _bt_days_guard(cfg_hari, 2)
+        cek("rentang 2 hari dengan gerbang trend ditolak", False, "tidak melempar apa pun")
+    except bt.BacktestError as exc:
+        cek("rentang 2 hari dengan gerbang trend ditolak dengan pesan jelas",
+            "minimal" in str(exc) and "hari" in str(exc), str(exc)[:70])
+    _bt_days_guard(cfg_hari, minimal)
+    _bt_days_guard(dict(cfg_hari, TREND_FILTER_ENABLED=False), 2)
+    cek("rentang cukup dan filter nonaktif tetap diloloskan", True)
+
+    # --- peta rute dan smoke test HTTP ---
+    # Penjaga kelas bug yang pernah lolos ke pengguna: fungsi bantu disisipkan tepat
+    # di antara decorator @app.route dan fungsi view, sehingga rute menunjuk ke
+    # fungsi yang salah dan browser menerima halaman HTML 500 ("Unexpected token '<'")
+    # alih-alih JSON.
+    import inspect as _inspect
+
+    def _view(aturan_akhir: str):
+        for aturan in app.url_map.iter_rules():
+            if str(aturan) == aturan_akhir:
+                return app.view_functions[aturan.endpoint], aturan.endpoint
+        return None, None
+
+    for jalur, diharapkan in (("/api/backtest/start", "api_backtest_start"),
+                              ("/api/backtest/grid/start", "api_backtest_grid_start"),
+                              ("/api/backtest/cancel/<job_id>", "api_backtest_cancel"),
+                              ("/api/backtest/status/<job_id>", "api_backtest_status"),
+                              ("/api/backtest/defaults", "api_backtest_defaults")):
+        view, endpoint = _view(jalur)
+        cek(f"rute {jalur} menunjuk fungsi view yang benar",
+            view is not None and endpoint == diharapkan, f"endpoint={endpoint}")
+
+    salah = [aturan.endpoint for aturan in app.url_map.iter_rules()
+             if aturan.endpoint.startswith("_")]
+    cek("tidak ada view yang terpasang pada fungsi bantu (nama diawali garis bawah)",
+        not salah, salah)
+
+    viewsalah = []
+    for aturan in app.url_map.iter_rules():
+        view = app.view_functions[aturan.endpoint]
+        try:
+            wajib = [p for p in _inspect.signature(view).parameters.values()
+                     if p.default is _inspect.Parameter.empty
+                     and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+        except (TypeError, ValueError):
+            continue
+        # Flask mengisi sendiri argumen yang namanya ada di pola URL (mis. <job_id>),
+        # jadi yang dicari adalah argumen wajib DI LUAR pola itu.
+        wajib = [p for p in wajib if p.name not in (aturan.arguments or set())]
+        if wajib:
+            viewsalah.append(f"{aturan.endpoint}({', '.join(p.name for p in wajib)})")
+    cek("semua view bisa dipanggil Flask tanpa argumen posisi tambahan",
+        not viewsalah, viewsalah)
+
+    # Diambil lewat globals() supaya penetapan di bawah tidak membuat nama lokal
+    # yang menutupi fungsi aslinya.
+    asli_run = globals().get("_bt_run_job")
+    asli_grid = globals().get("_bt_run_grid_job")
+    globals()["_bt_run_job"] = lambda *a, **k: None
+    globals()["_bt_run_grid_job"] = lambda *a, **k: None
+    app.config["TESTING"] = True
+    klien = app.test_client()
+    kepala = {"X-Admin-Token": _ADMIN_TOKEN, "Origin": "http://localhost"}
+    try:
+        with _bt_jobs_lock:
+            _bt_jobs.clear()
+        resp = klien.post("/api/backtest/start", json={"days": 30, "max_symbols": 150},
+                          headers=kepala)
+        tipe = str(resp.headers.get("Content-Type", ""))
+        isi = resp.get_data(as_text=True)
+        cek("POST /api/backtest/start menjawab JSON, bukan HTML",
+            resp.status_code == 200 and tipe.startswith("application/json")
+            and '"job_id"' in isi, f"{resp.status_code} {tipe[:30]} {isi[:40]}")
+        if resp.status_code != 200:
+            print("    pesan server:", isi[:160])
+
+        with _bt_jobs_lock:
+            _bt_jobs.clear()
+        resp2 = klien.post("/api/backtest/start", json={"days": 2, "max_symbols": 150},
+                           headers=kepala)
+        isi2 = resp2.get_data(as_text=True)
+        cek("rentang hari terlalu pendek dijawab JSON 400 yang jelas",
+            resp2.status_code == 400
+            and str(resp2.headers.get("Content-Type", "")).startswith("application/json")
+            and "minimal" in isi2 and "hari" in isi2, f"{resp2.status_code} {isi2[:60]}")
+
+        with _bt_jobs_lock:
+            _bt_jobs.clear()
+        resp3 = klien.post("/api/backtest/grid/start",
+                           json={"days": 30, "max_symbols": 10,
+                                 "spec": {"TP_PCT": [2.0, 3.0]},
+                                 "USE_ATR_EXIT": False},
+                           headers=kepala)
+        isi3 = resp3.get_data(as_text=True)
+        cek("POST /api/backtest/grid/start menjawab JSON, bukan HTML",
+            resp3.status_code == 200
+            and str(resp3.headers.get("Content-Type", "")).startswith("application/json")
+            and '"job_id"' in isi3, f"{resp3.status_code} {isi3[:60]}")
+
+        with _bt_jobs_lock:
+            _bt_jobs.clear()
+        resp3b = klien.post("/api/backtest/grid/start",
+                            json={"days": 2, "max_symbols": 10, "spec": {"TP_PCT": [2.0]},
+                                  "USE_ATR_EXIT": False, "TREND_FILTER_ENABLED": True},
+                            headers=kepala)
+        isi3b = resp3b.get_data(as_text=True)
+        cek("grid dengan rentang terlalu pendek dijawab JSON 400 yang jelas",
+            resp3b.status_code == 400
+            and str(resp3b.headers.get("Content-Type", "")).startswith("application/json")
+            and "minimal" in isi3b, f"{resp3b.status_code} {isi3b[:70]}")
+
+        with _bt_jobs_lock:
+            _bt_jobs.clear()
+            _bt_jobs["uji"] = {"status": "running", "cancel": False, "progress": 0.0,
+                               "stage": "", "updated_at": time.time(), "created_at": time.time()}
+        resp4 = klien.post("/api/backtest/cancel/uji", headers=kepala)
+        cek("POST /api/backtest/cancel menjawab JSON",
+            str(resp4.headers.get("Content-Type", "")).startswith("application/json"),
+            f"{resp4.status_code} {str(resp4.headers.get('Content-Type'))[:30]}")
+    finally:
+        with _bt_jobs_lock:
+            _bt_jobs.clear()
+        if asli_run is not None:
+            globals()["_bt_run_job"] = asli_run
+        if asli_grid is not None:
+            globals()["_bt_run_grid_job"] = asli_grid
+        app.config["TESTING"] = False
+
+    print("HASIL SELFTEST dashboard: " + ("SEMUA LULUS" if not gagal else f"{gagal} GAGAL"))
+    return 0 if not gagal else 1
+
+
 def main(*, auto_start_bot: bool = False) -> int:
     if not _bind_is_loopback():
         if _DASHBOARD_HOST in ("0.0.0.0", "::"):
@@ -1748,4 +2208,6 @@ def main(*, auto_start_bot: bool = False) -> int:
 
 
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        raise SystemExit(selftest())
     raise SystemExit(main(auto_start_bot=False))

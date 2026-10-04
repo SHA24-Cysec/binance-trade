@@ -7,7 +7,14 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional, Sequence
 
 from backtesting import backtest as bt
+from backtesting import parity
 from strategy.indicators import Kline
+
+
+def parity_trend_window(config: dict) -> int:
+    from strategy import indicators as strategy_mod
+
+    return strategy_mod.trend_window_bars(config)
 
 KUNCI_ATR = (
     "ATR_PERIOD", "ATR_MULT_SL", "ATR_MULT_TP", "ATR_MULT_BE_TRIGGER",
@@ -222,6 +229,22 @@ def run_grid_search(
     hasil_grid = HasilGridSearch(
         total_kombinasi=len(kombinasi), dipangkas=dipangkas, metrik=metrik)
 
+    interval_sim = str(base_config.get("CONFIRM_INTERVAL", "5m") or "5m")
+    trend_latih = trend_uji = None
+    if bool(base_config.get("TREND_FILTER_ENABLED", False)):
+        try:
+            butuh_warmup = parity.trend_warmup_bars(base_config, interval_sim)
+        except ValueError as exc:
+            raise GridSearchError(str(exc)) from exc
+        if int(warmup_bars) < butuh_warmup:
+            hasil_grid.peringatan.append(
+                f"Warmup {warmup_bars} bar dinaikkan menjadi {butuh_warmup} bar karena "
+                f"gerbang trend {base_config.get('TREND_INTERVAL', '1h')} butuh "
+                f"{parity_trend_window(base_config)} candle trend tertutup. Unduhan data "
+                "harus mencakup rentang warmup ini."
+            )
+            warmup_bars = butuh_warmup
+
     if rasio_latih >= 1.0:
         potong = n
         kl_latih, kl_uji = klines, []
@@ -236,6 +259,11 @@ def run_grid_search(
 
     hasil_grid.bar_latih = max(0, len(kl_latih) - warmup_bars)
     hasil_grid.bar_uji = max(0, len(kl_uji) - warmup_bars) if kl_uji else 0
+
+    if bool(base_config.get("TREND_FILTER_ENABLED", False)):
+        trend_latih = parity.build_trend_klines(kl_latih, base_config, interval_sim)
+        trend_uji = (parity.build_trend_klines(kl_uji, base_config, interval_sim)
+                     if kl_uji else [])
 
     if kl_uji and hasil_grid.bar_uji < 50:
         hasil_grid.peringatan.append(
@@ -266,7 +294,8 @@ def run_grid_search(
 
         try:
             r_latih = bt.run_backtest(kl_latih, cfg, warmup_bars,
-                                      btc_klines=btc_klines)
+                                      btc_klines=btc_klines,
+                                      trend_klines=trend_latih)
             s_latih = bt.summarize(r_latih)
         except Exception:
             dilewati += 1
@@ -286,7 +315,8 @@ def run_grid_search(
         if kl_uji:
             try:
                 r_uji = bt.run_backtest(kl_uji, cfg, warmup_bars,
-                                        btc_klines=btc_klines)
+                                        btc_klines=btc_klines,
+                                        trend_klines=trend_uji)
                 s_uji = bt.summarize(r_uji)
                 item.uji = s_uji
                 item.skor_uji = hitung_skor(s_uji, metrik)
@@ -377,7 +407,17 @@ def run_portfolio_grid_search(
             f"Periode uji hanya {hasil_grid.bar_uji} bar (di bawah 50). "
             f"Skor uji pada sampel sepersis ini sulit diandalkan.")
 
-    prebuilt = (timeline, series_of)
+    trend_of = pbt.build_trend_lookups(store, list(series_of), base_config, interval)
+    if trend_of:
+        butuh_warmup = parity.trend_warmup_ms(base_config, interval)
+        if int(warmup_ms) < butuh_warmup:
+            hasil_grid.peringatan.append(
+                f"Warmup {warmup_ms} ms dinaikkan menjadi {butuh_warmup} ms karena gerbang "
+                f"trend {base_config.get('TREND_INTERVAL', '1h')} butuh "
+                f"{parity_trend_window(base_config)} candle trend tertutup."
+            )
+            warmup_ms = butuh_warmup
+    prebuilt = (timeline, series_of, trend_of)
     dilewati = 0
     total = len(kombinasi)
 
@@ -608,3 +648,99 @@ def parse_spec_cli(teks: str) -> dict:
     if not spec:
         raise GridSearchError("Spesifikasi grid tidak menghasilkan parameter apa pun.")
     return spec
+
+
+def selftest() -> int:
+    """Uji lokal pencarian grid dengan gerbang trend aktif.
+
+    Menjaga dua hal yang pernah salah dan mudah terulang:
+      * candle trend yang sudah dirangkai tidak boleh dirangkai dua kali,
+      * penolakan gerbang trend harus benar-benar terlihat di hasil grid.
+    Tidak menghubungi Binance sama sekali.
+    """
+    print("=== SELFTEST grid_search.py: gerbang trend di jalur grid ===")
+    from backtesting.backtest_storage import KlineStore
+    from backtesting.synthetic_data import (
+        blok_setup_volume, cfg_gerbang_pump_nonaktif, seri_5m_trend,
+    )
+    from config.config import PUMP_CONFIG
+
+    gagal = 0
+
+    def cek(nama: str, syarat: bool, info: str = "") -> None:
+        nonlocal gagal
+        if not syarat:
+            gagal += 1
+        print(("  LULUS " if syarat else "  GAGAL ") + nama + (f"  -> {info}" if info else ""))
+
+    def seri_drift(arah: float, siklus: int = 12, jam_drift: int = 24,
+                   tick: float = 0.0006, volume: float = 5_000_000.0):
+        """5m: drift searah selama sehari, ditutup satu blok setup, diulang."""
+        out, i, harga = [], 0, 100.0
+        for _ in range(siklus):
+            seg = seri_5m_trend(harga=harga, jam_trend=jam_drift, arah=arah,
+                                tick=tick, volume=volume, mulai_index=i)
+            out.extend(seg)
+            i += len(seg)
+            harga = seg[-1].close
+            blok, harga, i = blok_setup_volume(harga, i, volume)
+            out.extend(blok)
+        return out
+
+    def konfig(trend: bool) -> dict:
+        cfg = cfg_gerbang_pump_nonaktif(dict(PUMP_CONFIG))
+        cfg.update({
+            "MIN_QUOTE_VOLUME_USDT_24H": 1_000_000,
+            "BACKTEST_ENTRY_DELAY_BARS": 0, "BACKTEST_ENTRY_SPREAD_PCT": 0.0,
+            "BACKTEST_SLIPPAGE_PCT": 0.0, "_symbol": "TESTUSDT", "USE_ATR_EXIT": False,
+            "TP_PCT": 2.0, "SL_PCT": 1.0, "MAX_CHASE_PCT": 0.0,
+            "MIN_SECONDS_BETWEEN_ENTRIES": 0, "MAX_OPEN_POSITIONS": 1,
+            "BACKTEST_INITIAL_EQUITY_USDT": 1000.0, "POSITION_SIZE_PCT": 10.0,
+            "TREND_FILTER_ENABLED": trend, "TREND_INTERVAL": "1h",
+            "TREND_EMA_FAST": 20, "TREND_EMA_SLOW": 50, "TREND_ADX_PERIOD": 14,
+            "TREND_ADX_MIN": 20.0, "TREND_LOOKBACK_BARS": 120,
+        })
+        return cfg
+
+    spec = {"TP_PCT": [2.0, 3.0], "SL_PCT": [1.0, 1.5]}
+
+    def total_trade(hasil, kunci: str) -> int:
+        return sum(int(r.get(kunci, 0) or 0) for r in ringkas_untuk_tabel(hasil, top_n=99))
+
+    for nama, arah, harus_lolos in (("drift naik", 1.0, True), ("drift turun", -1.0, False)):
+        kl = seri_drift(arah)
+        on = run_grid_search(kl, konfig(True), spec, warmup_bars=0, min_trades=1,
+                             rasio_latih=0.6)
+        off = run_grid_search(kl, konfig(False), spec, warmup_bars=0, min_trades=1,
+                              rasio_latih=0.6)
+        tr_on, tr_off = total_trade(on, "trades_latih"), total_trade(off, "trades_latih")
+        cek(f"[{nama}] warmup trend dinaikkan dan dilaporkan di peringatan",
+            any("Warmup" in w for w in on.peringatan), len(on.peringatan))
+        cek(f"[{nama}] empat kombinasi exit dinilai", on.total_kombinasi == 4,
+            on.total_kombinasi)
+        cek(f"[{nama}] periode uji tetap tersedia", on.bar_uji >= 50, on.bar_uji)
+        if harus_lolos:
+            cek(f"[{nama}] gerbang trend meloloskan sinyal (data trend dirangkai sekali)",
+                tr_on >= 1, f"trend_on={tr_on} trend_off={tr_off}")
+        else:
+            cek(f"[{nama}] gerbang trend memblokir sinyal latih",
+                tr_on == 0 and tr_off >= 1, f"trend_on={tr_on} trend_off={tr_off}")
+
+    data = {"NAIKUSDT": seri_drift(1.0), "TURUNUSDT": seri_drift(-1.0)}
+    with KlineStore.from_klines(data) as store:
+        on_pf = run_portfolio_grid_search(store, konfig(True), "5m", 0, spec,
+                                         min_trades=1, rasio_latih=0.6)
+        off_pf = run_portfolio_grid_search(store, konfig(False), "5m", 0, spec,
+                                           min_trades=1, rasio_latih=0.6)
+    total_on = total_trade(on_pf, "trades_latih") + total_trade(on_pf, "trades_uji")
+    total_off = total_trade(off_pf, "trades_latih") + total_trade(off_pf, "trades_uji")
+    cek("grid portofolio memakai gerbang trend yang sama",
+        any("Warmup" in w for w in on_pf.peringatan) and 0 < total_on < total_off,
+        f"trend_on={total_on} trend_off={total_off}")
+
+    print("HASIL SELFTEST grid_search: " + ("SEMUA LULUS" if not gagal else f"{gagal} GAGAL"))
+    return 0 if not gagal else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(selftest())

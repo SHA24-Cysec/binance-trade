@@ -105,3 +105,74 @@ def cfg_gerbang_pump_nonaktif(config: dict) -> dict:
     out["PUMP_MIN_24H_CHANGE_PCT"] = -1000.0
     out["PUMP_MAX_24H_CHANGE_PCT"] = 0.0
     return out
+
+
+def seri_5m_trend(harga: float = 100.0, jam_trend: int = 130, arah: float = 1.0,
+                  tick: float = 0.0006, volume: float = 5_000_000.0,
+                  mulai_index: int = 0, ayun: float = 0.0) -> list[Kline]:
+    """Candle 5m dengan arah trend per jam yang ditentukan.
+
+    arah > 0 naik, arah < 0 turun. `ayun` menyisipkan candle berlawanan arah
+    setiap beberapa candle supaya ADX tidak melulu 100 (trend naik tapi lemah).
+    """
+    out: list[Kline] = []
+    i = mulai_index
+    price = float(harga)
+    total = max(1, int(jam_trend)) * 12
+    for bar in range(total):
+        langkah = tick * (1.0 if arah >= 0 else -1.0) * abs(arah)
+        if ayun > 0:
+            # gigi gergaji: naik lebih besar, turun lebih kecil, jadi net tetap
+            # searah `arah` tetapi ADX tidak pernah jenuh 100.
+            langkah = tick * (1.0 + ayun) if bar % 2 == 0 else -tick * ayun * abs(arah)
+        price = price * (1.0 + langkah)
+        out.append(make_candle(i, price * (1 - langkah / 2), price * 1.0008,
+                               price * 0.9992, price, volume))
+        i += 1
+    return out
+
+
+def blok_setup_volume(harga: float, mulai_index: int, volume: float = 5_000_000.0,
+                      lonjakan: float = 3.0) -> tuple[list[Kline], float, int]:
+    """Blok kecil 20 candle: basis sempit lalu breakout dengan lonjakan volume.
+
+    Dirancang lolos filter volume rolling dan filter zona demand pada konfigurasi
+    default bot, dan hanya memakai data dari blok itu sendiri sehingga bisa
+    ditempel pada seri trend naik maupun turun.
+    """
+    out: list[Kline] = []
+    i = mulai_index
+    harga = float(harga)
+    for j in range(12):
+        o = harga
+        h = harga * 1.004
+        low = harga * 0.996
+        c = harga * 1.001
+        if j == 6:
+            h = harga * 1.008
+            c = harga * 1.004
+        out.append(make_candle(i, o, h, low, c, volume))
+        i += 1
+
+    vulg = volume * lonjakan
+    for j in range(6):
+        o = harga * (1 + 0.004 * j)
+        c = o * 1.004
+        out.append(make_candle(i, o, c * 1.002, o * 0.998, max(c, o * 1.002), vulg))
+        i += 1
+    terakhir = out[-1].close
+    out.append(make_candle(i, terakhir, terakhir * 1.006, terakhir * 0.999,
+                           terakhir * 1.005, vulg))
+    i += 1
+    return out, out[-1].close, i
+
+
+def seri_trend_dengan_setup(harga: float = 100.0, jam_trend: int = 130, arah: float = 1.0,
+                            tick: float = 0.0006, volume: float = 5_000_000.0,
+                            ayun: float = 0.0, lonjakan: float = 3.0) -> list[Kline]:
+    """Seri trend berarah lalu ditutup blok setup entry yang sah secara lokal."""
+    out = seri_5m_trend(harga=harga, jam_trend=jam_trend, arah=arah, tick=tick,
+                        volume=volume, ayun=ayun)
+    blok, _harga, _i = blok_setup_volume(out[-1].close, len(out), volume, lonjakan)
+    out.extend(blok)
+    return out

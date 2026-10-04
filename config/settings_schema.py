@@ -171,6 +171,13 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "DEMAND_MAX_DISTANCE_PCT": _field("Konfirmasi Demand", "Jarak maksimum dari zona demand", "Batas jarak harga penutupan sinyal di atas batas zona demand agar bot tidak membeli terlalu jauh dari area demand (anti-pucuk).", "float", minimum=0.1, maximum=50, unit="%"),
     "DEMAND_MIN_CLOSE_POSITION": _field("Konfirmasi Demand", "Posisi close minimum pada candle", "Posisi penutupan minimum di dalam rentang high-low candle sinyal (0.0 di low, 1.0 di high) sebagai bukti dorongan demand pembeli.", "float", minimum=0.0, maximum=1.0),
     "TOP_N_CANDIDATES_TO_CONFIRM": _field("Scan", "Jumlah kandidat konfirmasi", "Berapa kandidat teratas yang diperiksa.", "int", minimum=1, maximum=1000),
+    "TREND_FILTER_ENABLED": _field("Trend H1", "Filter trend timeframe tinggi", "Wajibkan trend timeframe tinggi (default H1) naik sebelum entry. Data candle trend gagal diambil berarti kandidat ditolak (fail closed).", "bool"),
+    "TREND_INTERVAL": _field("Trend H1", "Interval trend", "Timeframe untuk gerbang trend. Wajib kelipatan bulat dari interval konfirmasi supaya backtest bisa merangkai candle ini dari data yang sama.", "str", editor="select", options=["1h", "2h", "4h", "6h", "8h", "12h", "1d"]),
+    "TREND_EMA_FAST": _field("Trend H1", "Periode EMA cepat", "EMA cepat pada timeframe trend. Wajib lebih kecil dari EMA lambat.", "int", minimum=2, maximum=500, unit="candle"),
+    "TREND_EMA_SLOW": _field("Trend H1", "Periode EMA lambat", "EMA lambat pada timeframe trend; dipakai juga sebagai penentu panjang riwayat minimum.", "int", minimum=3, maximum=1000, unit="candle"),
+    "TREND_ADX_PERIOD": _field("Trend H1", "Periode ADX", "Periode ADX Wilder pada timeframe trend. Butuh sekitar dua kali periode ini candle agar nilainya terdefinisi.", "int", minimum=2, maximum=200, unit="candle"),
+    "TREND_ADX_MIN": _field("Trend H1", "Ambang ADX minimum", "ADX minimum agar trend dianggap kuat. Isi 0 untuk mematikan cek kekuatan trend dan hanya memakai susunan EMA.", "float", minimum=0, maximum=100),
+    "TREND_LOOKBACK_BARS": _field("Trend H1", "Jendela candle trend", "Jumlah candle tertutup timeframe trend yang dipakai menghitung EMA dan ADX. Nilai ini dipakai sama persis oleh bot live dan backtest; endpoint klines Binance membatasi 1000 candle per panggilan.", "int", minimum=20, maximum=999, unit="candle"),
     "USE_RISK_PERCENT": _field("Ukuran Posisi", "Gunakan persen risiko", "Ukuran posisi dihitung dari saldo bebas.", "bool", dangerous=True),
 }
 
@@ -433,6 +440,36 @@ def validate_candidate(candidate: dict, mode: str) -> tuple[dict, dict[str, str]
         relation("DEMAND_MAX_DISTANCE_PCT",
                  cleaned["DEMAND_MAX_DISTANCE_PCT"] >= cleaned["DEMAND_ZONE_BUFFER_PCT"],
                  "harus lebih besar atau sama dengan DEMAND_ZONE_BUFFER_PCT")
+        relation("TREND_EMA_SLOW",
+                 cleaned["TREND_EMA_SLOW"] > cleaned["TREND_EMA_FAST"],
+                 "harus lebih besar dari TREND_EMA_FAST agar susunan EMA tidak terbalik")
+        try:
+            from strategy.indicators import INTERVAL_MINUTES as _INTERVAL_MINUTES
+            _menit_trend = _INTERVAL_MINUTES.get(str(cleaned["TREND_INTERVAL"]).lower())
+            _menit_konfirmasi = _INTERVAL_MINUTES.get(str(cleaned["CONFIRM_INTERVAL"]).lower())
+        except ImportError:
+            _menit_trend = _menit_konfirmasi = None
+        if _menit_trend and _menit_konfirmasi:
+            relation(
+                "TREND_INTERVAL",
+                _menit_trend % _menit_konfirmasi == 0 and _menit_trend >= _menit_konfirmasi,
+                "harus kelipatan bulat dari CONFIRM_INTERVAL dan tidak lebih pendek, "
+                "supaya backtest bisa merangkai candle trend dari candle konfirmasi",
+            )
+        if cleaned["TREND_FILTER_ENABLED"]:
+            _minimal = max(int(cleaned["TREND_EMA_SLOW"]),
+                           2 * int(cleaned["TREND_ADX_PERIOD"]) + 1)
+            if int(cleaned["TREND_LOOKBACK_BARS"]) < _minimal:
+                warnings.append(
+                    f"TREND_LOOKBACK_BARS {cleaned['TREND_LOOKBACK_BARS']} lebih kecil dari "
+                    f"{_minimal} candle yang dibutuhkan EMA dan ADX. Gerbang trend akan "
+                    "memakai nilai minimum itu dan menolak entry selama riwayat belum cukup."
+                )
+            if cleaned["TREND_ADX_MIN"] == 0:
+                warnings.append(
+                    "TREND_ADX_MIN nol: cek kekuatan trend mati, hanya susunan EMA yang "
+                    "menyaring entry sehingga pasar sideways lebih mudah diloloskan."
+                )
         if cleaned["USE_TP"] and cleaned["USE_STOP_LOSS"]:
             relation("TP_PCT", cleaned["TP_PCT"] > cleaned["SL_PCT"],
                      "harus lebih besar dari SL_PCT agar rasio risk-reward tidak terbalik")

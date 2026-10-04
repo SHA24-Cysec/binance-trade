@@ -55,6 +55,7 @@ class BacktestResult:
     final_equity: float = 0.0
     risk_events: dict = field(default_factory=dict)
     chase_skips: int = 0
+    trend_skips: int = 0
 
 
 def bars_per_day(interval: str) -> int:
@@ -160,7 +161,8 @@ def fetch_full_klines(
 
 def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
                   progress_cb: Optional[Callable[[float], None]] = None,
-                  btc_klines: Optional[list[Kline]] = None) -> BacktestResult:
+                  btc_klines: Optional[list[Kline]] = None,
+                  trend_klines: Optional[list[Kline]] = None) -> BacktestResult:
     interval = config.get("CONFIRM_INTERVAL", "5m")
     window = bars_per_day(interval)
     stats = compute_rolling_24h_stats(klines, window)
@@ -171,6 +173,8 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
     n = len(klines)
     trades: list[BacktestTrade] = []
     warnings: list[str] = []
+    trend_scans = 0
+    trend_skips = 0
 
     initial_equity = initial_backtest_equity(config)
     symbol = str(config.get("_symbol", "") or "")
@@ -208,6 +212,21 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
     if btc_warning:
         warnings.append(btc_warning)
 
+    trend_lookup = parity.make_trend_lookup(
+        trend_klines if trend_klines is not None else klines, config, interval,
+        sudah_dirangkai=trend_klines is not None)
+    if trend_lookup is not None:
+        butuh_warmup = strategy.trend_warmup_bars(config, interval)
+        if int(warmup_bars) < butuh_warmup:
+            warnings.append(
+                f"Warmup {warmup_bars} bar {interval} dinaikkan menjadi {butuh_warmup} bar "
+                f"karena gerbang trend {config.get('TREND_INTERVAL', '1h')} butuh "
+                f"{trend_lookup.window} candle trend tertutup. Naikkan warmup di pemanggil "
+                "(atau perpanjang rentang data) supaya backtest dan live memakai riwayat "
+                "trend yang sama."
+            )
+            warmup_bars = butuh_warmup
+
     i = max(warmup_bars, window - 1, lookback)
     start_idx = i
 
@@ -228,6 +247,13 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
                                       if btc_lookup is not None else None)):
                 window_klines = klines[max(0, i - lookback + 1): i + 1]
                 setup = scanner.detect_entry_setup(window_klines, config)
+                if setup.ok and trend_lookup is not None:
+                    trend_scans += 1
+                    verdict = trend_lookup.verdict_at(candle.close_time)
+                    if not verdict["ok"]:
+                        trend_skips += 1
+                        i += 1
+                        continue
                 if setup.ok:
                     entry_idx = i + entry_delay_bars
                     if entry_idx >= n:
@@ -337,6 +363,14 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
         warnings.append(
             f"{chase_skips} sinyal dilewati oleh filter MAX_CHASE_PCT "
             f"({max_chase_pct:g}%), sama seperti bot live.")
+    if trend_lookup is not None and trend_skips:
+        warnings.append(
+            f"{trend_skips} dari {trend_scans} sinyal konfirmasi dilewati oleh gerbang "
+            f"trend {config.get('TREND_INTERVAL', '1h')} "
+            f"(EMA{int(config.get('TREND_EMA_FAST', 20))}/"
+            f"EMA{int(config.get('TREND_EMA_SLOW', 50))} dan ADX"
+            f"{int(config.get('TREND_ADX_PERIOD', 14))} >= "
+            f"{float(config.get('TREND_ADX_MIN', 20.0) or 0.0):g}), sama seperti bot live.")
     result = BacktestResult(
         symbol=config.get("_symbol", "?"),
         interval=interval,
@@ -351,6 +385,7 @@ def run_backtest(klines: list[Kline], config: dict, warmup_bars: int,
         final_equity=equity,
         risk_events=dict(controls.events),
         chase_skips=chase_skips,
+        trend_skips=trend_skips,
     )
     return result
 
@@ -419,6 +454,7 @@ def summarize(result: BacktestResult) -> dict:
         "total_fee_pct": sum(t.fee_pct for t in trades),
         "risk_events": dict(result.risk_events),
         "chase_skips": int(result.chase_skips),
+        "trend_skips": int(getattr(result, "trend_skips", 0)),
         **parity.per_trade_metrics(trades),
     }
 
@@ -455,6 +491,13 @@ def apply_overrides(base_config: dict, overrides: dict) -> dict:
         "DEMAND_ZONE_BUFFER_PCT": float,
         "DEMAND_MAX_DISTANCE_PCT": float,
         "DEMAND_MIN_CLOSE_POSITION": float,
+        "TREND_FILTER_ENABLED": _as_bool,
+        "TREND_INTERVAL": str,
+        "TREND_EMA_FAST": int,
+        "TREND_EMA_SLOW": int,
+        "TREND_ADX_PERIOD": int,
+        "TREND_ADX_MIN": float,
+        "TREND_LOOKBACK_BARS": int,
     }
     cfg = copy.deepcopy(base_config)
     for key, caster in ALLOWED.items():
@@ -503,6 +546,38 @@ def validate_params(cfg: dict) -> None:
             if val is None or not (lo <= float(val) <= hi):
                 raise BacktestError(f"Parameter '{key}'={val} di luar rentang wajar ({lo}..{hi}).")
 
+    if bool(cfg.get("TREND_FILTER_ENABLED", False)):
+        trend_checks = [
+            ("TREND_EMA_FAST", 2, 500),
+            ("TREND_EMA_SLOW", 3, 1000),
+            ("TREND_ADX_PERIOD", 2, 200),
+            ("TREND_ADX_MIN", 0.0, 100.0),
+            ("TREND_LOOKBACK_BARS", 20, strategy.TREND_KLINE_LIMIT - 1),
+        ]
+        for key, lo, hi in trend_checks:
+            val = cfg.get(key)
+            if val is None or not (lo <= float(val) <= hi):
+                raise BacktestError(
+                    f"Parameter '{key}'={val} di luar rentang wajar ({lo}..{hi}).")
+        if int(cfg["TREND_EMA_SLOW"]) <= int(cfg["TREND_EMA_FAST"]):
+            raise BacktestError(
+                "TREND_EMA_SLOW harus lebih besar dari TREND_EMA_FAST agar susunan "
+                "EMA pada gerbang trend tidak terbalik."
+            )
+        interval = cfg.get("CONFIRM_INTERVAL", "5m")
+        try:
+            butuh_trend = strategy.trend_required_bars(cfg)
+            strategy.trend_warmup_bars(cfg, interval)
+        except ValueError as exc:
+            raise BacktestError(str(exc)) from exc
+        if int(cfg.get("TREND_LOOKBACK_BARS", 0)) < butuh_trend:
+            raise BacktestError(
+                f"TREND_LOOKBACK_BARS={cfg.get('TREND_LOOKBACK_BARS')} lebih kecil dari "
+                f"{butuh_trend} candle yang dibutuhkan EMA dan ADX pada "
+                f"{cfg.get('TREND_INTERVAL', '1h')}. Naikkan nilainya supaya backtest "
+                "dan bot live memakai jendela trend yang sama."
+            )
+
     butuh = strategy.required_lookback_bars(cfg)
     if int(cfg.get("CONFIRM_LOOKBACK_BARS", 0)) < butuh:
         raise BacktestError(
@@ -541,6 +616,9 @@ def selftest():
     from config.config import PUMP_CONFIG
     from backtesting.synthetic_data import cfg_gerbang_pump_nonaktif
     cfg = cfg_gerbang_pump_nonaktif(PUMP_CONFIG)
+    # Gerbang trend dimatikan dulu supaya tes-tes di bawah fokus pada logika lain.
+    # Gerbang trend diuji khusus di bagian "paritas gerbang trend timeframe tinggi".
+    cfg["TREND_FILTER_ENABLED"] = False
     cfg["MIN_QUOTE_VOLUME_USDT_24H"] = 1_000_000
     cfg["BACKTEST_ENTRY_DELAY_BARS"] = 0
     cfg["BACKTEST_ENTRY_SPREAD_PCT"] = 0.0
@@ -718,7 +796,12 @@ def selftest():
     assert ctl3.update(10_000, 1200.0) is True and ctl3.events["daily_profit_stop"] == 1
     assert ctl3.force_close_due(True, True) is False, "Target profit harian tidak menutup posisi"
     assert parity.AccountRiskControls({}, 1000.0).update(0, 1.0) is False, "Tanpa konfigurasi tidak ada stop"
-    cfg_fc = dict(cfg, BACKTEST_INITIAL_EQUITY_USDT=1000.0, MAX_DAILY_LOSS_PERCENT=1.0)
+    # Stop Loss dimatikan khusus untuk tes ini: dengan ukuran posisi 100 USDT dari modal
+    # 1000 USDT, SL sekitar 3 persen hanya merugi sekitar 0.3 persen modal sehingga stop
+    # harian 1 persen tidak akan pernah mendahului SL. Tanpa SL, jalur penutupan paksa
+    # (CLOSE_ALL_AT_LIMIT) benar-benar diuji.
+    cfg_fc = dict(cfg, BACKTEST_INITIAL_EQUITY_USDT=1000.0, MAX_DAILY_LOSS_PERCENT=1.0,
+                  USE_STOP_LOSS=False)
     k_fc = list(kl_setup)
     k_fc[308] = _mk(308, 100.0, 100.2, 84.0, 85.0)
     r_fc = run_backtest(k_fc, cfg_fc, warmup_bars=0)
@@ -757,6 +840,131 @@ def selftest():
     assert len(r_dem_off.trades) >= 1, "Saat filter zona demand dimatikan, entry tetap terjadi"
     print("  filter zona demand memblokir entry pucuk dan meloloskan saat di area demand -> OK")
 
+    print("\n=== SELFTEST backtest.py: paritas gerbang trend timeframe tinggi (H1) ===")
+    from backtesting.synthetic_data import seri_trend_dengan_setup
+
+    cfg_trend = dict(cfg, TREND_FILTER_ENABLED=True, TREND_INTERVAL="1h",
+                     TREND_EMA_FAST=20, TREND_EMA_SLOW=50, TREND_ADX_PERIOD=14,
+                     TREND_ADX_MIN=20.0, TREND_LOOKBACK_BARS=120)
+
+    # (a) candle trend dibentuk dari candle simulasi yang sama, bukan unduhan baru
+    kl_naik = seri_trend_dengan_setup(arah=1.0)
+    h1_naik = parity.build_trend_klines(kl_naik, cfg_trend, "5m")
+    assert len(h1_naik) * 12 <= len(kl_naik) < (len(h1_naik) + 1) * 12, len(h1_naik)
+    assert all(int(k.close_time) % 3_600_000 == 3_599_999 for k in h1_naik)
+    print(f"  candle 5m {len(kl_naik)} -> candle 1h {len(h1_naik)} (rangkaian sendiri, tanpa unduhan tambahan)")
+
+    # (b) trend turun memblokir entry walau konfirmasi 5m sah, dan kontrol negatifnya tetap masuk
+    kl_turun = seri_trend_dengan_setup(arah=-1.0)
+    r_turun_on = run_backtest(kl_turun, cfg_trend, warmup_bars=0)
+    r_turun_off = run_backtest(kl_turun, dict(cfg_trend, TREND_FILTER_ENABLED=False), warmup_bars=0)
+    assert len(r_turun_off.trades) >= 1, "kontrol: tanpa gerbang trend, setup yang sama harus entry"
+    assert len(r_turun_on.trades) == 0, "trend H1 turun harus memblokir semua entry baru"
+    assert r_turun_on.trend_skips >= 1 and r_turun_on.trend_skips == r_turun_off.trades[0].entry_time and False or r_turun_on.trend_skips >= 1
+    reason_trend = r_turun_on.trend_skips
+    assert any("gerbang trend" in w for w in r_turun_on.warnings), r_turun_on.warnings
+    print(f"  trend H1 turun: {reason_trend} sinyal disaring, 0 trade "
+          f"(tanpa gerbang trend: {len(r_turun_off.trades)} trade)")
+
+    # (c) trend naik tidak mengurangi trade (kontrol positif dua arah)
+    r_naik_on = run_backtest(kl_naik, cfg_trend, warmup_bars=0)
+    r_naik_off = run_backtest(kl_naik, dict(cfg_trend, TREND_FILTER_ENABLED=False), warmup_bars=0)
+    assert r_naik_on.trend_skips == 0, r_naik_on.trend_skips
+    assert [t.entry_time for t in r_naik_on.trades] == [t.entry_time for t in r_naik_off.trades]
+    print(f"  trend H1 naik: {len(r_naik_on.trades)} trade, identik dengan tanpa gerbang trend")
+
+    # (d) susunan EMA naik tetapi ADX lemah tetap ditolak, dan ADX_MIN=0 meloloskan
+    kl_datar = seri_trend_dengan_setup(arah=0.0)
+    r_datar_on = run_backtest(kl_datar, cfg_trend, warmup_bars=0)
+    r_datar_off = run_backtest(kl_datar, dict(cfg_trend, TREND_FILTER_ENABLED=False), warmup_bars=0)
+    r_datar_tanpa_adx = run_backtest(kl_datar, dict(cfg_trend, TREND_ADX_MIN=0.0), warmup_bars=0)
+    assert len(r_datar_off.trades) >= 1 and len(r_datar_on.trades) == 0
+    assert r_datar_on.trend_skips >= 1
+    assert len(r_datar_tanpa_adx.trades) == len(r_datar_off.trades), \
+        "TREND_ADX_MIN=0 harus meloloskan sinyal yang sama seperti tanpa gerbang"
+    print("  ADX di bawah ambang: ditolak; dengan TREND_ADX_MIN=0 lolos seperti kontrol")
+
+    # (e) riwayat trend kurang = fail closed, bukan lolos diam-diam
+    kl_pendek = seri_trend_dengan_setup(jam_trend=40, arah=1.0)
+    verdict_pendek = parity.TrendLookup(
+        parity.build_trend_klines(kl_pendek, cfg_trend, "5m"), cfg_trend
+    ).verdict_at(kl_pendek[-1].close_time)
+    assert not verdict_pendek["ok"] and "kurang" in verdict_pendek["reason"], verdict_pendek
+    r_pendek = run_backtest(kl_pendek, cfg_trend, warmup_bars=0)
+    assert len(r_pendek.trades) == 0, len(r_pendek.trades)
+    assert any("Warmup" in w for w in r_pendek.warnings), r_pendek.warnings
+    print(f"  riwayat trend kurang: {verdict_pendek['reason'][:58]}... -> 0 trade (fail closed)")
+
+    # (e2) candle trend yang sudah dirangkai tidak boleh dirangkai ulang
+    r_langsung = run_backtest(kl_naik, cfg_trend, warmup_bars=0)
+    r_dirangkai = run_backtest(kl_naik, cfg_trend, warmup_bars=0, trend_klines=h1_naik)
+    assert [t.entry_time for t in r_langsung.trades] == [t.entry_time for t in r_dirangkai.trades], \
+        "data trend yang sudah dirangkai harus dipakai apa adanya, bukan dirangkai dua kali"
+    assert r_dirangkai.trend_skips == r_langsung.trend_skips
+
+    # (f) paritas jendela live vs backtest: jendela diambil dari aturan yang sama
+    lookup = parity.TrendLookup(h1_naik, cfg_trend)
+    jendela = strategy.trend_window_bars(cfg_trend)
+    banding = 0
+    for akhir in (60, 80, 100, len(h1_naik) - 1):
+        waktu_sinyal = int(h1_naik[akhir].close_time)
+        for jeda_detik in (1, 30, 120, 240):
+            sekarang = waktu_sinyal + jeda_detik * 1000
+            tutup_live = [k for k in h1_naik if int(k.close_time) < sekarang][-jendela:]
+            v_live = strategy.evaluate_trend_filter(tutup_live, cfg_trend)
+            v_bt = lookup.verdict_at(waktu_sinyal)
+            assert (v_live["ok"], v_live["reason"], v_live["bars"]) == (
+                v_bt["ok"], v_bt["reason"], v_bt["bars"]), (
+                akhir, jeda_detik, v_live["reason"], v_bt["reason"])
+            banding += 1
+    print(f"  paritas live vs backtest identik pada {banding} kombinasi waktu evaluasi")
+
+    # (g) candle yang belum tutup tidak boleh mempengaruhi keputusan (tanpa lookahead)
+    v_sebelum = lookup.verdict_at(int(h1_naik[-1].close_time))
+    h1_plus_parsial = list(h1_naik) + [strategy.Kline(
+        open_time=int(h1_naik[-1].open_time) + 3_600_000, open=h1_naik[-1].close,
+        high=h1_naik[-1].close * 5, low=h1_naik[-1].close * 0.2, close=h1_naik[-1].close,
+        close_time=int(h1_naik[-1].close_time) + 3_600_000, volume=1.0, quote_volume=1.0)]
+    v_sesudah = parity.TrendLookup(h1_plus_parsial, cfg_trend).verdict_at(
+        int(h1_naik[-1].close_time))
+    assert v_sebelum["reason"] == v_sesudah["reason"], (v_sebelum, v_sesudah)
+    print("  candle trend yang belum tutup tidak mengubah keputusan (tidak repaint)")
+
+    # (h) warmup otomatis dinaikkan + peringatan, bukan diam-diam memakai riwayat kurang
+    r_warmup = run_backtest(kl_naik, cfg_trend, warmup_bars=0)
+    assert any("Warmup" in w for w in r_warmup.warnings), r_warmup.warnings
+    assert strategy.trend_warmup_bars(cfg_trend, "5m") == jendela * 12 + 12
+    print(f"  warmup kurang -> dinaikkan otomatis ke {strategy.trend_warmup_bars(cfg_trend, '5m')} candle 5m + peringatan")
+
+    # (i) parameter trend tervalidasi dan bisa di-override lewat dashboard/CLI
+    merged_trend = apply_overrides(dict(PUMP_CONFIG), {
+        "TREND_FILTER_ENABLED": "false", "TREND_INTERVAL": "4h",
+        "TREND_EMA_FAST": "12", "TREND_EMA_SLOW": "36", "TREND_ADX_MIN": "18.5",
+        "TREND_LOOKBACK_BARS": "200"})
+    assert merged_trend["TREND_FILTER_ENABLED"] is False
+    assert merged_trend["TREND_EMA_FAST"] == 12 and merged_trend["TREND_EMA_SLOW"] == 36
+    assert merged_trend["TREND_ADX_MIN"] == 18.5 and merged_trend["TREND_LOOKBACK_BARS"] == 200
+    validate_params(merged_trend)
+    for jelek, kunci in (
+        ({"TREND_LOOKBACK_BARS": "30"}, "TREND_LOOKBACK_BARS"),
+        ({"TREND_EMA_FAST": "30", "TREND_EMA_SLOW": "20"}, "TREND_EMA_SLOW"),
+        ({"TREND_ADX_MIN": "500"}, "TREND_ADX_MIN"),
+    ):
+        try:
+            validate_params(apply_overrides(dict(PUMP_CONFIG), dict(jelek, TREND_FILTER_ENABLED="true")))
+            raise AssertionError(f"validate_params harus menolak {kunci} tidak wajar")
+        except BacktestError:
+            pass
+    try:
+        validate_params(dict(PUMP_CONFIG, TREND_FILTER_ENABLED=True,
+                             CONFIRM_INTERVAL="1h", TREND_INTERVAL="30m"))
+        raise AssertionError("TREND_INTERVAL lebih pendek dari CONFIRM_INTERVAL harus ditolak")
+    except BacktestError:
+        pass
+    validate_params(dict(PUMP_CONFIG, TREND_FILTER_ENABLED=True,
+                         CONFIRM_INTERVAL="5m", TREND_INTERVAL="4h"))
+    print("  apply_overrides dan validate_params untuk parameter trend -> OK")
+
     print("\nSEMUA SELFTEST backtest.py LULUS.")
     print("(Tidak menghubungi Binance sama sekali, murni logika lokal dengan data sintetis.)")
 
@@ -781,8 +989,9 @@ def print_single_result(result: BacktestResult) -> None:
     print(f"Modal awal         : {summary['initial_equity']:.2f}")
     print(f"Alasan exit        : {dict(sorted(summary['reason_counts'].items()))}")
     risk_info = {k: v for k, v in summary.get("risk_events", {}).items() if v}
-    if risk_info or summary.get("chase_skips"):
-        print(f"Kontrol akun/filter: {risk_info}, chase dilewati {summary.get('chase_skips', 0)}")
+    if risk_info or summary.get("chase_skips") or summary.get("trend_skips"):
+        print(f"Kontrol akun/filter: {risk_info}, chase dilewati {summary.get('chase_skips', 0)}, "
+              f"trend dilewati {summary.get('trend_skips', 0)}")
     if result.warnings:
         print("Peringatan:")
         for item in result.warnings:
@@ -832,10 +1041,13 @@ def main():
 
     interval = cfg["CONFIRM_INTERVAL"]
     warmup = bars_per_day(interval)
+    if bool(cfg.get("TREND_FILTER_ENABLED", False)):
+        warmup = max(warmup, strategy.trend_warmup_bars(cfg, interval))
     total_bars = warmup + bars_per_day(interval) * args.days
 
     print(f"Mengambil {total_bars} candle {interval} untuk {args.symbol} "
-          f"({args.days} hari + warmup 1 hari)...")
+          f"({args.days} hari + warmup {warmup} candle = "
+          f"{warmup / float(bars_per_day(interval)):.2f} hari)...")
     client = BinanceSpotClient(
         "", "", cfg["LIVE_BASE_URL"], allow_signed=False,
         rate_limit_state_file=cfg.get("RATE_LIMIT_STATE_FILE"),

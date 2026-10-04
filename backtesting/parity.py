@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from bisect import bisect_right
 from typing import Optional, Sequence
 
 from strategy.indicators import Kline
@@ -215,6 +216,97 @@ def next_entry_allowed(close_time_ms: int, config: dict) -> int:
     cooldown_ms = int(config.get("COOLDOWN_MINUTES_AFTER_CLOSE", 0) or 0) * MS_PER_MIN
     spacing_ms = int(float(config.get("MIN_SECONDS_BETWEEN_TRADES", 0) or 0) * 1000)
     return int(close_time_ms) + max(cooldown_ms, spacing_ms)
+
+
+class TrendLookup:
+    """Jendela candle trend (timeframe tinggi) untuk gerbang entry.
+
+    Aturan pengambilan jendela di sini adalah aturan yang SAMA dengan bot live
+    (TrendCache pada trading/pump_scanner_bot.py): pakai TREND_LOOKBACK_BARS
+    candle terakhir yang SUDAH TUTUP pada saat candle sinyal ditutup, lalu
+    hitung ulang EMA dan ADX pada jendela itu. Jadi kalau data candle trendnya
+    sama, keputusan live dan backtest juga sama.
+    """
+
+    def __init__(self, trend_klines: Sequence[Kline], config: dict) -> None:
+        from strategy import indicators as strategy_mod
+
+        self.config = config
+        self.interval = strategy_mod.trend_interval(config) if _interval_ok(config) else None
+        self.window = strategy_mod.trend_window_bars(config)
+        self.required = strategy_mod.trend_required_bars(config)
+        self.klines = list(trend_klines)
+        self.close_times = [int(k.close_time) for k in self.klines]
+
+    def window_at(self, signal_close_time_ms: int) -> list:
+        idx = bisect_right(self.close_times, int(signal_close_time_ms))
+        return self.klines[max(0, idx - self.window):idx]
+
+    def verdict_at(self, signal_close_time_ms: int) -> dict:
+        return evaluate_trend(self.window_at(signal_close_time_ms), self.config)
+
+
+def _interval_ok(config: dict) -> bool:
+    from strategy import indicators as strategy_mod
+
+    raw = str(config.get("TREND_INTERVAL", "1h") or "1h").strip().lower()
+    return raw in strategy_mod.INTERVAL_MINUTES
+
+
+def build_trend_klines(klines: Sequence[Kline], config: dict, interval: str) -> list:
+    """Candle trend untuk backtest, dirangkai dari candle interval simulasi.
+
+    Contoh: candle 1h dibentuk dari 12 candle 5m. Hanya bucket yang lengkap yang
+    dipakai, sehingga nilai OHLCV-nya identik dengan candle asli Binance.
+    """
+    from strategy import indicators as strategy_mod
+
+    trend_minutes = strategy_mod.trend_interval_minutes(config)
+    source_minutes = strategy_mod.INTERVAL_MINUTES.get(str(interval))
+    if source_minutes is None:
+        raise ValueError(
+            f"Interval simulasi '{interval}' tidak dikenal sehingga candle trend "
+            f"'{strategy_mod.trend_interval(config)}' tidak bisa dirangkai."
+        )
+    return strategy_mod.aggregate_klines(list(klines), trend_minutes, source_minutes)
+
+
+def make_trend_lookup(klines: Sequence[Kline], config: dict, interval: str,
+                      *, sudah_dirangkai: bool = False) -> Optional[TrendLookup]:
+    """Lookup gerbang trend untuk backtest satu simbol.
+
+    `sudah_dirangkai=True` dipakai kalau pemanggil sudah merangkai candle trend
+    sendiri (mis. trend_latih/trend_uji di pencarian grid), supaya candle trend
+    tidak dirangkai dua kali dan jendelanya tidak melar.
+    """
+    if not config.get("TREND_FILTER_ENABLED", False):
+        return None
+    bars = list(klines) if sudah_dirangkai else build_trend_klines(klines, config, interval)
+    return TrendLookup(bars, config)
+
+
+def trend_warmup_bars(config: dict, interval: str) -> int:
+    """Jumlah candle interval simulasi yang dibutuhkan gerbang trend.
+
+    Dipakai jalur pencarian grid (satu simbol) yang bekerja dalam satuan bar,
+    sedangkan jalur portofolio memakai trend_warmup_ms.
+    """
+    from strategy import indicators as strategy_mod
+
+    return strategy_mod.trend_warmup_bars(config, interval)
+
+
+def trend_warmup_ms(config: dict, interval: str) -> int:
+    """Warmup (ms) yang wajib tersedia sebelum bar entry pertama dievaluasi."""
+    from strategy import indicators as strategy_mod
+
+    return strategy_mod.trend_warmup_bars(config, interval) * strategy_mod.interval_to_ms(interval)
+
+
+def evaluate_trend(klines: Sequence[Kline], config: dict) -> dict:
+    from strategy import indicators as strategy_mod
+
+    return strategy_mod.evaluate_trend_filter(list(klines), config)
 
 
 def per_trade_metrics(trades: Sequence) -> dict:
