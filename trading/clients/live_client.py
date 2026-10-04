@@ -149,10 +149,12 @@ class LiveClient(ExchangeClient):
     def new_market_order(self, symbol: str, side: str,
                          quantity: Optional[float] = None,
                          quote_order_qty: Optional[float] = None,
-                         new_client_order_id: Optional[str] = None) -> dict:
+                         new_client_order_id: Optional[str] = None,
+                         quote_precision: Optional[int] = None) -> dict:
         return self.signed.new_market_order(
             symbol, side, quantity=quantity, quote_order_qty=quote_order_qty,
             new_client_order_id=new_client_order_id,
+            quote_precision=quote_precision,
         )
 
     def place_native_stop_loss(self, symbol: str, quantity: float,

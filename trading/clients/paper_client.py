@@ -110,7 +110,10 @@ class PaperClient(ExchangeClient):
     def new_market_order(self, symbol: str, side: str,
                          quantity: Optional[float] = None,
                          quote_order_qty: Optional[float] = None,
-                         new_client_order_id: Optional[str] = None) -> dict:
+                         new_client_order_id: Optional[str] = None,
+                         quote_precision: Optional[int] = None) -> dict:
+        # quote_precision hanya relevan untuk bursa nyata; mesin paper memakai
+        # nominal apa adanya supaya perilakunya tetap sama dengan sebelumnya.
         order = self.engine.place_order(
             symbol=symbol, side=side, order_type="MARKET",
             quantity=quantity, quote_order_qty=quote_order_qty,

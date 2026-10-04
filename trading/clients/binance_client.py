@@ -65,6 +65,42 @@ def _fmt_num(value) -> str:
     return format(number, "f")
 
 
+QUOTE_PRECISION_DEFAULT = 8
+
+
+def _quote_precision_places(value) -> int:
+    """Ubah presisi quote asset menjadi jumlah desimal yang aman (0..18)."""
+    try:
+        places = int(value)
+    except (TypeError, ValueError):
+        places = QUOTE_PRECISION_DEFAULT
+    return max(0, min(18, places))
+
+
+def _round_down_places(value, places: int):
+    """Bulatkan KE BAWAH ke jumlah desimal tertentu memakai Decimal.
+
+    Dipakai untuk parameter quoteOrderQty. Nilai hasil perhitungan float
+    (contoh 7.58 * 0.995 = 7.5421000000000005) mengandung belasan desimal dan
+    ditolak bursa dengan kode -1111 "Parameter 'quoteOrderQty' has too much
+    precision". Pembulatan ke bawah dipilih supaya nilai tidak pernah melebihi
+    saldo yang tersedia.
+    """
+    number = value if isinstance(value, Decimal) else Decimal(str(value))
+    if not number.is_finite():
+        raise ValueError(f"nilai non-finite tidak boleh dibulatkan: {value!r}")
+    step = Decimal(1).scaleb(-_quote_precision_places(places))
+    hasil = number.quantize(step, rounding=ROUND_DOWN)
+    # Buang nol di belakang koma supaya teks yang dikirim ringkas
+    # (7.54210000 -> 7.5421) tanpa mengubah nilainya.
+    teks = format(hasil, "f")
+    if "." in teks:
+        teks = teks.rstrip("0").rstrip(".")
+    if teks in ("", "-", "-0"):
+        teks = "0"
+    return Decimal(teks)
+
+
 _REDACT_PARAMS = ("signature", "apiKey", "api_key", "secret", "token")
 _REDACT_RE = re.compile(
     r"(?i)\b(" + "|".join(_REDACT_PARAMS) + r")=[^&\s\"'>]*"
@@ -421,7 +457,8 @@ class BinanceSpotClient:
 
     def new_market_order(self, symbol: str, side: str, quantity: Optional[float] = None,
                           quote_order_qty: Optional[float] = None,
-                          new_client_order_id: Optional[str] = None) -> dict:
+                          new_client_order_id: Optional[str] = None,
+                          quote_precision: Optional[int] = None) -> dict:
         if (quantity is None) == (quote_order_qty is None):
             raise ValueError("MARKET order wajib memakai tepat satu dari quantity/quoteOrderQty")
         side = str(side).upper()
@@ -433,6 +470,16 @@ class BinanceSpotClient:
                 raise ValueError("quantity MARKET harus lebih besar dari nol")
             params["quantity"] = _fmt_num(quantity)
         if quote_order_qty is not None:
+            # Lapis pengaman terakhir sebelum dikirim: bulatkan ke bawah sesuai
+            # presisi quote asset. Tanpa ini nilai float berdesimal panjang
+            # (mis. 7.5421000000000005) ditolak bursa dengan kode -1111.
+            quote_order_qty = _round_down_places(
+                quote_order_qty,
+                _quote_precision_places(
+                    quote_precision if quote_precision is not None
+                    else QUOTE_PRECISION_DEFAULT
+                ),
+            )
             if Decimal(_fmt_num(quote_order_qty)) <= 0:
                 raise ValueError("quoteOrderQty MARKET harus lebih besar dari nol")
             params["quoteOrderQty"] = _fmt_num(quote_order_qty)
@@ -580,7 +627,8 @@ class SymbolFilters:
                  max_price: Decimal = Decimal("0"),
                  order_types: set[str] | None = None,
                  permission_sets: tuple[frozenset[str], ...] | None = None,
-                 permission_metadata_verified: bool = False):
+                 permission_metadata_verified: bool = False,
+                 quote_precision: int = QUOTE_PRECISION_DEFAULT):
         self.step_size = Decimal(step_size)
         self.min_qty = Decimal(min_qty)
         self.min_notional = Decimal(min_notional)
@@ -607,6 +655,9 @@ class SymbolFilters:
         self.permission_metadata_verified = bool(
             permission_metadata_verified and self.permission_sets
         )
+        # Presisi quote asset (quoteAssetPrecision dari exchangeInfo). Dipakai
+        # untuk membulatkan quoteOrderQty sebelum dikirim ke bursa.
+        self.quote_precision = _quote_precision_places(quote_precision)
 
         if self.step_size <= 0 or self.lot_step_size <= 0 or self.tick_size <= 0:
             raise ValueError("stepSize/tickSize simbol wajib lebih besar dari nol")
@@ -718,6 +769,14 @@ class SymbolFilters:
             sym_data
         )
 
+        raw_quote_precision = sym_data.get("quoteAssetPrecision")
+        if raw_quote_precision is None:
+            raw_quote_precision = sym_data.get("quotePrecision")
+        quote_precision = _quote_precision_places(
+            raw_quote_precision if raw_quote_precision is not None
+            else QUOTE_PRECISION_DEFAULT
+        )
+
         return cls(
             step_size=effective_step,
             min_qty=effective_min,
@@ -736,6 +795,7 @@ class SymbolFilters:
             order_types=order_types,
             permission_sets=permission_sets,
             permission_metadata_verified=permission_metadata_verified,
+            quote_precision=quote_precision,
         )
 
     @staticmethod
@@ -752,6 +812,15 @@ class SymbolFilters:
 
     def round_price(self, price: float, *, rounding=ROUND_DOWN) -> float:
         return self._round_step(price, self.tick_size, rounding=rounding)
+
+    def round_quote_amount(self, value: float) -> float:
+        """Bulatkan nominal quote (USDT) ke presisi quote asset bursa.
+
+        Wajib dipakai sebelum mengirim quoteOrderQty: hasil perhitungan float
+        seperti 7.58 * 0.995 = 7.5421000000000005 akan ditolak dengan
+        -1111 "Parameter 'quoteOrderQty' has too much precision".
+        """
+        return float(_round_down_places(value, self.quote_precision))
 
     def market_qty_valid(self, qty: float) -> bool:
         value = Decimal(str(qty))

@@ -64,7 +64,8 @@ class ExchangeClient(ABC):
     def new_market_order(self, symbol: str, side: str,
                          quantity: Optional[float] = None,
                          quote_order_qty: Optional[float] = None,
-                         new_client_order_id: Optional[str] = None) -> dict: ...
+                         new_client_order_id: Optional[str] = None,
+                         quote_precision: Optional[int] = None) -> dict: ...
 
     def place_native_stop_loss(self, symbol: str, quantity: float,
                                stop_price: float,

@@ -838,10 +838,12 @@ def _new_client_order_id(prefix: str) -> str:
 
 def _submit_market_order(client: ExchangeClient, symbol: str, side: str,
                          quantity: float | None, client_order_id: str,
-                         quote_order_qty: float | None = None) -> dict:
+                         quote_order_qty: float | None = None,
+                         quote_precision: int | None = None) -> dict:
     return client.new_market_order(
         symbol, side, quantity=quantity, quote_order_qty=quote_order_qty,
         new_client_order_id=client_order_id,
+        quote_precision=quote_precision,
     )
 
 
@@ -2006,6 +2008,13 @@ def open_position(client: ExchangeClient, config: dict, filters_cache: dict,
     if filters.max_qty > 0 and qty > float(filters.max_qty):
         qty = filters.round_qty(float(filters.max_qty))
         order_quote_qty = min(order_quote_qty, qty * price_ref)
+    # quoteOrderQty wajib mengikuti presisi quote asset bursa (quoteAssetPrecision).
+    # Nilai hasil pembagian/multiplikasi float bisa berdesimal panjang, misalnya
+    # 7.58 * 0.995 = 7.5421000000000005, dan ditolak dengan kode -1111
+    # "Parameter 'quoteOrderQty' has too much precision". Pembulatan dilakukan
+    # ke bawah supaya nominal tidak pernah melebihi saldo yang tersedia.
+    if bool(filters.quote_order_qty_market_allowed):
+        order_quote_qty = filters.round_quote_amount(order_quote_qty)
     notional = qty * price_ref
     if (
         not filters.market_qty_valid(qty)
@@ -2065,10 +2074,26 @@ def open_position(client: ExchangeClient, config: dict, filters_cache: dict,
     state_mod.save_state(config["STATE_FILE"], state)
     try:
         resp = _submit_market_order(
-            client, candidate.symbol, "BUY", order_quantity, client_order_id,
+            client, symbol=candidate.symbol, side="BUY", quantity=order_quantity,
+            client_order_id=client_order_id,
             quote_order_qty=order_quote_qty,
+            quote_precision=filters.quote_precision,
         )
     except BinanceAPIError as exc:
+        if _is_definitive_reject(exc):
+            # Penolakan definitif (mis. -1111 presisi, -1013 filter, -1100
+            # parameter) terjadi SEBELUM order masuk ke matching engine, jadi
+            # tidak ada order yang terbentuk. Intent dibatalkan tanpa
+            # rekonsiliasi supaya bot tidak memblokir entry berikutnya.
+            state["pending_order"] = None
+            _clear_reconciliation(state)
+            state_mod.save_state(config["STATE_FILE"], state)
+            logger.error(
+                "Order BUY %s ditolak bursa dan dipastikan tidak terbentuk: %s. "
+                "Intent dibatalkan, entry berikutnya tetap berjalan.",
+                candidate.symbol, exc,
+            )
+            return
         state["reconciliation_required"] = True
         state["reconciliation_assets"] = [candidate.symbol]
         state_mod.save_state(config["STATE_FILE"], state)
@@ -3137,7 +3162,7 @@ def selftest() -> None:
             return {"asks": asks, "bids": bids}
 
         def new_market_order(self, symbol, side, quantity=None, quote_order_qty=None,
-                             new_client_order_id=None):
+                             new_client_order_id=None, quote_precision=None):
             qty = float(quantity or 0.0)
             if qty <= 0 and quote_order_qty is not None and self.price > 0:
                 qty = float(quote_order_qty) / self.price
@@ -3208,9 +3233,9 @@ def selftest() -> None:
             ]}
 
         def new_market_order(self, symbol, side, quantity=None, quote_order_qty=None,
-                             new_client_order_id=None):
+                             new_client_order_id=None, quote_precision=None):
             resp = super().new_market_order(symbol, side, quantity, quote_order_qty,
-                                            new_client_order_id)
+                                            new_client_order_id, quote_precision)
             if side == "BUY":
                 bought = float(quantity or 0.0)
                 if bought <= 0 and quote_order_qty is not None and self.price > 0:
