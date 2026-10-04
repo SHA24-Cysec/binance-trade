@@ -1299,6 +1299,7 @@ def _detector_score_symbol(client, symbol: str, ticker: dict, planned: float) ->
 
     book = scanner.orderbook_metrics(depth, planned, PUMP_CONFIG)
     det = scanner.compute_detector_score(chg, klines, price, book, PUMP_CONFIG)
+    demand = strategy_ind.detect_demand_zone(klines or [], PUMP_CONFIG)
 
     gate_ok, gate_reason = scanner.evaluate_pump_gate(chg, qv, PUMP_CONFIG)
     if depth is None:
@@ -1311,11 +1312,14 @@ def _detector_score_symbol(client, symbol: str, ticker: dict, planned: float) ->
         verdict, reason = "DITOLAK GERBANG", gate_reason
     elif not book_ok:
         verdict, reason = "DITOLAK ORDER BOOK", book_reason
+    elif not demand["ok"]:
+        verdict, reason = "DITOLAK DEMAND", demand["reason"]
     else:
-        verdict, reason = "LOLOS", "lolos gerbang pump dan filter order book"
+        verdict, reason = "LOLOS", f"lolos gerbang pump, order book, dan {demand['reason']}"
     return {
         "symbol": symbol, "price": price, "change_24h": chg, "quote_volume_24h": qv,
         "score": det["score"], "components": det["components"],
+        "demand": demand,
         "missing": det["missing"], "partial": det["partial"],
         "verdict": verdict, "reason": reason,
     }

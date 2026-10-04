@@ -2988,14 +2988,15 @@ def run(config: dict, lifecycle=None) -> int:
 def selftest() -> None:
     import tempfile
 
-    assert PUMP_CONFIG.get("PUMP_MIN_24H_CHANGE_PCT") == 3.0
-    assert PUMP_CONFIG.get("PUMP_MAX_24H_CHANGE_PCT") == 25.0
+    assert PUMP_CONFIG.get("PUMP_MIN_24H_CHANGE_PCT") == 5.0
+    assert PUMP_CONFIG.get("PUMP_MAX_24H_CHANGE_PCT") == 10.0
     assert PUMP_CONFIG.get("BTC_FILTER_ENABLED") is False
     assert PUMP_CONFIG.get("TOP_N_CANDIDATES_TO_CONFIRM") == 30
     assert PUMP_CONFIG.get("ROLLING_VOLUME_SURGE_MULT") == 1.3
     assert PUMP_CONFIG.get("MAX_CHASE_PCT") == 3.0
-    assert PUMP_CONFIG.get("DEPTH_FILTER_ENABLED") is False
-    assert PUMP_CONFIG.get("ORDERBOOK_FILTER_ENABLED") is False
+    assert PUMP_CONFIG.get("DEPTH_FILTER_ENABLED") is True
+    assert PUMP_CONFIG.get("ORDERBOOK_FILTER_ENABLED") is True
+    assert PUMP_CONFIG.get("DEMAND_ZONE_FILTER_ENABLED") is True
 
     cfg = dict(PUMP_CONFIG)
     cfg["STATE_FILE"] = os.path.join(tempfile.gettempdir(), "pump_bot_selftest_state.json")
@@ -3119,7 +3120,27 @@ def selftest() -> None:
     assert not hasil_tolak.ok, "Volume hanya 1,5x harus ditolak (minimum 2x)"
     hasil_pendek = scanner.detect_entry_setup(_seri_volume(3000.0)[:10], cfg)
     assert not hasil_pendek.ok, "Data candle kurang harus ditolak"
-    print("  -> OK (volume 3x lolos, volume 1,5x ditolak, data kurang ditolak)")
+    assert hasil.demand_zone_low is not None and hasil.demand_zone_high is not None, \
+        "batas zona demand harus terisi saat DEMAND_ZONE_FILTER_ENABLED aktif"
+    seri_bearish = _seri_volume(3000.0)
+    seri_bearish[-1] = strategy.Kline(29 * 300_000, 100.5, 101.0, 99.0, 99.5,
+                                      29 * 300_000 + 299_999, 3000.0, 3000.0 * 99.5)
+    assert not scanner.detect_entry_setup(seri_bearish, cfg).ok, \
+        "Candle sinyal bearish harus ditolak oleh filter zona demand"
+    seri_ekor_atas = _seri_volume(3000.0)
+    seri_ekor_atas[-1] = strategy.Kline(29 * 300_000, 100.1, 104.0, 100.0, 100.3,
+                                        29 * 300_000 + 299_999, 3000.0, 3000.0 * 100.3)
+    assert not scanner.detect_entry_setup(seri_ekor_atas, cfg).ok, \
+        "Candle dengan ekor atas panjang (close_pos rendah) harus ditolak filter demand"
+    seri_pucuk = _seri_volume(3000.0)
+    seri_pucuk[-1] = strategy.Kline(29 * 300_000, 105.0, 106.5, 104.8, 106.2,
+                                    29 * 300_000 + 299_999, 3000.0, 3000.0 * 106.2)
+    assert not scanner.detect_entry_setup(seri_pucuk, cfg).ok, \
+        "Harga yang sudah terbang terlalu jauh di atas zona demand harus ditolak"
+    assert scanner.detect_entry_setup(
+        seri_pucuk, dict(cfg, DEMAND_ZONE_FILTER_ENABLED=False)
+    ).ok, "Jika DEMAND_ZONE_FILTER_ENABLED=False, hanya volume rolling yang dicek"
+    print("  -> OK (volume 3x + zona demand lolos, bearish/ekor atas/pucuk ditolak, data kurang ditolak)")
 
     print("\n=== SELFTEST: simulasi exit (TP/Breakeven/Trailing) ===")
     from decimal import Decimal as D

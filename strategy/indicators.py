@@ -70,8 +70,13 @@ def parse_klines(raw: list) -> list[Kline]:
 def required_lookback_bars(config: dict) -> int:
     rolling_lookback = int(config.get("ROLLING_VOLUME_LOOKBACK_BARS", 20) or 20)
     confirmation_bars = int(config.get("ROLLING_VOLUME_CONFIRMATION_BARS", 1) or 1)
+    demand_lookback = (
+        int(config.get("DEMAND_LOOKBACK_BARS", 20) or 20) + 1
+        if bool(config.get("DEMAND_ZONE_FILTER_ENABLED", False))
+        else 0
+    )
     atr_period = max(1, int(config.get("ATR_PERIOD", 14) or 14))
-    return max(atr_period, rolling_lookback + max(1, confirmation_bars))
+    return max(atr_period, rolling_lookback + max(1, confirmation_bars), demand_lookback)
 
 def confirm_window_bars(config: dict) -> int:
     lookback = int(config.get("CONFIRM_LOOKBACK_BARS", 48) or 48)
@@ -138,6 +143,137 @@ def atr(klines: list[Kline], period: int = 14) -> float | None:
     for tr in trs[period:]:
         result = (result * (period - 1) + tr) / period
     return result if math.isfinite(result) and result > 0 else None
+
+
+def detect_demand_zone(klines: list[Kline], config: dict) -> dict:
+    if not bool(config.get("DEMAND_ZONE_FILTER_ENABLED", False)):
+        return {
+            "ok": True,
+            "reason": "filter zona demand nonaktif",
+            "zone_low": None,
+            "zone_high": None,
+            "distance_pct": None,
+            "close_position": None,
+        }
+
+    lookback = max(3, int(config.get("DEMAND_LOOKBACK_BARS", 20) or 20))
+    buffer_pct = max(0.0, float(config.get("DEMAND_ZONE_BUFFER_PCT", 0.8) or 0.0))
+    max_dist_pct = max(0.0, float(config.get("DEMAND_MAX_DISTANCE_PCT", 3.5) or 0.0))
+    min_close_pos = max(0.0, min(1.0, float(config.get("DEMAND_MIN_CLOSE_POSITION", 0.45) or 0.0)))
+
+    required = lookback + 1
+    if not klines or len(klines) < required:
+        return {
+            "ok": False,
+            "reason": f"data zona demand kurang: {len(klines) if klines else 0} dari minimum {required}",
+            "zone_low": None,
+            "zone_high": None,
+            "distance_pct": None,
+            "close_position": None,
+        }
+
+    prior = klines[-1 - lookback:-1]
+    signal = klines[-1]
+
+    for candle in prior + [signal]:
+        if (
+            not math.isfinite(candle.open)
+            or not math.isfinite(candle.high)
+            or not math.isfinite(candle.low)
+            or not math.isfinite(candle.close)
+            or candle.low <= 0
+            or candle.high < candle.low
+        ):
+            return {
+                "ok": False,
+                "reason": "data OHLC candle untuk zona demand tidak valid",
+                "zone_low": None,
+                "zone_high": None,
+                "distance_pct": None,
+                "close_position": None,
+            }
+
+    recent_base = prior[-min(len(prior), 6):]
+    swing_low = min(float(k.low) for k in prior)
+    recent_low = min(float(k.low) for k in recent_base)
+    zone_low = recent_low if recent_low >= swing_low else swing_low
+    base_body = min(max(float(k.open), float(k.close)) for k in recent_base)
+    zone_high = max(base_body, zone_low * (1.0 + buffer_pct / 100.0))
+
+    sig_open = float(signal.open)
+    sig_high = float(signal.high)
+    sig_low = float(signal.low)
+    sig_close = float(signal.close)
+    prev_close = float(prior[-1].close)
+
+    candle_range = sig_high - sig_low
+    if candle_range > 0:
+        close_pos = (sig_close - sig_low) / candle_range
+    else:
+        close_pos = 1.0 if sig_close >= prev_close else 0.0
+
+    distance_pct = max(0.0, (sig_close / zone_high - 1.0) * 100.0) if zone_high > 0 else 0.0
+
+    if sig_close < zone_low:
+        return {
+            "ok": False,
+            "reason": f"zona demand ditembus: close {sig_close:.6g} di bawah dasar demand {zone_low:.6g}",
+            "zone_low": zone_low,
+            "zone_high": zone_high,
+            "distance_pct": distance_pct,
+            "close_position": close_pos,
+        }
+
+    if sig_close < sig_open or sig_close < prev_close:
+        return {
+            "ok": False,
+            "reason": (
+                f"reaksi demand lemah: candle sinyal bearish/turun "
+                f"(open={sig_open:.6g}, close={sig_close:.6g}, prev={prev_close:.6g})"
+            ),
+            "zone_low": zone_low,
+            "zone_high": zone_high,
+            "distance_pct": distance_pct,
+            "close_position": close_pos,
+        }
+
+    if close_pos + 1e-9 < min_close_pos:
+        return {
+            "ok": False,
+            "reason": (
+                f"dorongan demand kurang: posisi close candle {close_pos:.2f} "
+                f"di bawah minimum {min_close_pos:.2f}"
+            ),
+            "zone_low": zone_low,
+            "zone_high": zone_high,
+            "distance_pct": distance_pct,
+            "close_position": close_pos,
+        }
+
+    if max_dist_pct > 0 and distance_pct > max_dist_pct:
+        return {
+            "ok": False,
+            "reason": (
+                f"harga terlalu jauh di atas zona demand: +{distance_pct:.2f}% "
+                f"melebihi batas {max_dist_pct:g}%"
+            ),
+            "zone_low": zone_low,
+            "zone_high": zone_high,
+            "distance_pct": distance_pct,
+            "close_position": close_pos,
+        }
+
+    return {
+        "ok": True,
+        "reason": (
+            f"demand zone valid [{zone_low:.6g}..{zone_high:.6g}], "
+            f"jarak +{distance_pct:.2f}%, close_pos {close_pos:.2f}"
+        ),
+        "zone_low": zone_low,
+        "zone_high": zone_high,
+        "distance_pct": distance_pct,
+        "close_position": close_pos,
+    }
 
 
 def resolve_exit_levels(config: dict) -> dict:

@@ -949,6 +949,19 @@ def selftest() -> bool:
     check("kontrol positif: data sama tanpa ambang volume tetap menghasilkan trade",
           len(_jalankan({"AUSDT": up_a}, cfg).trades) > 0)
 
+    cfg_demand = dict(
+        cfg,
+        DEMAND_ZONE_FILTER_ENABLED=True,
+        DEMAND_LOOKBACK_BARS=20,
+        DEMAND_ZONE_BUFFER_PCT=0.8,
+        DEMAND_MAX_DISTANCE_PCT=3.5,
+        DEMAND_MIN_CLOSE_POSITION=0.45,
+    )
+    res_demand = _jalankan({"AUSDT": up_a, "BUSDT": up_b}, cfg_demand)
+    check("filter zona demand menyaring entry fase turun dan menjaga kualitas",
+          0 < len(res_demand.trades) < len(res.trades),
+          f"{len(res_demand.trades)} vs {len(res.trades)} trade")
+
     s = summarize_portfolio(res)
     check("total = menang + kalah", s["total_trades"] == s["wins"] + s["losses"])
     check("kurva equity panjangnya benar", len(s["equity_curve"]) == s["total_trades"] + 1)

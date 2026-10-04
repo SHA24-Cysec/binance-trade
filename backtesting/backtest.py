@@ -450,6 +450,11 @@ def apply_overrides(base_config: dict, overrides: dict) -> dict:
         "BE_LOCK_PCT": float,
         "TRAILING_START_PCT": float,
         "TRAILING_STEP_PCT": float,
+        "DEMAND_ZONE_FILTER_ENABLED": _as_bool,
+        "DEMAND_LOOKBACK_BARS": int,
+        "DEMAND_ZONE_BUFFER_PCT": float,
+        "DEMAND_MAX_DISTANCE_PCT": float,
+        "DEMAND_MIN_CLOSE_POSITION": float,
     }
     cfg = copy.deepcopy(base_config)
     for key, caster in ALLOWED.items():
@@ -485,6 +490,18 @@ def validate_params(cfg: dict) -> None:
         val = cfg.get(key)
         if val is None or not (lo <= val <= hi):
             raise BacktestError(f"Parameter '{key}'={val} di luar rentang wajar ({lo}..{hi}).")
+
+    if bool(cfg.get("DEMAND_ZONE_FILTER_ENABLED", False)):
+        demand_checks = [
+            ("DEMAND_LOOKBACK_BARS", 3, 500),
+            ("DEMAND_ZONE_BUFFER_PCT", 0.05, 20.0),
+            ("DEMAND_MAX_DISTANCE_PCT", 0.1, 50.0),
+            ("DEMAND_MIN_CLOSE_POSITION", 0.0, 1.0),
+        ]
+        for key, lo, hi in demand_checks:
+            val = cfg.get(key)
+            if val is None or not (lo <= float(val) <= hi):
+                raise BacktestError(f"Parameter '{key}'={val} di luar rentang wajar ({lo}..{hi}).")
 
     butuh = strategy.required_lookback_bars(cfg)
     if int(cfg.get("CONFIRM_LOOKBACK_BARS", 0)) < butuh:
@@ -728,6 +745,17 @@ def selftest():
     assert abs(lookup.drop_pct_at(307 * 300_000) - (-5.0)) < 1e-9
     assert lookup.drop_pct_at(2 * 300_000) is None and lookup.drop_pct_at(999 * 300_000) is None
     print("  modal awal, metrik per trade, lookup BTC -> OK")
+
+    print("\n=== SELFTEST backtest.py: paritas filter zona demand di backtest ===")
+    k_overext = list(kl_setup)
+    k_overext[-2] = _mk(len(k_overext) - 2, 100.0, 108.0, 99.5, 107.0, vol=10_000_000.0)
+    k_overext[-1] = _mk(len(k_overext) - 1, 107.0, 108.5, 106.5, 107.5, vol=10_000_000.0)
+    r_dem_block = run_backtest(k_overext, dict(cfg, DEMAND_ZONE_FILTER_ENABLED=True,
+                                               DEMAND_MAX_DISTANCE_PCT=3.5), warmup_bars=0)
+    r_dem_off = run_backtest(k_overext, dict(cfg, DEMAND_ZONE_FILTER_ENABLED=False), warmup_bars=0)
+    assert len(r_dem_block.trades) == 0, "Harga terlalu jauh di atas zona demand harus memblokir entry"
+    assert len(r_dem_off.trades) >= 1, "Saat filter zona demand dimatikan, entry tetap terjadi"
+    print("  filter zona demand memblokir entry pucuk dan meloloskan saat di area demand -> OK")
 
     print("\nSEMUA SELFTEST backtest.py LULUS.")
     print("(Tidak menghubungi Binance sama sekali, murni logika lokal dengan data sintetis.)")

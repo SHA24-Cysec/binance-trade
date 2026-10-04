@@ -1190,7 +1190,7 @@ function renderDetector(d){
     `Empat komponen dinilai terhadap ambang bot: kenaikan 24 jam, `+
     `lonjakan volume 5m, kualitas order book, dan ATR. Angka kecil di bawah nilai adalah poin / poin maksimum. `+
     `<b>Hanya tampilan</b>, skor tidak mengubah keputusan entry bot. Data yang gagal diambil dihitung 0. `+
-    `Status LOLOS berarti gerbang pump dan filter order book terpenuhi saat ini; entry tetap butuh konfirmasi volume 5m, spread, chase, dan usia listing.`;
+    `Status LOLOS berarti gerbang pump, filter order book, dan zona demand terpenuhi saat ini; entry tetap butuh konfirmasi volume 5m, spread, chase, dan usia listing.`;
 
   const tb=document.getElementById('detBody');
   if(!items.length){
@@ -1198,7 +1198,7 @@ function renderDetector(d){
     return;
   }
 
-  const stCls={'LOLOS':'st-siap','DITOLAK GERBANG':'st-tipis','DITOLAK ORDER BOOK':'st-menunggu'};
+  const stCls={'LOLOS':'st-siap','DITOLAK GERBANG':'st-tipis','DITOLAK ORDER BOOK':'st-menunggu','DITOLAK DEMAND':'st-menunggu'};
   tb.innerHTML=items.map(r=>{
     const c=r.components||{};
     const sc=r.score;

@@ -462,6 +462,15 @@ class SetupResult:
     reason: str
     signal_close: Optional[float] = None
     atr_value: Optional[float] = None
+    demand_zone_low: Optional[float] = None
+    demand_zone_high: Optional[float] = None
+    demand_distance_pct: Optional[float] = None
+    demand_close_position: Optional[float] = None
+
+
+def _demand_zone_confirmation(klines: list[Kline], config: dict) -> dict:
+    return strategy.detect_demand_zone(klines, config)
+
 
 def _rolling_volume_confirmation(klines: list[Kline], config: dict) -> tuple[bool, str]:
     if not bool(config.get("ROLLING_VOLUME_FILTER_ENABLED", True)):
@@ -515,10 +524,26 @@ def detect_entry_setup(klines: list[Kline], config: dict) -> SetupResult:
     volume_ok, volume_detail = _rolling_volume_confirmation(klines, config)
     if not volume_ok:
         return SetupResult(False, f"rolling volume ditolak: {volume_detail}")
+    demand = _demand_zone_confirmation(klines, config)
+    if not demand["ok"]:
+        return SetupResult(
+            False,
+            f"zona demand ditolak: {demand['reason']}",
+            demand_zone_low=demand.get("zone_low"),
+            demand_zone_high=demand.get("zone_high"),
+            demand_distance_pct=demand.get("distance_pct"),
+            demand_close_position=demand.get("close_position"),
+        )
     return SetupResult(
-        True, f"entry sah: gerbang pump lolos, {volume_detail}",
+        True,
+        f"entry sah: gerbang pump lolos, {volume_detail}, {demand['reason']}",
         signal_close=klines[-1].close,
-        atr_value=strategy.atr(klines, int(config.get("ATR_PERIOD", 14) or 14)))
+        atr_value=strategy.atr(klines, int(config.get("ATR_PERIOD", 14) or 14)),
+        demand_zone_low=demand.get("zone_low"),
+        demand_zone_high=demand.get("zone_high"),
+        demand_distance_pct=demand.get("distance_pct"),
+        demand_close_position=demand.get("close_position"),
+    )
 
 def setup_quality_key(setup: SetupResult, candidate: Candidate) -> tuple:
     return (-float(candidate.quote_volume),)

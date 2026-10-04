@@ -165,6 +165,11 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "ROLLING_VOLUME_FILTER_ENABLED": _field("Konfirmasi Volume", "Filter volume rolling", "Wajibkan volume candle konfirmasi melampaui rata-rata candle sebelumnya.", "bool"),
     "ROLLING_VOLUME_LOOKBACK_BARS": _field("Konfirmasi Volume", "Lookback volume rolling", "Jumlah candle sebelumnya untuk menghitung rata-rata volume.", "int", minimum=2, maximum=500, unit="candle"),
     "ROLLING_VOLUME_SURGE_MULT": _field("Konfirmasi Volume", "Pengali volume rolling", "Volume candle konfirmasi minimal sekian kali rata-rata sebelumnya.", "float", minimum=0.1, maximum=100, unit="x"),
+    "DEMAND_ZONE_FILTER_ENABLED": _field("Konfirmasi Demand", "Filter zona demand chart", "Wajibkan harga berada di area demand (support atau base akumulasi) dengan reaksi dorongan beli yang sah pada candle konfirmasi. Berlaku di LIVE, PAPER, dan backtest.", "bool"),
+    "DEMAND_LOOKBACK_BARS": _field("Konfirmasi Demand", "Lookback zona demand", "Jumlah candle tertutup sebelumnya untuk memetakan dasar zona demand (swing support atau base akumulasi).", "int", minimum=3, maximum=500, unit="candle"),
+    "DEMAND_ZONE_BUFFER_PCT": _field("Konfirmasi Demand", "Lebar zona demand", "Toleransi persentase di atas titik base terendah yang dianggap sebagai area aktif zona demand.", "float", minimum=0.05, maximum=20, unit="%"),
+    "DEMAND_MAX_DISTANCE_PCT": _field("Konfirmasi Demand", "Jarak maksimum dari zona demand", "Batas jarak harga penutupan sinyal di atas batas zona demand agar bot tidak membeli terlalu jauh dari area demand (anti-pucuk).", "float", minimum=0.1, maximum=50, unit="%"),
+    "DEMAND_MIN_CLOSE_POSITION": _field("Konfirmasi Demand", "Posisi close minimum pada candle", "Posisi penutupan minimum di dalam rentang high-low candle sinyal (0.0 di low, 1.0 di high) sebagai bukti dorongan demand pembeli.", "float", minimum=0.0, maximum=1.0),
     "TOP_N_CANDIDATES_TO_CONFIRM": _field("Scan", "Jumlah kandidat konfirmasi", "Berapa kandidat teratas yang diperiksa.", "int", minimum=1, maximum=1000),
     "USE_RISK_PERCENT": _field("Ukuran Posisi", "Gunakan persen risiko", "Ukuran posisi dihitung dari saldo bebas.", "bool", dangerous=True),
 }
@@ -425,6 +430,9 @@ def validate_candidate(candidate: dict, mode: str) -> tuple[dict, dict[str, str]
                  "tidak boleh melebihi trigger breakeven")
         relation("ATR_MULT_TP", cleaned["ATR_MULT_TP"] > cleaned["ATR_MULT_SL"],
                  "harus lebih besar dari ATR_MULT_SL agar rasio risk-reward tidak terbalik")
+        relation("DEMAND_MAX_DISTANCE_PCT",
+                 cleaned["DEMAND_MAX_DISTANCE_PCT"] >= cleaned["DEMAND_ZONE_BUFFER_PCT"],
+                 "harus lebih besar atau sama dengan DEMAND_ZONE_BUFFER_PCT")
         if cleaned["USE_TP"] and cleaned["USE_STOP_LOSS"]:
             relation("TP_PCT", cleaned["TP_PCT"] > cleaned["SL_PCT"],
                      "harus lebih besar dari SL_PCT agar rasio risk-reward tidak terbalik")
