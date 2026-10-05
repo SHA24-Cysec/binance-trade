@@ -52,12 +52,12 @@ PUMP_CONFIG = {
 
     "USE_ATR_EXIT": True,
     "ATR_PERIOD": 14,
-    "ATR_MULT_SL": 1.5,
-    "ATR_MULT_TP": 3.0,
-    "ATR_MULT_TRAIL": 1.0,
-    "ATR_MULT_BE_TRIGGER": 1.0,
-    "ATR_MULT_BE_LOCK": 0.1,
-    "ATR_MULT_TRAIL_START": 1.5,
+    "ATR_MULT_SL": 13.0, #1.5
+    "ATR_MULT_TP": 24.5, #3.0
+    "ATR_MULT_TRAIL": 8.0, #1.0
+    "ATR_MULT_BE_TRIGGER": 6.0, #1.0
+    "ATR_MULT_BE_LOCK": 0.0, #0.1
+    "ATR_MULT_TRAIL_START": 12.0, #1.5
 
     "EXTRA_EXCLUDE_SYMBOLS": [],
 
