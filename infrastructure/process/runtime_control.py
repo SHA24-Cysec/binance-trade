@@ -10,7 +10,10 @@ from pathlib import Path
 from typing import Any
 
 from infrastructure.storage.atomic_io import (
-    atomic_write_json, interprocess_lock, read_json, replace_with_retry,
+    atomic_write_json,
+    interprocess_lock,
+    read_json,
+    replace_with_retry,
     timestamp_tag,
 )
 from infrastructure.process import procctl
@@ -64,7 +67,9 @@ def _read_dict(path: Path) -> dict:
 def _archive_stale(path: Path) -> None:
     if not path.exists():
         return
-    target = path.with_name(f"{path.name}.stale-{timestamp_tag()}-{uuid.uuid4().hex[:6]}")
+    target = path.with_name(
+        f"{path.name}.stale-{timestamp_tag()}-{uuid.uuid4().hex[:6]}"
+    )
     try:
         replace_with_retry(path, target)
     except FileNotFoundError:
@@ -127,7 +132,9 @@ def _strict_position_snapshot(mode: str) -> dict:
     result["state_file"] = str(path)
     result["config_errors"] = list(config_errors)
     if config_errors:
-        result["inspection_error"] = "Konfigurasi mode tidak dapat diverifikasi: " + "; ".join(config_errors)
+        result["inspection_error"] = (
+            "Konfigurasi mode tidak dapat diverifikasi: " + "; ".join(config_errors)
+        )
         return result
     if not path.exists():
         return result
@@ -154,15 +161,19 @@ def _strict_position_snapshot(mode: str) -> dict:
         result["inspection_error"] = "Qty atau harga entry pada state bukan angka aman."
         return result
     if bool(symbol) != bool(qty > 0):
-        result["inspection_error"] = "State posisi tidak konsisten antara simbol dan qty."
+        result["inspection_error"] = (
+            "State posisi tidak konsisten antara simbol dan qty."
+        )
         return result
 
-    result.update({
-        "has_position": bool(symbol and qty > 0),
-        "symbol": symbol,
-        "qty": qty,
-        "entry_price": entry,
-    })
+    result.update(
+        {
+            "has_position": bool(symbol and qty > 0),
+            "symbol": symbol,
+            "qty": qty,
+            "entry_price": entry,
+        }
+    )
     return result
 
 
@@ -178,7 +189,9 @@ def mode_switch_guard(target_mode: str) -> dict:
     if owner:
         reasons.append(f"Bot {other} masih berjalan dengan PID {owner.get('pid')}.")
     if position.get("inspection_error"):
-        reasons.append(f"State {other} tidak dapat diverifikasi: {position['inspection_error']}")
+        reasons.append(
+            f"State {other} tidak dapat diverifikasi: {position['inspection_error']}"
+        )
     elif position.get("has_position"):
         reasons.append(
             f"Mode {other} masih memiliki posisi {position.get('symbol')} "
@@ -214,7 +227,9 @@ class BotModeLock:
         self.global_scope = bool(global_scope)
         self.path = global_lock_file() if self.global_scope else lock_file(self.mode)
         self.reclaim_path = (
-            global_reclaim_lock_file() if self.global_scope else reclaim_lock_file(self.mode)
+            global_reclaim_lock_file()
+            if self.global_scope
+            else reclaim_lock_file(self.mode)
         )
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.token = uuid.uuid4().hex
@@ -228,7 +243,9 @@ class BotModeLock:
             "token": self.token,
             "created_at": time.time(),
         }
-        encoded = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        encoded = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode(
+            "utf-8"
+        )
         reclaim_path = self.reclaim_path
         for _ in range(150):
             try:
@@ -240,7 +257,9 @@ class BotModeLock:
                 except (TypeError, ValueError):
                     pid = 0
                 token = existing.get("token")
-                if pid and procctl.is_process_alive(pid, existing.get("process_identity")):
+                if pid and procctl.is_process_alive(
+                    pid, existing.get("process_identity")
+                ):
                     running_mode = str(existing.get("mode") or self.mode).upper()
                     raise BotAlreadyRunningError(
                         f"Bot mode {running_mode} sudah berjalan dengan PID {pid}."
@@ -261,7 +280,9 @@ class BotModeLock:
                     )
                 except FileExistsError:
                     try:
-                        reclaim_age = max(0.0, time.time() - reclaim_path.stat().st_mtime)
+                        reclaim_age = max(
+                            0.0, time.time() - reclaim_path.stat().st_mtime
+                        )
                         if reclaim_age > 2.0:
                             reclaim_path.unlink(missing_ok=True)
                     except OSError:
@@ -271,7 +292,9 @@ class BotModeLock:
                 try:
                     os.close(reclaim_fd)
                     current = _read_dict(self.path)
-                    if current.get("token") != token or current.get("pid") != existing.get("pid"):
+                    if current.get("token") != token or current.get(
+                        "pid"
+                    ) != existing.get("pid"):
                         continue
                     try:
                         current_pid = int(current.get("pid", 0))
@@ -325,8 +348,14 @@ class BotLifecycle:
         self.managed = bool(managed)
         self.last_status = "STARTING"
 
-    def write(self, status: str, *, exit_code: int | None = None,
-              reason: str | None = None, extra: dict | None = None) -> None:
+    def write(
+        self,
+        status: str,
+        *,
+        exit_code: int | None = None,
+        reason: str | None = None,
+        extra: dict | None = None,
+    ) -> None:
         self.last_status = status
         data = {
             "mode": self.mode,
@@ -381,8 +410,11 @@ class BotRuntime:
                 if exc is None:
                     self.lifecycle.write("STOPPED", exit_code=0)
                 else:
-                    self.lifecycle.write("CRASHED", exit_code=1,
-                                         reason=f"{type(exc).__name__}: {str(exc)[:300]}")
+                    self.lifecycle.write(
+                        "CRASHED",
+                        exit_code=1,
+                        reason=f"{type(exc).__name__}: {str(exc)[:300]}",
+                    )
         finally:
             self.lock.release()
             self.global_lock.release()
@@ -412,6 +444,7 @@ class BotProcessManager:
     @staticmethod
     def _config():
         from config import config
+
         return config
 
     def _read_lifecycle(self, mode: str) -> dict:
@@ -423,19 +456,19 @@ class BotProcessManager:
         if not bool(cfg.get("SUPERVISOR_AUTO_RESTART", False)):
             return
         now = time.monotonic()
-        window = max(60.0, float(cfg.get("SUPERVISOR_RESTART_WINDOW_SECONDS", 300) or 300))
+        window = max(
+            60.0, float(cfg.get("SUPERVISOR_RESTART_WINDOW_SECONDS", 300) or 300)
+        )
         if now - self._restart_window_started >= window:
             self._restart_window_started = now
             self._restart_attempts = 0
         maximum = max(0, int(cfg.get("SUPERVISOR_MAX_RESTARTS", 5) or 5))
         if self._restart_attempts >= maximum:
             self._auto_restart_mode = None
-            self._last_job_warning = (
-                f"Auto-restart dihentikan setelah {maximum} percobaan dalam {window:.0f} detik."
-            )
+            self._last_job_warning = f"Auto-restart dihentikan setelah {maximum} percobaan dalam {window:.0f} detik."
             return
         base = max(1.0, float(cfg.get("SUPERVISOR_RESTART_BACKOFF_SECONDS", 5) or 5))
-        delay = min(base * (2 ** self._restart_attempts), window)
+        delay = min(base * (2**self._restart_attempts), window)
         self._restart_attempts += 1
         self._auto_restart_mode = mode
         self._restart_next_at = now + delay
@@ -497,37 +530,77 @@ class BotProcessManager:
                     if status not in ("STARTING", "RUNNING", "STOPPING"):
                         status = "RUNNING"
                     started = float(lifecycle.get("started_at") or time.time())
-                    return self._status_payload(mode, status, pid, started, None,
-                                                lifecycle.get("reason"), True, lifecycle)
+                    return self._status_payload(
+                        mode,
+                        status,
+                        pid,
+                        started,
+                        None,
+                        lifecycle.get("reason"),
+                        True,
+                        lifecycle,
+                    )
                 self._handle_managed_exit_locked(mode, int(code))
                 lifecycle = self._read_lifecycle(mode)
 
             owner = lock_owner(mode)
             if owner:
                 pid = int(owner["pid"])
-                started = float(lifecycle.get("started_at") or owner.get("created_at") or time.time())
+                started = float(
+                    lifecycle.get("started_at")
+                    or owner.get("created_at")
+                    or time.time()
+                )
                 status = lifecycle.get("status") or "RUNNING"
                 if status not in ("STARTING", "RUNNING", "STOPPING"):
                     status = "RUNNING"
                 owner_lifecycle = dict(lifecycle)
-                owner_lifecycle.setdefault("process_identity", owner.get("process_identity"))
-                return self._status_payload(mode, status, pid, started, None,
-                                            lifecycle.get("reason"), bool(lifecycle.get("managed")), owner_lifecycle)
+                owner_lifecycle.setdefault(
+                    "process_identity", owner.get("process_identity")
+                )
+                return self._status_payload(
+                    mode,
+                    status,
+                    pid,
+                    started,
+                    None,
+                    lifecycle.get("reason"),
+                    bool(lifecycle.get("managed")),
+                    owner_lifecycle,
+                )
 
             status = str(lifecycle.get("status") or "STOPPED")
             if status in ("STARTING", "RUNNING", "STOPPING"):
                 status = "CRASHED"
             return self._status_payload(
-                mode, status, lifecycle.get("pid"), lifecycle.get("started_at"),
-                lifecycle.get("exit_code"), lifecycle.get("reason"),
-                bool(lifecycle.get("managed")), lifecycle,
+                mode,
+                status,
+                lifecycle.get("pid"),
+                lifecycle.get("started_at"),
+                lifecycle.get("exit_code"),
+                lifecycle.get("reason"),
+                bool(lifecycle.get("managed")),
+                lifecycle,
             )
 
-    def _status_payload(self, mode: str, status: str, pid: Any, started: Any,
-                        exit_code: Any, reason: Any, managed: bool, lifecycle: dict) -> dict:
+    def _status_payload(
+        self,
+        mode: str,
+        status: str,
+        pid: Any,
+        started: Any,
+        exit_code: Any,
+        reason: Any,
+        managed: bool,
+        lifecycle: dict,
+    ) -> dict:
         now = time.time()
         try:
-            uptime = max(0.0, now - float(started)) if started and status in ("STARTING", "RUNNING", "STOPPING") else None
+            uptime = (
+                max(0.0, now - float(started))
+                if started and status in ("STARTING", "RUNNING", "STOPPING")
+                else None
+            )
         except (TypeError, ValueError):
             uptime = None
         last_pid = int(pid) if pid else None
@@ -548,7 +621,9 @@ class BotProcessManager:
             "job_warning": self._last_job_warning,
         }
 
-    def _record_managed_exit(self, mode: str, code: int, lifecycle: dict | None = None) -> None:
+    def _record_managed_exit(
+        self, mode: str, code: int, lifecycle: dict | None = None
+    ) -> None:
         lifecycle = lifecycle or {}
         status = "STOPPED" if code == 0 else "CRASHED"
         current = self._read_lifecycle(mode)
@@ -563,7 +638,8 @@ class BotProcessManager:
             "started_at": current.get("started_at") or lifecycle.get("started_at"),
             "updated_at": time.time(),
             "exit_code": code,
-            "reason": current.get("reason") or (None if code == 0 else "Proses bot keluar tidak terduga."),
+            "reason": current.get("reason")
+            or (None if code == 0 else "Proses bot keluar tidak terduga."),
         }
         atomic_write_json(process_file(mode), data)
 
@@ -590,7 +666,8 @@ class BotProcessManager:
                     self._restart_window_started = time.monotonic()
                 if cfgmod.CONFIG_LOAD_ERRORS:
                     raise BotControlError(
-                        "Konfigurasi runtime rusak: " + "; ".join(cfgmod.CONFIG_LOAD_ERRORS)
+                        "Konfigurasi runtime rusak: "
+                        + "; ".join(cfgmod.CONFIG_LOAD_ERRORS)
                     )
                 mode = cfgmod.require_valid_mode(cfgmod.PUMP_CONFIG)
                 current = self.status(mode)
@@ -612,27 +689,37 @@ class BotProcessManager:
                 env["PUMP_BOT_MANAGED"] = "1"
                 env["PUMP_BOT_MANAGED_MODE"] = mode
                 proc, tree = procctl.spawn_python(
-                    "-m", args=["trading.pump_scanner_bot"], cwd=PROJECT_ROOT, env=env,
+                    "-m",
+                    args=["trading.pump_scanner_bot"],
+                    cwd=PROJECT_ROOT,
+                    env=env,
                 )
                 self._proc = proc
                 self._tree = tree
                 self._managed_mode = mode
                 self._last_job_warning = tree.error
-                atomic_write_json(process_file(mode), {
-                    "mode": mode,
-                    "status": "STARTING",
-                    "pid": proc.pid,
-                    "process_identity": procctl.process_identity(proc.pid),
-                    "managed": True,
-                    "started_at": time.time(),
-                    "updated_at": time.time(),
-                    "exit_code": None,
-                    "reason": None,
-                })
+                atomic_write_json(
+                    process_file(mode),
+                    {
+                        "mode": mode,
+                        "status": "STARTING",
+                        "pid": proc.pid,
+                        "process_identity": procctl.process_identity(proc.pid),
+                        "managed": True,
+                        "started_at": time.time(),
+                        "updated_at": time.time(),
+                        "exit_code": None,
+                        "reason": None,
+                    },
+                )
                 return self.status(mode)
 
     def _position(self, config: dict) -> dict:
-        raw = state_mod.load_state(config["STATE_FILE"]) if Path(config["STATE_FILE"]).exists() else {}
+        raw = (
+            state_mod.load_state(config["STATE_FILE"])
+            if Path(config["STATE_FILE"]).exists()
+            else {}
+        )
         try:
             qty = float(raw.get("qty", 0) or 0)
         except (TypeError, ValueError):
@@ -656,11 +743,14 @@ class BotProcessManager:
         position = self._position(cfg)
         if not position["has_position"]:
             return
-        state_mod.save_control(cfg["CONTROL_FILE"], {
-            "action": "CLOSE_POSITION",
-            "symbol": position["symbol"],
-            "requested_at": state_mod.now_ms(),
-        })
+        state_mod.save_control(
+            cfg["CONTROL_FILE"],
+            {
+                "action": "CLOSE_POSITION",
+                "symbol": position["symbol"],
+                "requested_at": state_mod.now_ms(),
+            },
+        )
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if not self._position(cfg)["has_position"]:
@@ -669,10 +759,17 @@ class BotProcessManager:
             if status["status"] not in ("STARTING", "RUNNING", "STOPPING"):
                 raise BotControlError("Bot berhenti sebelum posisi berhasil dijual.")
             time.sleep(0.2)
-        raise BotControlError("Posisi belum berhasil dijual sebelum timeout. Bot tetap dijalankan.")
+        raise BotControlError(
+            "Posisi belum berhasil dijual sebelum timeout. Bot tetap dijalankan."
+        )
 
-    def stop(self, *, position_policy: str = "REQUIRE_EMPTY",
-             graceful_timeout: float = 25.0, signal_timeout: float = 8.0) -> dict:
+    def stop(
+        self,
+        *,
+        position_policy: str = "REQUIRE_EMPTY",
+        graceful_timeout: float = 25.0,
+        signal_timeout: float = 8.0,
+    ) -> dict:
         cfgmod = self._config()
         with self._operation_lock:
             try:
@@ -687,7 +784,8 @@ class BotProcessManager:
                     policy = str(position_policy or "REQUIRE_EMPTY").strip().upper()
                     position = self._position(cfg)
                     if position["has_position"] and policy not in (
-                        "SELL_FIRST", "KEEP_OPEN"
+                        "SELL_FIRST",
+                        "KEEP_OPEN",
                     ):
                         raise BotControlError(
                             "Ada posisi terbuka. Pilih SELL_FIRST atau KEEP_OPEN."
@@ -713,13 +811,15 @@ class BotProcessManager:
                     tree = self._tree if managed_group else None
                     state_mod.request_stop(cfg["CONTROL_FILE"])
                     lifecycle = self._read_lifecycle(mode)
-                    lifecycle.update({
-                        "mode": mode,
-                        "status": "STOPPING",
-                        "pid": pid,
-                        "updated_at": time.time(),
-                        "managed": managed_group,
-                    })
+                    lifecycle.update(
+                        {
+                            "mode": mode,
+                            "status": "STOPPING",
+                            "pid": pid,
+                            "updated_at": time.time(),
+                            "managed": managed_group,
+                        }
+                    )
                     atomic_write_json(process_file(mode), lifecycle)
 
                 if self._wait_dead(pid, graceful_timeout, expected_identity):
@@ -749,9 +849,7 @@ class BotProcessManager:
                         self._finish_stop(mode)
                         return self.status(mode)
                 try:
-                    procctl.force_kill(
-                        pid, tree, process_group=managed_group
-                    )
+                    procctl.force_kill(pid, tree, process_group=managed_group)
                 except (OSError, ProcessLookupError):
                     pass
                 self._wait_dead(pid, 5.0, expected_identity)
@@ -763,8 +861,9 @@ class BotProcessManager:
                     self._intentional_stop = False
                 raise
 
-    def _wait_dead(self, pid: int, timeout: float,
-                   expected_identity: str | None = None) -> bool:
+    def _wait_dead(
+        self, pid: int, timeout: float, expected_identity: str | None = None
+    ) -> bool:
         deadline = time.monotonic() + max(0.0, timeout)
         while time.monotonic() < deadline:
             with self._lock:
@@ -781,9 +880,7 @@ class BotProcessManager:
             time.sleep(0.1)
         with self._lock:
             managed_proc = (
-                self._proc
-                if self._proc is not None and self._proc.pid == pid
-                else None
+                self._proc if self._proc is not None and self._proc.pid == pid else None
             )
         if managed_proc is not None:
             return managed_proc.poll() is not None
@@ -800,21 +897,27 @@ class BotProcessManager:
         else:
             current = self._read_lifecycle(mode)
             previous_code = current.get("exit_code")
-            previous_crash = (
-                str(current.get("status") or "").upper() == "CRASHED"
-                and previous_code not in (None, 0)
-            )
+            previous_crash = str(
+                current.get("status") or ""
+            ).upper() == "CRASHED" and previous_code not in (None, 0)
             crashed = forced or previous_crash
-            current.update({
-                "mode": mode,
-                "status": "CRASHED" if crashed else "STOPPED",
-                "updated_at": time.time(),
-                "exit_code": 1 if forced else previous_code if previous_code is not None else 0,
-                "reason": (
-                    "Dihentikan paksa setelah timeout."
-                    if forced else current.get("reason") or "Stop graceful dari dashboard."
-                ),
-            })
+            current.update(
+                {
+                    "mode": mode,
+                    "status": "CRASHED" if crashed else "STOPPED",
+                    "updated_at": time.time(),
+                    "exit_code": (
+                        1
+                        if forced
+                        else previous_code if previous_code is not None else 0
+                    ),
+                    "reason": (
+                        "Dihentikan paksa setelah timeout."
+                        if forced
+                        else current.get("reason") or "Stop graceful dari dashboard."
+                    ),
+                }
+            )
             atomic_write_json(process_file(mode), current)
 
     def shutdown_dashboard(self) -> None:
@@ -826,12 +929,16 @@ class BotProcessManager:
                 self._clear_managed_handles()
                 return
         try:
-            self.stop(position_policy="KEEP_OPEN", graceful_timeout=25, signal_timeout=8)
+            self.stop(
+                position_policy="KEEP_OPEN", graceful_timeout=25, signal_timeout=8
+            )
         except Exception:
             with self._lock:
                 if self._proc is not None and self._proc.poll() is None:
                     try:
-                        procctl.force_kill(self._proc.pid, self._tree, process_group=True)
+                        procctl.force_kill(
+                            self._proc.pid, self._tree, process_group=True
+                        )
                     except Exception:
                         pass
                 self._clear_managed_handles()

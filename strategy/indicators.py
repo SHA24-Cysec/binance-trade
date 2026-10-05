@@ -16,8 +16,17 @@ class Kline(NamedTuple):
 
 
 INTERVAL_MINUTES = {
-    "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
-    "1h": 60, "2h": 120, "4h": 240, "6h": 360, "8h": 480, "12h": 720,
+    "1m": 1,
+    "3m": 3,
+    "5m": 5,
+    "15m": 15,
+    "30m": 30,
+    "1h": 60,
+    "2h": 120,
+    "4h": 240,
+    "6h": 360,
+    "8h": 480,
+    "12h": 720,
     "1d": 1440,
 }
 
@@ -42,7 +51,9 @@ def parse_klines(raw: list) -> list[Kline]:
                     "Profit diam-diam gagal."
                 )
             if nilai in (float("inf"), float("-inf")):
-                raise ValueError(f"Candle ke-{idx} punya {nama} tak hingga. Data bursa rusak.")
+                raise ValueError(
+                    f"Candle ke-{idx} punya {nama} tak hingga. Data bursa rusak."
+                )
             if nilai <= 0:
                 raise ValueError(
                     f"Candle ke-{idx} punya {nama}={nilai}. Harga wajib > 0. "
@@ -50,7 +61,9 @@ def parse_klines(raw: list) -> list[Kline]:
                 )
 
         if h < low_:
-            raise ValueError(f"Candle ke-{idx}: high ({h}) lebih kecil dari low ({low_}).")
+            raise ValueError(
+                f"Candle ke-{idx}: high ({h}) lebih kecil dari low ({low_})."
+            )
 
         out.append(
             Kline(
@@ -76,11 +89,15 @@ def required_lookback_bars(config: dict) -> int:
         else 0
     )
     atr_period = max(1, int(config.get("ATR_PERIOD", 14) or 14))
-    return max(atr_period, rolling_lookback + max(1, confirmation_bars), demand_lookback)
+    return max(
+        atr_period, rolling_lookback + max(1, confirmation_bars), demand_lookback
+    )
+
 
 def confirm_window_bars(config: dict) -> int:
     lookback = int(config.get("CONFIRM_LOOKBACK_BARS", 48) or 48)
     return max(1, min(1000, max(lookback, required_lookback_bars(config))))
+
 
 def resolve_position_notional(config: dict, quote_free: float) -> dict:
     free = max(0.0, float(quote_free or 0.0))
@@ -115,17 +132,26 @@ def resolve_position_notional(config: dict, quote_free: float) -> dict:
         "effective_pct_of_free": effective_pct,
     }
 
-def backtest_buy_execution_price(open_price: float, spread_pct: float = 0.0,
-                                  slippage_pct: float = 0.0) -> float:
+
+def backtest_buy_execution_price(
+    open_price: float, spread_pct: float = 0.0, slippage_pct: float = 0.0
+) -> float:
     price = float(open_price)
-    adverse = max(0.0, float(spread_pct)) / 200.0 + max(0.0, float(slippage_pct)) / 100.0
+    adverse = (
+        max(0.0, float(spread_pct)) / 200.0 + max(0.0, float(slippage_pct)) / 100.0
+    )
     return price * (1.0 + adverse)
 
-def backtest_sell_execution_price(price: float, spread_pct: float = 0.0,
-                                  slippage_pct: float = 0.0) -> float:
+
+def backtest_sell_execution_price(
+    price: float, spread_pct: float = 0.0, slippage_pct: float = 0.0
+) -> float:
     raw = max(0.0, float(price))
-    adverse = max(0.0, float(spread_pct)) / 200.0 + max(0.0, float(slippage_pct)) / 100.0
+    adverse = (
+        max(0.0, float(spread_pct)) / 200.0 + max(0.0, float(slippage_pct)) / 100.0
+    )
     return raw * max(0.0, 1.0 - adverse)
+
 
 def atr(klines: list[Kline], period: int = 14) -> float | None:
     period = int(period)
@@ -134,9 +160,13 @@ def atr(klines: list[Kline], period: int = 14) -> float | None:
     trs: list[float] = []
     for i, candle in enumerate(klines):
         prev_close = klines[i - 1].close if i else candle.close
-        trs.append(max(candle.high - candle.low,
-                       abs(candle.high - prev_close),
-                       abs(candle.low - prev_close)))
+        trs.append(
+            max(
+                candle.high - candle.low,
+                abs(candle.high - prev_close),
+                abs(candle.low - prev_close),
+            )
+        )
     if len(trs) < period:
         return None
     result = sum(trs[:period]) / period
@@ -159,7 +189,9 @@ def detect_demand_zone(klines: list[Kline], config: dict) -> dict:
     lookback = max(3, int(config.get("DEMAND_LOOKBACK_BARS", 20) or 20))
     buffer_pct = max(0.0, float(config.get("DEMAND_ZONE_BUFFER_PCT", 0.8) or 0.0))
     max_dist_pct = max(0.0, float(config.get("DEMAND_MAX_DISTANCE_PCT", 3.5) or 0.0))
-    min_close_pos = max(0.0, min(1.0, float(config.get("DEMAND_MIN_CLOSE_POSITION", 0.45) or 0.0)))
+    min_close_pos = max(
+        0.0, min(1.0, float(config.get("DEMAND_MIN_CLOSE_POSITION", 0.45) or 0.0))
+    )
 
     required = lookback + 1
     if not klines or len(klines) < required:
@@ -172,7 +204,7 @@ def detect_demand_zone(klines: list[Kline], config: dict) -> dict:
             "close_position": None,
         }
 
-    prior = klines[-1 - lookback:-1]
+    prior = klines[-1 - lookback : -1]
     signal = klines[-1]
 
     for candle in prior + [signal]:
@@ -193,7 +225,7 @@ def detect_demand_zone(klines: list[Kline], config: dict) -> dict:
                 "close_position": None,
             }
 
-    recent_base = prior[-min(len(prior), 6):]
+    recent_base = prior[-min(len(prior), 6) :]
     swing_low = min(float(k.low) for k in prior)
     recent_low = min(float(k.low) for k in recent_base)
     zone_low = recent_low if recent_low >= swing_low else swing_low
@@ -212,7 +244,9 @@ def detect_demand_zone(klines: list[Kline], config: dict) -> dict:
     else:
         close_pos = 1.0 if sig_close >= prev_close else 0.0
 
-    distance_pct = max(0.0, (sig_close / zone_high - 1.0) * 100.0) if zone_high > 0 else 0.0
+    distance_pct = (
+        max(0.0, (sig_close / zone_high - 1.0) * 100.0) if zone_high > 0 else 0.0
+    )
 
     if sig_close < zone_low:
         return {
@@ -293,12 +327,21 @@ def resolve_exit_levels(config: dict) -> dict:
         if atr_value is not None:
             atr_value = abs(float(atr_value))
         scale = atr_value if atr_value is not None else 1.0
-        return {"sl_pct": sl * scale, "tp_pct": tp * scale,
-                "be_trigger_pct": be_trigger * scale, "be_lock_pct": be_lock * scale,
-                "trail_start_pct": trail_start * scale, "trail_step_pct": trail * scale,
-                "atr_period": period, "atr_value": atr_value,
-                "atr_mult_sl": sl, "atr_mult_tp": tp, "atr_mult_trail": trail,
-                "source": "ATR", "note": "Level exit berbasis ATR; invariant diterapkan"}
+        return {
+            "sl_pct": sl * scale,
+            "tp_pct": tp * scale,
+            "be_trigger_pct": be_trigger * scale,
+            "be_lock_pct": be_lock * scale,
+            "trail_start_pct": trail_start * scale,
+            "trail_step_pct": trail * scale,
+            "atr_period": period,
+            "atr_value": atr_value,
+            "atr_mult_sl": sl,
+            "atr_mult_tp": tp,
+            "atr_mult_trail": trail,
+            "source": "ATR",
+            "note": "Level exit berbasis ATR; invariant diterapkan",
+        }
 
     fixed_sl = abs(float(config.get("SL_PCT", 1.8)))
     fixed_tp = abs(float(config.get("TP_PCT", 4.0)))
@@ -309,10 +352,16 @@ def resolve_exit_levels(config: dict) -> dict:
     fixed_trail_step = min(fixed_trail_step, fixed_sl)
     fixed_be_trigger = min(fixed_be_trigger, fixed_trail_start)
     fixed_be_lock = min(fixed_be_lock, fixed_be_trigger)
-    return {"sl_pct": fixed_sl, "tp_pct": fixed_tp,
-            "be_trigger_pct": fixed_be_trigger, "be_lock_pct": fixed_be_lock,
-            "trail_start_pct": fixed_trail_start, "trail_step_pct": fixed_trail_step,
-            "source": "FIXED", "note": "Level exit tetap dari config; invariant diterapkan"}
+    return {
+        "sl_pct": fixed_sl,
+        "tp_pct": fixed_tp,
+        "be_trigger_pct": fixed_be_trigger,
+        "be_lock_pct": fixed_be_lock,
+        "trail_start_pct": fixed_trail_start,
+        "trail_step_pct": fixed_trail_step,
+        "source": "FIXED",
+        "note": "Level exit tetap dari config; invariant diterapkan",
+    }
 
 
 TREND_KLINE_LIMIT = 1000
@@ -375,8 +424,9 @@ def trend_warmup_bars(config: dict, interval: str) -> int:
     return trend_window_bars(config) * rasio + rasio
 
 
-def aggregate_klines(klines: list[Kline], target_minutes: int,
-                     source_minutes: Optional[int] = None) -> list[Kline]:
+def aggregate_klines(
+    klines: list[Kline], target_minutes: int, source_minutes: Optional[int] = None
+) -> list[Kline]:
     """Rangkai candle timeframe tinggi dari candle yang lebih kecil.
 
     Hanya bucket yang LENGKAP yang dipakai: bucket yang kekurangan candle
@@ -387,7 +437,9 @@ def aggregate_klines(klines: list[Kline], target_minutes: int,
     target_ms = int(target_minutes) * 60_000
     if source_minutes is None:
         if len(klines) >= 2:
-            source_minutes = max(1, (int(klines[1].open_time) - int(klines[0].open_time)) // 60_000)
+            source_minutes = max(
+                1, (int(klines[1].open_time) - int(klines[0].open_time)) // 60_000
+            )
         else:
             source_minutes = int(target_minutes)
     source_ms = int(source_minutes) * 60_000
@@ -482,7 +534,9 @@ def adx_series(klines: list[Kline], period: int = 14) -> list[Optional[float]]:
         prev_high = float(klines[i - 1].high)
         prev_low = float(klines[i - 1].low)
         prev_close = float(klines[i - 1].close)
-        if not all(math.isfinite(v) for v in (high, low, prev_high, prev_low, prev_close)):
+        if not all(
+            math.isfinite(v) for v in (high, low, prev_high, prev_low, prev_close)
+        ):
             return out
         naik = high - prev_high
         turun = prev_low - low
@@ -492,7 +546,9 @@ def adx_series(klines: list[Kline], period: int = 14) -> list[Optional[float]]:
             minus_dm[i] = turun
         tr[i] = max(high - low, abs(high - prev_close), abs(low - prev_close))
 
-    def _dx(tr_smooth: float, plus_smooth: float, minus_smooth: float) -> Optional[float]:
+    def _dx(
+        tr_smooth: float, plus_smooth: float, minus_smooth: float
+    ) -> Optional[float]:
         if tr_smooth <= 0 or not math.isfinite(tr_smooth):
             return None
         di_plus = 100.0 * plus_smooth / tr_smooth
@@ -502,9 +558,9 @@ def adx_series(klines: list[Kline], period: int = 14) -> list[Optional[float]]:
             return 0.0
         return 100.0 * abs(di_plus - di_minus) / jumlah
 
-    tr_smooth = sum(tr[1:period + 1])
-    plus_smooth = sum(plus_dm[1:period + 1])
-    minus_smooth = sum(minus_dm[1:period + 1])
+    tr_smooth = sum(tr[1 : period + 1])
+    plus_smooth = sum(plus_dm[1 : period + 1])
+    minus_smooth = sum(minus_dm[1 : period + 1])
 
     dx: list[Optional[float]] = [None] * n
     dx[period] = _dx(tr_smooth, plus_smooth, minus_smooth)
@@ -531,8 +587,9 @@ def adx_series(klines: list[Kline], period: int = 14) -> list[Optional[float]]:
     return out
 
 
-def evaluate_trend_filter(klines: list[Kline], config: dict,
-                          signal_close_time_ms: Optional[int] = None) -> dict:
+def evaluate_trend_filter(
+    klines: list[Kline], config: dict, signal_close_time_ms: Optional[int] = None
+) -> dict:
     """Gerbang trend timeframe tinggi (default H1) untuk menyaring entry.
 
     Aturan, semuanya dari candle yang SUDAH TUTUP (tanpa repaint):
@@ -546,17 +603,37 @@ def evaluate_trend_filter(klines: list[Kline], config: dict,
     """
     interval = str(config.get("TREND_INTERVAL", "1h") or "1h").strip().lower()
     if interval not in INTERVAL_MINUTES:
-        return {"ok": False,
-                "reason": (f"TREND_INTERVAL '{interval}' tidak dikenal; pilihan: "
-                           + ", ".join(sorted(INTERVAL_MINUTES, key=INTERVAL_MINUTES.get))),
-                "interval": interval, "bars": 0, "required": 0, "window": 0,
-                "close": None, "ema_fast": None, "ema_slow": None, "adx": None,
-                "checks": {}, "values": {}}
+        return {
+            "ok": False,
+            "reason": (
+                f"TREND_INTERVAL '{interval}' tidak dikenal; pilihan: "
+                + ", ".join(sorted(INTERVAL_MINUTES, key=INTERVAL_MINUTES.get))
+            ),
+            "interval": interval,
+            "bars": 0,
+            "required": 0,
+            "window": 0,
+            "close": None,
+            "ema_fast": None,
+            "ema_slow": None,
+            "adx": None,
+            "checks": {},
+            "values": {},
+        }
     if not bool(config.get("TREND_FILTER_ENABLED", False)):
-        return {"ok": True, "reason": f"filter trend {interval} nonaktif",
-                "interval": interval, "bars": 0, "required": 0,
-                "close": None, "ema_fast": None, "ema_slow": None, "adx": None,
-                "checks": {}, "values": {}}
+        return {
+            "ok": True,
+            "reason": f"filter trend {interval} nonaktif",
+            "interval": interval,
+            "bars": 0,
+            "required": 0,
+            "close": None,
+            "ema_fast": None,
+            "ema_slow": None,
+            "adx": None,
+            "checks": {},
+            "values": {},
+        }
 
     fast = max(2, int(config.get("TREND_EMA_FAST", 20) or 20))
     slow = max(3, int(config.get("TREND_EMA_SLOW", 50) or 50))
@@ -567,84 +644,144 @@ def evaluate_trend_filter(klines: list[Kline], config: dict,
     jendela_penuh = trend_window_bars(config)
     minimum = trend_required_bars(config)
 
-    siap = [k for k in (klines or [])
-            if signal_close_time_ms is None or int(k.close_time) <= int(signal_close_time_ms)]
+    siap = [
+        k
+        for k in (klines or [])
+        if signal_close_time_ms is None
+        or int(k.close_time) <= int(signal_close_time_ms)
+    ]
     jendela = siap[-jendela_penuh:]
 
-    kosong = {"interval": interval, "bars": len(jendela), "required": minimum,
-              "window": jendela_penuh, "close": None, "ema_fast": None,
-              "ema_slow": None, "adx": None, "checks": {}, "values": {}}
+    kosong = {
+        "interval": interval,
+        "bars": len(jendela),
+        "required": minimum,
+        "window": jendela_penuh,
+        "close": None,
+        "ema_fast": None,
+        "ema_slow": None,
+        "adx": None,
+        "checks": {},
+        "values": {},
+    }
     if len(jendela) < minimum:
-        return {"ok": False,
-                "reason": (f"data candle {interval} kurang: {len(jendela)} dari minimum "
-                           f"{minimum} (jendela {jendela_penuh}; naikkan TREND_LOOKBACK_BARS "
-                           "atau tunggu riwayat bertambah)"),
-                **kosong}
+        return {
+            "ok": False,
+            "reason": (
+                f"data candle {interval} kurang: {len(jendela)} dari minimum "
+                f"{minimum} (jendela {jendela_penuh}; naikkan TREND_LOOKBACK_BARS "
+                "atau tunggu riwayat bertambah)"
+            ),
+            **kosong,
+        }
 
     for candle in jendela:
-        if (not math.isfinite(float(candle.close)) or float(candle.close) <= 0
-                or float(candle.high) < float(candle.low)):
+        if (
+            not math.isfinite(float(candle.close))
+            or float(candle.close) <= 0
+            or float(candle.high) < float(candle.low)
+        ):
             return {"ok": False, "reason": f"candle {interval} tidak valid", **kosong}
 
     closes = [float(k.close) for k in jendela]
     ema_fast_series = ema_series(closes, fast)
     ema_slow_series = ema_series(closes, slow)
-    adx_values = adx_series(jendela, adx_period) if adx_min > 0 else [None] * len(jendela)
+    adx_values = (
+        adx_series(jendela, adx_period) if adx_min > 0 else [None] * len(jendela)
+    )
     ema_fast = ema_fast_series[-1]
     ema_slow = ema_slow_series[-1]
     adx_now = adx_values[-1]
     close_now = closes[-1]
 
-    terisi = {"interval": interval, "bars": len(jendela), "required": minimum,
-              "window": jendela_penuh, "close": close_now, "ema_fast": ema_fast,
-              "ema_slow": ema_slow, "adx": adx_now, "checks": {},
-              "values": {"ema_fast": ema_fast, "ema_slow": ema_slow,
-                         "adx": adx_now, "close": close_now}}
+    terisi = {
+        "interval": interval,
+        "bars": len(jendela),
+        "required": minimum,
+        "window": jendela_penuh,
+        "close": close_now,
+        "ema_fast": ema_fast,
+        "ema_slow": ema_slow,
+        "adx": adx_now,
+        "checks": {},
+        "values": {
+            "ema_fast": ema_fast,
+            "ema_slow": ema_slow,
+            "adx": adx_now,
+            "close": close_now,
+        },
+    }
 
     if ema_fast is None or ema_slow is None:
-        return {"ok": False,
-                "reason": (f"EMA {interval} belum terdefinisi pada jendela "
-                           f"{len(jendela)} candle (butuh EMA cepat {fast} dan "
-                           f"EMA lambat {slow})"),
-                **terisi}
+        return {
+            "ok": False,
+            "reason": (
+                f"EMA {interval} belum terdefinisi pada jendela "
+                f"{len(jendela)} candle (butuh EMA cepat {fast} dan "
+                f"EMA lambat {slow})"
+            ),
+            **terisi,
+        }
 
     if adx_min > 0 and adx_now is None:
-        return {"ok": False,
-                "reason": (f"ADX {adx_period} {interval} tidak bisa dihitung dari "
-                           "jendela ini (rentang harga nol atau data rusak)"),
-                **terisi}
+        return {
+            "ok": False,
+            "reason": (
+                f"ADX {adx_period} {interval} tidak bisa dihitung dari "
+                "jendela ini (rentang harga nol atau data rusak)"
+            ),
+            **terisi,
+        }
 
     harga_di_atas = close_now > float(ema_fast)
     susunan_naik = float(ema_fast) > float(ema_slow)
     trend_kuat = True if adx_min <= 0 else bool(float(adx_now) >= adx_min)
 
-    checks = {"harga_di_atas_ema_cepat": harga_di_atas,
-              "ema_cepat_di_atas_ema_lambat": susunan_naik,
-              "adx_di_atas_ambang": trend_kuat}
-    ringkas = (f"close {close_now:.6g} vs EMA{fast} {float(ema_fast):.6g} vs "
-               f"EMA{slow} {float(ema_slow):.6g}"
-               + (f", ADX{adx_period} {float(adx_now):.1f}" if adx_now is not None else ""))
+    checks = {
+        "harga_di_atas_ema_cepat": harga_di_atas,
+        "ema_cepat_di_atas_ema_lambat": susunan_naik,
+        "adx_di_atas_ambang": trend_kuat,
+    }
+    ringkas = (
+        f"close {close_now:.6g} vs EMA{fast} {float(ema_fast):.6g} vs "
+        f"EMA{slow} {float(ema_slow):.6g}"
+        + (f", ADX{adx_period} {float(adx_now):.1f}" if adx_now is not None else "")
+    )
 
     if not harga_di_atas:
-        return {"ok": False,
-                "reason": (f"trend {interval} turun: close {close_now:.6g} di bawah "
-                           f"EMA{fast} {float(ema_fast):.6g} ({ringkas})"),
-                **{**terisi, "checks": checks}}
+        return {
+            "ok": False,
+            "reason": (
+                f"trend {interval} turun: close {close_now:.6g} di bawah "
+                f"EMA{fast} {float(ema_fast):.6g} ({ringkas})"
+            ),
+            **{**terisi, "checks": checks},
+        }
     if not susunan_naik:
-        return {"ok": False,
-                "reason": (f"struktur {interval} belum naik: EMA{fast} "
-                           f"{float(ema_fast):.6g} di bawah EMA{slow} "
-                           f"{float(ema_slow):.6g} ({ringkas})"),
-                **{**terisi, "checks": checks}}
+        return {
+            "ok": False,
+            "reason": (
+                f"struktur {interval} belum naik: EMA{fast} "
+                f"{float(ema_fast):.6g} di bawah EMA{slow} "
+                f"{float(ema_slow):.6g} ({ringkas})"
+            ),
+            **{**terisi, "checks": checks},
+        }
     if not trend_kuat:
-        return {"ok": False,
-                "reason": (f"trend {interval} lemah: ADX{adx_period} "
-                           f"{float(adx_now):.1f} di bawah ambang {adx_min:g} ({ringkas})"),
-                **{**terisi, "checks": checks}}
+        return {
+            "ok": False,
+            "reason": (
+                f"trend {interval} lemah: ADX{adx_period} "
+                f"{float(adx_now):.1f} di bawah ambang {adx_min:g} ({ringkas})"
+            ),
+            **{**terisi, "checks": checks},
+        }
 
-    return {"ok": True,
-            "reason": f"trend {interval} naik dan kuat ({ringkas})",
-            **{**terisi, "checks": checks}}
+    return {
+        "ok": True,
+        "reason": f"trend {interval} naik dan kuat ({ringkas})",
+        **{**terisi, "checks": checks},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -670,15 +807,28 @@ def _seri_uji_deterministik(n: int = 60) -> list[Kline]:
     out: list[Kline] = []
     for i in range(n):
         harga = 100.0 * (1.0 + 0.01 * _math.sin(i / 5.0) + i * 0.002)
-        out.append(Kline(open_time=i * 3_600_000, open=harga * 0.999,
-                         high=harga * 1.004, low=harga * 0.996, close=harga,
-                         close_time=i * 3_600_000 + 3_599_999,
-                         volume=1.0, quote_volume=harga))
+        out.append(
+            Kline(
+                open_time=i * 3_600_000,
+                open=harga * 0.999,
+                high=harga * 1.004,
+                low=harga * 0.996,
+                close=harga,
+                close_time=i * 3_600_000 + 3_599_999,
+                volume=1.0,
+                quote_volume=harga,
+            )
+        )
     return out
 
 
-def _seri_uji_riak(n: int = 130, amplitudo: float = 4.0, drift: float = 0.08,
-                   akhir_naik: int = 10, tick_akhir: float = 0.0008) -> list[Kline]:
+def _seri_uji_riak(
+    n: int = 130,
+    amplitudo: float = 4.0,
+    drift: float = 0.08,
+    akhir_naik: int = 10,
+    tick_akhir: float = 0.0008,
+) -> list[Kline]:
     """Seri dengan susunan EMA naik tetapi ADX lemah (pasar beriak).
 
     Sepuluh candle terakhir dibuat naik halus supaya close berada di atas EMA,
@@ -693,10 +843,18 @@ def _seri_uji_riak(n: int = 130, amplitudo: float = 4.0, drift: float = 0.08,
             harga = harga * (1.0 + tick_akhir)
         else:
             harga = 100.0 + amplitudo * _math.sin(i / 2.0) + drift * i
-        out.append(Kline(open_time=i * 3_600_000, open=harga * 0.999,
-                         high=harga * 1.003, low=harga * 0.997, close=harga,
-                         close_time=i * 3_600_000 + 3_599_999,
-                         volume=1.0, quote_volume=harga))
+        out.append(
+            Kline(
+                open_time=i * 3_600_000,
+                open=harga * 0.999,
+                high=harga * 1.003,
+                low=harga * 0.997,
+                close=harga,
+                close_time=i * 3_600_000 + 3_599_999,
+                volume=1.0,
+                quote_volume=harga,
+            )
+        )
     return out
 
 
@@ -706,10 +864,18 @@ def _seri_uji_ayun(n: int = 140) -> list[Kline]:
     out: list[Kline] = []
     for i in range(n):
         harga = 100.0 + 4.0 * _math.sin(i / 3.0) + 0.05 * i
-        out.append(Kline(open_time=i * 3_600_000, open=harga * 0.998,
-                         high=harga * 1.005, low=harga * 0.995, close=harga,
-                         close_time=i * 3_600_000 + 3_599_999,
-                         volume=1.0, quote_volume=harga))
+        out.append(
+            Kline(
+                open_time=i * 3_600_000,
+                open=harga * 0.998,
+                high=harga * 1.005,
+                low=harga * 0.995,
+                close=harga,
+                close_time=i * 3_600_000 + 3_599_999,
+                volume=1.0,
+                quote_volume=harga,
+            )
+        )
     return out
 
 
@@ -721,122 +887,269 @@ def selftest() -> int:
         nonlocal gagal
         if not syarat:
             gagal += 1
-        print(("  LULUS " if syarat else "  GAGAL ") + nama + (f"  -> {info}" if info else ""))
+        print(
+            ("  LULUS " if syarat else "  GAGAL ")
+            + nama
+            + (f"  -> {info}" if info else "")
+        )
 
     # --- EMA ---
     seri = _seri_uji_deterministik()
     tutup = [k.close for k in seri]
     ema20 = ema_series(tutup, 20)
     ema50 = ema_series(tutup, 50)
-    cek("EMA belum terdefinisi sebelum periode terpenuhi",
-        all(v is None for v in ema20[:19]) and ema20[19] is not None)
-    cek("EMA50 belum terdefinisi pada 49 candle pertama", ema50[48] is None and ema50[49] is not None)
-    cek("EMA20 akhir sama dengan referensi TA-Lib",
-        abs(ema20[-1] - _REF_EMA20_TERAKHIR) < 1e-9, f"{ema20[-1]:.10f}")
-    cek("EMA50 akhir sama dengan referensi TA-Lib",
-        abs(ema50[-1] - _REF_EMA50_TERAKHIR) < 1e-9, f"{ema50[-1]:.10f}")
-    cek("close akhir sama dengan referensi", abs(tutup[-1] - _REF_CLOSE_TERAKHIR) < 1e-9)
+    cek(
+        "EMA belum terdefinisi sebelum periode terpenuhi",
+        all(v is None for v in ema20[:19]) and ema20[19] is not None,
+    )
+    cek(
+        "EMA50 belum terdefinisi pada 49 candle pertama",
+        ema50[48] is None and ema50[49] is not None,
+    )
+    cek(
+        "EMA20 akhir sama dengan referensi TA-Lib",
+        abs(ema20[-1] - _REF_EMA20_TERAKHIR) < 1e-9,
+        f"{ema20[-1]:.10f}",
+    )
+    cek(
+        "EMA50 akhir sama dengan referensi TA-Lib",
+        abs(ema50[-1] - _REF_EMA50_TERAKHIR) < 1e-9,
+        f"{ema50[-1]:.10f}",
+    )
+    cek(
+        "close akhir sama dengan referensi", abs(tutup[-1] - _REF_CLOSE_TERAKHIR) < 1e-9
+    )
     datar = [5.0] * 40
-    cek("EMA seri datar sama dengan nilainya sendiri",
-        abs(ema_series(datar, 20)[-1] - 5.0) < 1e-12)
+    cek(
+        "EMA seri datar sama dengan nilainya sendiri",
+        abs(ema_series(datar, 20)[-1] - 5.0) < 1e-12,
+    )
     naik_linear = [100.0 + i for i in range(60)]
     e = ema_series(naik_linear, 20)[-1]
     _sma20 = sum(naik_linear[-20:]) / 20
-    cek("EMA seri naik berada di antara SMA dan harga terakhir",
-        _sma20 <= e <= naik_linear[-1], f"{e:.6f}")
+    cek(
+        "EMA seri naik berada di antara SMA dan harga terakhir",
+        _sma20 <= e <= naik_linear[-1],
+        f"{e:.6f}",
+    )
 
     # --- ADX ---
     adx_satur = adx_series(seri, 14)
-    cek("ADX terdefinisi mulai candle ke-2x periode + 1",
-        all(v is None for v in adx_satur[:27]) and adx_satur[27] is not None)
-    cek("ADX seri naik monoton jenuh di 100",
-        abs(adx_satur[-1] - 100.0) < 1e-9, f"{adx_satur[-1]:.6f}")
+    cek(
+        "ADX terdefinisi mulai candle ke-2x periode + 1",
+        all(v is None for v in adx_satur[:27]) and adx_satur[27] is not None,
+    )
+    cek(
+        "ADX seri naik monoton jenuh di 100",
+        abs(adx_satur[-1] - 100.0) < 1e-9,
+        f"{adx_satur[-1]:.6f}",
+    )
     adx_ayun = adx_series(_seri_uji_ayun(), 14)
-    cek("ADX seri berayun sama dengan referensi TA-Lib (toleransi 0.01)",
+    cek(
+        "ADX seri berayun sama dengan referensi TA-Lib (toleransi 0.01)",
         abs(adx_ayun[-1] - _REF_ADX14_TERAKHIR_SERI_AYUN) < 0.01,
-        f"{adx_ayun[-1]:.6f} vs {_REF_ADX14_TERAKHIR_SERI_AYUN:.6f}")
-    cek("ADX seri berayun di bawah ambang 30 (tidak jenuh)",
-        adx_ayun[-1] < 30.0, f"{adx_ayun[-1]:.2f}")
-    adx_datar = adx_series([Kline(i * 3_600_000, 1.0, 1.0, 1.0, 1.0,
-                                  i * 3_600_000 + 3_599_999, 1.0, 1.0) for i in range(40)], 14)
-    cek("ADX rentang harga nol tidak dihitung (None, fail closed)",
-        all(v is None for v in adx_datar))
+        f"{adx_ayun[-1]:.6f} vs {_REF_ADX14_TERAKHIR_SERI_AYUN:.6f}",
+    )
+    cek(
+        "ADX seri berayun di bawah ambang 30 (tidak jenuh)",
+        adx_ayun[-1] < 30.0,
+        f"{adx_ayun[-1]:.2f}",
+    )
+    adx_datar = adx_series(
+        [
+            Kline(
+                i * 3_600_000, 1.0, 1.0, 1.0, 1.0, i * 3_600_000 + 3_599_999, 1.0, 1.0
+            )
+            for i in range(40)
+        ],
+        14,
+    )
+    cek(
+        "ADX rentang harga nol tidak dihitung (None, fail closed)",
+        all(v is None for v in adx_datar),
+    )
     cek("ADX data kurang ditolak", all(v is None for v in adx_series(seri[:20], 14)))
 
     # --- rangkaian candle ---
-    lima = [Kline(open_time=i * 300_000, open=100.0 + i, high=100.5 + i, low=99.5 + i,
-                  close=100.2 + i, close_time=i * 300_000 + 299_999,
-                  volume=10.0, quote_volume=1000.0) for i in range(24)]
+    lima = [
+        Kline(
+            open_time=i * 300_000,
+            open=100.0 + i,
+            high=100.5 + i,
+            low=99.5 + i,
+            close=100.2 + i,
+            close_time=i * 300_000 + 299_999,
+            volume=10.0,
+            quote_volume=1000.0,
+        )
+        for i in range(24)
+    ]
     jam = aggregate_klines(lima, 60, 5)
-    cek("12 candle 5m menjadi 1 candle 1h", len(jam) == 2 and jam[0].open_time == 0
-        and jam[1].open_time == 3_600_000)
-    cek("OHLC hasil rangkaian benar",
-        jam[0].open == lima[0].open and jam[0].close == lima[11].close
+    cek(
+        "12 candle 5m menjadi 1 candle 1h",
+        len(jam) == 2 and jam[0].open_time == 0 and jam[1].open_time == 3_600_000,
+    )
+    cek(
+        "OHLC hasil rangkaian benar",
+        jam[0].open == lima[0].open
+        and jam[0].close == lima[11].close
         and jam[0].high == max(k.high for k in lima[:12])
-        and jam[0].low == min(k.low for k in lima[:12]))
-    cek("volume hasil rangkaian adalah jumlah anaknya",
-        abs(jam[0].volume - 120.0) < 1e-9 and abs(jam[0].quote_volume - 12_000.0) < 1e-9)
-    cek("close_time candle rangkaian menutup bucket",
-        jam[0].close_time == 3_600_000 - 1)
+        and jam[0].low == min(k.low for k in lima[:12]),
+    )
+    cek(
+        "volume hasil rangkaian adalah jumlah anaknya",
+        abs(jam[0].volume - 120.0) < 1e-9
+        and abs(jam[0].quote_volume - 12_000.0) < 1e-9,
+    )
+    cek(
+        "close_time candle rangkaian menutup bucket", jam[0].close_time == 3_600_000 - 1
+    )
     bolong = [k for i, k in enumerate(lima) if i not in (3, 4)]
-    cek("bucket tidak lengkap dibuang (bukan dipakai setengah matang)",
-        len(aggregate_klines(bolong, 60, 5)) == 1)
-    cek("rangkaian interval tidak bulat ditolak",
-        _gagal_tertangkap(lambda: aggregate_klines(lima, 7, 5)))
+    cek(
+        "bucket tidak lengkap dibuang (bukan dipakai setengah matang)",
+        len(aggregate_klines(bolong, 60, 5)) == 1,
+    )
+    cek(
+        "rangkaian interval tidak bulat ditolak",
+        _gagal_tertangkap(lambda: aggregate_klines(lima, 7, 5)),
+    )
 
     # --- gerbang trend ---
-    cfg = {"TREND_FILTER_ENABLED": True, "TREND_INTERVAL": "1h", "TREND_EMA_FAST": 20,
-           "TREND_EMA_SLOW": 50, "TREND_ADX_PERIOD": 14, "TREND_ADX_MIN": 20.0,
-           "TREND_LOOKBACK_BARS": 120}
+    cfg = {
+        "TREND_FILTER_ENABLED": True,
+        "TREND_INTERVAL": "1h",
+        "TREND_EMA_FAST": 20,
+        "TREND_EMA_SLOW": 50,
+        "TREND_ADX_PERIOD": 14,
+        "TREND_ADX_MIN": 20.0,
+        "TREND_LOOKBACK_BARS": 120,
+    }
 
     def jam_deret(a: float, n: int = 130) -> list[Kline]:
         out = []
         p = 100.0
         for i in range(n):
             p *= a
-            out.append(Kline(i * 3_600_000, p, p * 1.002, p * 0.998, p,
-                             i * 3_600_000 + 3_599_999, 1.0, p))
+            out.append(
+                Kline(
+                    i * 3_600_000,
+                    p,
+                    p * 1.002,
+                    p * 0.998,
+                    p,
+                    i * 3_600_000 + 3_599_999,
+                    1.0,
+                    p,
+                )
+            )
         return out
 
     naik = evaluate_trend_filter(jam_deret(1.004), cfg)
     turun = evaluate_trend_filter(jam_deret(0.996), cfg)
     riak = evaluate_trend_filter(_seri_uji_riak(), cfg)
     cek("trend naik diloloskan", naik["ok"], naik["reason"])
-    cek("trend turun ditolak", (not turun["ok"]) and "di bawah" in turun["reason"],
-        turun["reason"])
-    cek("susunan EMA naik tetapi ADX lemah ditolak",
-        (not riak["ok"]) and "lemah" in riak["reason"], riak["reason"])
-    cek("riak memang punya susunan EMA naik (bukan salah tolak karena struktur)",
+    cek(
+        "trend turun ditolak",
+        (not turun["ok"]) and "di bawah" in turun["reason"],
+        turun["reason"],
+    )
+    cek(
+        "susunan EMA naik tetapi ADX lemah ditolak",
+        (not riak["ok"]) and "lemah" in riak["reason"],
+        riak["reason"],
+    )
+    cek(
+        "riak memang punya susunan EMA naik (bukan salah tolak karena struktur)",
         bool(riak["checks"]["harga_di_atas_ema_cepat"])
-        and bool(riak["checks"]["ema_cepat_di_atas_ema_lambat"]))
-    cek("ADX_MIN 0 meloloskan riak (cek kekuatan trend benar-benar dimatikan)",
-        evaluate_trend_filter(_seri_uji_riak(), dict(cfg, TREND_ADX_MIN=0.0))["ok"])
+        and bool(riak["checks"]["ema_cepat_di_atas_ema_lambat"]),
+    )
+    cek(
+        "ADX_MIN 0 meloloskan riak (cek kekuatan trend benar-benar dimatikan)",
+        evaluate_trend_filter(_seri_uji_riak(), dict(cfg, TREND_ADX_MIN=0.0))["ok"],
+    )
     datar_penuh = evaluate_trend_filter(jam_deret(1.0), cfg)
-    cek("harga rata sempurna ditolak (close tidak lebih tinggi dari EMA)",
-        not datar_penuh["ok"], datar_penuh["reason"])
-    cek("filter nonaktif selalu lolos",
-        evaluate_trend_filter(jam_deret(0.996), dict(cfg, TREND_FILTER_ENABLED=False))["ok"])
+    cek(
+        "harga rata sempurna ditolak (close tidak lebih tinggi dari EMA)",
+        not datar_penuh["ok"],
+        datar_penuh["reason"],
+    )
+    cek(
+        "filter nonaktif selalu lolos",
+        evaluate_trend_filter(jam_deret(0.996), dict(cfg, TREND_FILTER_ENABLED=False))[
+            "ok"
+        ],
+    )
     kurang = evaluate_trend_filter(jam_deret(1.004, 40), cfg)
-    cek("riwayat kurang ditolak (fail closed)",
-        (not kurang["ok"]) and "kurang" in kurang["reason"], kurang["reason"])
-    cek("jendela dipakai persis TREND_LOOKBACK_BARS",
-        evaluate_trend_filter(jam_deret(1.004), cfg)["bars"] == 120)
-    cek("candle belum tutup dibuang walau diberikan pemanggil",
-        evaluate_trend_filter(jam_deret(1.004) + [Kline(130 * 3_600_000, 1.0, 1.0, 1.0, 1.0,
-                                                        130 * 3_600_000 + 3_599_999, 1.0, 1.0)],
-                              cfg)["bars"] == 120)
-    cek("TREND_INTERVAL tidak dikenal ditolak",
-        not evaluate_trend_filter(jam_deret(1.004), dict(cfg, TREND_INTERVAL="7h"))["ok"])
-    cek("harga tidak wajar ditolak",
+    cek(
+        "riwayat kurang ditolak (fail closed)",
+        (not kurang["ok"]) and "kurang" in kurang["reason"],
+        kurang["reason"],
+    )
+    cek(
+        "jendela dipakai persis TREND_LOOKBACK_BARS",
+        evaluate_trend_filter(jam_deret(1.004), cfg)["bars"] == 120,
+    )
+    cek(
+        "candle belum tutup dibuang walau diberikan pemanggil",
+        evaluate_trend_filter(
+            jam_deret(1.004)
+            + [
+                Kline(
+                    130 * 3_600_000,
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0,
+                    130 * 3_600_000 + 3_599_999,
+                    1.0,
+                    1.0,
+                )
+            ],
+            cfg,
+        )["bars"]
+        == 120,
+    )
+    cek(
+        "TREND_INTERVAL tidak dikenal ditolak",
+        not evaluate_trend_filter(jam_deret(1.004), dict(cfg, TREND_INTERVAL="7h"))[
+            "ok"
+        ],
+    )
+    cek(
+        "harga tidak wajar ditolak",
         not evaluate_trend_filter(
-            [Kline(i * 3_600_000, 1.0, 1.0, 1.0, 0.0, i * 3_600_000 + 3_599_999, 1.0, 1.0)
-             for i in range(130)], cfg)["ok"], "harga nol")
-    cek("helper kebutuhan warmup menghitung rasio interval",
-        trend_warmup_bars(cfg, "5m") == trend_window_bars(cfg) * 12 + 12)
-    cek("warmup menolak trend yang lebih pendek dari interval simulasi",
-        _gagal_tertangkap(lambda: trend_warmup_bars(dict(cfg, TREND_INTERVAL="30m"), "1h")))
+            [
+                Kline(
+                    i * 3_600_000,
+                    1.0,
+                    1.0,
+                    1.0,
+                    0.0,
+                    i * 3_600_000 + 3_599_999,
+                    1.0,
+                    1.0,
+                )
+                for i in range(130)
+            ],
+            cfg,
+        )["ok"],
+        "harga nol",
+    )
+    cek(
+        "helper kebutuhan warmup menghitung rasio interval",
+        trend_warmup_bars(cfg, "5m") == trend_window_bars(cfg) * 12 + 12,
+    )
+    cek(
+        "warmup menolak trend yang lebih pendek dari interval simulasi",
+        _gagal_tertangkap(
+            lambda: trend_warmup_bars(dict(cfg, TREND_INTERVAL="30m"), "1h")
+        ),
+    )
 
-    print("HASIL SELFTEST indicators: " + ("SEMUA LULUS" if not gagal else f"{gagal} GAGAL"))
+    print(
+        "HASIL SELFTEST indicators: "
+        + ("SEMUA LULUS" if not gagal else f"{gagal} GAGAL")
+    )
     return 0 if not gagal else 1
 
 

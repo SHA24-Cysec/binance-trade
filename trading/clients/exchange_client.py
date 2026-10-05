@@ -25,21 +25,32 @@ class ExchangeClient(ABC):
     def get_exchange_info(self, symbol: Optional[str] = None) -> dict: ...
 
     @abstractmethod
-    def get_klines(self, symbol: str, interval: str, limit: int = 500,
-                   start_time_ms: Optional[int] = None,
-                   end_time_ms: Optional[int] = None) -> list: ...
+    def get_klines(
+        self,
+        symbol: str,
+        interval: str,
+        limit: int = 500,
+        start_time_ms: Optional[int] = None,
+        end_time_ms: Optional[int] = None,
+    ) -> list: ...
 
     @abstractmethod
     def get_ticker_24hr_all(self) -> list: ...
 
-    def get_klines_many(self, symbols, interval: str, limit: int = 500,
-                        end_time_ms: Optional[int] = None,
-                        max_workers: Optional[int] = None) -> dict:
+    def get_klines_many(
+        self,
+        symbols,
+        interval: str,
+        limit: int = 500,
+        end_time_ms: Optional[int] = None,
+        max_workers: Optional[int] = None,
+    ) -> dict:
         hasil: dict = {}
         for symbol in dict.fromkeys(symbols or ()):
             try:
-                hasil[symbol] = self.get_klines(symbol, interval, limit,
-                                                None, end_time_ms)
+                hasil[symbol] = self.get_klines(
+                    symbol, interval, limit, None, end_time_ms
+                )
             except Exception as exc:
                 logger.debug("Gagal mengambil candle %s %s: %s", symbol, interval, exc)
                 hasil[symbol] = None
@@ -61,40 +72,64 @@ class ExchangeClient(ABC):
     def get_account(self) -> dict: ...
 
     @abstractmethod
-    def new_market_order(self, symbol: str, side: str,
-                         quantity: Optional[float] = None,
-                         quote_order_qty: Optional[float] = None,
-                         new_client_order_id: Optional[str] = None,
-                         quote_precision: Optional[int] = None) -> dict: ...
+    def new_market_order(
+        self,
+        symbol: str,
+        side: str,
+        quantity: Optional[float] = None,
+        quote_order_qty: Optional[float] = None,
+        new_client_order_id: Optional[str] = None,
+        quote_precision: Optional[int] = None,
+    ) -> dict: ...
 
-    def place_native_stop_loss(self, symbol: str, quantity: float,
-                               stop_price: float,
-                               new_client_order_id: str) -> dict:
+    def place_native_stop_loss(
+        self, symbol: str, quantity: float, stop_price: float, new_client_order_id: str
+    ) -> dict:
         raise NotImplementedError("native stop loss tidak tersedia pada client ini")
 
-    def place_native_oco(self, symbol: str, quantity: float,
-                        above_price: float, above_stop_price: float,
-                        below_price: float, below_stop_price: float,
-                        list_client_order_id: str,
-                        above_client_order_id: str,
-                        below_client_order_id: str) -> dict:
+    def place_native_oco(
+        self,
+        symbol: str,
+        quantity: float,
+        above_price: float,
+        above_stop_price: float,
+        below_price: float,
+        below_stop_price: float,
+        list_client_order_id: str,
+        above_client_order_id: str,
+        below_client_order_id: str,
+    ) -> dict:
         raise NotImplementedError("native OCO tidak tersedia pada client ini")
 
     @abstractmethod
-    def get_order(self, symbol: str, order_id: Optional[int] = None,
-                  orig_client_order_id: Optional[str] = None) -> dict: ...
+    def get_order(
+        self,
+        symbol: str,
+        order_id: Optional[int] = None,
+        orig_client_order_id: Optional[str] = None,
+    ) -> dict: ...
 
     @abstractmethod
-    def cancel_order(self, symbol: str, order_id: Optional[int] = None,
-                     orig_client_order_id: Optional[str] = None) -> dict: ...
+    def cancel_order(
+        self,
+        symbol: str,
+        order_id: Optional[int] = None,
+        orig_client_order_id: Optional[str] = None,
+    ) -> dict: ...
 
-    def get_order_list(self, order_list_id: Optional[int] = None,
-                       list_client_order_id: Optional[str] = None) -> dict:
+    def get_order_list(
+        self,
+        order_list_id: Optional[int] = None,
+        list_client_order_id: Optional[str] = None,
+    ) -> dict:
         raise NotImplementedError("query order list tidak tersedia pada client ini")
 
-    def cancel_order_list(self, symbol: str,
-                          order_list_id: Optional[int] = None,
-                          list_client_order_id: Optional[str] = None) -> dict:
+    def cancel_order_list(
+        self,
+        symbol: str,
+        order_list_id: Optional[int] = None,
+        list_client_order_id: Optional[str] = None,
+    ) -> dict:
         raise NotImplementedError("cancel order list tidak tersedia pada client ini")
 
     @abstractmethod
@@ -115,8 +150,12 @@ def create_exchange_client(config: dict) -> ExchangeClient:
     mode = require_valid_mode(config)
     if mode == "LIVE":
         from trading.clients.live_client import LiveClient
+
         logger.info("Membuat LiveClient (MODE=LIVE): order & saldo SUNGGUHAN.")
         return LiveClient(config)
     from trading.clients.paper_client import PaperClient
-    logger.info("Membuat PaperClient (MODE=PAPER): eksekusi & saldo DISIMULASIKAN lokal.")
+
+    logger.info(
+        "Membuat PaperClient (MODE=PAPER): eksekusi & saldo DISIMULASIKAN lokal."
+    )
     return PaperClient(config)

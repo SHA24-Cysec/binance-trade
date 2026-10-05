@@ -7,7 +7,6 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-
 if os.name == "nt":
     import ctypes
     from ctypes import wintypes
@@ -56,12 +55,17 @@ if os.name == "nt":
     _kernel32.OpenProcess.restype = wintypes.HANDLE
     _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     _kernel32.CloseHandle.restype = wintypes.BOOL
-    _kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    _kernel32.GetExitCodeProcess.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
     _kernel32.GetExitCodeProcess.restype = wintypes.BOOL
     _kernel32.GetProcessTimes.argtypes = [
         wintypes.HANDLE,
-        ctypes.POINTER(wintypes.FILETIME), ctypes.POINTER(wintypes.FILETIME),
-        ctypes.POINTER(wintypes.FILETIME), ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
     ]
     _kernel32.GetProcessTimes.restype = wintypes.BOOL
     _kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
@@ -69,7 +73,10 @@ if os.name == "nt":
     _kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
     _kernel32.CreateJobObjectW.restype = wintypes.HANDLE
     _kernel32.SetInformationJobObject.argtypes = [
-        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
     ]
     _kernel32.SetInformationJobObject.restype = wintypes.BOOL
     _kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
@@ -96,8 +103,11 @@ def process_identity(pid: int) -> str | None:
             kernel = wintypes.FILETIME()
             user = wintypes.FILETIME()
             if not _kernel32.GetProcessTimes(
-                handle, ctypes.byref(creation), ctypes.byref(exit_time),
-                ctypes.byref(kernel), ctypes.byref(user)
+                handle,
+                ctypes.byref(creation),
+                ctypes.byref(exit_time),
+                ctypes.byref(kernel),
+                ctypes.byref(user),
             ):
                 return None
             value = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
@@ -108,7 +118,7 @@ def process_identity(pid: int) -> str | None:
     stat_path = Path(f"/proc/{pid}/stat")
     try:
         raw = stat_path.read_text(encoding="utf-8")
-        rest = raw[raw.rfind(")") + 2:].split()
+        rest = raw[raw.rfind(")") + 2 :].split()
         return f"proc:{rest[19]}"
     except (OSError, IndexError, ValueError):
         try:
@@ -168,14 +178,18 @@ class ProcessTreeHandle:
             info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
             info.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
             ok = _kernel32.SetInformationJobObject(
-                handle, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
-                ctypes.byref(info), ctypes.sizeof(info)
+                handle,
+                _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+                ctypes.byref(info),
+                ctypes.sizeof(info),
             )
             if not ok:
                 err = ctypes.get_last_error()
                 _kernel32.CloseHandle(handle)
                 raise OSError(err, "SetInformationJobObject gagal")
-            if not _kernel32.AssignProcessToJobObject(handle, wintypes.HANDLE(proc._handle)):
+            if not _kernel32.AssignProcessToJobObject(
+                handle, wintypes.HANDLE(proc._handle)
+            ):
                 err = ctypes.get_last_error()
                 _kernel32.CloseHandle(handle)
                 raise OSError(err, "AssignProcessToJobObject gagal")
@@ -201,9 +215,13 @@ class ProcessTreeHandle:
             self.handle = None
 
 
-def spawn_python(script: os.PathLike | str, *, args: Optional[list[str]] = None,
-                 cwd: os.PathLike | str | None = None,
-                 env: Optional[dict[str, str]] = None) -> tuple[subprocess.Popen, ProcessTreeHandle]:
+def spawn_python(
+    script: os.PathLike | str,
+    *,
+    args: Optional[list[str]] = None,
+    cwd: os.PathLike | str | None = None,
+    env: Optional[dict[str, str]] = None,
+) -> tuple[subprocess.Popen, ProcessTreeHandle]:
     command = [sys.executable, os.fspath(script), *(args or [])]
     kwargs: dict = {
         "cwd": os.fspath(cwd) if cwd is not None else None,
@@ -222,7 +240,9 @@ def spawn_python(script: os.PathLike | str, *, args: Optional[list[str]] = None,
 def send_graceful_signal(pid: int, *, process_group: bool = True) -> None:
     if os.name == "nt":
         if not process_group:
-            raise RuntimeError("CTRL_BREAK_EVENT membutuhkan child CREATE_NEW_PROCESS_GROUP")
+            raise RuntimeError(
+                "CTRL_BREAK_EVENT membutuhkan child CREATE_NEW_PROCESS_GROUP"
+            )
         os.kill(int(pid), signal.CTRL_BREAK_EVENT)
     else:
         if process_group:
@@ -231,8 +251,9 @@ def send_graceful_signal(pid: int, *, process_group: bool = True) -> None:
             os.kill(int(pid), signal.SIGTERM)
 
 
-def force_kill(pid: int, tree: ProcessTreeHandle | None = None,
-               *, process_group: bool = True) -> None:
+def force_kill(
+    pid: int, tree: ProcessTreeHandle | None = None, *, process_group: bool = True
+) -> None:
     if os.name == "nt":
         if tree is not None and tree.terminate(exit_code=1):
             return

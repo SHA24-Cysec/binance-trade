@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 try:
     from websocket import WebSocketApp
+
     _WS_AVAILABLE = True
 except ImportError:
     WebSocketApp = object
@@ -85,7 +86,9 @@ class MarketWebSocket:
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
-        self._thread = threading.Thread(target=self._run_loop, name="market-ws", daemon=True)
+        self._thread = threading.Thread(
+            target=self._run_loop, name="market-ws", daemon=True
+        )
         self._thread.start()
 
     def stop(self) -> None:
@@ -187,9 +190,11 @@ class MarketWebSocket:
                 on_close=self._on_close,
             )
             try:
-                self._app.run_forever(ping_interval=_PING_INTERVAL,
-                                      ping_timeout=_PING_TIMEOUT,
-                                      reconnect=None)
+                self._app.run_forever(
+                    ping_interval=_PING_INTERVAL,
+                    ping_timeout=_PING_TIMEOUT,
+                    reconnect=None,
+                )
             except Exception as exc:
                 logger.warning("WebSocket run_forever error: %s", exc)
             connected_before_close = self._connected.is_set()
@@ -255,17 +260,23 @@ class MarketWebSocket:
         if not isinstance(data, dict):
             return
         etype = data.get("e")
-        if etype == "bookTicker" or ("b" in data and "a" in data and "s" in data and "k" not in data):
+        if etype == "bookTicker" or (
+            "b" in data and "a" in data and "s" in data and "k" not in data
+        ):
             sym = data.get("s")
             if sym:
                 try:
                     bid = float(data["b"])
                     ask = float(data["a"])
-                    self._book.put(sym.upper(), {
-                        "bid": bid, "ask": ask,
-                        "bidQty": float(data.get("B", 0) or 0),
-                        "askQty": float(data.get("A", 0) or 0),
-                    })
+                    self._book.put(
+                        sym.upper(),
+                        {
+                            "bid": bid,
+                            "ask": ask,
+                            "bidQty": float(data.get("B", 0) or 0),
+                            "askQty": float(data.get("A", 0) or 0),
+                        },
+                    )
                     self._prices.put(sym.upper(), (bid + ask) / 2.0)
                 except (TypeError, ValueError, KeyError):
                     pass

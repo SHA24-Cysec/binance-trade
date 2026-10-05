@@ -29,11 +29,13 @@ def load_account_snapshot(path: str) -> dict:
             data = json.load(f)
         balances = []
         for asset, b in sorted((data.get("balances") or {}).items()):
-            balances.append({
-                "asset": asset,
-                "free": str(_d(b.get("free", 0))),
-                "locked": str(_d(b.get("locked", 0))),
-            })
+            balances.append(
+                {
+                    "asset": asset,
+                    "free": str(_d(b.get("free", 0))),
+                    "locked": str(_d(b.get("locked", 0))),
+                }
+            )
         return {
             "accountType": "SPOT",
             "balances": balances,
@@ -76,8 +78,11 @@ class PaperStore:
     def _load_or_init(self) -> None:
         with self.lock:
             if not os.path.exists(self.path):
-                logger.info("File state PAPER %s belum ada. Memulai saldo awal: %s",
-                            self.path, self.initial_balances)
+                logger.info(
+                    "File state PAPER %s belum ada. Memulai saldo awal: %s",
+                    self.path,
+                    self.initial_balances,
+                )
                 self.state = self._default_state()
                 self._save_locked()
                 return
@@ -89,9 +94,18 @@ class PaperStore:
                 data = self._migrate(data)
                 self._validate(data)
                 self.state = data
-                logger.info("State PAPER dimuat dari %s (versi skema %s).",
-                            self.path, data.get("schema_version"))
-            except (json.JSONDecodeError, OSError, ValueError, KeyError, TypeError) as exc:
+                logger.info(
+                    "State PAPER dimuat dari %s (versi skema %s).",
+                    self.path,
+                    data.get("schema_version"),
+                )
+            except (
+                json.JSONDecodeError,
+                OSError,
+                ValueError,
+                KeyError,
+                TypeError,
+            ) as exc:
                 self._backup_corrupt(exc)
                 self.state = self._default_state()
                 self._save_locked()
@@ -102,18 +116,28 @@ class PaperStore:
             logger.error(
                 "File state PAPER %s RUSAK (%s). Cadangan disimpan ke %s. "
                 "State direset ke saldo awal, file lama tidak ditimpa diam-diam.",
-                self.path, exc, backup,
+                self.path,
+                exc,
+                backup,
             )
         except OSError as move_exc:
             logger.error(
                 "File state PAPER %s rusak (%s) dan cadangan gagal dibuat (%s). "
                 "Melanjutkan dengan state saldo awal di memori.",
-                self.path, exc, move_exc,
+                self.path,
+                exc,
+                move_exc,
             )
 
     def _validate(self, data: dict) -> None:
-        for key in ("balances", "open_orders", "order_history", "trade_history",
-                    "total_fees", "next_order_id"):
+        for key in (
+            "balances",
+            "open_orders",
+            "order_history",
+            "trade_history",
+            "total_fees",
+            "next_order_id",
+        ):
             if key not in data:
                 raise KeyError(f"kunci wajib '{key}' hilang di state")
         if not isinstance(data["balances"], dict):
@@ -131,7 +155,8 @@ class PaperStore:
             fn = migrations.get(version)
             if fn is None:
                 raise ValueError(
-                    f"Tidak ada jalur migrasi dari versi skema {version} ke {SCHEMA_VERSION}")
+                    f"Tidak ada jalur migrasi dari versi skema {version} ke {SCHEMA_VERSION}"
+                )
             logger.info("Migrasi state PAPER versi %d -> %d", version, version + 1)
             data = fn(data)
             version = int(data.get("schema_version", version + 1))
@@ -173,7 +198,9 @@ class PaperStore:
             free = _d(b["free"])
             amt = _d(amount)
             if amt > free:
-                raise ValueError(f"Saldo {asset} tidak cukup: butuh {amt}, tersedia {free}")
+                raise ValueError(
+                    f"Saldo {asset} tidak cukup: butuh {amt}, tersedia {free}"
+                )
             b["free"] = str(free - amt)
 
     def lock_funds(self, asset: str, amount: Decimal) -> None:
@@ -182,7 +209,9 @@ class PaperStore:
             free = _d(b["free"])
             amt = _d(amount)
             if amt > free:
-                raise ValueError(f"Saldo {asset} tidak cukup untuk dikunci: {amt} > {free}")
+                raise ValueError(
+                    f"Saldo {asset} tidak cukup untuk dikunci: {amt} > {free}"
+                )
             b["free"] = str(free - amt)
             b["locked"] = str(_d(b["locked"]) + amt)
 
@@ -257,14 +286,18 @@ class PaperStore:
             return [o for o in orders if o.get("symbol") == s]
         return orders
 
-    def find_order(self, order_id: Optional[int] = None,
-                   orig_client_order_id: Optional[str] = None) -> Optional[dict]:
+    def find_order(
+        self, order_id: Optional[int] = None, orig_client_order_id: Optional[str] = None
+    ) -> Optional[dict]:
         with self.lock:
             pools = self.state["open_orders"] + self.state["order_history"]
             for o in pools:
                 if order_id is not None and o.get("orderId") == order_id:
                     return o
-                if orig_client_order_id is not None and o.get("clientOrderId") == orig_client_order_id:
+                if (
+                    orig_client_order_id is not None
+                    and o.get("clientOrderId") == orig_client_order_id
+                ):
                     return o
         return None
 
@@ -272,23 +305,29 @@ class PaperStore:
         with self.lock:
             self.state["order_history"].append(order)
             if len(self.state["order_history"]) > 10000:
-                del self.state["order_history"][: len(self.state["order_history"]) - 10000]
+                del self.state["order_history"][
+                    : len(self.state["order_history"]) - 10000
+                ]
 
     def add_trade(self, trade: dict) -> None:
         with self.lock:
             self.state["trade_history"].append(trade)
             if len(self.state["trade_history"]) > 20000:
-                del self.state["trade_history"][: len(self.state["trade_history"]) - 20000]
+                del self.state["trade_history"][
+                    : len(self.state["trade_history"]) - 20000
+                ]
 
     def account_snapshot(self) -> dict:
         with self.lock:
             balances = []
             for asset, b in sorted(self.state["balances"].items()):
-                balances.append({
-                    "asset": asset,
-                    "free": str(_d(b.get("free", 0))),
-                    "locked": str(_d(b.get("locked", 0))),
-                })
+                balances.append(
+                    {
+                        "asset": asset,
+                        "free": str(_d(b.get("free", 0))),
+                        "locked": str(_d(b.get("locked", 0))),
+                    }
+                )
             return {
                 "makerCommission": 0,
                 "takerCommission": 0,

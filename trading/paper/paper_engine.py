@@ -17,7 +17,10 @@ ERR_MIN_NOTIONAL = (-1013, "Filter failure: NOTIONAL")
 ERR_PRICE_FILTER = (-1013, "Filter failure: PRICE_FILTER")
 ERR_INSUFFICIENT = (-2010, "Account has insufficient balance for requested action.")
 ERR_DUPLICATE = (-2010, "Duplicate order sent.")
-ERR_BAD_PARAM = (-1102, "Mandatory parameter was not sent, was empty/null, or malformed.")
+ERR_BAD_PARAM = (
+    -1102,
+    "Mandatory parameter was not sent, was empty/null, or malformed.",
+)
 ERR_NO_SYMBOL = (-1121, "Invalid symbol.")
 
 
@@ -44,7 +47,9 @@ class PaperMatchingEngine:
         self.price_provider = price_provider
         self.quote_asset = quote_asset.upper()
         taker_base = Decimal(str(config.get("TAKER_FEE_PCT", 0.1)))
-        maker_base = Decimal(str(config.get("MAKER_FEE_PCT", config.get("TAKER_FEE_PCT", 0.1))))
+        maker_base = Decimal(
+            str(config.get("MAKER_FEE_PCT", config.get("TAKER_FEE_PCT", 0.1)))
+        )
         if config.get("USE_BNB_FEE_DISCOUNT"):
             taker_base *= Decimal("0.75")
             maker_base *= Decimal("0.75")
@@ -72,22 +77,23 @@ class PaperMatchingEngine:
         if qty <= 0:
             raise _reject(ERR_INVALID_QTY, "(qty <= 0)")
         if qty < filters.min_qty:
-            raise _reject(ERR_INVALID_QTY,
-                          f"(qty {qty} < minQty {filters.min_qty})")
+            raise _reject(ERR_INVALID_QTY, f"(qty {qty} < minQty {filters.min_qty})")
         step = filters.step_size
         if step > 0:
             rem = (qty - filters.min_qty) % step
             if rem != 0:
-                raise _reject(ERR_INVALID_QTY,
-                              f"(qty {qty} tidak kelipatan stepSize {step})")
+                raise _reject(
+                    ERR_INVALID_QTY, f"(qty {qty} tidak kelipatan stepSize {step})"
+                )
 
     def _check_price_filter(self, filters: SymbolFilters, price: Decimal) -> None:
         if price <= 0:
             raise _reject(ERR_PRICE_FILTER, "(price <= 0)")
         tick = filters.tick_size
         if tick > 0 and (price % tick) != 0:
-            raise _reject(ERR_PRICE_FILTER,
-                          f"(price {price} tidak kelipatan tickSize {tick})")
+            raise _reject(
+                ERR_PRICE_FILTER, f"(price {price} tidak kelipatan tickSize {tick})"
+            )
 
     def _levels(self, symbol: str, side: str) -> list[tuple[Decimal, Decimal]]:
         depth = self.depth_provider(symbol)
@@ -100,8 +106,9 @@ class PaperMatchingEngine:
                 continue
         return out
 
-    def _walk_by_qty(self, levels: list[tuple[Decimal, Decimal]], target_qty: Decimal
-                     ) -> tuple[Decimal, Decimal, list[tuple[Decimal, Decimal]]]:
+    def _walk_by_qty(
+        self, levels: list[tuple[Decimal, Decimal]], target_qty: Decimal
+    ) -> tuple[Decimal, Decimal, list[tuple[Decimal, Decimal]]]:
         remaining = target_qty
         filled = _ZERO
         quote = _ZERO
@@ -118,8 +125,9 @@ class PaperMatchingEngine:
             remaining -= take
         return filled, quote, fills
 
-    def _walk_by_quote(self, levels: list[tuple[Decimal, Decimal]], target_quote: Decimal
-                       ) -> tuple[Decimal, Decimal, list[tuple[Decimal, Decimal]]]:
+    def _walk_by_quote(
+        self, levels: list[tuple[Decimal, Decimal]], target_quote: Decimal
+    ) -> tuple[Decimal, Decimal, list[tuple[Decimal, Decimal]]]:
         remaining_quote = target_quote
         filled = _ZERO
         quote = _ZERO
@@ -132,7 +140,7 @@ class PaperMatchingEngine:
                 take = avail
                 cost = level_cost
             else:
-                take = (remaining_quote / price)
+                take = remaining_quote / price
                 cost = take * price
             if take <= 0:
                 continue
@@ -142,9 +150,17 @@ class PaperMatchingEngine:
             remaining_quote -= cost
         return filled, quote, fills
 
-    def _new_order_record(self, symbol: str, side: str, order_type: str,
-                          orig_qty: Decimal, price: Decimal, stop_price: Optional[Decimal],
-                          time_in_force: Optional[str], client_order_id: str) -> dict:
+    def _new_order_record(
+        self,
+        symbol: str,
+        side: str,
+        order_type: str,
+        orig_qty: Decimal,
+        price: Decimal,
+        stop_price: Optional[Decimal],
+        time_in_force: Optional[str],
+        client_order_id: str,
+    ) -> dict:
         oid = self.store.next_order_id()
         now = self._now_ms()
         return {
@@ -167,8 +183,15 @@ class PaperMatchingEngine:
             "fills": [],
         }
 
-    def _apply_fills(self, order: dict, base: str, quote: str, side: str,
-                     fills: list[tuple[Decimal, Decimal]], maker: bool) -> None:
+    def _apply_fills(
+        self,
+        order: dict,
+        base: str,
+        quote: str,
+        side: str,
+        fills: list[tuple[Decimal, Decimal]],
+        maker: bool,
+    ) -> None:
         rate = self._maker_rate if maker else self._taker_rate
         exec_qty = _ZERO
         cum_quote = _ZERO
@@ -185,13 +208,15 @@ class PaperMatchingEngine:
             for price, qty in fills:
                 fee = qty * rate
                 fee_total_base += fee
-                fill_records.append({
-                    "price": str(price),
-                    "qty": str(qty),
-                    "commission": str(fee),
-                    "commissionAsset": base,
-                    "tradeId": self._next_trade_id(),
-                })
+                fill_records.append(
+                    {
+                        "price": str(price),
+                        "qty": str(qty),
+                        "commission": str(fee),
+                        "commissionAsset": base,
+                        "tradeId": self._next_trade_id(),
+                    }
+                )
             self.store.credit(base, exec_qty - fee_total_base)
             self.store.add_fee(base, fee_total_base)
         else:
@@ -201,29 +226,33 @@ class PaperMatchingEngine:
                 gross = price * qty
                 fee = gross * rate
                 fee_total_quote += fee
-                fill_records.append({
-                    "price": str(price),
-                    "qty": str(qty),
-                    "commission": str(fee),
-                    "commissionAsset": quote,
-                    "tradeId": self._next_trade_id(),
-                })
+                fill_records.append(
+                    {
+                        "price": str(price),
+                        "qty": str(qty),
+                        "commission": str(fee),
+                        "commissionAsset": quote,
+                        "tradeId": self._next_trade_id(),
+                    }
+                )
             self.store.credit(quote, cum_quote - fee_total_quote)
             self.store.add_fee(quote, fee_total_quote)
 
         order["executedQty"] = str(exec_qty)
         order["cummulativeQuoteQty"] = str(cum_quote)
         order["fills"] = fill_records
-        self.store.add_trade({
-            "symbol": order["symbol"],
-            "orderId": order["orderId"],
-            "side": side,
-            "type": order["type"],
-            "executedQty": str(exec_qty),
-            "cummulativeQuoteQty": str(cum_quote),
-            "avgPrice": str(cum_quote / exec_qty) if exec_qty > 0 else "0",
-            "time": self._now_ms(),
-        })
+        self.store.add_trade(
+            {
+                "symbol": order["symbol"],
+                "orderId": order["orderId"],
+                "side": side,
+                "type": order["type"],
+                "executedQty": str(exec_qty),
+                "cummulativeQuoteQty": str(cum_quote),
+                "avgPrice": str(cum_quote / exec_qty) if exec_qty > 0 else "0",
+                "time": self._now_ms(),
+            }
+        )
 
     def place_order(
         self,
@@ -247,23 +276,50 @@ class PaperMatchingEngine:
             raise _reject(ERR_NO_SYMBOL, f"({symbol})")
 
         base, quote = self._split_assets(symbol)
-        coid = client_order_id or f"paper-{int(time.time()*1000)}-{self.store.next_order_id()}"
+        coid = (
+            client_order_id
+            or f"paper-{int(time.time()*1000)}-{self.store.next_order_id()}"
+        )
 
         with self.store.lock:
             if self.store.is_duplicate_client_order_id(client_order_id):
                 raise _reject(ERR_DUPLICATE, f"(clientOrderId {client_order_id})")
 
             if order_type == "MARKET":
-                result = self._place_market(symbol, side, base, quote, filters,
-                                            quantity, quote_order_qty, coid)
+                result = self._place_market(
+                    symbol, side, base, quote, filters, quantity, quote_order_qty, coid
+                )
             elif order_type == "LIMIT":
-                result = self._place_limit(symbol, side, base, quote, filters,
-                                           quantity, price, time_in_force, coid)
-            elif order_type in ("STOP_LOSS", "TAKE_PROFIT", "STOP_LOSS_LIMIT",
-                                "TAKE_PROFIT_LIMIT"):
-                result = self._place_stop(symbol, side, base, quote, filters,
-                                          order_type, quantity, price, stop_price,
-                                          time_in_force, coid)
+                result = self._place_limit(
+                    symbol,
+                    side,
+                    base,
+                    quote,
+                    filters,
+                    quantity,
+                    price,
+                    time_in_force,
+                    coid,
+                )
+            elif order_type in (
+                "STOP_LOSS",
+                "TAKE_PROFIT",
+                "STOP_LOSS_LIMIT",
+                "TAKE_PROFIT_LIMIT",
+            ):
+                result = self._place_stop(
+                    symbol,
+                    side,
+                    base,
+                    quote,
+                    filters,
+                    order_type,
+                    quantity,
+                    price,
+                    stop_price,
+                    time_in_force,
+                    coid,
+                )
             else:
                 raise _reject(ERR_BAD_PARAM, f"(type {order_type} tidak didukung)")
 
@@ -271,15 +327,18 @@ class PaperMatchingEngine:
             self.store.save()
             return result
 
-    def _place_market(self, symbol, side, base, quote, filters, quantity,
-                      quote_order_qty, coid) -> dict:
+    def _place_market(
+        self, symbol, side, base, quote, filters, quantity, quote_order_qty, coid
+    ) -> dict:
         if quantity is None and quote_order_qty is None:
             raise _reject(ERR_BAD_PARAM, "(butuh quantity atau quoteOrderQty)")
 
         levels = self._levels(symbol, side)
         if not levels:
-            raise _reject((-1013, "Filter failure: no liquidity"),
-                          "(order book kosong / tidak tersedia)")
+            raise _reject(
+                (-1013, "Filter failure: no liquidity"),
+                "(order book kosong / tidak tersedia)",
+            )
 
         if quantity is not None:
             qty = _d(quantity)
@@ -287,18 +346,24 @@ class PaperMatchingEngine:
             best_price = levels[0][0]
             est_notional = qty * best_price
             if filters.min_notional > 0 and est_notional < filters.min_notional:
-                raise _reject(ERR_MIN_NOTIONAL,
-                              f"(notional {est_notional} < minNotional {filters.min_notional})")
+                raise _reject(
+                    ERR_MIN_NOTIONAL,
+                    f"(notional {est_notional} < minNotional {filters.min_notional})",
+                )
             filled, spent, fills = self._walk_by_qty(levels, qty)
             orig_qty = qty
         else:
             qoq = _d(quote_order_qty)
             if filters.min_notional > 0 and qoq < filters.min_notional:
-                raise _reject(ERR_MIN_NOTIONAL,
-                              f"(quoteOrderQty {qoq} < minNotional {filters.min_notional})")
+                raise _reject(
+                    ERR_MIN_NOTIONAL,
+                    f"(quoteOrderQty {qoq} < minNotional {filters.min_notional})",
+                )
             filled, spent, fills = self._walk_by_quote(levels, qoq)
             filled = self._round_down_step(filled, filters)
-            filled, spent, fills = self._walk_by_qty(levels, filled) if filled > 0 else (_ZERO, _ZERO, [])
+            filled, spent, fills = (
+                self._walk_by_qty(levels, filled) if filled > 0 else (_ZERO, _ZERO, [])
+            )
             orig_qty = filled
 
         if filled <= 0:
@@ -307,15 +372,20 @@ class PaperMatchingEngine:
         if side == "BUY":
             need = spent
             if self.store.get_free(quote) < need:
-                raise _reject(ERR_INSUFFICIENT,
-                              f"(butuh {need} {quote}, ada {self.store.get_free(quote)})")
+                raise _reject(
+                    ERR_INSUFFICIENT,
+                    f"(butuh {need} {quote}, ada {self.store.get_free(quote)})",
+                )
         else:
             if self.store.get_free(base) < filled:
-                raise _reject(ERR_INSUFFICIENT,
-                              f"(butuh {filled} {base}, ada {self.store.get_free(base)})")
+                raise _reject(
+                    ERR_INSUFFICIENT,
+                    f"(butuh {filled} {base}, ada {self.store.get_free(base)})",
+                )
 
-        order = self._new_order_record(symbol, side, "MARKET", orig_qty,
-                                       Decimal("0"), None, None, coid)
+        order = self._new_order_record(
+            symbol, side, "MARKET", orig_qty, Decimal("0"), None, None, coid
+        )
         self._apply_fills(order, base, quote, side, fills, maker=False)
 
         exec_qty = _d(order["executedQty"])
@@ -323,8 +393,13 @@ class PaperMatchingEngine:
             order["status"] = "FILLED"
         else:
             order["status"] = "EXPIRED"
-            logger.info("Market %s %s partial fill: %s dari %s (kedalaman kurang) -> EXPIRED sisa.",
-                        side, symbol, exec_qty, orig_qty)
+            logger.info(
+                "Market %s %s partial fill: %s dari %s (kedalaman kurang) -> EXPIRED sisa.",
+                side,
+                symbol,
+                exec_qty,
+                orig_qty,
+            )
         self.store.archive_order(order)
         return order
 
@@ -335,8 +410,9 @@ class PaperMatchingEngine:
         steps = (qty / step).to_integral_value(rounding=ROUND_DOWN)
         return steps * step
 
-    def _place_limit(self, symbol, side, base, quote, filters, quantity, price,
-                     time_in_force, coid) -> dict:
+    def _place_limit(
+        self, symbol, side, base, quote, filters, quantity, price, time_in_force, coid
+    ) -> dict:
         if quantity is None or price is None:
             raise _reject(ERR_BAD_PARAM, "(LIMIT butuh quantity & price)")
         qty = _d(quantity)
@@ -344,11 +420,14 @@ class PaperMatchingEngine:
         self._check_lot_size(filters, qty)
         self._check_price_filter(filters, px)
         if filters.min_notional > 0 and (qty * px) < filters.min_notional:
-            raise _reject(ERR_MIN_NOTIONAL,
-                          f"(notional {qty*px} < minNotional {filters.min_notional})")
+            raise _reject(
+                ERR_MIN_NOTIONAL,
+                f"(notional {qty*px} < minNotional {filters.min_notional})",
+            )
 
-        order = self._new_order_record(symbol, side, "LIMIT", qty, px, None,
-                                       time_in_force or "GTC", coid)
+        order = self._new_order_record(
+            symbol, side, "LIMIT", qty, px, None, time_in_force or "GTC", coid
+        )
 
         if side == "BUY":
             need = qty * px
@@ -363,7 +442,9 @@ class PaperMatchingEngine:
         order["_lockedAsset"] = quote if side == "BUY" else base
         order["_lockedRemaining"] = str((qty * px) if side == "BUY" else qty)
         order["_createdMs"] = self._now_ms()
-        order["_timeoutMs"] = int(self.config.get("PAPER_LIMIT_ORDER_TIMEOUT_SECONDS", 60)) * 1000
+        order["_timeoutMs"] = (
+            int(self.config.get("PAPER_LIMIT_ORDER_TIMEOUT_SECONDS", 60)) * 1000
+        )
 
         self._try_fill_limit(order, base, quote, filters)
         if order["status"] in ("FILLED",):
@@ -372,8 +453,9 @@ class PaperMatchingEngine:
             self.store.add_open_order(order)
         return order
 
-    def _try_fill_limit(self, order: dict, base: str, quote: str,
-                        filters: SymbolFilters) -> None:
+    def _try_fill_limit(
+        self, order: dict, base: str, quote: str, filters: SymbolFilters
+    ) -> None:
         symbol = order["symbol"]
         side = order["side"]
         limit_px = _d(order["price"])
@@ -393,12 +475,14 @@ class PaperMatchingEngine:
             return
         if side == "BUY":
             self._consume_locked_tracked(order, quote, spent)
-            self._credit_base_after_fee(base, fills, maker=True, order=order,
-                                        quote=quote, spent=spent)
+            self._credit_base_after_fee(
+                base, fills, maker=True, order=order, quote=quote, spent=spent
+            )
         else:
             self._consume_locked_tracked(order, base, filled)
-            self._credit_quote_after_fee(quote, fills, maker=True, order=order,
-                                         base=base)
+            self._credit_quote_after_fee(
+                quote, fills, maker=True, order=order, base=base
+            )
         new_exec = already + filled
         new_cum = _d(order["cummulativeQuoteQty"]) + spent
         order["executedQty"] = str(new_exec)
@@ -416,9 +500,15 @@ class PaperMatchingEngine:
         self.store.add_fee(base, fee_base)
         recs = order.setdefault("fills", [])
         for price, qty in fills:
-            recs.append({"price": str(price), "qty": str(qty),
-                         "commission": str(qty * rate), "commissionAsset": base,
-                         "tradeId": self._next_trade_id()})
+            recs.append(
+                {
+                    "price": str(price),
+                    "qty": str(qty),
+                    "commission": str(qty * rate),
+                    "commissionAsset": base,
+                    "tradeId": self._next_trade_id(),
+                }
+            )
 
     def _credit_quote_after_fee(self, quote, fills, maker, order, base) -> None:
         rate = self._maker_rate if maker else self._taker_rate
@@ -428,12 +518,30 @@ class PaperMatchingEngine:
         self.store.add_fee(quote, fee_quote)
         recs = order.setdefault("fills", [])
         for price, qty in fills:
-            recs.append({"price": str(price), "qty": str(qty),
-                         "commission": str(p_q_fee(p=price, q=qty, rate=rate)),
-                         "commissionAsset": quote, "tradeId": self._next_trade_id()})
+            recs.append(
+                {
+                    "price": str(price),
+                    "qty": str(qty),
+                    "commission": str(p_q_fee(p=price, q=qty, rate=rate)),
+                    "commissionAsset": quote,
+                    "tradeId": self._next_trade_id(),
+                }
+            )
 
-    def _place_stop(self, symbol, side, base, quote, filters, order_type,
-                    quantity, price, stop_price, time_in_force, coid) -> dict:
+    def _place_stop(
+        self,
+        symbol,
+        side,
+        base,
+        quote,
+        filters,
+        order_type,
+        quantity,
+        price,
+        stop_price,
+        time_in_force,
+        coid,
+    ) -> dict:
         if quantity is None or stop_price is None:
             raise _reject(ERR_BAD_PARAM, "(STOP butuh quantity & stopPrice)")
         qty = _d(quantity)
@@ -443,8 +551,9 @@ class PaperMatchingEngine:
         if px > 0:
             self._check_price_filter(filters, px)
 
-        order = self._new_order_record(symbol, side, order_type, qty, px, sp,
-                                       time_in_force or "GTC", coid)
+        order = self._new_order_record(
+            symbol, side, order_type, qty, px, sp, time_in_force or "GTC", coid
+        )
         if side == "SELL":
             if self.store.get_free(base) < qty:
                 raise _reject(ERR_INSUFFICIENT, f"(butuh {qty} {base})")
@@ -477,7 +586,11 @@ class PaperMatchingEngine:
 
                 if otype == "LIMIT":
                     self._try_fill_limit(order, base, quote, filters)
-                    timed_out = (now - int(order.get("_createdMs", now))) >= int(order.get("_timeoutMs", 0)) > 0
+                    timed_out = (
+                        (now - int(order.get("_createdMs", now)))
+                        >= int(order.get("_timeoutMs", 0))
+                        > 0
+                    )
                     if order["status"] == "FILLED":
                         self._finalize_open(order)
                         changed.append(order)
@@ -488,8 +601,12 @@ class PaperMatchingEngine:
                         self.store.update_open_order(order)
                         changed.append(order)
 
-                elif otype in ("STOP_LOSS", "TAKE_PROFIT", "STOP_LOSS_LIMIT",
-                               "TAKE_PROFIT_LIMIT"):
+                elif otype in (
+                    "STOP_LOSS",
+                    "TAKE_PROFIT",
+                    "STOP_LOSS_LIMIT",
+                    "TAKE_PROFIT_LIMIT",
+                ):
                     triggered = self._stop_triggered(order)
                     if triggered:
                         self._execute_stop_as_market(order, base, quote, filters)
@@ -524,15 +641,20 @@ class PaperMatchingEngine:
             return
         if side == "SELL":
             self._consume_locked_tracked(order, base, filled)
-            self._credit_quote_after_fee(quote, fills, maker=False, order=order, base=base)
+            self._credit_quote_after_fee(
+                quote, fills, maker=False, order=order, base=base
+            )
         else:
             self._consume_locked_tracked(order, quote, spent)
-            self._credit_base_after_fee(base, fills, maker=False, order=order,
-                                        quote=quote, spent=spent)
+            self._credit_base_after_fee(
+                base, fills, maker=False, order=order, quote=quote, spent=spent
+            )
         new_exec = _d(order["executedQty"]) + filled
         order["executedQty"] = str(new_exec)
         order["cummulativeQuoteQty"] = str(_d(order["cummulativeQuoteQty"]) + spent)
-        order["status"] = "FILLED" if new_exec >= _d(order["origQty"]) else "PARTIALLY_FILLED"
+        order["status"] = (
+            "FILLED" if new_exec >= _d(order["origQty"]) else "PARTIALLY_FILLED"
+        )
 
     def _finalize_open(self, order: dict) -> None:
         self._release_leftover_lock(order)
@@ -567,21 +689,32 @@ class PaperMatchingEngine:
             if remaining_qty <= 0:
                 return
             if side == "BUY":
-                leftover = remaining_qty * _d(order["price"]) if _d(order["price"]) > 0 else _ZERO
+                leftover = (
+                    remaining_qty * _d(order["price"])
+                    if _d(order["price"]) > 0
+                    else _ZERO
+                )
             else:
                 leftover = remaining_qty
         if leftover > 0:
             self.store.unlock_funds(asset, leftover)
 
-    def cancel_order(self, symbol: str, order_id: Optional[int] = None,
-                     orig_client_order_id: Optional[str] = None) -> dict:
+    def cancel_order(
+        self,
+        symbol: str,
+        order_id: Optional[int] = None,
+        orig_client_order_id: Optional[str] = None,
+    ) -> dict:
         with self.store.lock:
             target = None
             for o in self.store.get_open_orders(symbol):
                 if order_id is not None and o.get("orderId") == order_id:
                     target = o
                     break
-                if orig_client_order_id is not None and o.get("clientOrderId") == orig_client_order_id:
+                if (
+                    orig_client_order_id is not None
+                    and o.get("clientOrderId") == orig_client_order_id
+                ):
                     target = o
                     break
             if target is None:

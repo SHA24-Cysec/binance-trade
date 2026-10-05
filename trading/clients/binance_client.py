@@ -13,7 +13,10 @@ from typing import Any, Optional
 
 import requests
 
-from infrastructure.network.rate_limiter import RateLimitBlockedError, SharedRequestWeightLimiter
+from infrastructure.network.rate_limiter import (
+    RateLimitBlockedError,
+    SharedRequestWeightLimiter,
+)
 
 logger = logging.getLogger("binance_client")
 
@@ -32,8 +35,13 @@ class SignedEndpointBlockedError(RuntimeError):
 
 class BinanceRateLimitError(BinanceAPIError):
 
-    def __init__(self, status_code: int, code: Optional[int], msg: str,
-                 retry_after: Optional[int] = None):
+    def __init__(
+        self,
+        status_code: int,
+        code: Optional[int],
+        msg: str,
+        retry_after: Optional[int] = None,
+    ):
         super().__init__(status_code, code, msg)
         self.retry_after = retry_after
 
@@ -102,9 +110,7 @@ def _round_down_places(value, places: int):
 
 
 _REDACT_PARAMS = ("signature", "apiKey", "api_key", "secret", "token")
-_REDACT_RE = re.compile(
-    r"(?i)\b(" + "|".join(_REDACT_PARAMS) + r")=[^&\s\"'>]*"
-)
+_REDACT_RE = re.compile(r"(?i)\b(" + "|".join(_REDACT_PARAMS) + r")=[^&\s\"'>]*")
 
 
 class BinanceSpotClient:
@@ -115,9 +121,17 @@ class BinanceSpotClient:
         except Exception:
             return "<pesan tidak dapat diredaksi>"
 
-    def __init__(self, api_key: str, api_secret: str, base_url: str, timeout: float = 10.0,
-                 allow_signed: bool = True, rate_limit_state_file: str | None = None,
-                 rate_limit_limit: int = 6000, rate_limit_safety_margin: int = 100):
+    def __init__(
+        self,
+        api_key: str,
+        api_secret: str,
+        base_url: str,
+        timeout: float = 10.0,
+        allow_signed: bool = True,
+        rate_limit_state_file: str | None = None,
+        rate_limit_limit: int = 6000,
+        rate_limit_safety_margin: int = 100,
+    ):
         self.api_key = api_key
         self.api_secret = api_secret
         self.base_url = base_url.rstrip("/")
@@ -135,7 +149,6 @@ class BinanceSpotClient:
         )
 
         self.used_weight_1m = 0
-        self.used_weight_ts = 0.0
         self.blocked_until = 0.0
 
     def _new_session(self):
@@ -163,7 +176,9 @@ class BinanceSpotClient:
         server_time = self.get_server_time()
         local_time = int(time.time() * 1000)
         self._time_offset_ms = server_time - local_time
-        logger.info("Sinkronisasi waktu server selesai. Offset = %d ms", self._time_offset_ms)
+        logger.info(
+            "Sinkronisasi waktu server selesai. Offset = %d ms", self._time_offset_ms
+        )
 
     def close(self) -> None:
         with self._sessions_lock:
@@ -179,8 +194,9 @@ class BinanceSpotClient:
         return int(time.time() * 1000) + self._time_offset_ms
 
     @staticmethod
-    def _estimate_request_weight(method: str, path: str,
-                                 params: dict | None = None) -> int:
+    def _estimate_request_weight(
+        method: str, path: str, params: dict | None = None
+    ) -> int:
         method = str(method or "GET").upper()
         params = params or {}
         if path == "/api/v3/ticker/24hr":
@@ -191,7 +207,11 @@ class BinanceSpotClient:
             return 2
         if path == "/api/v3/depth":
             limit = int(params.get("limit", 100) or 100)
-            return 5 if limit <= 100 else 25 if limit <= 500 else 50 if limit <= 1000 else 250
+            return (
+                5
+                if limit <= 100
+                else 25 if limit <= 500 else 50 if limit <= 1000 else 250
+            )
         if path == "/api/v3/ticker/bookTicker":
             return 4 if not params.get("symbol") else 2
         if path == "/api/v3/time":
@@ -248,13 +268,16 @@ class BinanceSpotClient:
             try:
                 try:
                     if skip_shared_block:
-                        self._rate_limiter.record_retry_after_server_wait(request_weight)
+                        self._rate_limiter.record_retry_after_server_wait(
+                            request_weight
+                        )
                     else:
                         self._rate_limiter.reserve(request_weight)
                     skip_shared_block = False
                 except RateLimitBlockedError as exc:
                     raise BinanceRateLimitError(
-                        429, None,
+                        429,
+                        None,
                         "shared rate limiter masih memblokir request sebelum dikirim",
                         retry_after=int(exc.retry_after),
                     ) from exc
@@ -294,16 +317,26 @@ class BinanceSpotClient:
                 last_exc = exc
 
                 if isinstance(exc, BinanceRateLimitError):
-                    wait = max(5.0, float(exc.retry_after)) if exc.retry_after else min(60 * attempt, 180)
+                    wait = (
+                        max(5.0, float(exc.retry_after))
+                        if exc.retry_after
+                        else min(60 * attempt, 180)
+                    )
                     logger.error(
                         "Kena batas rate Binance (HTTP %s) pada %s %s. "
                         "Mundur %ds sesuai instruksi server (percobaan %d/%d).",
-                        exc.status_code, method, path, wait, attempt, max_retries,
+                        exc.status_code,
+                        method,
+                        path,
+                        wait,
+                        attempt,
+                        max_retries,
                     )
                     if exc.status_code == 418:
                         logger.error(
                             "HTTP 418: IP ini sedang diblokir Binance sampai %ds "
-                            "ke depan. Permintaan dihentikan, tidak dicoba ulang.", wait,
+                            "ke depan. Permintaan dihentikan, tidak dicoba ulang.",
+                            wait,
                         )
                         raise
                     if attempt < max_retries:
@@ -320,14 +353,21 @@ class BinanceSpotClient:
                         or exc.code in (-1000, -1001, -1021)
                     )
                     if exc.code == -1021:
-                        logger.warning("Timestamp meleset, sinkronisasi ulang jam server...")
+                        logger.warning(
+                            "Timestamp meleset, sinkronisasi ulang jam server..."
+                        )
                         self.sync_time()
 
                 if retryable and attempt < max_retries:
-                    wait = min(2 ** attempt, 10)
+                    wait = min(2**attempt, 10)
                     logger.warning(
                         "Request %s %s gagal sementara (percobaan %d/%d): %s. Tunggu %ds.",
-                        method, path, attempt, max_retries, self._redact(exc), wait,
+                        method,
+                        path,
+                        attempt,
+                        max_retries,
+                        self._redact(exc),
+                        wait,
                     )
                     time.sleep(wait)
                     continue
@@ -335,13 +375,19 @@ class BinanceSpotClient:
                 if not retryable:
                     logger.warning(
                         "Request %s %s ditolak tanpa retry: %s.",
-                        method, path, self._redact(exc),
+                        method,
+                        path,
+                        self._redact(exc),
                     )
                     raise
 
                 logger.warning(
                     "Request %s %s gagal (percobaan terakhir %d/%d): %s.",
-                    method, path, attempt, max_retries, self._redact(exc),
+                    method,
+                    path,
+                    attempt,
+                    max_retries,
+                    self._redact(exc),
                 )
 
         if isinstance(last_exc, requests.exceptions.RequestException):
@@ -354,10 +400,11 @@ class BinanceSpotClient:
 
     def _record_used_weight(self, headers) -> None:
         try:
-            raw = headers.get("x-mbx-used-weight-1m") or headers.get("X-MBX-USED-WEIGHT-1M")
+            raw = headers.get("x-mbx-used-weight-1m") or headers.get(
+                "X-MBX-USED-WEIGHT-1M"
+            )
             if raw is not None:
                 self.used_weight_1m = int(raw)
-                self.used_weight_ts = time.time()
                 self._rate_limiter.observe_server_weight(self.used_weight_1m)
         except (TypeError, ValueError):
             pass
@@ -374,18 +421,13 @@ class BinanceSpotClient:
 
     def _note_rate_limited(self, status_code: int, retry_after: Optional[int]) -> None:
         wait = retry_after if retry_after else (300 if status_code == 418 else 60)
-        self.blocked_until = max(getattr(self, "blocked_until", 0.0), time.time() + wait)
+        self.blocked_until = max(
+            getattr(self, "blocked_until", 0.0), time.time() + wait
+        )
         self._rate_limiter.block(wait)
 
     def is_rate_limited(self) -> bool:
         return time.time() < getattr(self, "blocked_until", 0.0)
-
-    def weight_headroom(self, limit: int = 6000) -> float:
-        ts = getattr(self, "used_weight_ts", 0.0)
-        if not ts or time.time() - ts > 60:
-            return 1.0
-        used = getattr(self, "used_weight_1m", 0)
-        return max(0.0, 1.0 - used / float(limit or 6000))
 
     def get_server_time(self) -> int:
         data = self._request("GET", "/api/v3/time")
@@ -398,8 +440,14 @@ class BinanceSpotClient:
     def get_ticker_24hr_all(self) -> list:
         return self._request("GET", "/api/v3/ticker/24hr", {})
 
-    def get_klines(self, symbol: str, interval: str, limit: int = 500,
-                    start_time_ms: Optional[int] = None, end_time_ms: Optional[int] = None) -> list:
+    def get_klines(
+        self,
+        symbol: str,
+        interval: str,
+        limit: int = 500,
+        start_time_ms: Optional[int] = None,
+        end_time_ms: Optional[int] = None,
+    ) -> list:
         params = {"symbol": symbol, "interval": interval, "limit": limit}
         if start_time_ms is not None:
             params["startTime"] = start_time_ms
@@ -408,30 +456,43 @@ class BinanceSpotClient:
         return self._request("GET", "/api/v3/klines", params)
 
     def get_book_ticker(self, symbol: str, max_retries: int = 3) -> dict:
-        return self._request("GET", "/api/v3/ticker/bookTicker", {"symbol": symbol},
-                             max_retries=max_retries)
+        return self._request(
+            "GET",
+            "/api/v3/ticker/bookTicker",
+            {"symbol": symbol},
+            max_retries=max_retries,
+        )
 
     def get_depth(self, symbol: str, limit: int = 100, max_retries: int = 3) -> dict:
-        return self._request("GET", "/api/v3/depth",
-                             {"symbol": symbol, "limit": limit}, max_retries=max_retries)
+        return self._request(
+            "GET",
+            "/api/v3/depth",
+            {"symbol": symbol, "limit": limit},
+            max_retries=max_retries,
+        )
 
     def get_price(self, symbol: str, max_retries: int = 3) -> float:
-        data = self._request("GET", "/api/v3/ticker/price", {"symbol": symbol},
-                             max_retries=max_retries)
+        data = self._request(
+            "GET", "/api/v3/ticker/price", {"symbol": symbol}, max_retries=max_retries
+        )
         return float(data["price"])
 
     def get_account(self) -> dict:
         return self._request("GET", "/api/v3/account", signed=True)
 
     def get_api_key_permissions(self) -> dict:
-        return self._request(
-            "GET", "/sapi/v1/account/apiRestrictions", signed=True
-        )
+        return self._request("GET", "/sapi/v1/account/apiRestrictions", signed=True)
 
-    def get_order(self, symbol: str, order_id: Optional[int] = None,
-                  orig_client_order_id: Optional[str] = None) -> dict:
+    def get_order(
+        self,
+        symbol: str,
+        order_id: Optional[int] = None,
+        orig_client_order_id: Optional[str] = None,
+    ) -> dict:
         if (order_id is None) == (orig_client_order_id is None):
-            raise ValueError("get_order wajib memakai tepat satu orderId/origClientOrderId")
+            raise ValueError(
+                "get_order wajib memakai tepat satu orderId/origClientOrderId"
+            )
         params = {"symbol": str(symbol).upper()}
         if order_id is not None:
             params["orderId"] = int(order_id)
@@ -439,28 +500,42 @@ class BinanceSpotClient:
             params["origClientOrderId"] = str(orig_client_order_id)
         return self._request("GET", "/api/v3/order", params, signed=True)
 
-    def cancel_order(self, symbol: str, order_id: Optional[int] = None,
-                     orig_client_order_id: Optional[str] = None) -> dict:
+    def cancel_order(
+        self,
+        symbol: str,
+        order_id: Optional[int] = None,
+        orig_client_order_id: Optional[str] = None,
+    ) -> dict:
         if (order_id is None) == (orig_client_order_id is None):
-            raise ValueError("cancel_order wajib memakai tepat satu orderId/origClientOrderId")
+            raise ValueError(
+                "cancel_order wajib memakai tepat satu orderId/origClientOrderId"
+            )
         params = {"symbol": str(symbol).upper()}
         if order_id is not None:
             params["orderId"] = int(order_id)
         else:
             params["origClientOrderId"] = str(orig_client_order_id)
-        return self._request("DELETE", "/api/v3/order", params, signed=True,
-                             max_retries=1)
+        return self._request(
+            "DELETE", "/api/v3/order", params, signed=True, max_retries=1
+        )
 
     def get_open_orders(self, symbol: Optional[str] = None) -> list:
         params = {"symbol": str(symbol).upper()} if symbol else {}
         return self._request("GET", "/api/v3/openOrders", params, signed=True)
 
-    def new_market_order(self, symbol: str, side: str, quantity: Optional[float] = None,
-                          quote_order_qty: Optional[float] = None,
-                          new_client_order_id: Optional[str] = None,
-                          quote_precision: Optional[int] = None) -> dict:
+    def new_market_order(
+        self,
+        symbol: str,
+        side: str,
+        quantity: Optional[float] = None,
+        quote_order_qty: Optional[float] = None,
+        new_client_order_id: Optional[str] = None,
+        quote_precision: Optional[int] = None,
+    ) -> dict:
         if (quantity is None) == (quote_order_qty is None):
-            raise ValueError("MARKET order wajib memakai tepat satu dari quantity/quoteOrderQty")
+            raise ValueError(
+                "MARKET order wajib memakai tepat satu dari quantity/quoteOrderQty"
+            )
         side = str(side).upper()
         if side not in ("BUY", "SELL"):
             raise ValueError(f"side order tidak valid: {side!r}")
@@ -476,7 +551,8 @@ class BinanceSpotClient:
             quote_order_qty = _round_down_places(
                 quote_order_qty,
                 _quote_precision_places(
-                    quote_precision if quote_precision is not None
+                    quote_precision
+                    if quote_precision is not None
                     else QUOTE_PRECISION_DEFAULT
                 ),
             )
@@ -485,16 +561,23 @@ class BinanceSpotClient:
             params["quoteOrderQty"] = _fmt_num(quote_order_qty)
         if new_client_order_id:
             params["newClientOrderId"] = str(new_client_order_id)
-        return self._request("POST", "/api/v3/order", params, signed=True,
-                             max_retries=1)
+        return self._request(
+            "POST", "/api/v3/order", params, signed=True, max_retries=1
+        )
 
-    def new_stop_loss_order(self, symbol: str, quantity: float,
-                            stop_price: float,
-                            new_client_order_id: str | None = None) -> dict:
+    def new_stop_loss_order(
+        self,
+        symbol: str,
+        quantity: float,
+        stop_price: float,
+        new_client_order_id: str | None = None,
+    ) -> dict:
         quantity_text = _fmt_num(quantity)
         stop_text = _fmt_num(stop_price)
         if Decimal(quantity_text) <= 0 or Decimal(stop_text) <= 0:
-            raise ValueError("quantity dan stopPrice STOP_LOSS harus lebih besar dari nol")
+            raise ValueError(
+                "quantity dan stopPrice STOP_LOSS harus lebih besar dari nol"
+            )
         params = {
             "symbol": str(symbol).upper(),
             "side": "SELL",
@@ -505,19 +588,38 @@ class BinanceSpotClient:
         }
         if new_client_order_id:
             params["newClientOrderId"] = str(new_client_order_id)
-        return self._request("POST", "/api/v3/order", params, signed=True,
-                             max_retries=1)
+        return self._request(
+            "POST", "/api/v3/order", params, signed=True, max_retries=1
+        )
 
-    def new_oco_sell_order(self, symbol: str, quantity: float,
-                           above_price: float, above_stop_price: float,
-                           below_price: float, below_stop_price: float,
-                           list_client_order_id: str,
-                           above_client_order_id: str,
-                           below_client_order_id: str) -> dict:
-        numeric = [quantity, above_price, above_stop_price, below_price, below_stop_price]
+    def new_oco_sell_order(
+        self,
+        symbol: str,
+        quantity: float,
+        above_price: float,
+        above_stop_price: float,
+        below_price: float,
+        below_stop_price: float,
+        list_client_order_id: str,
+        above_client_order_id: str,
+        below_client_order_id: str,
+    ) -> dict:
+        numeric = [
+            quantity,
+            above_price,
+            above_stop_price,
+            below_price,
+            below_stop_price,
+        ]
         if any(Decimal(_fmt_num(value)) <= 0 for value in numeric):
-            raise ValueError("quantity dan seluruh harga OCO harus lebih besar dari nol")
-        ids = [str(list_client_order_id), str(above_client_order_id), str(below_client_order_id)]
+            raise ValueError(
+                "quantity dan seluruh harga OCO harus lebih besar dari nol"
+            )
+        ids = [
+            str(list_client_order_id),
+            str(above_client_order_id),
+            str(below_client_order_id),
+        ]
         if any(not value for value in ids) or len(set(ids)) != 3:
             raise ValueError("ketiga client order ID OCO wajib terisi dan berbeda")
         params = {
@@ -537,11 +639,13 @@ class BinanceSpotClient:
             "belowTimeInForce": "GTC",
             "newOrderRespType": "FULL",
         }
-        return self._request("POST", "/api/v3/orderList/oco", params,
-                             signed=True, max_retries=1)
+        return self._request(
+            "POST", "/api/v3/orderList/oco", params, signed=True, max_retries=1
+        )
 
-    def get_order_list(self, order_list_id: int | None = None,
-                       list_client_order_id: str | None = None) -> dict:
+    def get_order_list(
+        self, order_list_id: int | None = None, list_client_order_id: str | None = None
+    ) -> dict:
         if (order_list_id is None) == (list_client_order_id is None):
             raise ValueError("get_order_list wajib memakai tepat satu ID list")
         params = {}
@@ -551,8 +655,12 @@ class BinanceSpotClient:
             params["origClientOrderId"] = str(list_client_order_id)
         return self._request("GET", "/api/v3/orderList", params, signed=True)
 
-    def cancel_order_list(self, symbol: str, order_list_id: int | None = None,
-                          list_client_order_id: str | None = None) -> dict:
+    def cancel_order_list(
+        self,
+        symbol: str,
+        order_list_id: int | None = None,
+        list_client_order_id: str | None = None,
+    ) -> dict:
         if (order_list_id is None) == (list_client_order_id is None):
             raise ValueError("cancel_order_list wajib memakai tepat satu ID list")
         params = {"symbol": str(symbol).upper()}
@@ -560,18 +668,24 @@ class BinanceSpotClient:
             params["orderListId"] = int(order_list_id)
         else:
             params["listClientOrderId"] = str(list_client_order_id)
-        return self._request("DELETE", "/api/v3/orderList", params,
-                             signed=True, max_retries=1)
+        return self._request(
+            "DELETE", "/api/v3/orderList", params, signed=True, max_retries=1
+        )
 
     def get_dust_convertible(self, account_type: str = "SPOT") -> dict:
-        return self._request("POST", "/sapi/v1/asset/dust-btc",
-                             {"accountType": account_type}, signed=True,
-                             max_retries=1)
+        return self._request(
+            "POST",
+            "/sapi/v1/asset/dust-btc",
+            {"accountType": account_type},
+            signed=True,
+            max_retries=1,
+        )
 
     def convert_dust(self, assets: list, account_type: str = "SPOT") -> dict:
         params = {"asset": ",".join(assets), "accountType": account_type}
-        return self._request("POST", "/sapi/v1/asset/dust", params, signed=True,
-                             max_retries=1)
+        return self._request(
+            "POST", "/sapi/v1/asset/dust", params, signed=True, max_retries=1
+        )
 
 
 def parse_symbol_permission_sets(
@@ -609,26 +723,35 @@ def permission_sets_allow(
     account_permissions: set[str] | frozenset[str],
 ) -> bool:
     normalized = {str(item).strip().upper() for item in account_permissions if item}
-    return bool(permission_sets) and all(bool(group & normalized) for group in permission_sets)
+    return bool(permission_sets) and all(
+        bool(group & normalized) for group in permission_sets
+    )
 
 
 class SymbolFilters:
 
-    def __init__(self, step_size: Decimal, min_qty: Decimal, min_notional: Decimal,
-                 tick_size: Decimal, max_qty: Decimal = Decimal("0"),
-                 max_notional: Decimal = Decimal("0"),
-                 quote_order_qty_market_allowed: bool = True,
-                 *, lot_step_size: Decimal | None = None,
-                 lot_min_qty: Decimal | None = None,
-                 lot_max_qty: Decimal | None = None,
-                 limit_min_notional: Decimal | None = None,
-                 limit_max_notional: Decimal | None = None,
-                 min_price: Decimal = Decimal("0"),
-                 max_price: Decimal = Decimal("0"),
-                 order_types: set[str] | None = None,
-                 permission_sets: tuple[frozenset[str], ...] | None = None,
-                 permission_metadata_verified: bool = False,
-                 quote_precision: int = QUOTE_PRECISION_DEFAULT):
+    def __init__(
+        self,
+        step_size: Decimal,
+        min_qty: Decimal,
+        min_notional: Decimal,
+        tick_size: Decimal,
+        max_qty: Decimal = Decimal("0"),
+        max_notional: Decimal = Decimal("0"),
+        quote_order_qty_market_allowed: bool = True,
+        *,
+        lot_step_size: Decimal | None = None,
+        lot_min_qty: Decimal | None = None,
+        lot_max_qty: Decimal | None = None,
+        limit_min_notional: Decimal | None = None,
+        limit_max_notional: Decimal | None = None,
+        min_price: Decimal = Decimal("0"),
+        max_price: Decimal = Decimal("0"),
+        order_types: set[str] | None = None,
+        permission_sets: tuple[frozenset[str], ...] | None = None,
+        permission_metadata_verified: bool = False,
+        quote_precision: int = QUOTE_PRECISION_DEFAULT,
+    ):
         self.step_size = Decimal(step_size)
         self.min_qty = Decimal(min_qty)
         self.min_notional = Decimal(min_notional)
@@ -637,7 +760,9 @@ class SymbolFilters:
         self.max_notional = Decimal(max_notional)
         self.quote_order_qty_market_allowed = bool(quote_order_qty_market_allowed)
 
-        self.lot_step_size = Decimal(lot_step_size if lot_step_size is not None else step_size)
+        self.lot_step_size = Decimal(
+            lot_step_size if lot_step_size is not None else step_size
+        )
         self.lot_min_qty = Decimal(lot_min_qty if lot_min_qty is not None else min_qty)
         self.lot_max_qty = Decimal(lot_max_qty if lot_max_qty is not None else max_qty)
         self.limit_min_notional = Decimal(
@@ -648,9 +773,15 @@ class SymbolFilters:
         )
         self.min_price = Decimal(min_price)
         self.max_price = Decimal(max_price)
-        self.order_types = set(order_types or {
-            "MARKET", "STOP_LOSS", "STOP_LOSS_LIMIT", "TAKE_PROFIT_LIMIT",
-        })
+        self.order_types = set(
+            order_types
+            or {
+                "MARKET",
+                "STOP_LOSS",
+                "STOP_LOSS_LIMIT",
+                "TAKE_PROFIT_LIMIT",
+            }
+        )
         self.permission_sets = tuple(permission_sets or ())
         self.permission_metadata_verified = bool(
             permission_metadata_verified and self.permission_sets
@@ -672,11 +803,13 @@ class SymbolFilters:
     def _common_step(first: Decimal, second: Decimal) -> Decimal:
         values = [value for value in (first, second) if value > 0]
         if not values:
-            raise ValueError("LOT_SIZE dan MARKET_LOT_SIZE tidak memiliki stepSize aktif")
+            raise ValueError(
+                "LOT_SIZE dan MARKET_LOT_SIZE tidak memiliki stepSize aktif"
+            )
         if len(values) == 1:
             return values[0]
         places = max(0, *(-value.as_tuple().exponent for value in values))
-        scale = 10 ** places
+        scale = 10**places
         integers = [int(value * scale) for value in values]
         common = math.lcm(*integers)
         return Decimal(common) / Decimal(scale)
@@ -692,7 +825,8 @@ class SymbolFilters:
 
         by_type = {
             str(item.get("filterType")): item
-            for item in raw_filters if isinstance(item, dict) and item.get("filterType")
+            for item in raw_filters
+            if isinstance(item, dict) and item.get("filterType")
         }
         lot = by_type.get("LOT_SIZE")
         price_filter = by_type.get("PRICE_FILTER")
@@ -749,11 +883,17 @@ class SymbolFilters:
                         market_max_values.append(maximum)
 
         if not limit_min_values:
-            raise ValueError(f"MIN_NOTIONAL/NOTIONAL minimum tidak tersedia untuk {symbol}")
+            raise ValueError(
+                f"MIN_NOTIONAL/NOTIONAL minimum tidak tersedia untuk {symbol}"
+            )
         limit_min = max(limit_min_values)
-        market_min_notional = max(market_min_values) if market_min_values else Decimal("0")
+        market_min_notional = (
+            max(market_min_values) if market_min_values else Decimal("0")
+        )
         limit_max = min(limit_max_values) if limit_max_values else Decimal("0")
-        market_max_notional = min(market_max_values) if market_max_values else Decimal("0")
+        market_max_notional = (
+            min(market_max_values) if market_max_values else Decimal("0")
+        )
 
         quote_allowed = sym_data.get("quoteOrderQtyMarketAllowed")
         if not isinstance(quote_allowed, bool):
@@ -773,7 +913,8 @@ class SymbolFilters:
         if raw_quote_precision is None:
             raw_quote_precision = sym_data.get("quotePrecision")
         quote_precision = _quote_precision_places(
-            raw_quote_precision if raw_quote_precision is not None
+            raw_quote_precision
+            if raw_quote_precision is not None
             else QUOTE_PRECISION_DEFAULT
         )
 

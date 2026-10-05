@@ -3,7 +3,11 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from trading.clients.binance_client import SymbolFilters, build_filters_cache, SignedEndpointBlockedError
+from trading.clients.binance_client import (
+    SymbolFilters,
+    build_filters_cache,
+    SignedEndpointBlockedError,
+)
 from trading.clients.exchange_client import ExchangeClient
 from market.market_data import MarketDataProvider
 from trading.paper.paper_engine import PaperMatchingEngine
@@ -20,7 +24,9 @@ class PaperClient(ExchangeClient):
         self.quote_asset = str(config.get("QUOTE_ASSET", "USDT")).upper()
 
         self.market = MarketDataProvider(config)
-        state_file = config.get("PAPER_ACCOUNT_STATE_FILE", "data/pump_paper_account_paper.json")
+        state_file = config.get(
+            "PAPER_ACCOUNT_STATE_FILE", "data/pump_paper_account_paper.json"
+        )
         self.store = PaperStore(state_file, config.get("PAPER_INITIAL_BALANCES"))
 
         self._filters_cache: dict[str, SymbolFilters] = {}
@@ -33,18 +39,23 @@ class PaperClient(ExchangeClient):
             price_provider=self.market.get_price,
             quote_asset=self.quote_asset,
         )
-        logger.info("PaperClient siap. State=%s | saldo awal=%s | fee taker=%s%%%s",
-                    state_file, config.get("PAPER_INITIAL_BALANCES"),
-                    config.get("TAKER_FEE_PCT"),
-                    " (diskon BNB aktif)" if config.get("USE_BNB_FEE_DISCOUNT") else "")
+        logger.info(
+            "PaperClient siap. State=%s | saldo awal=%s | fee taker=%s%%%s",
+            state_file,
+            config.get("PAPER_INITIAL_BALANCES"),
+            config.get("TAKER_FEE_PCT"),
+            " (diskon BNB aktif)" if config.get("USE_BNB_FEE_DISCOUNT") else "",
+        )
 
     def _ensure_filters(self, force: bool = False) -> None:
         if self._filters_cache and not force:
             return
         info = self.market.get_exchange_info(force=force)
         self._filters_cache = build_filters_cache(info)
-        logger.info("Filter simbol PAPER dimuat/diperbarui (%d simbol).",
-                    len(self._filters_cache))
+        logger.info(
+            "Filter simbol PAPER dimuat/diperbarui (%d simbol).",
+            len(self._filters_cache),
+        )
 
     def _get_filters(self, symbol: str) -> Optional[SymbolFilters]:
         s = symbol.upper()
@@ -73,20 +84,36 @@ class PaperClient(ExchangeClient):
     def get_exchange_info(self, symbol: Optional[str] = None) -> dict:
         return self.market.get_exchange_info(symbol=symbol)
 
-    def get_klines(self, symbol: str, interval: str, limit: int = 500,
-                   start_time_ms: Optional[int] = None,
-                   end_time_ms: Optional[int] = None) -> list:
-        return self.market.get_klines(symbol, interval, limit, start_time_ms, end_time_ms)
+    def get_klines(
+        self,
+        symbol: str,
+        interval: str,
+        limit: int = 500,
+        start_time_ms: Optional[int] = None,
+        end_time_ms: Optional[int] = None,
+    ) -> list:
+        return self.market.get_klines(
+            symbol, interval, limit, start_time_ms, end_time_ms
+        )
 
     def get_ticker_24hr_all(self) -> list:
         return self.market.get_ticker_24hr_all()
 
-    def get_klines_many(self, symbols, interval: str, limit: int = 500,
-                        end_time_ms: Optional[int] = None,
-                        max_workers: Optional[int] = None) -> dict:
-        return self.market.get_klines_many(symbols, interval, limit=limit,
-                                           end_time_ms=end_time_ms,
-                                           max_workers=max_workers)
+    def get_klines_many(
+        self,
+        symbols,
+        interval: str,
+        limit: int = 500,
+        end_time_ms: Optional[int] = None,
+        max_workers: Optional[int] = None,
+    ) -> dict:
+        return self.market.get_klines_many(
+            symbols,
+            interval,
+            limit=limit,
+            end_time_ms=end_time_ms,
+            max_workers=max_workers,
+        )
 
     def prewarm_book_ticker(self, symbols) -> None:
         return self.market.prewarm_book_ticker(symbols)
@@ -107,33 +134,52 @@ class PaperClient(ExchangeClient):
             logger.debug("process_open_orders saat get_account: %s", exc)
         return self.store.account_snapshot()
 
-    def new_market_order(self, symbol: str, side: str,
-                         quantity: Optional[float] = None,
-                         quote_order_qty: Optional[float] = None,
-                         new_client_order_id: Optional[str] = None,
-                         quote_precision: Optional[int] = None) -> dict:
+    def new_market_order(
+        self,
+        symbol: str,
+        side: str,
+        quantity: Optional[float] = None,
+        quote_order_qty: Optional[float] = None,
+        new_client_order_id: Optional[str] = None,
+        quote_precision: Optional[int] = None,
+    ) -> dict:
         # quote_precision hanya relevan untuk bursa nyata; mesin paper memakai
         # nominal apa adanya supaya perilakunya tetap sama dengan sebelumnya.
         order = self.engine.place_order(
-            symbol=symbol, side=side, order_type="MARKET",
-            quantity=quantity, quote_order_qty=quote_order_qty,
+            symbol=symbol,
+            side=side,
+            order_type="MARKET",
+            quantity=quantity,
+            quote_order_qty=quote_order_qty,
             client_order_id=new_client_order_id,
         )
         return self._public_order(order)
 
-    def get_order(self, symbol: str, order_id: Optional[int] = None,
-                  orig_client_order_id: Optional[str] = None) -> dict:
+    def get_order(
+        self,
+        symbol: str,
+        order_id: Optional[int] = None,
+        orig_client_order_id: Optional[str] = None,
+    ) -> dict:
         self.engine.process_open_orders()
-        o = self.store.find_order(order_id=order_id, orig_client_order_id=orig_client_order_id)
+        o = self.store.find_order(
+            order_id=order_id, orig_client_order_id=orig_client_order_id
+        )
         if o is None:
             from trading.clients.binance_client import BinanceAPIError
+
             raise BinanceAPIError(400, -2013, "Order does not exist.")
         return self._public_order(o)
 
-    def cancel_order(self, symbol: str, order_id: Optional[int] = None,
-                     orig_client_order_id: Optional[str] = None) -> dict:
-        o = self.engine.cancel_order(symbol, order_id=order_id,
-                                     orig_client_order_id=orig_client_order_id)
+    def cancel_order(
+        self,
+        symbol: str,
+        order_id: Optional[int] = None,
+        orig_client_order_id: Optional[str] = None,
+    ) -> dict:
+        o = self.engine.cancel_order(
+            symbol, order_id=order_id, orig_client_order_id=orig_client_order_id
+        )
         return self._public_order(o)
 
     def get_open_orders(self, symbol: Optional[str] = None) -> list:
@@ -143,12 +189,14 @@ class PaperClient(ExchangeClient):
     def get_dust_convertible(self, account_type: str = "SPOT") -> dict:
         raise SignedEndpointBlockedError(
             "get_dust_convertible (POST /sapi/v1/asset/dust-btc) diblokir di mode PAPER: "
-            "endpoint bertanda tangan tidak boleh dipanggil.")
+            "endpoint bertanda tangan tidak boleh dipanggil."
+        )
 
     def convert_dust(self, assets: list, account_type: str = "SPOT") -> dict:
         raise SignedEndpointBlockedError(
             "convert_dust (POST /sapi/v1/asset/dust) diblokir di mode PAPER: "
-            "endpoint bertanda tangan tidak boleh dipanggil.")
+            "endpoint bertanda tangan tidak boleh dipanggil."
+        )
 
     @staticmethod
     def _public_order(order: dict) -> dict:

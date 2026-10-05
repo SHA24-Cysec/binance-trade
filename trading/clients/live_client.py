@@ -24,10 +24,15 @@ class LiveClient(ExchangeClient):
         api_key = config.get("API_KEY", "")
         api_secret = config.get("API_SECRET", "")
         self.signed = BinanceSpotClient(
-            api_key, api_secret, get_base_url(config), allow_signed=True,
+            api_key,
+            api_secret,
+            get_base_url(config),
+            allow_signed=True,
             rate_limit_state_file=config.get("RATE_LIMIT_STATE_FILE"),
             rate_limit_limit=int(config.get("RATE_LIMIT_WEIGHT_LIMIT", 6000) or 6000),
-            rate_limit_safety_margin=int(config.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100),
+            rate_limit_safety_margin=int(
+                config.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100
+            ),
         )
         self.market = MarketDataProvider(config)
         self._spot_permission_verified_until = 0.0
@@ -48,20 +53,36 @@ class LiveClient(ExchangeClient):
     def get_exchange_info(self, symbol: Optional[str] = None) -> dict:
         return self.market.get_exchange_info(symbol=symbol)
 
-    def get_klines(self, symbol: str, interval: str, limit: int = 500,
-                   start_time_ms: Optional[int] = None,
-                   end_time_ms: Optional[int] = None) -> list:
-        return self.market.get_klines(symbol, interval, limit, start_time_ms, end_time_ms)
+    def get_klines(
+        self,
+        symbol: str,
+        interval: str,
+        limit: int = 500,
+        start_time_ms: Optional[int] = None,
+        end_time_ms: Optional[int] = None,
+    ) -> list:
+        return self.market.get_klines(
+            symbol, interval, limit, start_time_ms, end_time_ms
+        )
 
     def get_ticker_24hr_all(self) -> list:
         return self.market.get_ticker_24hr_all()
 
-    def get_klines_many(self, symbols, interval: str, limit: int = 500,
-                        end_time_ms: Optional[int] = None,
-                        max_workers: Optional[int] = None) -> dict:
-        return self.market.get_klines_many(symbols, interval, limit=limit,
-                                           end_time_ms=end_time_ms,
-                                           max_workers=max_workers)
+    def get_klines_many(
+        self,
+        symbols,
+        interval: str,
+        limit: int = 500,
+        end_time_ms: Optional[int] = None,
+        max_workers: Optional[int] = None,
+    ) -> dict:
+        return self.market.get_klines_many(
+            symbols,
+            interval,
+            limit=limit,
+            end_time_ms=end_time_ms,
+            max_workers=max_workers,
+        )
 
     def prewarm_book_ticker(self, symbols) -> None:
         return self.market.prewarm_book_ticker(symbols)
@@ -81,16 +102,13 @@ class LiveClient(ExchangeClient):
             return
         permission = self.signed.get_api_key_permissions()
         if not isinstance(permission, dict):
-            raise BinanceAPIError(
-                502, None, "respons API-key permission bukan object"
-            )
+            raise BinanceAPIError(502, None, "respons API-key permission bukan object")
         if permission.get("enableReading") is not True:
-            raise BinanceAPIError(
-                403, None, "API key tidak memiliki izin membaca akun"
-            )
+            raise BinanceAPIError(403, None, "API key tidak memiliki izin membaca akun")
         if permission.get("enableSpotAndMarginTrading") is not True:
             raise BinanceAPIError(
-                403, None,
+                403,
+                None,
                 "API key tidak mengizinkan Spot & Margin Trading",
             )
         self._spot_permission_verified_until = now + 60.0
@@ -146,66 +164,101 @@ class LiveClient(ExchangeClient):
         )
         return verified
 
-    def new_market_order(self, symbol: str, side: str,
-                         quantity: Optional[float] = None,
-                         quote_order_qty: Optional[float] = None,
-                         new_client_order_id: Optional[str] = None,
-                         quote_precision: Optional[int] = None) -> dict:
+    def new_market_order(
+        self,
+        symbol: str,
+        side: str,
+        quantity: Optional[float] = None,
+        quote_order_qty: Optional[float] = None,
+        new_client_order_id: Optional[str] = None,
+        quote_precision: Optional[int] = None,
+    ) -> dict:
         return self.signed.new_market_order(
-            symbol, side, quantity=quantity, quote_order_qty=quote_order_qty,
+            symbol,
+            side,
+            quantity=quantity,
+            quote_order_qty=quote_order_qty,
             new_client_order_id=new_client_order_id,
             quote_precision=quote_precision,
         )
 
-    def place_native_stop_loss(self, symbol: str, quantity: float,
-                               stop_price: float,
-                               new_client_order_id: str) -> dict:
+    def place_native_stop_loss(
+        self, symbol: str, quantity: float, stop_price: float, new_client_order_id: str
+    ) -> dict:
         return self.signed.new_stop_loss_order(
-            symbol, quantity=quantity, stop_price=stop_price,
+            symbol,
+            quantity=quantity,
+            stop_price=stop_price,
             new_client_order_id=new_client_order_id,
         )
 
-    def place_native_oco(self, symbol: str, quantity: float,
-                        above_price: float, above_stop_price: float,
-                        below_price: float, below_stop_price: float,
-                        list_client_order_id: str,
-                        above_client_order_id: str,
-                        below_client_order_id: str) -> dict:
+    def place_native_oco(
+        self,
+        symbol: str,
+        quantity: float,
+        above_price: float,
+        above_stop_price: float,
+        below_price: float,
+        below_stop_price: float,
+        list_client_order_id: str,
+        above_client_order_id: str,
+        below_client_order_id: str,
+    ) -> dict:
         return self.signed.new_oco_sell_order(
-            symbol, quantity=quantity,
-            above_price=above_price, above_stop_price=above_stop_price,
-            below_price=below_price, below_stop_price=below_stop_price,
+            symbol,
+            quantity=quantity,
+            above_price=above_price,
+            above_stop_price=above_stop_price,
+            below_price=below_price,
+            below_stop_price=below_stop_price,
             list_client_order_id=list_client_order_id,
             above_client_order_id=above_client_order_id,
             below_client_order_id=below_client_order_id,
         )
 
-    def get_order_list(self, order_list_id: Optional[int] = None,
-                       list_client_order_id: Optional[str] = None) -> dict:
+    def get_order_list(
+        self,
+        order_list_id: Optional[int] = None,
+        list_client_order_id: Optional[str] = None,
+    ) -> dict:
         return self.signed.get_order_list(
             order_list_id=order_list_id,
             list_client_order_id=list_client_order_id,
         )
 
-    def cancel_order_list(self, symbol: str,
-                          order_list_id: Optional[int] = None,
-                          list_client_order_id: Optional[str] = None) -> dict:
+    def cancel_order_list(
+        self,
+        symbol: str,
+        order_list_id: Optional[int] = None,
+        list_client_order_id: Optional[str] = None,
+    ) -> dict:
         return self.signed.cancel_order_list(
-            symbol, order_list_id=order_list_id,
+            symbol,
+            order_list_id=order_list_id,
             list_client_order_id=list_client_order_id,
         )
 
-    def get_order(self, symbol: str, order_id: Optional[int] = None,
-                  orig_client_order_id: Optional[str] = None) -> dict:
+    def get_order(
+        self,
+        symbol: str,
+        order_id: Optional[int] = None,
+        orig_client_order_id: Optional[str] = None,
+    ) -> dict:
         return self.signed.get_order(
-            symbol, order_id=order_id,
+            symbol,
+            order_id=order_id,
             orig_client_order_id=orig_client_order_id,
         )
 
-    def cancel_order(self, symbol: str, order_id: Optional[int] = None,
-                     orig_client_order_id: Optional[str] = None) -> dict:
+    def cancel_order(
+        self,
+        symbol: str,
+        order_id: Optional[int] = None,
+        orig_client_order_id: Optional[str] = None,
+    ) -> dict:
         return self.signed.cancel_order(
-            symbol, order_id=order_id,
+            symbol,
+            order_id=order_id,
             orig_client_order_id=orig_client_order_id,
         )
 

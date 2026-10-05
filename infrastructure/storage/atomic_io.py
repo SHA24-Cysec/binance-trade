@@ -73,7 +73,8 @@ def _release_lock(fd: int) -> None:
     except OSError as exc:
         logger.warning(
             "Gagal melepas lock file secara eksplisit (%s). File descriptor "
-            "tetap ditutup, sehingga lock dilepas oleh sistem operasi.", exc,
+            "tetap ditutup, sehingga lock dilepas oleh sistem operasi.",
+            exc,
         )
 
 
@@ -99,8 +100,11 @@ def timestamp_tag() -> str:
     return time.strftime("%Y%m%d-%H%M%S", time.localtime())
 
 
-def replace_with_retry(source: os.PathLike | str, target: os.PathLike | str,
-                       delays: tuple[float, ...] = _REPLACE_DELAYS) -> None:
+def replace_with_retry(
+    source: os.PathLike | str,
+    target: os.PathLike | str,
+    delays: tuple[float, ...] = _REPLACE_DELAYS,
+) -> None:
     src = os.fspath(source)
     dst = os.fspath(target)
     last: BaseException | None = None
@@ -121,7 +125,9 @@ def replace_with_retry(source: os.PathLike | str, target: os.PathLike | str,
     raise last
 
 
-def atomic_write_text(path: os.PathLike | str, text: str, *, mode: int | None = None) -> None:
+def atomic_write_text(
+    path: os.PathLike | str, text: str, *, mode: int | None = None
+) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(f".{target.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}")
@@ -147,7 +153,9 @@ def atomic_write_text(path: os.PathLike | str, text: str, *, mode: int | None = 
             pass
 
 
-def atomic_write_json(path: os.PathLike | str, data: Any, *, mode: int | None = None) -> None:
+def atomic_write_json(
+    path: os.PathLike | str, data: Any, *, mode: int | None = None
+) -> None:
     text = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=False) + "\n"
     atomic_write_text(path, text, mode=mode)
 

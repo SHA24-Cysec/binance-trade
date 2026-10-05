@@ -17,6 +17,7 @@ def _safe_console() -> None:
 def main() -> int:
     _safe_console()
     from web.dashboard import main as dashboard_main
+
     return dashboard_main(auto_start_bot=False)
 
 

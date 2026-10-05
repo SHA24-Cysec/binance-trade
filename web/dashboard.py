@@ -21,8 +21,16 @@ from flask import Flask, jsonify, render_template, request
 from infrastructure.paths import PROJECT_ROOT
 
 from config.config import (
-    PUMP_CONFIG, CONFIG_LOAD_ERRORS, get_mode, get_mode_source, get_base_url,
-    is_paper, backtest_enabled, get_state_file, get_log_file, get_control_file,
+    PUMP_CONFIG,
+    CONFIG_LOAD_ERRORS,
+    get_mode,
+    get_mode_source,
+    get_base_url,
+    is_paper,
+    backtest_enabled,
+    get_state_file,
+    get_log_file,
+    get_control_file,
     detector_enabled,
 )
 from infrastructure.storage import state as state_mod
@@ -32,6 +40,7 @@ from infrastructure.process.runtime_control import BotControlError, BotProcessMa
 
 try:
     from trading.clients.binance_client import BinanceSpotClient
+
     _HAS_CLIENT = True
 except Exception:
     _HAS_CLIENT = False
@@ -43,13 +52,21 @@ class _PaperDashboardClient:
 
     def __init__(self) -> None:
         self._market = BinanceSpotClient(
-            "", "", get_base_url(PUMP_CONFIG), allow_signed=False,
+            "",
+            "",
+            get_base_url(PUMP_CONFIG),
+            allow_signed=False,
             rate_limit_state_file=PUMP_CONFIG.get("RATE_LIMIT_STATE_FILE"),
-            rate_limit_limit=int(PUMP_CONFIG.get("RATE_LIMIT_WEIGHT_LIMIT", 6000) or 6000),
-            rate_limit_safety_margin=int(PUMP_CONFIG.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100),
+            rate_limit_limit=int(
+                PUMP_CONFIG.get("RATE_LIMIT_WEIGHT_LIMIT", 6000) or 6000
+            ),
+            rate_limit_safety_margin=int(
+                PUMP_CONFIG.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100
+            ),
         )
-        self._account_file = PUMP_CONFIG.get("PAPER_ACCOUNT_STATE_FILE",
-                                             "data/pump_paper_account_paper.json")
+        self._account_file = PUMP_CONFIG.get(
+            "PAPER_ACCOUNT_STATE_FILE", "data/pump_paper_account_paper.json"
+        )
 
     def get_price(self, symbol, max_retries: int = 3):
         return self._market.get_price(symbol, max_retries=max_retries)
@@ -57,10 +74,16 @@ class _PaperDashboardClient:
     def get_ticker_24hr_all(self):
         return self._market.get_ticker_24hr_all()
 
-    def get_klines(self, symbol, interval, limit=500, start_time_ms=None, end_time_ms=None):
-        return self._market.get_klines(symbol, interval, limit=limit,
-                                       start_time_ms=start_time_ms,
-                                       end_time_ms=end_time_ms)
+    def get_klines(
+        self, symbol, interval, limit=500, start_time_ms=None, end_time_ms=None
+    ):
+        return self._market.get_klines(
+            symbol,
+            interval,
+            limit=limit,
+            start_time_ms=start_time_ms,
+            end_time_ms=end_time_ms,
+        )
 
     def get_depth(self, symbol, limit=100):
         return self._market.get_depth(symbol, limit=limit)
@@ -68,12 +91,11 @@ class _PaperDashboardClient:
     def is_rate_limited(self):
         return self._market.is_rate_limited()
 
-    def weight_headroom(self, limit=None):
-        return self._market.weight_headroom(limit)
-
     def get_account(self):
         from trading.paper.paper_store import load_account_snapshot
+
         return load_account_snapshot(self._account_file)
+
 
 from backtesting import backtest as bt
 from backtesting import grid_search as gs
@@ -139,7 +161,10 @@ def _request_origin_is_local() -> bool:
         parsed = urlsplit(source)
     except ValueError:
         return False
-    return parsed.scheme in ("http", "https") and parsed.netloc.lower() == request.host.lower()
+    return (
+        parsed.scheme in ("http", "https")
+        and parsed.netloc.lower() == request.host.lower()
+    )
 
 
 def _remote_is_loopback() -> bool:
@@ -167,20 +192,37 @@ def _security_gate():
 
     if request.method in ("POST", "PUT", "PATCH", "DELETE"):
         if not _bind_is_loopback():
-            return jsonify({
-                "error": "Dashboard terikat ke alamat non-loopback. Semua kontrol tulis dinonaktifkan."
-            }), 403
+            return (
+                jsonify(
+                    {
+                        "error": "Dashboard terikat ke alamat non-loopback. Semua kontrol tulis dinonaktifkan."
+                    }
+                ),
+                403,
+            )
         if not _remote_is_loopback():
-            return jsonify({"error": "Request kontrol harus berasal dari alamat loopback."}), 403
+            return (
+                jsonify(
+                    {"error": "Request kontrol harus berasal dari alamat loopback."}
+                ),
+                403,
+            )
         if not _request_origin_is_local():
             return jsonify({"error": "Origin atau Referer tidak valid."}), 403
         now = time.monotonic()
         rate_key = request.remote_addr or "test-client"
         with _rate_lock:
-            recent = [item for item in _write_attempts.get(rate_key, []) if now - item < 60.0]
+            recent = [
+                item for item in _write_attempts.get(rate_key, []) if now - item < 60.0
+            ]
             if len(recent) >= 120:
                 _write_attempts[rate_key] = recent
-                return jsonify({"error": "Terlalu banyak request tulis. Coba lagi sebentar."}), 429
+                return (
+                    jsonify(
+                        {"error": "Terlalu banyak request tulis. Coba lagi sebentar."}
+                    ),
+                    429,
+                )
             recent.append(now)
             _write_attempts[rate_key] = recent
         supplied = request.headers.get("X-Admin-Token", "")
@@ -213,10 +255,18 @@ def _make_confirmation(kind: str, payload: dict, ttl: float = 180.0) -> str:
     token = secrets.token_urlsafe(24)
     now = time.time()
     with _confirm_lock:
-        stale = [key for key, value in _confirmations.items() if value.get("expires", 0) < now]
+        stale = [
+            key
+            for key, value in _confirmations.items()
+            if value.get("expires", 0) < now
+        ]
         for key in stale:
             _confirmations.pop(key, None)
-        _confirmations[token] = {"kind": kind, "payload": deepcopy(payload), "expires": now + ttl}
+        _confirmations[token] = {
+            "kind": kind,
+            "payload": deepcopy(payload),
+            "expires": now + ttl,
+        }
     return token
 
 
@@ -250,8 +300,9 @@ def _update_control_operation(operation_id: str, **updates) -> bool:
         return True
 
 
-def _run_control_operation(operation_id: str, action: str,
-                           position_policy: str) -> None:
+def _run_control_operation(
+    operation_id: str, action: str, position_policy: str
+) -> None:
     _update_control_operation(
         operation_id,
         status="RUNNING",
@@ -305,8 +356,12 @@ def get_client():
                         PUMP_CONFIG.get("API_SECRET", ""),
                         get_base_url(PUMP_CONFIG),
                         rate_limit_state_file=PUMP_CONFIG.get("RATE_LIMIT_STATE_FILE"),
-                        rate_limit_limit=int(PUMP_CONFIG.get("RATE_LIMIT_WEIGHT_LIMIT", 6000) or 6000),
-                        rate_limit_safety_margin=int(PUMP_CONFIG.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100),
+                        rate_limit_limit=int(
+                            PUMP_CONFIG.get("RATE_LIMIT_WEIGHT_LIMIT", 6000) or 6000
+                        ),
+                        rate_limit_safety_margin=int(
+                            PUMP_CONFIG.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100
+                        ),
                     )
             except Exception:
                 _client = None
@@ -419,19 +474,25 @@ def parse_log(max_lines: int = 4000):
         if m:
             d = m.groupdict()
             t = dict(open_pos or {})
-            t.update({
-                "symbol": d["sym"],
-                "sell_time": d["ts"],
-                "sell_price": float(d["price"]),
-                "entry": float(d["entry"]),
-                "pnl": float(d["pnl"]),
-                "reason": d["reason"],
-                "paper": is_paper(PUMP_CONFIG),
-            })
+            t.update(
+                {
+                    "symbol": d["sym"],
+                    "sell_time": d["ts"],
+                    "sell_price": float(d["price"]),
+                    "entry": float(d["entry"]),
+                    "pnl": float(d["pnl"]),
+                    "reason": d["reason"],
+                    "paper": is_paper(PUMP_CONFIG),
+                }
+            )
             if "buy_price" not in t:
                 t["buy_price"] = float(d["entry"])
             t.setdefault("qty", float(d["qty"]))
-            t["pnl_pct"] = (t["sell_price"] / t["buy_price"] - 1.0) * 100.0 if t.get("buy_price") else 0.0
+            t["pnl_pct"] = (
+                (t["sell_price"] / t["buy_price"] - 1.0) * 100.0
+                if t.get("buy_price")
+                else 0.0
+            )
             trades.append(t)
             open_pos = None
             continue
@@ -524,14 +585,19 @@ def build_status():
         "config": {
             "sl_pct": (
                 (state.get("sl_pct") or PUMP_CONFIG.get("SL_PCT"))
-                if PUMP_CONFIG.get("USE_STOP_LOSS") else None
+                if PUMP_CONFIG.get("USE_STOP_LOSS")
+                else None
             ),
             "tp_pct": state.get("tp_pct") or PUMP_CONFIG.get("TP_PCT"),
             "exit_source": state.get("exit_source") or "FIXED",
-            "be_trigger_pct": state.get("be_trigger_pct") or PUMP_CONFIG.get("BE_TRIGGER_PCT"),
-            "trail_start_pct": state.get("trail_start_pct") or PUMP_CONFIG.get("TRAILING_START_PCT"),
-            "trail_step_pct": state.get("trail_step_pct") or PUMP_CONFIG.get("TRAILING_STEP_PCT"),
-            "trailing_start_pct": state.get("trail_start_pct") or PUMP_CONFIG.get("TRAILING_START_PCT"),
+            "be_trigger_pct": state.get("be_trigger_pct")
+            or PUMP_CONFIG.get("BE_TRIGGER_PCT"),
+            "trail_start_pct": state.get("trail_start_pct")
+            or PUMP_CONFIG.get("TRAILING_START_PCT"),
+            "trail_step_pct": state.get("trail_step_pct")
+            or PUMP_CONFIG.get("TRAILING_STEP_PCT"),
+            "trailing_start_pct": state.get("trail_start_pct")
+            or PUMP_CONFIG.get("TRAILING_START_PCT"),
             "use_atr_exit": bool(PUMP_CONFIG.get("USE_ATR_EXIT")),
             "atr_mult_sl": PUMP_CONFIG.get("ATR_MULT_SL"),
             "atr_mult_tp": PUMP_CONFIG.get("ATR_MULT_TP"),
@@ -566,21 +632,41 @@ def build_trade_summary(trades):
 def _reject_if_backtest_disabled():
     if backtest_enabled(PUMP_CONFIG):
         return None
-    return jsonify({
-        "error": "Fitur backtest dinonaktifkan saat mode LIVE. "
-                 "Untuk mengaktifkannya, set SHOW_BACKTEST_IN_LIVE=True di config.py "
-                 "lalu jalankan ulang dashboard.",
-        "backtest_disabled": True,
-    }), 403
+    return (
+        jsonify(
+            {
+                "error": "Fitur backtest dinonaktifkan saat mode LIVE. "
+                "Untuk mengaktifkannya, set SHOW_BACKTEST_IN_LIVE=True di config.py "
+                "lalu jalankan ulang dashboard.",
+                "backtest_disabled": True,
+            }
+        ),
+        403,
+    )
 
 
 BT_PARAM_KEYS = (
-    "USE_ATR_EXIT", "ATR_PERIOD", "ATR_MULT_SL", "ATR_MULT_TP",
-    "ATR_MULT_BE_TRIGGER", "ATR_MULT_BE_LOCK", "ATR_MULT_TRAIL_START",
-    "ATR_MULT_TRAIL", "SL_PCT", "TP_PCT", "BE_TRIGGER_PCT", "BE_LOCK_PCT",
-    "TRAILING_START_PCT", "TRAILING_STEP_PCT",
-    "TREND_FILTER_ENABLED", "TREND_INTERVAL", "TREND_EMA_FAST", "TREND_EMA_SLOW",
-    "TREND_ADX_PERIOD", "TREND_ADX_MIN", "TREND_LOOKBACK_BARS",
+    "USE_ATR_EXIT",
+    "ATR_PERIOD",
+    "ATR_MULT_SL",
+    "ATR_MULT_TP",
+    "ATR_MULT_BE_TRIGGER",
+    "ATR_MULT_BE_LOCK",
+    "ATR_MULT_TRAIL_START",
+    "ATR_MULT_TRAIL",
+    "SL_PCT",
+    "TP_PCT",
+    "BE_TRIGGER_PCT",
+    "BE_LOCK_PCT",
+    "TRAILING_START_PCT",
+    "TRAILING_STEP_PCT",
+    "TREND_FILTER_ENABLED",
+    "TREND_INTERVAL",
+    "TREND_EMA_FAST",
+    "TREND_EMA_SLOW",
+    "TREND_ADX_PERIOD",
+    "TREND_ADX_MIN",
+    "TREND_LOOKBACK_BARS",
 )
 
 # Grid parameter SENGAJA hanya berisi parameter exit: sinyal entry (konfirmasi 5m
@@ -588,8 +674,9 @@ BT_PARAM_KEYS = (
 # parameter entry di dalam grid tidak akan mengubah hasil apa pun selain
 # menyesatkan. Untuk membandingkan setelan trend, jalankan backtest portofolio
 # biasa dengan nilai TREND_* yang berbeda.
-GRID_PARAM_KEYS = tuple(k for k in BT_PARAM_KEYS
-                        if k != "USE_ATR_EXIT" and not k.startswith("TREND_"))
+GRID_PARAM_KEYS = tuple(
+    k for k in BT_PARAM_KEYS if k != "USE_ATR_EXIT" and not k.startswith("TREND_")
+)
 
 _bt_jobs: dict = {}
 _bt_jobs_lock = threading.Lock()
@@ -599,7 +686,11 @@ BT_JOB_TTL_SECONDS = 3600
 def _bt_cleanup_old_jobs():
     now = time.time()
     with _bt_jobs_lock:
-        stale = [jid for jid, j in _bt_jobs.items() if now - j.get("created_at", now) > BT_JOB_TTL_SECONDS]
+        stale = [
+            jid
+            for jid, j in _bt_jobs.items()
+            if now - j.get("created_at", now) > BT_JOB_TTL_SECONDS
+        ]
         for jid in stale:
             _bt_jobs.pop(jid, None)
 
@@ -618,22 +709,29 @@ def _bt_estimate_requests(days: int, max_symbols: int, cfg: dict) -> int:
 def _bt_trend_warmup_note(cfg: dict, interval: str) -> str:
     """Kalimat keterangan berapa lama rentang yang habis untuk pemanasan trend."""
     if not bool(cfg.get("TREND_FILTER_ENABLED", False)):
-        return ("Gerbang trend sedang NONAKTIF, jadi candle trend tidak diambil dan tidak ada "
-                "sinyal yang disaring di atas.")
+        return (
+            "Gerbang trend sedang NONAKTIF, jadi candle trend tidak diambil dan tidak ada "
+            "sinyal yang disaring di atas."
+        )
     try:
         hari = pbt.parity.trend_warmup_ms(cfg, interval) / float(bt.MS_PER_DAY)
     except ValueError:
-        return ("Gerbang trend aktif, tetapi interval trend tidak sepadan dengan interval "
-                "simulasi sehingga backtest ini akan menolak berjalan.")
-    return (f"Gerbang trend aktif: pemanasan gerbang ini memakai sekitar {hari:.1f} hari pertama "
-            f"dari rentang yang diunduh pada interval {interval}, sehingga rentang yang benar-benar "
-            "diperdagangkan dimulai setelah pemanasan itu. Pakai rentang hari yang lebih panjang "
-            "(misalnya 14 hari ke atas) supaya jumlah trade tidak terlalu tipis, dan bandingkan "
-            "penghitung sinyal yang disaring gerbang trend pada ringkasan di atas.")
+        return (
+            "Gerbang trend aktif, tetapi interval trend tidak sepadan dengan interval "
+            "simulasi sehingga backtest ini akan menolak berjalan."
+        )
+    return (
+        f"Gerbang trend aktif: pemanasan gerbang ini memakai sekitar {hari:.1f} hari pertama "
+        f"dari rentang yang diunduh pada interval {interval}, sehingga rentang yang benar-benar "
+        "diperdagangkan dimulai setelah pemanasan itu. Pakai rentang hari yang lebih panjang "
+        "(misalnya 14 hari ke atas) supaya jumlah trade tidak terlalu tipis, dan bandingkan "
+        "penghitung sinyal yang disaring gerbang trend pada ringkasan di atas."
+    )
 
 
-def _bt_prepare_universe(job_id: str, cfg: dict, days: int, max_symbols: int,
-                         set_progress, cancelled) -> dict:
+def _bt_prepare_universe(
+    job_id: str, cfg: dict, days: int, max_symbols: int, set_progress, cancelled
+) -> dict:
     interval = _bt_simulation_interval(cfg)
     bt.bars_per_day(interval)
     bar_ms = bt.INTERVAL_MINUTES[interval] * 60_000
@@ -647,8 +745,10 @@ def _bt_prepare_universe(job_id: str, cfg: dict, days: int, max_symbols: int,
             logger.info(
                 "Warmup backtest dinaikkan dari %.1f jam menjadi %.1f jam karena "
                 "gerbang trend %s butuh %d candle trend tertutup.",
-                warmup_ms / 3_600_000.0, butuh_trend_ms / 3_600_000.0,
-                cfg.get("TREND_INTERVAL", "1h"), int(cfg.get("TREND_LOOKBACK_BARS", 120) or 120),
+                warmup_ms / 3_600_000.0,
+                butuh_trend_ms / 3_600_000.0,
+                cfg.get("TREND_INTERVAL", "1h"),
+                int(cfg.get("TREND_LOOKBACK_BARS", 120) or 120),
             )
             warmup_ms = butuh_trend_ms
 
@@ -662,10 +762,15 @@ def _bt_prepare_universe(job_id: str, cfg: dict, days: int, max_symbols: int,
             "Backtest butuh akses ke data historis publik Binance."
         )
     client = BinanceSpotClient(
-        "", "", PUMP_CONFIG["LIVE_BASE_URL"], allow_signed=False,
+        "",
+        "",
+        PUMP_CONFIG["LIVE_BASE_URL"],
+        allow_signed=False,
         rate_limit_state_file=PUMP_CONFIG.get("RATE_LIMIT_STATE_FILE"),
         rate_limit_limit=int(PUMP_CONFIG.get("RATE_LIMIT_WEIGHT_LIMIT", 6000) or 6000),
-        rate_limit_safety_margin=int(PUMP_CONFIG.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100),
+        rate_limit_safety_margin=int(
+            PUMP_CONFIG.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100
+        ),
     )
 
     set_progress(0.01, "mengambil daftar pasar...")
@@ -680,18 +785,23 @@ def _bt_prepare_universe(job_id: str, cfg: dict, days: int, max_symbols: int,
     try:
         exchange_info = client.get_exchange_info()
         tradable_now = {
-            s.get("symbol") for s in exchange_info.get("symbols", [])
-            if s.get("symbol") and s.get("status") == "TRADING"
+            s.get("symbol")
+            for s in exchange_info.get("symbols", [])
+            if s.get("symbol")
+            and s.get("status") == "TRADING"
             and s.get("isSpotTradingAllowed", True)
         }
     except Exception as exc:
-        logger.warning("Metadata status pair tidak tersedia untuk portfolio backtest: %s", exc)
+        logger.warning(
+            "Metadata status pair tidak tersedia untuk portfolio backtest: %s", exc
+        )
     if tradable_now is not None:
         cfg["_historical_tradable_symbols"] = tradable_now
         cfg["_tradable_status_is_current_snapshot"] = True
 
-    universe = pbt.select_universe(tickers, cfg, max_symbols=max_symbols,
-                                   tradable_symbols=tradable_now)
+    universe = pbt.select_universe(
+        tickers, cfg, max_symbols=max_symbols, tradable_symbols=tradable_now
+    )
     if not universe:
         raise bt.BacktestError(
             "Tidak ada simbol yang lolos saringan pasar. Periksa QUOTE_ASSET "
@@ -705,8 +815,10 @@ def _bt_prepare_universe(job_id: str, cfg: dict, days: int, max_symbols: int,
     set_progress(0.03, f"mengunduh data {len(universe)} simbol...")
 
     def dl_progress(frac, sym):
-        set_progress(0.03 + frac * 0.77,
-                     f"mengunduh {sym} ({int(frac * len(universe))}/{len(universe)})")
+        set_progress(
+            0.03 + frac * 0.77,
+            f"mengunduh {sym} ({int(frac * len(universe))}/{len(universe)})",
+        )
 
     store = None
     kline_cache = None
@@ -714,8 +826,15 @@ def _bt_prepare_universe(job_id: str, cfg: dict, days: int, max_symbols: int,
         store = pbt.new_backtest_store(cfg)
         kline_cache = pbt.open_kline_cache(cfg)
         symbols_with_data, failed = pbt.fetch_universe_klines(
-            client, universe, interval, fetch_start_ms, end_ms, store,
-            progress_cb=dl_progress, cancel_cb=cancelled, cache=kline_cache,
+            client,
+            universe,
+            interval,
+            fetch_start_ms,
+            end_ms,
+            store,
+            progress_cb=dl_progress,
+            cancel_cb=cancelled,
+            cache=kline_cache,
         )
         if not symbols_with_data:
             raise bt.BacktestError(
@@ -730,7 +849,8 @@ def _bt_prepare_universe(job_id: str, cfg: dict, days: int, max_symbols: int,
             set_progress(0.82, f"mengunduh {btc_symbol} untuk filter BTC...")
             try:
                 btc_klines = pbt._klines_untuk_simbol(
-                    client, btc_symbol, interval, fetch_start_ms, end_ms, kline_cache)
+                    client, btc_symbol, interval, fetch_start_ms, end_ms, kline_cache
+                )
                 if not btc_klines:
                     btc_klines = None
                     btc_error = f"candle {btc_symbol} kosong"
@@ -781,7 +901,8 @@ def _bt_days_guard(cfg: dict, days: int) -> None:
     if int(days) < minimal:
         raise bt.BacktestError(
             f"Jumlah hari minimal {minimal} untuk setelan ini, sedangkan yang diminta "
-            f"{int(days)} hari. {catatan}".strip())
+            f"{int(days)} hari. {catatan}".strip()
+        )
 
 
 def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
@@ -806,16 +927,21 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
         bt.validate_params(cfg)
         _bt_days_guard(cfg, days)
 
-        prep = _bt_prepare_universe(job_id, cfg, days, max_symbols,
-                                    set_progress, cancelled)
+        prep = _bt_prepare_universe(
+            job_id, cfg, days, max_symbols, set_progress, cancelled
+        )
         store = prep["store"]
         kline_cache = prep["kline_cache"]
 
         set_progress(0.82, "menjalankan simulasi portofolio...")
         result = pbt.run_portfolio_backtest(
-            store, cfg, prep["interval"], warmup_ms=prep["warmup_ms"],
-            progress_cb=lambda f: set_progress(0.82 + f * 0.17,
-                                               "menjalankan simulasi portofolio..."),
+            store,
+            cfg,
+            prep["interval"],
+            warmup_ms=prep["warmup_ms"],
+            progress_cb=lambda f: set_progress(
+                0.82 + f * 0.17, "menjalankan simulasi portofolio..."
+            ),
             cancel_cb=cancelled,
             btc_klines=prep.get("btc_klines"),
         )
@@ -824,27 +950,35 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
         def _ts(ms):
             if not ms:
                 return None
-            return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+            return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime(
+                "%Y-%m-%d %H:%M"
+            )
 
-        trades_out = [{
-            "symbol": t.symbol,
-            "entry_time": _ts(t.entry_time),
-            "exit_time": _ts(t.exit_time),
-            "entry_price": t.entry_price,
-            "exit_price": t.exit_price,
-            "reason": t.reason,
-            "hold_minutes": t.hold_minutes,
-            "pnl_pct": t.pnl_pct,
-            "rank_at_entry": t.rank_at_entry,
-            "pct24h_at_entry": t.pct24h_at_entry,
-        } for t in result.trades]
+        trades_out = [
+            {
+                "symbol": t.symbol,
+                "entry_time": _ts(t.entry_time),
+                "exit_time": _ts(t.exit_time),
+                "entry_price": t.entry_price,
+                "exit_price": t.exit_price,
+                "reason": t.reason,
+                "hold_minutes": t.hold_minutes,
+                "pnl_pct": t.pnl_pct,
+                "rank_at_entry": t.rank_at_entry,
+                "pct24h_at_entry": t.pct24h_at_entry,
+            }
+            for t in result.trades
+        ]
 
-        skipped_out = [{
-            "time": _ts(s.time),
-            "symbol": s.symbol,
-            "reason": s.reason,
-            "holding": s.holding,
-        } for s in result.skipped[:200]]
+        skipped_out = [
+            {
+                "time": _ts(s.time),
+                "symbol": s.symbol,
+                "reason": s.reason,
+                "holding": s.holding,
+            }
+            for s in result.skipped[:200]
+        ]
 
         payload = {
             "mode": "portfolio",
@@ -857,8 +991,12 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
             "symbols_failed_count": len(prep["failed"]),
             "cache": (kline_cache.stats() if kline_cache is not None else None),
             "bars_total": result.bars_total,
-            "start_time": (_ts(result.start_time) or "") + " UTC" if result.start_time else None,
-            "end_time": (_ts(result.end_time) or "") + " UTC" if result.end_time else None,
+            "start_time": (
+                (_ts(result.start_time) or "") + " UTC" if result.start_time else None
+            ),
+            "end_time": (
+                (_ts(result.end_time) or "") + " UTC" if result.end_time else None
+            ),
             "params_used": {k: cfg.get(k) for k in BT_PARAM_KEYS},
             "summary": summary,
             # Setelan gerbang trend yang BENAR-BENAR dipakai simulasi ini, supaya
@@ -876,12 +1014,21 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
             },
             "trades": trades_out,
             "skipped": skipped_out,
-            "warnings": (list(result.warnings) + (
-                [f"Data BTC gagal diunduh ({prep.get('btc_error')}) sehingga filter BTC "
-                 "tidak diterapkan."]
-                if (cfg.get("BTC_FILTER_ENABLED", False) and prep.get("btc_klines") is None
-                    and not any("BTC" in w for w in result.warnings))
-                else [])),
+            "warnings": (
+                list(result.warnings)
+                + (
+                    [
+                        f"Data BTC gagal diunduh ({prep.get('btc_error')}) sehingga filter BTC "
+                        "tidak diterapkan."
+                    ]
+                    if (
+                        cfg.get("BTC_FILTER_ENABLED", False)
+                        and prep.get("btc_klines") is None
+                        and not any("BTC" in w for w in result.warnings)
+                    )
+                    else []
+                )
+            ),
             "limitations": [
                 "SURVIVORSHIP BIAS, dan ini tidak bisa diperbaiki: Binance hanya menyediakan "
                 "data historis untuk pair yang MASIH listing hari ini. Koin yang sudah "
@@ -895,8 +1042,11 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "SL/TP/BE/Trailing diisi pada harga pembukaan candle itu, konsisten dengan "
                 "simulasi PAPER, bukan pada harga levelnya. Candle tempat posisi dibuka "
                 "(termasuk candle entry saat ada jeda eksekusi) juga ikut dievaluasi.",
-                "Exit dievaluasi per-candle " + prep["interval"] + " (bukan tiap "
-                + str(PUMP_CONFIG.get("LOOP_INTERVAL_SECONDS", 15)) + " detik seperti bot asli). "
+                "Exit dievaluasi per-candle "
+                + prep["interval"]
+                + " (bukan tiap "
+                + str(PUMP_CONFIG.get("LOOP_INTERVAL_SECONDS", 15))
+                + " detik seperti bot asli). "
                 "Urutan konservatif: stop BE/trailing yang sudah aktif dari candle sebelumnya, "
                 "lalu STOP_LOSS, TAKE_PROFIT, dan BE/trailing yang baru aktif di candle yang "
                 "sama. Stop Loss dianggap kena lebih dulu kalau ambigu dalam satu candle.",
@@ -911,17 +1061,20 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "memakai aturan yang sama dengan bot live: TREND_LOOKBACK_BARS candle trend "
                 "terakhir yang sudah tutup pada saat candle sinyal ditutup, lalu close > EMA cepat, "
                 "EMA cepat > EMA lambat, dan ADX >= TREND_ADX_MIN. Candle trend di backtest "
-                "dirangkai dari candle " + prep["interval"] + " yang diunduh (nilai OHLCV-nya sama "
+                "dirangkai dari candle "
+                + prep["interval"]
+                + " yang diunduh (nilai OHLCV-nya sama "
                 "dengan candle timeframe tinggi asli Binance), jadi tidak ada unduhan tambahan. "
                 "Bedanya dengan live: candle trend yang jamnya bolong sebagian (data tidak lengkap) "
                 "dibuang, sedangkan live memakai candle asli dari bursa; dan riwayat EMA/ADX di "
                 "backtest dimulai dari awal rentang data yang diunduh, bukan riwayat penuh simbol. "
-                + _bt_trend_warmup_note(cfg, prep["interval"]) +
-                "Filter live yang SUDAH disimulasikan dari candle: filter BTC (BTC_MAX_DROP_PCT, "
+                + _bt_trend_warmup_note(cfg, prep["interval"])
+                + "Filter live yang SUDAH disimulasikan dari candle: filter BTC (BTC_MAX_DROP_PCT, "
                 "memakai candle BTC historis), MAX_CHASE_PCT, MIN_SECONDS_BETWEEN_TRADES, "
                 "COOLDOWN_MINUTES_AFTER_CLOSE, equity stop (drawdown), stop harian, dan "
                 "CLOSE_ALL_AT_LIMIT. Kontrol akun dicek saat candle ditutup, bukan tiap "
-                + str(PUMP_CONFIG.get("LOOP_INTERVAL_SECONDS", 15)) + " detik, sehingga "
+                + str(PUMP_CONFIG.get("LOOP_INTERVAL_SECONDS", 15))
+                + " detik, sehingga "
                 "penutupan paksa di bot asli bisa terjadi lebih awal dari di sini.",
                 "Filter live yang BELUM disimulasikan (butuh data yang tidak tersedia dari "
                 "candle historis): spread order book (MAX_SPREAD_PCT), filter kedalaman, "
@@ -942,10 +1095,14 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
 
         with _bt_jobs_lock:
             if job_id in _bt_jobs:
-                _bt_jobs[job_id].update({
-                    "status": "done", "progress": 1.0, "stage": "selesai",
-                    "result": _json_safe(payload),
-                })
+                _bt_jobs[job_id].update(
+                    {
+                        "status": "done",
+                        "progress": 1.0,
+                        "stage": "selesai",
+                        "result": _json_safe(payload),
+                    }
+                )
     except bt.BacktestError as exc:
         with _bt_jobs_lock:
             if job_id in _bt_jobs:
@@ -953,7 +1110,9 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
     except Exception as exc:
         with _bt_jobs_lock:
             if job_id in _bt_jobs:
-                _bt_jobs[job_id].update({"status": "error", "error": f"Error tak terduga: {exc}"})
+                _bt_jobs[job_id].update(
+                    {"status": "error", "error": f"Error tak terduga: {exc}"}
+                )
     finally:
         if store is not None:
             store.cleanup()
@@ -961,9 +1120,17 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
             kline_cache.close()
 
 
-def _bt_run_grid_job(job_id: str, days: int, max_symbols: int, spec: dict,
-                     rasio_latih: float, metrik: str, min_trades: int,
-                     total_kombinasi: int, overrides: dict | None = None):
+def _bt_run_grid_job(
+    job_id: str,
+    days: int,
+    max_symbols: int,
+    spec: dict,
+    rasio_latih: float,
+    metrik: str,
+    min_trades: int,
+    total_kombinasi: int,
+    overrides: dict | None = None,
+):
     def set_progress(frac, stage=""):
         with _bt_jobs_lock:
             if job_id in _bt_jobs:
@@ -988,19 +1155,27 @@ def _bt_run_grid_job(job_id: str, days: int, max_symbols: int, spec: dict,
         bt.validate_params(cfg)
         _bt_days_guard(cfg, days)
 
-        prep = _bt_prepare_universe(job_id, cfg, days, max_symbols,
-                                    set_progress, cancelled)
+        prep = _bt_prepare_universe(
+            job_id, cfg, days, max_symbols, set_progress, cancelled
+        )
         store = prep["store"]
         kline_cache = prep["kline_cache"]
 
         set_progress(0.30, f"menjalankan grid search ({total_kombinasi} kombinasi)...")
         hasil = gs.run_portfolio_grid_search(
-            store, cfg, prep["interval"], prep["warmup_ms"], spec,
-            metrik=metrik, rasio_latih=rasio_latih, min_trades=min_trades,
+            store,
+            cfg,
+            prep["interval"],
+            prep["warmup_ms"],
+            spec,
+            metrik=metrik,
+            rasio_latih=rasio_latih,
+            min_trades=min_trades,
             progress_cb=lambda f: set_progress(
                 0.30 + f * 0.69,
                 f"grid search {total_kombinasi} kombinasi "
-                f"({int(round(f * total_kombinasi))}/{total_kombinasi})"),
+                f"({int(round(f * total_kombinasi))}/{total_kombinasi})",
+            ),
             cancel_cb=cancelled,
             btc_klines=prep.get("btc_klines"),
         )
@@ -1031,10 +1206,16 @@ def _bt_run_grid_job(job_id: str, days: int, max_symbols: int, spec: dict,
             },
             "rows": rows,
             "warnings": (
-                [f"Filter BTC aktif tetapi data BTC gagal diunduh ({prep.get('btc_error')}); "
-                 "filter BTC TIDAK diterapkan pada grid ini."]
-                if (cfg.get("BTC_FILTER_ENABLED", False) and prep.get("btc_klines") is None)
-                else []),
+                [
+                    f"Filter BTC aktif tetapi data BTC gagal diunduh ({prep.get('btc_error')}); "
+                    "filter BTC TIDAK diterapkan pada grid ini."
+                ]
+                if (
+                    cfg.get("BTC_FILTER_ENABLED", False)
+                    and prep.get("btc_klines") is None
+                )
+                else []
+            ),
             "limitations": [
                 "Grid ini berjalan di atas simulasi PORTOFOLIO (satu posisi lintas "
                 "simbol, prioritas volume) dengan parameter exit yang sama seperti "
@@ -1082,10 +1263,14 @@ def _bt_run_grid_job(job_id: str, days: int, max_symbols: int, spec: dict,
 
         with _bt_jobs_lock:
             if job_id in _bt_jobs:
-                _bt_jobs[job_id].update({
-                    "status": "done", "progress": 1.0, "stage": "selesai",
-                    "result": _json_safe(payload),
-                })
+                _bt_jobs[job_id].update(
+                    {
+                        "status": "done",
+                        "progress": 1.0,
+                        "stage": "selesai",
+                        "result": _json_safe(payload),
+                    }
+                )
     except (bt.BacktestError, gs.GridSearchError) as exc:
         with _bt_jobs_lock:
             if job_id in _bt_jobs:
@@ -1093,7 +1278,9 @@ def _bt_run_grid_job(job_id: str, days: int, max_symbols: int, spec: dict,
     except Exception as exc:
         with _bt_jobs_lock:
             if job_id in _bt_jobs:
-                _bt_jobs[job_id].update({"status": "error", "error": f"Error tak terduga: {exc}"})
+                _bt_jobs[job_id].update(
+                    {"status": "error", "error": f"Error tak terduga: {exc}"}
+                )
     finally:
         if store is not None:
             store.cleanup()
@@ -1116,8 +1303,10 @@ def _bt_min_days_note(cfg: dict, interval: str) -> tuple[int, str]:
     except ValueError as exc:
         return dasar, str(exc)
     minimal = max(dasar, int(math.ceil(hari_warmup)) + 1)
-    return minimal, (f"Gerbang trend {cfg.get('TREND_INTERVAL', '1h')} butuh sekitar "
-                     f"{hari_warmup:.1f} hari riwayat sebelum bar pertama bisa dievaluasi.")
+    return minimal, (
+        f"Gerbang trend {cfg.get('TREND_INTERVAL', '1h')} butuh sekitar "
+        f"{hari_warmup:.1f} hari riwayat sebelum bar pertama bisa dievaluasi."
+    )
 
 
 @app.route("/api/backtest/start", methods=["POST"])
@@ -1133,36 +1322,69 @@ def api_backtest_start():
     except (TypeError, ValueError):
         return jsonify({"error": "Jumlah hari tidak valid."}), 400
     if days < 2:
-        return jsonify({"error": "Jumlah hari minimal 2 (satu hari pertama dipakai warmup statistik 24 jam)."}), 400
+        return (
+            jsonify(
+                {
+                    "error": "Jumlah hari minimal 2 (satu hari pertama dipakai warmup statistik 24 jam)."
+                }
+            ),
+            400,
+        )
 
     # Rentang bisa perlu lebih panjang kalau gerbang trend aktif: tanpa pemeriksaan ini
     # pengguna memilih 2 hari dan hasilnya nol trade karena seluruh rentang habis
     # untuk pemanasan.
     try:
         cfg_hari = bt.apply_overrides(
-            PUMP_CONFIG, {k: data.get(k) for k in BT_PARAM_KEYS if k in data})
+            PUMP_CONFIG, {k: data.get(k) for k in BT_PARAM_KEYS if k in data}
+        )
     except bt.BacktestError:
-        cfg_hari = PUMP_CONFIG  # galat nilainya dilaporkan di pemeriksaan parameter di bawah
-    minimal_hari, catatan_hari = _bt_min_days_note(cfg_hari, _bt_simulation_interval(cfg_hari))
+        cfg_hari = (
+            PUMP_CONFIG  # galat nilainya dilaporkan di pemeriksaan parameter di bawah
+        )
+    minimal_hari, catatan_hari = _bt_min_days_note(
+        cfg_hari, _bt_simulation_interval(cfg_hari)
+    )
     if days < minimal_hari:
-        return jsonify({"error": (f"Jumlah hari minimal {minimal_hari} untuk setelan ini, "
-                                  f"sedangkan yang diminta {days} hari. {catatan_hari}").strip()}), 400
+        return (
+            jsonify(
+                {
+                    "error": (
+                        f"Jumlah hari minimal {minimal_hari} untuk setelan ini, "
+                        f"sedangkan yang diminta {days} hari. {catatan_hari}"
+                    ).strip()
+                }
+            ),
+            400,
+        )
 
     try:
         max_symbols = int(data.get("max_symbols", 150))
     except (TypeError, ValueError):
         return jsonify({"error": "Jumlah simbol tidak valid."}), 400
     if max_symbols < 2:
-        return jsonify({"error": "Jumlah simbol minimal 2 (kalau hanya 1, tidak ada persaingan antar-simbol untuk disimulasikan)."}), 400
+        return (
+            jsonify(
+                {
+                    "error": "Jumlah simbol minimal 2 (kalau hanya 1, tidak ada persaingan antar-simbol untuk disimulasikan)."
+                }
+            ),
+            400,
+        )
     if max_symbols > 600:
         return jsonify({"error": "Jumlah simbol maksimal 600."}), 400
 
     est_requests = _bt_estimate_requests(days, max_symbols, PUMP_CONFIG)
     if est_requests > 20000:
-        return jsonify({
-            "error": f"Permintaan terlalu besar (perkiraan {est_requests:,} request ke Binance). "
-                     f"Kurangi jumlah simbol atau jumlah hari."
-        }), 400
+        return (
+            jsonify(
+                {
+                    "error": f"Permintaan terlalu besar (perkiraan {est_requests:,} request ke Binance). "
+                    f"Kurangi jumlah simbol atau jumlah hari."
+                }
+            ),
+            400,
+        )
 
     overrides = {k: data.get(k) for k in BT_PARAM_KEYS}
     try:
@@ -1174,18 +1396,32 @@ def api_backtest_start():
     with _bt_jobs_lock:
         running = sum(1 for j in _bt_jobs.values() if j["status"] == "running")
         if running >= 1:
-            return jsonify({"error": "Sudah ada backtest berjalan. Tunggu selesai atau batalkan dulu."}), 429
+            return (
+                jsonify(
+                    {
+                        "error": "Sudah ada backtest berjalan. Tunggu selesai atau batalkan dulu."
+                    }
+                ),
+                429,
+            )
 
         job_id = uuid.uuid4().hex[:12]
         now = time.time()
         _bt_jobs[job_id] = {
-            "status": "running", "progress": 0.0, "stage": "memulai...",
-            "created_at": now, "started_at": now, "updated_at": now,
-            "days": days, "max_symbols": max_symbols, "cancel": False,
+            "status": "running",
+            "progress": 0.0,
+            "stage": "memulai...",
+            "created_at": now,
+            "started_at": now,
+            "updated_at": now,
+            "days": days,
+            "max_symbols": max_symbols,
+            "cancel": False,
         }
 
-    thread = threading.Thread(target=_bt_run_job,
-                              args=(job_id, days, overrides, max_symbols), daemon=True)
+    thread = threading.Thread(
+        target=_bt_run_job, args=(job_id, days, overrides, max_symbols), daemon=True
+    )
     thread.start()
     return jsonify({"job_id": job_id})
 
@@ -1203,7 +1439,14 @@ def api_backtest_grid_start():
     except (TypeError, ValueError):
         return jsonify({"error": "Jumlah hari tidak valid."}), 400
     if days < 2:
-        return jsonify({"error": "Jumlah hari minimal 2 (satu hari pertama dipakai warmup statistik 24 jam)."}), 400
+        return (
+            jsonify(
+                {
+                    "error": "Jumlah hari minimal 2 (satu hari pertama dipakai warmup statistik 24 jam)."
+                }
+            ),
+            400,
+        )
 
     try:
         max_symbols = int(data.get("max_symbols", 150))
@@ -1214,34 +1457,59 @@ def api_backtest_grid_start():
 
     est_requests = _bt_estimate_requests(days, max_symbols, PUMP_CONFIG)
     if est_requests > 20000:
-        return jsonify({
-            "error": f"Permintaan terlalu besar (perkiraan {est_requests:,} request ke Binance). "
-                     f"Kurangi jumlah simbol atau jumlah hari."
-        }), 400
+        return (
+            jsonify(
+                {
+                    "error": f"Permintaan terlalu besar (perkiraan {est_requests:,} request ke Binance). "
+                    f"Kurangi jumlah simbol atau jumlah hari."
+                }
+            ),
+            400,
+        )
 
     try:
         rasio_latih = float(data.get("rasio_latih", 0.7))
     except (TypeError, ValueError):
         return jsonify({"error": "Rasio periode latih tidak valid."}), 400
     if not 0.1 <= rasio_latih <= 1.0:
-        return jsonify({"error": "Rasio periode latih harus di antara 0.1 dan 1.0."}), 400
+        return (
+            jsonify({"error": "Rasio periode latih harus di antara 0.1 dan 1.0."}),
+            400,
+        )
 
     metrik = str(data.get("metrik", "total_return_pct"))
     if metrik not in gs.METRIK_TERSEDIA:
-        return jsonify({"error": f"Metrik '{metrik}' tidak dikenal. "
-                                 f"Pilihan: {', '.join(gs.METRIK_TERSEDIA)}."}), 400
+        return (
+            jsonify(
+                {
+                    "error": f"Metrik '{metrik}' tidak dikenal. "
+                    f"Pilihan: {', '.join(gs.METRIK_TERSEDIA)}."
+                }
+            ),
+            400,
+        )
 
     try:
         min_trades = int(data.get("min_trades", 5))
     except (TypeError, ValueError):
         return jsonify({"error": "Jumlah trade minimal tidak valid."}), 400
     if min_trades < 1 or min_trades > 1000:
-        return jsonify({"error": "Jumlah trade minimal harus di antara 1 dan 1000."}), 400
+        return (
+            jsonify({"error": "Jumlah trade minimal harus di antara 1 dan 1000."}),
+            400,
+        )
 
     spec_raw = data.get("spec")
     if not isinstance(spec_raw, dict) or not spec_raw:
-        return jsonify({"error": "Spec grid kosong. Pilih minimal satu parameter "
-                                 "beserta nilai rentangnya."}), 400
+        return (
+            jsonify(
+                {
+                    "error": "Spec grid kosong. Pilih minimal satu parameter "
+                    "beserta nilai rentangnya."
+                }
+            ),
+            400,
+        )
     overrides = {k: data.get(k) for k in BT_PARAM_KEYS if k in data}
     try:
         cfg_preview = bt.apply_overrides(PUMP_CONFIG, overrides)
@@ -1249,43 +1517,99 @@ def api_backtest_grid_start():
     except bt.BacktestError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    minimal_hari, catatan_hari = _bt_min_days_note(cfg_preview, _bt_simulation_interval(cfg_preview))
+    minimal_hari, catatan_hari = _bt_min_days_note(
+        cfg_preview, _bt_simulation_interval(cfg_preview)
+    )
     if days < minimal_hari:
-        return jsonify({"error": (f"Jumlah hari minimal {minimal_hari} untuk setelan ini, "
-                                  f"sedangkan yang diminta {days} hari. {catatan_hari}").strip()}), 400
+        return (
+            jsonify(
+                {
+                    "error": (
+                        f"Jumlah hari minimal {minimal_hari} untuk setelan ini, "
+                        f"sedangkan yang diminta {days} hari. {catatan_hari}"
+                    ).strip()
+                }
+            ),
+            400,
+        )
 
     pakai_atr = bool(cfg_preview.get("USE_ATR_EXIT", False))
     spec = {}
     for key, values in spec_raw.items():
         if key not in GRID_PARAM_KEYS:
-            return jsonify({"error": f"Parameter '{key}' tidak diperbolehkan untuk grid. "
-                                     f"Pilihan: {', '.join(GRID_PARAM_KEYS)}."}), 400
+            return (
+                jsonify(
+                    {
+                        "error": f"Parameter '{key}' tidak diperbolehkan untuk grid. "
+                        f"Pilihan: {', '.join(GRID_PARAM_KEYS)}."
+                    }
+                ),
+                400,
+            )
         if pakai_atr and key in gs.KUNCI_PERSEN:
-            return jsonify({"error": f"Parameter '{key}' tidak berpengaruh karena exit "
-                                     "ATR sedang aktif (USE_ATR_EXIT=true): mesin "
-                                     "mengabaikan seluruh parameter persen. Matikan "
-                                     "exit ATR di Pengaturan dulu, atau pilih "
-                                     "parameter ATR."}), 400
+            return (
+                jsonify(
+                    {
+                        "error": f"Parameter '{key}' tidak berpengaruh karena exit "
+                        "ATR sedang aktif (USE_ATR_EXIT=true): mesin "
+                        "mengabaikan seluruh parameter persen. Matikan "
+                        "exit ATR di Pengaturan dulu, atau pilih "
+                        "parameter ATR."
+                    }
+                ),
+                400,
+            )
         if not pakai_atr and key in gs.KUNCI_ATR:
-            return jsonify({"error": f"Parameter '{key}' tidak berpengaruh karena exit "
-                                     "ATR sedang mati (USE_ATR_EXIT=false): mesin "
-                                     "mengabaikan seluruh parameter ATR. Aktifkan "
-                                     "exit ATR di Pengaturan dulu, atau pilih "
-                                     "parameter persen."}), 400
+            return (
+                jsonify(
+                    {
+                        "error": f"Parameter '{key}' tidak berpengaruh karena exit "
+                        "ATR sedang mati (USE_ATR_EXIT=false): mesin "
+                        "mengabaikan seluruh parameter ATR. Aktifkan "
+                        "exit ATR di Pengaturan dulu, atau pilih "
+                        "parameter persen."
+                    }
+                ),
+                400,
+            )
         if not isinstance(values, (list, tuple)) or not values:
-            return jsonify({"error": f"Nilai parameter '{key}' harus daftar angka "
-                                     f"yang tidak kosong."}), 400
+            return (
+                jsonify(
+                    {
+                        "error": f"Nilai parameter '{key}' harus daftar angka "
+                        f"yang tidak kosong."
+                    }
+                ),
+                400,
+            )
         bersih = []
         for v in values:
-            if isinstance(v, bool) or not isinstance(v, (int, float)) \
-                    or not math.isfinite(float(v)):
-                return jsonify({"error": f"Nilai parameter '{key}' harus angka "
-                                         f"(dapat: {v!r})."}), 400
+            if (
+                isinstance(v, bool)
+                or not isinstance(v, (int, float))
+                or not math.isfinite(float(v))
+            ):
+                return (
+                    jsonify(
+                        {
+                            "error": f"Nilai parameter '{key}' harus angka "
+                            f"(dapat: {v!r})."
+                        }
+                    ),
+                    400,
+                )
             if v not in bersih:
                 bersih.append(v)
         if not bersih:
-            return jsonify({"error": f"Nilai parameter '{key}' kosong setelah "
-                                     f"duplikat dibuang."}), 400
+            return (
+                jsonify(
+                    {
+                        "error": f"Nilai parameter '{key}' kosong setelah "
+                        f"duplikat dibuang."
+                    }
+                ),
+                400,
+            )
         if len(bersih) > 50:
             return jsonify({"error": f"Parameter '{key}' maksimal 50 nilai."}), 400
         spec[key] = bersih
@@ -1294,32 +1618,66 @@ def api_backtest_grid_start():
     for values in spec.values():
         total *= len(values)
     if total > gs.MAX_KOMBINASI_PORTFOLIO:
-        return jsonify({"error": f"Grid menghasilkan {total} kombinasi, melebihi batas "
-                                 f"{gs.MAX_KOMBINASI_PORTFOLIO} untuk simulasi portofolio. "
-                                 f"Persempit rentang atau perbesar langkah."}), 400
+        return (
+            jsonify(
+                {
+                    "error": f"Grid menghasilkan {total} kombinasi, melebihi batas "
+                    f"{gs.MAX_KOMBINASI_PORTFOLIO} untuk simulasi portofolio. "
+                    f"Persempit rentang atau perbesar langkah."
+                }
+            ),
+            400,
+        )
 
     with _bt_jobs_lock:
         running = sum(1 for j in _bt_jobs.values() if j["status"] == "running")
         if running >= 1:
-            return jsonify({"error": "Sudah ada backtest/grid berjalan. "
-                                     "Tunggu selesai atau batalkan dulu."}), 429
+            return (
+                jsonify(
+                    {
+                        "error": "Sudah ada backtest/grid berjalan. "
+                        "Tunggu selesai atau batalkan dulu."
+                    }
+                ),
+                429,
+            )
 
         job_id = uuid.uuid4().hex[:12]
         now = time.time()
         _bt_jobs[job_id] = {
-            "kind": "grid", "status": "running", "progress": 0.0,
-            "stage": "memulai...", "created_at": now, "started_at": now,
-            "updated_at": now, "days": days, "max_symbols": max_symbols,
-            "grid": {"metrik": metrik, "rasio_latih": rasio_latih,
-                     "min_trades": min_trades, "total_kombinasi": total},
+            "kind": "grid",
+            "status": "running",
+            "progress": 0.0,
+            "stage": "memulai...",
+            "created_at": now,
+            "started_at": now,
+            "updated_at": now,
+            "days": days,
+            "max_symbols": max_symbols,
+            "grid": {
+                "metrik": metrik,
+                "rasio_latih": rasio_latih,
+                "min_trades": min_trades,
+                "total_kombinasi": total,
+            },
             "cancel": False,
         }
 
     thread = threading.Thread(
         target=_bt_run_grid_job,
-        args=(job_id, days, max_symbols, spec, rasio_latih, metrik,
-              min_trades, total, overrides),
-        daemon=True)
+        args=(
+            job_id,
+            days,
+            max_symbols,
+            spec,
+            rasio_latih,
+            metrik,
+            min_trades,
+            total,
+            overrides,
+        ),
+        daemon=True,
+    )
     thread.start()
     return jsonify({"job_id": job_id})
 
@@ -1332,7 +1690,14 @@ def api_backtest_status(job_id):
     with _bt_jobs_lock:
         job = _bt_jobs.get(job_id)
         if job is None:
-            return jsonify({"error": "Job backtest tidak ditemukan (mungkin sudah kedaluwarsa)."}), 404
+            return (
+                jsonify(
+                    {
+                        "error": "Job backtest tidak ditemukan (mungkin sudah kedaluwarsa)."
+                    }
+                ),
+                404,
+            )
         out = dict(job)
 
     started_at = out.get("started_at")
@@ -1413,7 +1778,9 @@ def _detector_score_symbol(client, symbol: str, ticker: dict, planned: float) ->
     klines = None
     try:
         lookback = strategy_ind.confirm_window_bars(PUMP_CONFIG)
-        raw = client.get_klines(symbol, PUMP_CONFIG["CONFIRM_INTERVAL"], limit=lookback + 1)
+        raw = client.get_klines(
+            symbol, PUMP_CONFIG["CONFIRM_INTERVAL"], limit=lookback + 1
+        )
         closed = [k for k in strategy_ind.parse_klines(raw) if k.close_time < now_ms]
         klines = closed[-lookback:]
     except Exception:
@@ -1422,7 +1789,11 @@ def _detector_score_symbol(client, symbol: str, ticker: dict, planned: float) ->
     depth = None
     try:
         depth = client.get_depth(
-            symbol, scanner.normalize_depth_limit(PUMP_CONFIG.get("ORDERBOOK_DEPTH_LIMIT", 500)))
+            symbol,
+            scanner.normalize_depth_limit(
+                PUMP_CONFIG.get("ORDERBOOK_DEPTH_LIMIT", 500)
+            ),
+        )
     except Exception:
         depth = None
 
@@ -1435,25 +1806,39 @@ def _detector_score_symbol(client, symbol: str, ticker: dict, planned: float) ->
         try:
             jendela_trend = strategy_ind.trend_window_bars(PUMP_CONFIG)
             raw_trend = client.get_klines(
-                symbol, strategy_ind.trend_interval(PUMP_CONFIG),
-                limit=min(strategy_ind.TREND_KLINE_LIMIT, jendela_trend + 1))
-            closed_trend = [k for k in strategy_ind.parse_klines(raw_trend)
-                            if k.close_time < now_ms]
+                symbol,
+                strategy_ind.trend_interval(PUMP_CONFIG),
+                limit=min(strategy_ind.TREND_KLINE_LIMIT, jendela_trend + 1),
+            )
+            closed_trend = [
+                k for k in strategy_ind.parse_klines(raw_trend) if k.close_time < now_ms
+            ]
             trend = strategy_ind.evaluate_trend_filter(
-                closed_trend[-jendela_trend:], PUMP_CONFIG)
+                closed_trend[-jendela_trend:], PUMP_CONFIG
+            )
         except Exception as exc:
-            trend = {"ok": False, "interval": str(PUMP_CONFIG.get("TREND_INTERVAL", "1h")),
-                     "reason": f"candle trend gagal diambil: {exc}", "bars": 0,
-                     "close": None, "ema_fast": None, "ema_slow": None, "adx": None,
-                     "values": {}, "checks": {}}
+            trend = {
+                "ok": False,
+                "interval": str(PUMP_CONFIG.get("TREND_INTERVAL", "1h")),
+                "reason": f"candle trend gagal diambil: {exc}",
+                "bars": 0,
+                "close": None,
+                "ema_fast": None,
+                "ema_slow": None,
+                "adx": None,
+                "values": {},
+                "checks": {},
+            }
 
     gate_ok, gate_reason = scanner.evaluate_pump_gate(chg, qv, PUMP_CONFIG)
     if depth is None:
         book_ok, book_reason = False, "order book gagal diambil"
     else:
         book_ok, book_reason, _m = scanner.evaluate_orderbook(
-            depth, planned, dict(PUMP_CONFIG, DEPTH_FILTER_ENABLED=True,
-                                 ORDERBOOK_FILTER_ENABLED=True))
+            depth,
+            planned,
+            dict(PUMP_CONFIG, DEPTH_FILTER_ENABLED=True, ORDERBOOK_FILTER_ENABLED=True),
+        )
     if not gate_ok:
         verdict, reason = "DITOLAK GERBANG", gate_reason
     elif not book_ok:
@@ -1465,17 +1850,27 @@ def _detector_score_symbol(client, symbol: str, ticker: dict, planned: float) ->
     else:
         tambahan = f", dan {trend['reason']}" if trend is not None else ""
         verdict, reason = "LOLOS", (
-            f"lolos gerbang pump, order book, dan {demand['reason']}{tambahan}")
+            f"lolos gerbang pump, order book, dan {demand['reason']}{tambahan}"
+        )
     return {
-        "symbol": symbol, "price": price, "change_24h": chg, "quote_volume_24h": qv,
-        "score": det["score"], "components": det["components"],
-        "demand": demand, "trend": trend,
-        "missing": det["missing"], "partial": det["partial"],
-        "verdict": verdict, "reason": reason,
+        "symbol": symbol,
+        "price": price,
+        "change_24h": chg,
+        "quote_volume_24h": qv,
+        "score": det["score"],
+        "components": det["components"],
+        "demand": demand,
+        "trend": trend,
+        "missing": det["missing"],
+        "partial": det["partial"],
+        "verdict": verdict,
+        "reason": reason,
     }
 
 
-def _detector_candidates(tickers: list, config: dict) -> list[tuple[float, float, str, dict]]:
+def _detector_candidates(
+    tickers: list, config: dict
+) -> list[tuple[float, float, str, dict]]:
     """Detector-eligible pairs: lolos filter simbol, volume, dan rentang gerbang pump."""
     min_vol = float(config.get("MIN_QUOTE_VOLUME_USDT_24H", 0) or 0)
     min_change = float(config.get("PUMP_MIN_24H_CHANGE_PCT", 0) or 0)
@@ -1493,8 +1888,11 @@ def _detector_candidates(tickers: list, config: dict) -> list[tuple[float, float
             change = float(ticker.get("priceChangePercent", 0) or 0)
         except (TypeError, ValueError):
             continue
-        if (not all(math.isfinite(value) for value in (quote_volume, price, change))
-                or price <= 0 or quote_volume < min_vol):
+        if (
+            not all(math.isfinite(value) for value in (quote_volume, price, change))
+            or price <= 0
+            or quote_volume < min_vol
+        ):
             continue
         if change < min_change:
             continue
@@ -1509,7 +1907,9 @@ def _detector_rebuild() -> None:
     try:
         client = get_client()
         if client is None:
-            raise RuntimeError("Klien Binance tidak tersedia (requests belum terpasang?).")
+            raise RuntimeError(
+                "Klien Binance tidak tersedia (requests belum terpasang?)."
+            )
         if hasattr(client, "is_rate_limited") and client.is_rate_limited():
             raise RuntimeError("Batas rate Binance sedang aktif, skor ditunda.")
         raw = client.get_ticker_24hr_all()
@@ -1519,9 +1919,12 @@ def _detector_rebuild() -> None:
         planned = _detector_planned_notional()
         items = []
         from concurrent.futures import ThreadPoolExecutor
+
         with ThreadPoolExecutor(max_workers=DETECTOR_WORKERS) as pool:
-            futures = [pool.submit(_detector_score_symbol, client, sym, t, planned)
-                       for _chg, _qv, sym, t in picked]
+            futures = [
+                pool.submit(_detector_score_symbol, client, sym, t, planned)
+                for _chg, _qv, sym, t in picked
+            ]
             for fut in futures:
                 try:
                     items.append(fut.result())
@@ -1536,17 +1939,26 @@ def _detector_rebuild() -> None:
                 "total": len(items),
                 "lolos": sum(1 for r in items if r["verdict"] == "LOLOS"),
                 "skor_tertinggi": max(scores) if scores else None,
-                "skor_rata_rata": round(sum(scores) / len(scores), 1) if scores else None,
+                "skor_rata_rata": (
+                    round(sum(scores) / len(scores), 1) if scores else None
+                ),
             },
             "config": {
                 "quote_asset": PUMP_CONFIG.get("QUOTE_ASSET", "USDT"),
                 "eligible_symbols": len(picked),
                 "scored_symbols": len(items),
                 "min_quote_volume_24h": min_vol,
-                "min_change_pct": float(PUMP_CONFIG.get("PUMP_MIN_24H_CHANGE_PCT", 0) or 0),
-                "max_change_pct": float(PUMP_CONFIG.get("PUMP_MAX_24H_CHANGE_PCT", 0) or 0),
+                "min_change_pct": float(
+                    PUMP_CONFIG.get("PUMP_MIN_24H_CHANGE_PCT", 0) or 0
+                ),
+                "max_change_pct": float(
+                    PUMP_CONFIG.get("PUMP_MAX_24H_CHANGE_PCT", 0) or 0
+                ),
                 "planned_notional": planned,
-                "weights": {key: PUMP_CONFIG.get(wkey) for key, wkey, _l in scanner.DETECTOR_COMPONENTS},
+                "weights": {
+                    key: PUMP_CONFIG.get(wkey)
+                    for key, wkey, _l in scanner.DETECTOR_COMPONENTS
+                },
                 "trend_enabled": bool(PUMP_CONFIG.get("TREND_FILTER_ENABLED", False)),
                 "trend_interval": str(PUMP_CONFIG.get("TREND_INTERVAL", "1h")),
                 "trend_ema_fast": PUMP_CONFIG.get("TREND_EMA_FAST"),
@@ -1580,10 +1992,18 @@ def build_detector() -> dict:
             _detector_state["running"] = True
         running = _detector_state["running"]
     if start:
-        threading.Thread(target=_detector_rebuild, name="detector-rebuild", daemon=True).start()
+        threading.Thread(
+            target=_detector_rebuild, name="detector-rebuild", daemon=True
+        ).start()
     if data is None:
-        return {"enabled": True, "items": [], "summary": {}, "loading": running,
-                "error": error, "updated_at": None}
+        return {
+            "enabled": True,
+            "items": [],
+            "summary": {},
+            "loading": running,
+            "error": error,
+            "updated_at": None,
+        }
     out = dict(data)
     out.update(loading=running, error=error, updated_at=ts)
     return out
@@ -1602,11 +2022,13 @@ def api_status():
 @app.route("/api/trades")
 def api_trades():
     trades, _, level_count = parse_log()
-    return jsonify({
-        "summary": build_trade_summary(trades),
-        "trades": trades[:100],
-        "log_levels": level_count,
-    })
+    return jsonify(
+        {
+            "summary": build_trade_summary(trades),
+            "trades": trades[:100],
+            "log_levels": level_count,
+        }
+    )
 
 
 @app.route("/api/logs")
@@ -1642,7 +2064,14 @@ def api_manual_close():
     now = time.time()
     with _manual_close_lock:
         if now - _last_manual_close_request["ts"] < _MANUAL_CLOSE_COOLDOWN_SECONDS:
-            return jsonify({"error": "Tunggu sebentar, permintaan sebelumnya baru saja dikirim."}), 429
+            return (
+                jsonify(
+                    {
+                        "error": "Tunggu sebentar, permintaan sebelumnya baru saja dikirim."
+                    }
+                ),
+                429,
+            )
         _last_manual_close_request["ts"] = now
 
     def _release_cooldown() -> None:
@@ -1655,64 +2084,83 @@ def api_manual_close():
     qty = float(state.get("qty", 0) or 0)
     if not symbol or qty <= 0:
         _release_cooldown()
-        return jsonify({"error": "Tidak ada posisi terbuka saat ini untuk dijual."}), 400
+        return (
+            jsonify({"error": "Tidak ada posisi terbuka saat ini untuk dijual."}),
+            400,
+        )
 
     data = request.get_json(force=True, silent=True) or {}
     confirm_symbol = str(data.get("symbol", "")).strip().upper()
     if confirm_symbol and confirm_symbol != symbol:
         _release_cooldown()
-        return jsonify({
-            "error": f"Simbol tidak cocok (diminta {confirm_symbol}, posisi saat ini {symbol}). "
-                     "Muat ulang dashboard dan coba lagi."
-        }), 409
+        return (
+            jsonify(
+                {
+                    "error": f"Simbol tidak cocok (diminta {confirm_symbol}, posisi saat ini {symbol}). "
+                    "Muat ulang dashboard dan coba lagi."
+                }
+            ),
+            409,
+        )
 
-    state_mod.save_control(CONTROL_FILE, {
-        "action": "CLOSE_POSITION",
-        "symbol": symbol,
-        "requested_at": int(now * 1000),
-    })
+    state_mod.save_control(
+        CONTROL_FILE,
+        {
+            "action": "CLOSE_POSITION",
+            "symbol": symbol,
+            "requested_at": int(now * 1000),
+        },
+    )
 
     bot_alive = _bot_looks_alive()
     loop_interval = PUMP_CONFIG.get("LOOP_INTERVAL_SECONDS", 15)
-    return jsonify({
-        "ok": True,
-        "symbol": symbol,
-        "bot_alive": bot_alive,
-        "message": (
-            f"Perintah jual untuk {symbol} terkirim. Bot akan memprosesnya dalam "
-            f"maksimal {loop_interval} detik pada iterasi berikutnya."
-            if bot_alive else
-            f"Perintah jual untuk {symbol} tersimpan, TAPI proses bot sepertinya "
-            "sedang TIDAK berjalan (file state tidak diperbarui baru-baru ini). "
-            "Perintah baru akan dieksekusi setelah bot dijalankan lagi, dan akan "
-            "diabaikan otomatis kalau sudah lebih dari 2 menit."
-        ),
-    })
+    return jsonify(
+        {
+            "ok": True,
+            "symbol": symbol,
+            "bot_alive": bot_alive,
+            "message": (
+                f"Perintah jual untuk {symbol} terkirim. Bot akan memprosesnya dalam "
+                f"maksimal {loop_interval} detik pada iterasi berikutnya."
+                if bot_alive
+                else f"Perintah jual untuk {symbol} tersimpan, TAPI proses bot sepertinya "
+                "sedang TIDAK berjalan (file state tidak diperbarui baru-baru ini). "
+                "Perintah baru akan dieksekusi setelah bot dijalankan lagi, dan akan "
+                "diabaikan otomatis kalau sudah lebih dari 2 menit."
+            ),
+        }
+    )
 
 
 @app.route("/api/manual/close/status")
 def api_manual_close_status():
     pending = state_mod.load_control(CONTROL_FILE)
     state = load_state()
-    return jsonify({
-        "pending": bool(pending),
-        "pending_symbol": pending.get("symbol") if pending else None,
-        "has_position": bool(state.get("current_symbol") and float(state.get("qty", 0) or 0) > 0),
-        "current_symbol": state.get("current_symbol"),
-        "bot_alive": _bot_looks_alive(),
-    })
+    return jsonify(
+        {
+            "pending": bool(pending),
+            "pending_symbol": pending.get("symbol") if pending else None,
+            "has_position": bool(
+                state.get("current_symbol") and float(state.get("qty", 0) or 0) > 0
+            ),
+            "current_symbol": state.get("current_symbol"),
+            "bot_alive": _bot_looks_alive(),
+        }
+    )
 
 
 @app.route("/api/all")
 def api_all():
     trades, events, level_count = parse_log()
-    return jsonify({
-        "status": build_status(),
-        "summary": build_trade_summary(trades),
-        "trades": trades[:100],
-        "events": events,
-        "log_levels": level_count,
-    })
+    return jsonify(
+        {
+            "status": build_status(),
+            "summary": build_trade_summary(trades),
+            "trades": trades[:100],
+            "events": events,
+            "log_levels": level_count,
+        }
+    )
 
 
 @app.route("/api/control/status")
@@ -1720,17 +2168,19 @@ def api_control_status():
     mode = get_mode(PUMP_CONFIG)
     process = _process_manager.status(mode)
     guard = _process_manager.mode_guard(mode)
-    return jsonify({
-        "process": process,
-        "position": _process_manager.position(),
-        "operation": _control_operation_snapshot(),
-        "mode": mode,
-        "mode_source": get_mode_source(),
-        "mode_guard": guard,
-        "read_only": not _bind_is_loopback(),
-        "config_errors": list(CONFIG_LOAD_ERRORS),
-        "platform": {"os_name": os.name, "windows": os.name == "nt"},
-    })
+    return jsonify(
+        {
+            "process": process,
+            "position": _process_manager.position(),
+            "operation": _control_operation_snapshot(),
+            "mode": mode,
+            "mode_source": get_mode_source(),
+            "mode_guard": guard,
+            "read_only": not _bind_is_loopback(),
+            "config_errors": list(CONFIG_LOAD_ERRORS),
+            "platform": {"os_name": os.name, "windows": os.name == "nt"},
+        }
+    )
 
 
 @app.route("/api/control/prepare", methods=["POST"])
@@ -1741,52 +2191,93 @@ def api_control_prepare():
         return jsonify({"error": "Aksi hanya boleh START atau STOP."}), 400
     active_operation = _active_control_operation()
     if active_operation:
-        return jsonify({
-            "error": "Aksi bot lain masih diproses. Tunggu sampai selesai.",
-            "operation": active_operation,
-        }), 409
+        return (
+            jsonify(
+                {
+                    "error": "Aksi bot lain masih diproses. Tunggu sampai selesai.",
+                    "operation": active_operation,
+                }
+            ),
+            409,
+        )
     status = _process_manager.status(get_mode(PUMP_CONFIG))
     position = _process_manager.position()
     active_statuses = ("STARTING", "RUNNING", "STOPPING")
     if action == "START" and CONFIG_LOAD_ERRORS:
-        return jsonify({"error": "Konfigurasi mode tidak valid: " + "; ".join(CONFIG_LOAD_ERRORS)}), 409
+        return (
+            jsonify(
+                {
+                    "error": "Konfigurasi mode tidak valid: "
+                    + "; ".join(CONFIG_LOAD_ERRORS)
+                }
+            ),
+            409,
+        )
     if action == "START" and status["status"] not in ("STOPPED", "CRASHED"):
-        return jsonify({"error": f"Resume Bot ditolak karena bot sedang {status['status']}."}), 409
+        return (
+            jsonify(
+                {"error": f"Resume Bot ditolak karena bot sedang {status['status']}."}
+            ),
+            409,
+        )
     if action == "START":
         guard = _process_manager.mode_guard(get_mode(PUMP_CONFIG))
         if not guard["safe"]:
-            return jsonify({
-                "error": "Resume Bot ditolak demi keamanan antar mode. " + " ".join(guard["reasons"]),
-                "mode_guard": guard,
-            }), 409
+            return (
+                jsonify(
+                    {
+                        "error": "Resume Bot ditolak demi keamanan antar mode. "
+                        + " ".join(guard["reasons"]),
+                        "mode_guard": guard,
+                    }
+                ),
+                409,
+            )
     if action == "STOP" and status["status"] not in active_statuses:
-        return jsonify({"error": f"Stop Bot ditolak karena bot sudah {status['status']}."}), 409
+        return (
+            jsonify(
+                {"error": f"Stop Bot ditolak karena bot sudah {status['status']}."}
+            ),
+            409,
+        )
     policy = str(data.get("position_policy", "REQUIRE_EMPTY")).strip().upper()
     if action == "STOP" and position["has_position"]:
         if policy not in ("SELL_FIRST", "KEEP_OPEN"):
-            return jsonify({
-                "error": "Ada posisi terbuka. Pilih jual dulu atau pertahankan posisi.",
-                "requires_position_choice": True,
-                "position": position,
-            }), 409
+            return (
+                jsonify(
+                    {
+                        "error": "Ada posisi terbuka. Pilih jual dulu atau pertahankan posisi.",
+                        "requires_position_choice": True,
+                        "position": position,
+                    }
+                ),
+                409,
+            )
     else:
         policy = "REQUIRE_EMPTY"
-    token = _make_confirmation("process", {
-        "action": action,
-        "position_policy": policy,
-        "mode": get_mode(PUMP_CONFIG),
-        "pid": status.get("pid"),
-        "status": status.get("status"),
-    }, ttl=120)
-    return jsonify({
-        "confirmation_id": token,
-        "action": action,
-        "position": position,
-        "warning": (
-            "Posisi akan tetap terbuka tanpa SL/TP bot selama bot berhenti."
-            if position["has_position"] and policy == "KEEP_OPEN" else None
-        ),
-    })
+    token = _make_confirmation(
+        "process",
+        {
+            "action": action,
+            "position_policy": policy,
+            "mode": get_mode(PUMP_CONFIG),
+            "pid": status.get("pid"),
+            "status": status.get("status"),
+        },
+        ttl=120,
+    )
+    return jsonify(
+        {
+            "confirmation_id": token,
+            "action": action,
+            "position": position,
+            "warning": (
+                "Posisi akan tetap terbuka tanpa SL/TP bot selama bot berhenti."
+                if position["has_position"] and policy == "KEEP_OPEN"
+                else None
+            ),
+        }
+    )
 
 
 @app.route("/api/control/execute", methods=["POST"])
@@ -1805,31 +2296,50 @@ def api_control_execute():
             _control_operation
             and _control_operation.get("status") in _CONTROL_ACTIVE_STATUSES
         ):
-            return jsonify({
-                "error": "Aksi bot lain masih diproses. Tunggu sampai selesai.",
-                "operation": deepcopy(_control_operation),
-            }), 409
+            return (
+                jsonify(
+                    {
+                        "error": "Aksi bot lain masih diproses. Tunggu sampai selesai.",
+                        "operation": deepcopy(_control_operation),
+                    }
+                ),
+                409,
+            )
 
         current = _process_manager.status(get_mode(PUMP_CONFIG))
         action = payload.get("action")
         if action == "START":
             if current["status"] not in ("STOPPED", "CRASHED"):
-                return jsonify({
-                    "error": "Status proses berubah sejak konfirmasi Resume Bot."
-                }), 409
-        elif (
-            current["status"] not in ("STARTING", "RUNNING", "STOPPING")
-            or current.get("pid") != payload.get("pid")
-        ):
-            return jsonify({
-                "error": "PID atau status proses berubah sejak konfirmasi. Ulangi aksi."
-            }), 409
+                return (
+                    jsonify(
+                        {"error": "Status proses berubah sejak konfirmasi Resume Bot."}
+                    ),
+                    409,
+                )
+        elif current["status"] not in (
+            "STARTING",
+            "RUNNING",
+            "STOPPING",
+        ) or current.get("pid") != payload.get("pid"):
+            return (
+                jsonify(
+                    {
+                        "error": "PID atau status proses berubah sejak konfirmasi. Ulangi aksi."
+                    }
+                ),
+                409,
+            )
 
         ok, left = _cooldown("process", 2.0)
         if not ok:
-            return jsonify({
-                "error": f"Tunggu {left:.1f} detik sebelum aksi proses berikutnya."
-            }), 429
+            return (
+                jsonify(
+                    {
+                        "error": f"Tunggu {left:.1f} detik sebelum aksi proses berikutnya."
+                    }
+                ),
+                429,
+            )
 
         now = time.time()
         operation_id = uuid.uuid4().hex[:16]
@@ -1864,11 +2374,16 @@ def api_control_execute():
         )
         return jsonify({"error": "Worker kontrol gagal dimulai."}), 500
 
-    return jsonify({
-        "ok": True,
-        "accepted": True,
-        "operation": _control_operation_snapshot(),
-    }), 202
+    return (
+        jsonify(
+            {
+                "ok": True,
+                "accepted": True,
+                "operation": _control_operation_snapshot(),
+            }
+        ),
+        202,
+    )
 
 
 def selftest() -> int:
@@ -1876,46 +2391,97 @@ def selftest() -> int:
 
     Tidak menghubungi Binance sama sekali. Klien bursa diganti klien palsu.
     """
-    print("=== SELFTEST web/dashboard.py: kunci parameter backtest dan gerbang trend ===")
+    print(
+        "=== SELFTEST web/dashboard.py: kunci parameter backtest dan gerbang trend ==="
+    )
     gagal = 0
 
     def cek(nama: str, syarat: bool, info: str = "") -> None:
         nonlocal gagal
         if not syarat:
             gagal += 1
-        print(("  LULUS " if syarat else "  GAGAL ") + nama + (f"  -> {info}" if info else ""))
+        print(
+            ("  LULUS " if syarat else "  GAGAL ")
+            + nama
+            + (f"  -> {info}" if info else "")
+        )
 
-    cek("form backtest memuat semua kunci trend",
-        {"TREND_FILTER_ENABLED", "TREND_INTERVAL", "TREND_EMA_FAST", "TREND_EMA_SLOW",
-         "TREND_ADX_PERIOD", "TREND_ADX_MIN", "TREND_LOOKBACK_BARS"} <= set(BT_PARAM_KEYS))
-    cek("pencarian grid tidak menyapu parameter trend (sinyal entry dihitung sekali)",
-        not any("TREND" in k for k in GRID_PARAM_KEYS) and "USE_ATR_EXIT" not in GRID_PARAM_KEYS)
+    cek(
+        "form backtest memuat semua kunci trend",
+        {
+            "TREND_FILTER_ENABLED",
+            "TREND_INTERVAL",
+            "TREND_EMA_FAST",
+            "TREND_EMA_SLOW",
+            "TREND_ADX_PERIOD",
+            "TREND_ADX_MIN",
+            "TREND_LOOKBACK_BARS",
+        }
+        <= set(BT_PARAM_KEYS),
+    )
+    cek(
+        "pencarian grid tidak menyapu parameter trend (sinyal entry dihitung sekali)",
+        not any("TREND" in k for k in GRID_PARAM_KEYS)
+        and "USE_ATR_EXIT" not in GRID_PARAM_KEYS,
+    )
 
     from backtesting.synthetic_data import (
-        blok_setup_volume, make_candle, seri_5m_trend,
+        blok_setup_volume,
+        make_candle,
+        seri_5m_trend,
     )
 
     volume = 5_000_000.0
     datar = [make_candle(i, 100.0, 100.4, 99.6, 100.0, volume) for i in range(45)]
-    tren = seri_5m_trend(harga=100.0, jam_trend=1, arah=1.0, volume=volume, mulai_index=45)
+    tren = seri_5m_trend(
+        harga=100.0, jam_trend=1, arah=1.0, volume=volume, mulai_index=45
+    )
     blok, _harga, _i = blok_setup_volume(tren[-1].close, 45 + len(tren), volume)
     kl5 = datar + tren + blok
     sekarang = (len(kl5) + 2) * 300_000
 
     def baris_5m() -> list:
-        return [[int(k.open_time), str(k.open), str(k.high), str(k.low), str(k.close),
-                 str(k.volume), int(k.close_time), str(k.quote_volume), 10, "1", "1", "0"]
-                for k in kl5 if int(k.close_time) < sekarang]
+        return [
+            [
+                int(k.open_time),
+                str(k.open),
+                str(k.high),
+                str(k.low),
+                str(k.close),
+                str(k.volume),
+                int(k.close_time),
+                str(k.quote_volume),
+                10,
+                "1",
+                "1",
+                "0",
+            ]
+            for k in kl5
+            if int(k.close_time) < sekarang
+        ]
 
     def baris_h1(arah: float, jumlah: int = 130) -> list:
         batas = ((sekarang // 3_600_000) - 1) * 3_600_000
         rows, harga = [], 100.0
         for i in range(jumlah):
-            harga *= (1.0 + arah * 0.002)
+            harga *= 1.0 + arah * 0.002
             buka = batas - (jumlah - 1 - i) * 3_600_000
-            rows.append([buka, str(harga * 0.999), str(harga * 1.003), str(harga * 0.997),
-                         str(harga), "1000", buka + 3_599_999, str(harga * 1000),
-                         10, "500", "500000", "0"])
+            rows.append(
+                [
+                    buka,
+                    str(harga * 0.999),
+                    str(harga * 1.003),
+                    str(harga * 0.997),
+                    str(harga),
+                    "1000",
+                    buka + 3_599_999,
+                    str(harga * 1000),
+                    10,
+                    "500",
+                    "500000",
+                    "0",
+                ]
+            )
         return rows
 
     class KlienDetektor:
@@ -1924,8 +2490,9 @@ def selftest() -> int:
             self.gagal_trend = gagal_trend
             self.panggilan_trend = 0
 
-        def get_klines(self, symbol, interval, limit=500, start_time_ms=None,
-                       end_time_ms=None):
+        def get_klines(
+            self, symbol, interval, limit=500, start_time_ms=None, end_time_ms=None
+        ):
             if interval == PUMP_CONFIG.get("TREND_INTERVAL", "1h"):
                 self.panggilan_trend += 1
                 if self.gagal_trend:
@@ -1934,51 +2501,88 @@ def selftest() -> int:
             return baris_5m()[-limit:]
 
         def get_depth(self, symbol, limit=100):
-            return {"lastUpdateId": 1,
-                    "bids": [[str(99.95 - i * 0.01), "5000"] for i in range(20)],
-                    "asks": [[str(100.05 + i * 0.01), "5000"] for i in range(20)]}
+            return {
+                "lastUpdateId": 1,
+                "bids": [[str(99.95 - i * 0.01), "5000"] for i in range(20)],
+                "asks": [[str(100.05 + i * 0.01), "5000"] for i in range(20)],
+            }
 
-    ticker = {"symbol": "UJIUSDT", "priceChangePercent": "8.0",
-              "quoteVolume": "5000000", "lastPrice": "100.0"}
-    asli = {k: PUMP_CONFIG.get(k) for k in
-            ("TREND_FILTER_ENABLED", "TREND_INTERVAL", "TREND_EMA_FAST", "TREND_EMA_SLOW",
-             "TREND_ADX_PERIOD", "TREND_ADX_MIN", "TREND_LOOKBACK_BARS",
-             "CONFIRM_INTERVAL", "DEMAND_ZONE_FILTER_ENABLED")}
+    ticker = {
+        "symbol": "UJIUSDT",
+        "priceChangePercent": "8.0",
+        "quoteVolume": "5000000",
+        "lastPrice": "100.0",
+    }
+    asli = {
+        k: PUMP_CONFIG.get(k)
+        for k in (
+            "TREND_FILTER_ENABLED",
+            "TREND_INTERVAL",
+            "TREND_EMA_FAST",
+            "TREND_EMA_SLOW",
+            "TREND_ADX_PERIOD",
+            "TREND_ADX_MIN",
+            "TREND_LOOKBACK_BARS",
+            "CONFIRM_INTERVAL",
+            "DEMAND_ZONE_FILTER_ENABLED",
+        )
+    }
     try:
-        PUMP_CONFIG.update({"TREND_FILTER_ENABLED": True, "TREND_INTERVAL": "1h",
-                            "TREND_EMA_FAST": 20, "TREND_EMA_SLOW": 50,
-                            "TREND_ADX_PERIOD": 14, "TREND_ADX_MIN": 20.0,
-                            "TREND_LOOKBACK_BARS": 120})
+        PUMP_CONFIG.update(
+            {
+                "TREND_FILTER_ENABLED": True,
+                "TREND_INTERVAL": "1h",
+                "TREND_EMA_FAST": 20,
+                "TREND_EMA_SLOW": 50,
+                "TREND_ADX_PERIOD": 14,
+                "TREND_ADX_MIN": 20.0,
+                "TREND_LOOKBACK_BARS": 120,
+            }
+        )
 
         klien_naik = KlienDetektor(arah=1.0)
         hasil_naik = _detector_score_symbol(klien_naik, "UJIUSDT", ticker, 100.0)
-        cek("detektor meloloskan simbol saat trend H1 naik dan kuat",
-            hasil_naik.get("verdict") == "LOLOS", f"{hasil_naik.get('verdict')} | "
-            f"{str(hasil_naik.get('reason'))[:70]}")
-        cek("detektor memakai candle trend untuk menilai (1 kali ambil per simbol)",
-            klien_naik.panggilan_trend == 1, klien_naik.panggilan_trend)
-        cek("baris tabel trend tersedia untuk ditampilkan",
-            bool((hasil_naik.get("trend") or {}).get("reason")), hasil_naik.get("trend"))
+        cek(
+            "detektor meloloskan simbol saat trend H1 naik dan kuat",
+            hasil_naik.get("verdict") == "LOLOS",
+            f"{hasil_naik.get('verdict')} | " f"{str(hasil_naik.get('reason'))[:70]}",
+        )
+        cek(
+            "detektor memakai candle trend untuk menilai (1 kali ambil per simbol)",
+            klien_naik.panggilan_trend == 1,
+            klien_naik.panggilan_trend,
+        )
+        cek(
+            "baris tabel trend tersedia untuk ditampilkan",
+            bool((hasil_naik.get("trend") or {}).get("reason")),
+            hasil_naik.get("trend"),
+        )
 
         klien_turun = KlienDetektor(arah=-1.0)
         hasil_turun = _detector_score_symbol(klien_turun, "UJIUSDT", ticker, 100.0)
-        cek("detektor menolak simbol saat trend H1 turun",
+        cek(
+            "detektor menolak simbol saat trend H1 turun",
             hasil_turun.get("verdict") == "DITOLAK TREND",
-            f"{hasil_turun.get('verdict')} | {str(hasil_turun.get('reason'))[:70]}")
+            f"{hasil_turun.get('verdict')} | {str(hasil_turun.get('reason'))[:70]}",
+        )
 
         klien_rusak = KlienDetektor(gagal_trend=True)
         hasil_rusak = _detector_score_symbol(klien_rusak, "UJIUSDT", ticker, 100.0)
-        cek("detektor fail closed saat candle trend gagal diambil",
+        cek(
+            "detektor fail closed saat candle trend gagal diambil",
             hasil_rusak.get("verdict") == "DITOLAK TREND"
             and "gagal diambil" in str(hasil_rusak.get("reason")),
-            f"{hasil_rusak.get('verdict')} | {str(hasil_rusak.get('reason'))[:70]}")
+            f"{hasil_rusak.get('verdict')} | {str(hasil_rusak.get('reason'))[:70]}",
+        )
 
         PUMP_CONFIG["TREND_FILTER_ENABLED"] = False
         klien_mati = KlienDetektor(arah=-1.0)
         hasil_mati = _detector_score_symbol(klien_mati, "UJIUSDT", ticker, 100.0)
-        cek("filter trend nonaktif tidak mengambil candle trend dan tidak menolak",
+        cek(
+            "filter trend nonaktif tidak mengambil candle trend dan tidak menolak",
             klien_mati.panggilan_trend == 0 and hasil_mati.get("verdict") == "LOLOS",
-            f"{klien_mati.panggilan_trend} panggilan | {hasil_mati.get('verdict')}")
+            f"{klien_mati.panggilan_trend} panggilan | {hasil_mati.get('verdict')}",
+        )
         PUMP_CONFIG["TREND_FILTER_ENABLED"] = True
     finally:
         for kunci, nilai in asli.items():
@@ -2015,21 +2619,38 @@ def selftest() -> int:
         cfg_uji = dict(PUMP_CONFIG, CONFIRM_INTERVAL="5m")
         try:
             _bt_prepare_universe("uji", cfg_uji, 30, 5, lambda *a: None, lambda: False)
-            cek("warmup trend memblokir sebelum jaringan?", False, "tidak melempar apa pun")
+            cek(
+                "warmup trend memblokir sebelum jaringan?",
+                False,
+                "tidak melempar apa pun",
+            )
         except bt.BacktestError as exc:
-            cek("warmup trend dinaikkan sebelum jaringan dan pesannya jelas",
-                any("Warmup backtest dinaikkan" in m and "gerbang trend" in m for m in kelas_log)
+            cek(
+                "warmup trend dinaikkan sebelum jaringan dan pesannya jelas",
+                any(
+                    "Warmup backtest dinaikkan" in m and "gerbang trend" in m
+                    for m in kelas_log
+                )
                 and "jaringan uji putus" in str(exc),
-                f"{len(kelas_log)} catatan log")
+                f"{len(kelas_log)} catatan log",
+            )
 
         try:
-            _bt_prepare_universe("uji", dict(PUMP_CONFIG, CONFIRM_INTERVAL="5m",
-                                             TREND_INTERVAL="3m"), 30, 5,
-                                 lambda *a: None, lambda: False)
+            _bt_prepare_universe(
+                "uji",
+                dict(PUMP_CONFIG, CONFIRM_INTERVAL="5m", TREND_INTERVAL="3m"),
+                30,
+                5,
+                lambda *a: None,
+                lambda: False,
+            )
             cek("interval trend tidak sepadan ditolak", False, "tidak melempar apa pun")
         except bt.BacktestError as exc:
-            cek("interval trend tidak sepadan ditolak dengan pesan yang bisa dibaca",
-                "TREND_INTERVAL" in str(exc) or "kelipatan" in str(exc), str(exc)[:70])
+            cek(
+                "interval trend tidak sepadan ditolak dengan pesan yang bisa dibaca",
+                "TREND_INTERVAL" in str(exc) or "kelipatan" in str(exc),
+                str(exc)[:70],
+            )
     finally:
         logger.removeHandler(perekam)
         logger.setLevel(level_asli)
@@ -2038,17 +2659,32 @@ def selftest() -> int:
             globals()["BinanceSpotClient"] = asli_klien
 
     # tanggal minimum: rentang hari tidak boleh habis untuk pemanasan saja
-    cfg_hari = dict(PUMP_CONFIG, TREND_FILTER_ENABLED=True, TREND_INTERVAL="1h",
-                    TREND_LOOKBACK_BARS=120, CONFIRM_INTERVAL="5m")
+    cfg_hari = dict(
+        PUMP_CONFIG,
+        TREND_FILTER_ENABLED=True,
+        TREND_INTERVAL="1h",
+        TREND_LOOKBACK_BARS=120,
+        CONFIRM_INTERVAL="5m",
+    )
     minimal, catatan = _bt_min_days_note(cfg_hari, "5m")
-    cek("rentang hari minimum dihitung dari kebutuhan pemanasan gerbang trend",
-        minimal >= 6 and "hari" in catatan, f"minimal {minimal} hari | {catatan[:60]}")
+    cek(
+        "rentang hari minimum dihitung dari kebutuhan pemanasan gerbang trend",
+        minimal >= 6 and "hari" in catatan,
+        f"minimal {minimal} hari | {catatan[:60]}",
+    )
     try:
         _bt_days_guard(cfg_hari, 2)
-        cek("rentang 2 hari dengan gerbang trend ditolak", False, "tidak melempar apa pun")
+        cek(
+            "rentang 2 hari dengan gerbang trend ditolak",
+            False,
+            "tidak melempar apa pun",
+        )
     except bt.BacktestError as exc:
-        cek("rentang 2 hari dengan gerbang trend ditolak dengan pesan jelas",
-            "minimal" in str(exc) and "hari" in str(exc), str(exc)[:70])
+        cek(
+            "rentang 2 hari dengan gerbang trend ditolak dengan pesan jelas",
+            "minimal" in str(exc) and "hari" in str(exc),
+            str(exc)[:70],
+        )
     _bt_days_guard(cfg_hari, minimal)
     _bt_days_guard(dict(cfg_hari, TREND_FILTER_ENABLED=False), 2)
     cek("rentang cukup dan filter nonaktif tetap diloloskan", True)
@@ -2066,27 +2702,41 @@ def selftest() -> int:
                 return app.view_functions[aturan.endpoint], aturan.endpoint
         return None, None
 
-    for jalur, diharapkan in (("/api/backtest/start", "api_backtest_start"),
-                              ("/api/backtest/grid/start", "api_backtest_grid_start"),
-                              ("/api/backtest/cancel/<job_id>", "api_backtest_cancel"),
-                              ("/api/backtest/status/<job_id>", "api_backtest_status"),
-                              ("/api/backtest/defaults", "api_backtest_defaults")):
+    for jalur, diharapkan in (
+        ("/api/backtest/start", "api_backtest_start"),
+        ("/api/backtest/grid/start", "api_backtest_grid_start"),
+        ("/api/backtest/cancel/<job_id>", "api_backtest_cancel"),
+        ("/api/backtest/status/<job_id>", "api_backtest_status"),
+        ("/api/backtest/defaults", "api_backtest_defaults"),
+    ):
         view, endpoint = _view(jalur)
-        cek(f"rute {jalur} menunjuk fungsi view yang benar",
-            view is not None and endpoint == diharapkan, f"endpoint={endpoint}")
+        cek(
+            f"rute {jalur} menunjuk fungsi view yang benar",
+            view is not None and endpoint == diharapkan,
+            f"endpoint={endpoint}",
+        )
 
-    salah = [aturan.endpoint for aturan in app.url_map.iter_rules()
-             if aturan.endpoint.startswith("_")]
-    cek("tidak ada view yang terpasang pada fungsi bantu (nama diawali garis bawah)",
-        not salah, salah)
+    salah = [
+        aturan.endpoint
+        for aturan in app.url_map.iter_rules()
+        if aturan.endpoint.startswith("_")
+    ]
+    cek(
+        "tidak ada view yang terpasang pada fungsi bantu (nama diawali garis bawah)",
+        not salah,
+        salah,
+    )
 
     viewsalah = []
     for aturan in app.url_map.iter_rules():
         view = app.view_functions[aturan.endpoint]
         try:
-            wajib = [p for p in _inspect.signature(view).parameters.values()
-                     if p.default is _inspect.Parameter.empty
-                     and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+            wajib = [
+                p
+                for p in _inspect.signature(view).parameters.values()
+                if p.default is _inspect.Parameter.empty
+                and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+            ]
         except (TypeError, ValueError):
             continue
         # Flask mengisi sendiri argumen yang namanya ada di pola URL (mis. <job_id>),
@@ -2094,8 +2744,11 @@ def selftest() -> int:
         wajib = [p for p in wajib if p.name not in (aturan.arguments or set())]
         if wajib:
             viewsalah.append(f"{aturan.endpoint}({', '.join(p.name for p in wajib)})")
-    cek("semua view bisa dipanggil Flask tanpa argumen posisi tambahan",
-        not viewsalah, viewsalah)
+    cek(
+        "semua view bisa dipanggil Flask tanpa argumen posisi tambahan",
+        not viewsalah,
+        viewsalah,
+    )
 
     # Diambil lewat globals() supaya penetapan di bawah tidak membuat nama lokal
     # yang menutupi fungsi aslinya.
@@ -2109,59 +2762,101 @@ def selftest() -> int:
     try:
         with _bt_jobs_lock:
             _bt_jobs.clear()
-        resp = klien.post("/api/backtest/start", json={"days": 30, "max_symbols": 150},
-                          headers=kepala)
+        resp = klien.post(
+            "/api/backtest/start", json={"days": 30, "max_symbols": 150}, headers=kepala
+        )
         tipe = str(resp.headers.get("Content-Type", ""))
         isi = resp.get_data(as_text=True)
-        cek("POST /api/backtest/start menjawab JSON, bukan HTML",
-            resp.status_code == 200 and tipe.startswith("application/json")
-            and '"job_id"' in isi, f"{resp.status_code} {tipe[:30]} {isi[:40]}")
+        cek(
+            "POST /api/backtest/start menjawab JSON, bukan HTML",
+            resp.status_code == 200
+            and tipe.startswith("application/json")
+            and '"job_id"' in isi,
+            f"{resp.status_code} {tipe[:30]} {isi[:40]}",
+        )
         if resp.status_code != 200:
             print("    pesan server:", isi[:160])
 
         with _bt_jobs_lock:
             _bt_jobs.clear()
-        resp2 = klien.post("/api/backtest/start", json={"days": 2, "max_symbols": 150},
-                           headers=kepala)
+        resp2 = klien.post(
+            "/api/backtest/start", json={"days": 2, "max_symbols": 150}, headers=kepala
+        )
         isi2 = resp2.get_data(as_text=True)
-        cek("rentang hari terlalu pendek dijawab JSON 400 yang jelas",
+        cek(
+            "rentang hari terlalu pendek dijawab JSON 400 yang jelas",
             resp2.status_code == 400
-            and str(resp2.headers.get("Content-Type", "")).startswith("application/json")
-            and "minimal" in isi2 and "hari" in isi2, f"{resp2.status_code} {isi2[:60]}")
+            and str(resp2.headers.get("Content-Type", "")).startswith(
+                "application/json"
+            )
+            and "minimal" in isi2
+            and "hari" in isi2,
+            f"{resp2.status_code} {isi2[:60]}",
+        )
 
         with _bt_jobs_lock:
             _bt_jobs.clear()
-        resp3 = klien.post("/api/backtest/grid/start",
-                           json={"days": 30, "max_symbols": 10,
-                                 "spec": {"TP_PCT": [2.0, 3.0]},
-                                 "USE_ATR_EXIT": False},
-                           headers=kepala)
+        resp3 = klien.post(
+            "/api/backtest/grid/start",
+            json={
+                "days": 30,
+                "max_symbols": 10,
+                "spec": {"TP_PCT": [2.0, 3.0]},
+                "USE_ATR_EXIT": False,
+            },
+            headers=kepala,
+        )
         isi3 = resp3.get_data(as_text=True)
-        cek("POST /api/backtest/grid/start menjawab JSON, bukan HTML",
+        cek(
+            "POST /api/backtest/grid/start menjawab JSON, bukan HTML",
             resp3.status_code == 200
-            and str(resp3.headers.get("Content-Type", "")).startswith("application/json")
-            and '"job_id"' in isi3, f"{resp3.status_code} {isi3[:60]}")
+            and str(resp3.headers.get("Content-Type", "")).startswith(
+                "application/json"
+            )
+            and '"job_id"' in isi3,
+            f"{resp3.status_code} {isi3[:60]}",
+        )
 
         with _bt_jobs_lock:
             _bt_jobs.clear()
-        resp3b = klien.post("/api/backtest/grid/start",
-                            json={"days": 2, "max_symbols": 10, "spec": {"TP_PCT": [2.0]},
-                                  "USE_ATR_EXIT": False, "TREND_FILTER_ENABLED": True},
-                            headers=kepala)
+        resp3b = klien.post(
+            "/api/backtest/grid/start",
+            json={
+                "days": 2,
+                "max_symbols": 10,
+                "spec": {"TP_PCT": [2.0]},
+                "USE_ATR_EXIT": False,
+                "TREND_FILTER_ENABLED": True,
+            },
+            headers=kepala,
+        )
         isi3b = resp3b.get_data(as_text=True)
-        cek("grid dengan rentang terlalu pendek dijawab JSON 400 yang jelas",
+        cek(
+            "grid dengan rentang terlalu pendek dijawab JSON 400 yang jelas",
             resp3b.status_code == 400
-            and str(resp3b.headers.get("Content-Type", "")).startswith("application/json")
-            and "minimal" in isi3b, f"{resp3b.status_code} {isi3b[:70]}")
+            and str(resp3b.headers.get("Content-Type", "")).startswith(
+                "application/json"
+            )
+            and "minimal" in isi3b,
+            f"{resp3b.status_code} {isi3b[:70]}",
+        )
 
         with _bt_jobs_lock:
             _bt_jobs.clear()
-            _bt_jobs["uji"] = {"status": "running", "cancel": False, "progress": 0.0,
-                               "stage": "", "updated_at": time.time(), "created_at": time.time()}
+            _bt_jobs["uji"] = {
+                "status": "running",
+                "cancel": False,
+                "progress": 0.0,
+                "stage": "",
+                "updated_at": time.time(),
+                "created_at": time.time(),
+            }
         resp4 = klien.post("/api/backtest/cancel/uji", headers=kepala)
-        cek("POST /api/backtest/cancel menjawab JSON",
+        cek(
+            "POST /api/backtest/cancel menjawab JSON",
             str(resp4.headers.get("Content-Type", "")).startswith("application/json"),
-            f"{resp4.status_code} {str(resp4.headers.get('Content-Type'))[:30]}")
+            f"{resp4.status_code} {str(resp4.headers.get('Content-Type'))[:30]}",
+        )
     finally:
         with _bt_jobs_lock:
             _bt_jobs.clear()
@@ -2171,7 +2866,10 @@ def selftest() -> int:
             globals()["_bt_run_grid_job"] = asli_grid
         app.config["TESTING"] = False
 
-    print("HASIL SELFTEST dashboard: " + ("SEMUA LULUS" if not gagal else f"{gagal} GAGAL"))
+    print(
+        "HASIL SELFTEST dashboard: "
+        + ("SEMUA LULUS" if not gagal else f"{gagal} GAGAL")
+    )
     return 0 if not gagal else 1
 
 
@@ -2198,10 +2896,17 @@ def main(*, auto_start_bot: bool = False) -> int:
             print(f"Bot tidak dapat dimulai otomatis: {exc}")
 
     tampil = "localhost" if _DASHBOARD_HOST == "127.0.0.1" else _DASHBOARD_HOST
-    print(f"Dashboard berjalan di http://{tampil}:{_DASHBOARD_PORT}  (Ctrl+C untuk berhenti)")
+    print(
+        f"Dashboard berjalan di http://{tampil}:{_DASHBOARD_PORT}  (Ctrl+C untuk berhenti)"
+    )
     try:
-        app.run(host=_DASHBOARD_HOST, port=_DASHBOARD_PORT, debug=False,
-                use_reloader=False, threaded=True)
+        app.run(
+            host=_DASHBOARD_HOST,
+            port=_DASHBOARD_PORT,
+            debug=False,
+            use_reloader=False,
+            threaded=True,
+        )
     finally:
         _process_manager.shutdown_dashboard()
     return 0

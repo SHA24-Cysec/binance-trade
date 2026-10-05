@@ -7,7 +7,11 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from infrastructure.storage.atomic_io import archive_corrupt, atomic_write_json, interprocess_lock
+from infrastructure.storage.atomic_io import (
+    archive_corrupt,
+    atomic_write_json,
+    interprocess_lock,
+)
 
 logger = logging.getLogger("state")
 
@@ -86,9 +90,13 @@ def _load_control_unlocked(path: str) -> dict:
     except json.JSONDecodeError as exc:
         try:
             backup = archive_corrupt(path)
-            logger.error("File kontrol %s rusak (%s), diarsipkan ke %s.", path, exc, backup)
+            logger.error(
+                "File kontrol %s rusak (%s), diarsipkan ke %s.", path, exc, backup
+            )
         except OSError as backup_exc:
-            logger.error("File kontrol %s rusak dan gagal diarsipkan: %s", path, backup_exc)
+            logger.error(
+                "File kontrol %s rusak dan gagal diarsipkan: %s", path, backup_exc
+            )
         return {}
     except OSError:
         return {}
@@ -125,11 +133,14 @@ def get_stop_control_file(control_path: str) -> str:
 def request_stop(control_path: str, *, requested_by: str = "dashboard") -> str:
     stop_path = get_stop_control_file(control_path)
     with interprocess_lock(stop_path):
-        atomic_write_json(stop_path, {
-            "action": "STOP_BOT",
-            "requested_at": now_ms(),
-            "requested_by": str(requested_by)[:80],
-        })
+        atomic_write_json(
+            stop_path,
+            {
+                "action": "STOP_BOT",
+                "requested_at": now_ms(),
+                "requested_by": str(requested_by)[:80],
+            },
+        )
     return stop_path
 
 
@@ -153,6 +164,9 @@ def consume_stop_request(control_path: str, max_age_seconds: int = 300) -> bool:
             return False
         age = (now_ms() - requested_at) / 1000.0
         if requested_at <= 0 or age < -30 or age > max_age_seconds:
-            logger.warning("Perintah stop diabaikan karena stale/tidak valid (umur %.1f detik).", age)
+            logger.warning(
+                "Perintah stop diabaikan karena stale/tidak valid (umur %.1f detik).",
+                age,
+            )
             return False
         return True

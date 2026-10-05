@@ -24,10 +24,16 @@ _INSERT_BATCH = 2_000
 _KLINE_COLUMNS = "open_time, open, high, low, close, close_time, volume, quote_volume"
 _KLINE_PLACEHOLDERS = "?, ?, ?, ?, ?, ?, ?, ?"
 
-_SQL_INSERT_KLINES = ("INSERT OR REPLACE INTO klines (symbol, " + _KLINE_COLUMNS
-                      + ") VALUES (?, " + _KLINE_PLACEHOLDERS + ")")
-_SQL_SELECT_KLINES = ("SELECT " + _KLINE_COLUMNS
-                      + " FROM klines WHERE symbol = ? ORDER BY open_time")
+_SQL_INSERT_KLINES = (
+    "INSERT OR REPLACE INTO klines (symbol, "
+    + _KLINE_COLUMNS
+    + ") VALUES (?, "
+    + _KLINE_PLACEHOLDERS
+    + ")"
+)
+_SQL_SELECT_KLINES = (
+    "SELECT " + _KLINE_COLUMNS + " FROM klines WHERE symbol = ? ORDER BY open_time"
+)
 
 
 def _row_to_kline(row: Sequence) -> Kline:
@@ -85,18 +91,36 @@ class StorageError(RuntimeError):
 
 class SymbolSeries:
 
-    __slots__ = ("symbol", "_open_times", "_close_times", "_pct24h",
-                 "_vol24h", "_ready", "_open", "_high", "_low", "_close",
-                 "_volume", "_quote_volume")
+    __slots__ = (
+        "symbol",
+        "_open_times",
+        "_close_times",
+        "_pct24h",
+        "_vol24h",
+        "_ready",
+        "_open",
+        "_high",
+        "_low",
+        "_close",
+        "_volume",
+        "_quote_volume",
+    )
 
-    def __init__(self, symbol: str, open_times: array, close_times: array,
-                 pct24h: array, vol24h: array, ready: bytearray,
-                 open_prices: Optional[array] = None,
-                 high_prices: Optional[array] = None,
-                 low_prices: Optional[array] = None,
-                 close_prices: Optional[array] = None,
-                 volumes: Optional[array] = None,
-                 quote_volumes: Optional[array] = None) -> None:
+    def __init__(
+        self,
+        symbol: str,
+        open_times: array,
+        close_times: array,
+        pct24h: array,
+        vol24h: array,
+        ready: bytearray,
+        open_prices: Optional[array] = None,
+        high_prices: Optional[array] = None,
+        low_prices: Optional[array] = None,
+        close_prices: Optional[array] = None,
+        volumes: Optional[array] = None,
+        quote_volumes: Optional[array] = None,
+    ) -> None:
         self.symbol = str(symbol)
         self._open_times = open_times
         self._close_times = close_times
@@ -111,9 +135,13 @@ class SymbolSeries:
         self._quote_volume = quote_volumes
 
     @classmethod
-    def build(cls, symbol: str, klines: Sequence[Kline],
-              stats: Sequence[Optional[dict]],
-              include_ohlcv: bool = False) -> "SymbolSeries":
+    def build(
+        cls,
+        symbol: str,
+        klines: Sequence[Kline],
+        stats: Sequence[Optional[dict]],
+        include_ohlcv: bool = False,
+    ) -> "SymbolSeries":
         n = len(klines)
         if len(stats) != n:
             raise StorageError(
@@ -145,14 +173,23 @@ class SymbolSeries:
 
     @property
     def has_ohlcv(self) -> bool:
-        return all(values is not None for values in (
-            self._open, self._high, self._low, self._close,
-            self._volume, self._quote_volume,
-        ))
+        return all(
+            values is not None
+            for values in (
+                self._open,
+                self._high,
+                self._low,
+                self._close,
+                self._volume,
+                self._quote_volume,
+            )
+        )
 
     def kline_at(self, index: int) -> Kline:
         if not self.has_ohlcv:
-            raise StorageError(f"OHLCV untuk {self.symbol} tidak dimuat dalam SymbolSeries.")
+            raise StorageError(
+                f"OHLCV untuk {self.symbol} tidak dimuat dalam SymbolSeries."
+            )
         i = int(index)
         return Kline(
             open_time=int(self._open_times[i]),
@@ -167,7 +204,9 @@ class SymbolSeries:
 
     def klines_slice(self, start: int, end: int) -> list[Kline]:
         if not self.has_ohlcv:
-            raise StorageError(f"OHLCV untuk {self.symbol} tidak dimuat dalam SymbolSeries.")
+            raise StorageError(
+                f"OHLCV untuk {self.symbol} tidak dimuat dalam SymbolSeries."
+            )
         lo = max(0, int(start))
         hi = min(len(self), max(lo, int(end)))
         return [self.kline_at(i) for i in range(lo, hi)]
@@ -201,14 +240,24 @@ class SymbolSeries:
         return self._open_times
 
     def board_arrays(self) -> tuple:
-        return (self._open_times, self._close_times, self._pct24h,
-                self._vol24h, self._ready)
+        return (
+            self._open_times,
+            self._close_times,
+            self._pct24h,
+            self._vol24h,
+            self._ready,
+        )
 
 
 class KlineStore:
 
-    def __init__(self, db_path: str, *, temp_dir: Optional[str] = None,
-                 cache_size: int = DEFAULT_SYMBOL_CACHE_SIZE) -> None:
+    def __init__(
+        self,
+        db_path: str,
+        *,
+        temp_dir: Optional[str] = None,
+        cache_size: int = DEFAULT_SYMBOL_CACHE_SIZE,
+    ) -> None:
         self.db_path = str(db_path)
         self._temp_dir = str(temp_dir) if temp_dir else None
         self._cache_size = max(1, int(cache_size))
@@ -225,15 +274,23 @@ class KlineStore:
             self._conn.commit()
 
     @classmethod
-    def create_temp(cls, *, prefix: str = "binance_backtest_",
-                    cache_size: int = DEFAULT_SYMBOL_CACHE_SIZE) -> "KlineStore":
+    def create_temp(
+        cls,
+        *,
+        prefix: str = "binance_backtest_",
+        cache_size: int = DEFAULT_SYMBOL_CACHE_SIZE,
+    ) -> "KlineStore":
         temp_dir = tempfile.mkdtemp(prefix=prefix)
         db_path = str(Path(temp_dir) / "klines.sqlite3")
         return cls(db_path, temp_dir=temp_dir, cache_size=cache_size)
 
     @classmethod
-    def from_klines(cls, data: Mapping[str, Sequence[Kline]],
-                    *, cache_size: int = DEFAULT_SYMBOL_CACHE_SIZE) -> "KlineStore":
+    def from_klines(
+        cls,
+        data: Mapping[str, Sequence[Kline]],
+        *,
+        cache_size: int = DEFAULT_SYMBOL_CACHE_SIZE,
+    ) -> "KlineStore":
         store = cls.create_temp(cache_size=cache_size)
         try:
             for symbol, klines in data.items():
@@ -259,8 +316,7 @@ class KlineStore:
             self._require_open()
             cur = self._conn.cursor()
             for start in range(0, len(rows), _INSERT_BATCH):
-                cur.executemany(_SQL_INSERT_KLINES,
-                                rows[start:start + _INSERT_BATCH])
+                cur.executemany(_SQL_INSERT_KLINES, rows[start : start + _INSERT_BATCH])
             cur.execute(
                 "INSERT INTO symbols (symbol, seq, bars) "
                 "VALUES (?, (SELECT COALESCE(MAX(seq), -1) + 1 FROM symbols), ?) "
@@ -345,8 +401,9 @@ class KlineStore:
             else:
                 Path(self.db_path).unlink(missing_ok=True)
         except OSError as exc:
-            logger.warning("Gagal menghapus file backtest temporary %s: %s",
-                           self.db_path, exc)
+            logger.warning(
+                "Gagal menghapus file backtest temporary %s: %s", self.db_path, exc
+            )
 
     @property
     def closed(self) -> bool:

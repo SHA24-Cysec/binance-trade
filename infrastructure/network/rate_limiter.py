@@ -32,22 +32,29 @@ class RateLimitBlockedError(RuntimeError):
 
     def __init__(self, retry_after: float):
         self.retry_after = max(1.0, float(retry_after))
-        super().__init__(f"shared Binance rate limiter blocked for {self.retry_after:.1f}s")
+        super().__init__(
+            f"shared Binance rate limiter blocked for {self.retry_after:.1f}s"
+        )
 
 
 class SharedRequestWeightLimiter:
 
     _memory_lock = threading.RLock()
 
-    def __init__(self, state_file: str | None = None, limit: int = 6000,
-                 safety_margin: int = 100, window_seconds: int = 60,
-                 *, jeda_gagal_tulis: float = 30.0) -> None:
+    def __init__(
+        self,
+        state_file: str | None = None,
+        limit: int = 6000,
+        safety_margin: int = 100,
+        window_seconds: int = 60,
+        *,
+        jeda_gagal_tulis: float = 30.0,
+    ) -> None:
         self.limit = max(1, int(limit))
         self.safety_margin = max(0, int(safety_margin))
         self.window_seconds = max(1, int(window_seconds))
         self.state_file = (
-            os.path.abspath(os.path.expanduser(state_file))
-            if state_file else None
+            os.path.abspath(os.path.expanduser(state_file)) if state_file else None
         )
         self._memory_state: dict | None = None
         # Penulisan ledger bersifat best-effort. Kalau berkas terkunci (mis.
@@ -117,11 +124,14 @@ class SharedRequestWeightLimiter:
         except (ValueError, TypeError) as exc:
             logger.error(
                 "Ledger rate limit %s tidak dapat diverifikasi: %s. Request diblokir.",
-                self.state_file, exc,
+                self.state_file,
+                exc,
             )
             raise RateLimitBlockedError(self.window_seconds) from exc
 
-    def _gabung_dengan_memori(self, dari_berkas: dict | None, now: float) -> dict | None:
+    def _gabung_dengan_memori(
+        self, dari_berkas: dict | None, now: float
+    ) -> dict | None:
         """Ambil nilai tertinggi antara ledger berkas dan catatan memori.
 
         Dipakai supaya pembatasan tetap benar ketika penulisan berkas gagal:
@@ -150,8 +160,9 @@ class SharedRequestWeightLimiter:
             "blocked_until": max(a["blocked_until"], b["blocked_until"]),
         }
 
-    def _log_gangguan_ledger(self, exc: BaseException, *, aksi: str = "ditulis",
-                             kritis: bool = False) -> None:
+    def _log_gangguan_ledger(
+        self, exc: BaseException, *, aksi: str = "ditulis", kritis: bool = False
+    ) -> None:
         """Catat kegagalan penulisan ledger, dibatasi supaya log tidak banjir."""
         now = time.time()
         if now - self._peringatan_terakhir < 30.0:
@@ -162,7 +173,9 @@ class SharedRequestWeightLimiter:
             "dari memori proses ini sehingga request TIDAK dihentikan. "
             "Biasanya berkas terkunci oleh OneDrive/antivirus: pindahkan folder "
             "data keluar dari OneDrive atau jeda sinkronisasinya.",
-            self.state_file, aksi, exc,
+            self.state_file,
+            aksi,
+            exc,
         )
         if kritis:
             logger.error(*pesan)
@@ -202,7 +215,8 @@ class SharedRequestWeightLimiter:
             if self._gagal_tulis_berturut >= _MAKS_GAGAL_BERTURUT:
                 self._tulis_dijeda_sampai = now + self._jeda_gagal_tulis
             self._log_gangguan_ledger(
-                exc, aksi="ditulis", kritis=self._gagal_tulis_berturut == 1)
+                exc, aksi="ditulis", kritis=self._gagal_tulis_berturut == 1
+            )
             return False
         finally:
             if tmp is not None:
@@ -224,7 +238,6 @@ class SharedRequestWeightLimiter:
 
     @contextmanager
     def _locked_state(self) -> Iterator[dict]:
-        now = time.time()
         if not self.state_file:
             with self._locked_state_memori() as state:
                 yield state
@@ -276,7 +289,8 @@ class SharedRequestWeightLimiter:
                         logger.warning(
                             "Rate limiter meloloskan satu request berbobot %d "
                             "yang melebihi limit efektif %d pada jendela kosong.",
-                            requested, effective_limit,
+                            requested,
+                            effective_limit,
                         )
                     state["used"] += requested
                     return
@@ -317,8 +331,10 @@ def selftest() -> int:
 
     def cek(nama: str, syarat: bool, keterangan: str = "") -> None:
         nonlocal gagal
-        print(f"  [{'OK  ' if syarat else 'GAGAL'}] {nama}"
-              f"{(' -> ' + keterangan) if keterangan else ''}")
+        print(
+            f"  [{'OK  ' if syarat else 'GAGAL'}] {nama}"
+            f"{(' -> ' + keterangan) if keterangan else ''}"
+        )
         if not syarat:
             gagal += 1
 
@@ -356,15 +372,21 @@ def selftest() -> int:
             # baca ulang lewat jalur memori: pakai nilai tertinggi
             with lim2._locked_state() as state:  # noqa: SLF001
                 dipakai = int(state["used"])
-        cek("weight tetap terhitung walau berkas tak bisa ditulis",
-            dipakai >= 400, f"used={dipakai}")
-        cek("penulisan dijeda setelah beberapa kegagalan",
+        cek(
+            "weight tetap terhitung walau berkas tak bisa ditulis",
+            dipakai >= 400,
+            f"used={dipakai}",
+        )
+        cek(
+            "penulisan dijeda setelah beberapa kegagalan",
             lim2._tulis_dijeda_sampai > 0,  # noqa: SLF001
-            f"jeda sampai {lim2._tulis_dijeda_sampai:.0f}")  # noqa: SLF001
+            f"jeda sampai {lim2._tulis_dijeda_sampai:.0f}",
+        )  # noqa: SLF001
 
         print("\n=== 4. Ledger pulih saat berkas bisa ditulis lagi ===")
-        lim3 = SharedRequestWeightLimiter(berkas, limit=6000, safety_margin=100,
-                                          jeda_gagal_tulis=1.0)
+        lim3 = SharedRequestWeightLimiter(
+            berkas, limit=6000, safety_margin=100, jeda_gagal_tulis=1.0
+        )
         with mock.patch("os.replace", side_effect=galat):
             for _ in range(4):
                 lim3.reserve(50)
@@ -373,17 +395,22 @@ def selftest() -> int:
         lim3._tulis_dijeda_sampai = 0.0  # noqa: SLF001
         lim3.reserve(1)
         sesudah = json.loads(open(berkas, encoding="utf-8").read())
-        cek("berkas diperbarui lagi setelah pulih",
+        cek(
+            "berkas diperbarui lagi setelah pulih",
             int(sesudah.get("used", 0)) >= sebelum + 1,
-            f"{sebelum} -> {sesudah.get('used')}")
-        cek("tidak ada berkas sementara yang tertinggal",
+            f"{sebelum} -> {sesudah.get('used')}",
+        )
+        cek(
+            "tidak ada berkas sementara yang tertinggal",
             not [n for n in os.listdir(tmpdir) if n.startswith(".rate-limit-")],
-            str(os.listdir(tmpdir)))
+            str(os.listdir(tmpdir)),
+        )
 
         print("\n=== 5. Lock tidak bisa diambil: tetap jalan ===")
         lim4 = SharedRequestWeightLimiter(berkas, limit=6000, safety_margin=100)
-        with mock.patch("infrastructure.network.rate_limiter._open_lock_fd",
-                        side_effect=galat):
+        with mock.patch(
+            "infrastructure.network.rate_limiter._open_lock_fd", side_effect=galat
+        ):
             try:
                 lim4.reserve(7)
                 lim4.observe_server_weight(300)
@@ -402,19 +429,22 @@ def selftest() -> int:
             diblokir = False
         except RateLimitBlockedError:
             diblokir = True
-        cek("ledger rusak memblokir request (perilaku lama dipertahankan)",
-            diblokir)
+        cek("ledger rusak memblokir request (perilaku lama dipertahankan)", diblokir)
 
         print("\n=== 7. Jendela baru mereset pemakaian ===")
-        lim6 = SharedRequestWeightLimiter(None, limit=6000, safety_margin=100,
-                                          window_seconds=1)
+        lim6 = SharedRequestWeightLimiter(
+            None, limit=6000, safety_margin=100, window_seconds=1
+        )
         lim6.reserve(50)
         with lim6._locked_state() as state:  # noqa: SLF001
             state["window_start"] = time.time() - 5
         time.sleep(0.01)
         with lim6._locked_state() as state:  # noqa: SLF001
-            cek("pemakaian direset pada jendela baru", state["used"] == 0,
-                f"used={state['used']}")
+            cek(
+                "pemakaian direset pada jendela baru",
+                state["used"] == 0,
+                f"used={state['used']}",
+            )
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -428,4 +458,5 @@ def selftest() -> int:
 
 if __name__ == "__main__":
     import sys as _sys
+
     _sys.exit(selftest())

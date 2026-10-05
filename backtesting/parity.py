@@ -13,8 +13,14 @@ RISK_LIMIT_REASON = "RISK_LIMIT_TRIGGERED"
 
 
 class PositionState:
-    __slots__ = ("entry_price", "levels", "be_active", "be_stop",
-                 "trailing_active", "trailing_stop")
+    __slots__ = (
+        "entry_price",
+        "levels",
+        "be_active",
+        "be_stop",
+        "trailing_active",
+        "trailing_stop",
+    )
 
     def __init__(self, entry_price: float, levels: dict) -> None:
         self.entry_price = float(entry_price)
@@ -33,8 +39,9 @@ class PositionState:
         self.trailing_stop = 0.0
 
 
-def evaluate_candle_exit(pos: PositionState, candle: Kline,
-                         config: dict) -> Optional[tuple[str, float]]:
+def evaluate_candle_exit(
+    pos: PositionState, candle: Kline, config: dict
+) -> Optional[tuple[str, float]]:
     entry = pos.entry_price
     lv = pos.levels
     atr_mode = lv["src"] == "ATR"
@@ -45,7 +52,9 @@ def evaluate_candle_exit(pos: PositionState, candle: Kline,
     carried_reason = None
     if pos.be_active:
         carried_level, carried_reason = pos.be_stop, "BREAKEVEN"
-    if pos.trailing_active and (carried_level is None or pos.trailing_stop > carried_level):
+    if pos.trailing_active and (
+        carried_level is None or pos.trailing_stop > carried_level
+    ):
         carried_level, carried_reason = pos.trailing_stop, "TRAILING_STOP"
     gap_below_sl = use_sl and candle.open <= sl_price
     if carried_level is not None and not gap_below_sl and candle.low <= carried_level:
@@ -57,10 +66,15 @@ def evaluate_candle_exit(pos: PositionState, candle: Kline,
 
     if config["USE_BREAKEVEN"] and not pos.be_active and pnl_high_unit >= lv["be_trig"]:
         pos.be_active = True
-        pos.be_stop = entry + lv["be_lock"] if atr_mode else entry * (1 + lv["be_lock"] / 100.0)
+        pos.be_stop = (
+            entry + lv["be_lock"] if atr_mode else entry * (1 + lv["be_lock"] / 100.0)
+        )
     if config["USE_TRAILING"]:
-        cand_stop = (candle.high - lv["tr_step"] if atr_mode
-                     else candle.high * (1 - lv["tr_step"] / 100.0))
+        cand_stop = (
+            candle.high - lv["tr_step"]
+            if atr_mode
+            else candle.high * (1 - lv["tr_step"] / 100.0)
+        )
         if not pos.trailing_active and pnl_high_unit >= lv["tr_start"]:
             pos.trailing_active = True
             pos.trailing_stop = cand_stop
@@ -86,11 +100,16 @@ class AccountRiskControls:
     def __init__(self, config: dict, initial_equity: float) -> None:
         self.use_equity_stop = bool(config.get("USE_EQUITY_STOP", False))
         self.max_drawdown_pct = float(config.get("MAX_DRAWDOWN_PERCENT", 0.0) or 0.0)
-        self.dd_cooldown_ms = float(config.get("DD_COOLDOWN_HOURS", 0.0) or 0.0) * 3_600_000
+        self.dd_cooldown_ms = (
+            float(config.get("DD_COOLDOWN_HOURS", 0.0) or 0.0) * 3_600_000
+        )
         self.use_daily_stop = bool(config.get("USE_DAILY_STOP", False))
-        self.max_daily_loss_pct = float(config.get("MAX_DAILY_LOSS_PERCENT", 0.0) or 0.0)
+        self.max_daily_loss_pct = float(
+            config.get("MAX_DAILY_LOSS_PERCENT", 0.0) or 0.0
+        )
         self.daily_profit_target_pct = float(
-            config.get("DAILY_PROFIT_TARGET_PERCENT", 0.0) or 0.0)
+            config.get("DAILY_PROFIT_TARGET_PERCENT", 0.0) or 0.0
+        )
         self.close_all_at_limit = bool(config.get("CLOSE_ALL_AT_LIMIT", False))
 
         self.peak_equity: Optional[float] = float(initial_equity)
@@ -101,8 +120,12 @@ class AccountRiskControls:
         self.daily_stopped = False
         self.daily_stop_source: Optional[str] = None
         self._limit_close_done = False
-        self.events = {"dd_stop": 0, "daily_loss_stop": 0,
-                       "daily_profit_stop": 0, "forced_close": 0}
+        self.events = {
+            "dd_stop": 0,
+            "daily_loss_stop": 0,
+            "daily_profit_stop": 0,
+            "forced_close": 0,
+        }
 
     def update(self, now_ms: int, equity: float) -> bool:
         equity = float(equity)
@@ -116,8 +139,12 @@ class AccountRiskControls:
         if self.peak_equity is None or equity > self.peak_equity:
             self.peak_equity = equity
 
-        if (self.use_equity_stop and self.max_drawdown_pct > 0
-                and not self.dd_stopped and self.peak_equity):
+        if (
+            self.use_equity_stop
+            and self.max_drawdown_pct > 0
+            and not self.dd_stopped
+            and self.peak_equity
+        ):
             dd_pct = (self.peak_equity - equity) / self.peak_equity * 100.0
             if dd_pct >= self.max_drawdown_pct:
                 self.dd_stopped = True
@@ -125,18 +152,27 @@ class AccountRiskControls:
                 self.events["dd_stop"] += 1
 
         if self.dd_stopped:
-            if not self.use_equity_stop or not self.dd_stop_until or now_ms >= self.dd_stop_until:
+            if (
+                not self.use_equity_stop
+                or not self.dd_stop_until
+                or now_ms >= self.dd_stop_until
+            ):
                 self.dd_stopped = False
                 self.dd_stop_until = 0.0
                 self.peak_equity = equity
 
         if self.use_daily_stop and not self.daily_stopped and self.day_start_equity:
-            change_pct = (equity - self.day_start_equity) / self.day_start_equity * 100.0
+            change_pct = (
+                (equity - self.day_start_equity) / self.day_start_equity * 100.0
+            )
             if self.max_daily_loss_pct > 0 and change_pct <= -self.max_daily_loss_pct:
                 self.daily_stopped = True
                 self.daily_stop_source = "LOSS"
                 self.events["daily_loss_stop"] += 1
-            elif self.daily_profit_target_pct > 0 and change_pct >= self.daily_profit_target_pct:
+            elif (
+                self.daily_profit_target_pct > 0
+                and change_pct >= self.daily_profit_target_pct
+            ):
                 self.daily_stopped = True
                 self.daily_stop_source = "PROFIT"
                 self.events["daily_profit_stop"] += 1
@@ -145,13 +181,19 @@ class AccountRiskControls:
 
     def force_close_due(self, entries_paused: bool, in_position: bool) -> bool:
         profit_stop_only = (
-            self.daily_stopped and not self.dd_stopped
+            self.daily_stopped
+            and not self.dd_stopped
             and str(self.daily_stop_source or "LOSS").upper() == "PROFIT"
         )
         limit_now = bool(self.dd_stopped or self.daily_stopped) and not profit_stop_only
         due = False
-        if (self.close_all_at_limit and entries_paused and limit_now
-                and not self._limit_close_done and in_position):
+        if (
+            self.close_all_at_limit
+            and entries_paused
+            and limit_now
+            and not self._limit_close_done
+            and in_position
+        ):
             self._limit_close_done = True
             self.events["forced_close"] += 1
             due = True
@@ -162,7 +204,9 @@ class AccountRiskControls:
 
 class BtcDropLookup:
 
-    def __init__(self, klines: Sequence[Kline], bar_ms: int, lookback_bars: int) -> None:
+    def __init__(
+        self, klines: Sequence[Kline], bar_ms: int, lookback_bars: int
+    ) -> None:
         self._klines = sorted(klines, key=lambda k: int(k.open_time))
         self._index = {int(k.open_time): i for i, k in enumerate(self._klines)}
         self._bar_ms = int(bar_ms)
@@ -180,18 +224,23 @@ class BtcDropLookup:
         return (self._klines[idx].close / prev.close - 1.0) * 100.0
 
 
-def make_btc_lookup(btc_klines: Optional[Sequence[Kline]], config: dict,
-                    bar_ms: int) -> Optional[BtcDropLookup]:
+def make_btc_lookup(
+    btc_klines: Optional[Sequence[Kline]], config: dict, bar_ms: int
+) -> Optional[BtcDropLookup]:
     if not config.get("BTC_FILTER_ENABLED", False) or not btc_klines:
         return None
-    return BtcDropLookup(btc_klines, bar_ms, int(config.get("BTC_LOOKBACK_BARS", 3) or 3))
+    return BtcDropLookup(
+        btc_klines, bar_ms, int(config.get("BTC_LOOKBACK_BARS", 3) or 3)
+    )
 
 
 def btc_filter_warning(config: dict, lookup: Optional[BtcDropLookup]) -> Optional[str]:
     if config.get("BTC_FILTER_ENABLED", False) and lookup is None:
-        return ("BTC_FILTER_ENABLED aktif di config, tetapi candle BTCUSDT tidak "
-                "diberikan ke simulasi ini, sehingga filter BTC TIDAK diterapkan "
-                "(bot live menerapkannya).")
+        return (
+            "BTC_FILTER_ENABLED aktif di config, tetapi candle BTCUSDT tidak "
+            "diberikan ke simulasi ini, sehingga filter BTC TIDAK diterapkan "
+            "(bot live menerapkannya)."
+        )
     return None
 
 
@@ -203,13 +252,16 @@ def gate_config(config: dict, lookup: Optional[BtcDropLookup]) -> dict:
     return out
 
 
-def chase_exceeded(exec_price: float, signal_close: Optional[float],
-                   max_chase_pct: float) -> bool:
+def chase_exceeded(
+    exec_price: float, signal_close: Optional[float], max_chase_pct: float
+) -> bool:
     if not max_chase_pct or max_chase_pct <= 0:
         return False
     if not signal_close or signal_close <= 0:
         return False
-    return float(exec_price) > float(signal_close) * (1.0 + float(max_chase_pct) / 100.0)
+    return float(exec_price) > float(signal_close) * (
+        1.0 + float(max_chase_pct) / 100.0
+    )
 
 
 def next_entry_allowed(close_time_ms: int, config: dict) -> int:
@@ -232,7 +284,9 @@ class TrendLookup:
         from strategy import indicators as strategy_mod
 
         self.config = config
-        self.interval = strategy_mod.trend_interval(config) if _interval_ok(config) else None
+        self.interval = (
+            strategy_mod.trend_interval(config) if _interval_ok(config) else None
+        )
         self.window = strategy_mod.trend_window_bars(config)
         self.required = strategy_mod.trend_required_bars(config)
         self.klines = list(trend_klines)
@@ -240,7 +294,7 @@ class TrendLookup:
 
     def window_at(self, signal_close_time_ms: int) -> list:
         idx = bisect_right(self.close_times, int(signal_close_time_ms))
-        return self.klines[max(0, idx - self.window):idx]
+        return self.klines[max(0, idx - self.window) : idx]
 
     def verdict_at(self, signal_close_time_ms: int) -> dict:
         return evaluate_trend(self.window_at(signal_close_time_ms), self.config)
@@ -271,8 +325,13 @@ def build_trend_klines(klines: Sequence[Kline], config: dict, interval: str) -> 
     return strategy_mod.aggregate_klines(list(klines), trend_minutes, source_minutes)
 
 
-def make_trend_lookup(klines: Sequence[Kline], config: dict, interval: str,
-                      *, sudah_dirangkai: bool = False) -> Optional[TrendLookup]:
+def make_trend_lookup(
+    klines: Sequence[Kline],
+    config: dict,
+    interval: str,
+    *,
+    sudah_dirangkai: bool = False,
+) -> Optional[TrendLookup]:
     """Lookup gerbang trend untuk backtest satu simbol.
 
     `sudah_dirangkai=True` dipakai kalau pemanggil sudah merangkai candle trend
@@ -281,7 +340,11 @@ def make_trend_lookup(klines: Sequence[Kline], config: dict, interval: str,
     """
     if not config.get("TREND_FILTER_ENABLED", False):
         return None
-    bars = list(klines) if sudah_dirangkai else build_trend_klines(klines, config, interval)
+    bars = (
+        list(klines)
+        if sudah_dirangkai
+        else build_trend_klines(klines, config, interval)
+    )
     return TrendLookup(bars, config)
 
 
@@ -300,7 +363,9 @@ def trend_warmup_ms(config: dict, interval: str) -> int:
     """Warmup (ms) yang wajib tersedia sebelum bar entry pertama dievaluasi."""
     from strategy import indicators as strategy_mod
 
-    return strategy_mod.trend_warmup_bars(config, interval) * strategy_mod.interval_to_ms(interval)
+    return strategy_mod.trend_warmup_bars(
+        config, interval
+    ) * strategy_mod.interval_to_ms(interval)
 
 
 def evaluate_trend(klines: Sequence[Kline], config: dict) -> dict:
@@ -312,12 +377,20 @@ def evaluate_trend(klines: Sequence[Kline], config: dict) -> dict:
 def per_trade_metrics(trades: Sequence) -> dict:
     pcts = [float(t.pnl_pct) for t in trades]
     if not pcts:
-        return {"avg_trade_pct": 0.0, "median_trade_pct": 0.0, "best_trade_pct": 0.0,
-                "worst_trade_pct": 0.0, "sum_trade_pct": 0.0, "payoff_ratio": None,
-                "max_consecutive_losses": 0}
+        return {
+            "avg_trade_pct": 0.0,
+            "median_trade_pct": 0.0,
+            "best_trade_pct": 0.0,
+            "worst_trade_pct": 0.0,
+            "sum_trade_pct": 0.0,
+            "payoff_ratio": None,
+            "max_consecutive_losses": 0,
+        }
     ordered = sorted(pcts)
     mid = len(ordered) // 2
-    median = ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2.0
+    median = (
+        ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2.0
+    )
     wins = [p for p in pcts if p > 0]
     losses = [p for p in pcts if p <= 0]
     avg_win = sum(wins) / len(wins) if wins else 0.0

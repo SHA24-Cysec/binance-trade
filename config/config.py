@@ -7,6 +7,7 @@ _MANAGED_MODE_OVERRIDE = os.environ.get("PUMP_BOT_MANAGED_MODE", "")
 
 try:
     from dotenv import load_dotenv
+
     _ENV_PATH = os.path.join(str(PROJECT_ROOT), ".env")
     load_dotenv(dotenv_path=_ENV_PATH, override=True)
 except ImportError:
@@ -14,54 +15,42 @@ except ImportError:
 
 PUMP_CONFIG = {
     "QUOTE_ASSET": "USDT",
-
     "MODE": "PAPER",
-
     "SHOW_BACKTEST_IN_LIVE": False,
-
     "LIVE_BASE_URL": "https://api.binance.com",
     "RATE_LIMIT_STATE_FILE": "data/binance_rate_limit_state.json",
     "RATE_LIMIT_WEIGHT_LIMIT": 6000,
     "RATE_LIMIT_SAFETY_MARGIN": 100,
     "API_KEY": os.environ.get("BINANCE_API_KEY", ""),
     "API_SECRET": os.environ.get("BINANCE_API_SECRET", ""),
-
     "PAPER_INITIAL_BALANCES": {"USDT": 1000.0},
     "PAPER_ACCOUNT_STATE_FILE": "data/pump_paper_account.json",
     "PAPER_DEPTH_LIMIT": 100,
     "PAPER_LIMIT_ORDER_TIMEOUT_SECONDS": 60,
-
     "USE_WEBSOCKET": True,
     "WS_BASE_URL": "wss://stream.binance.com:9443",
     "MAX_MARKET_DATA_AGE_SECONDS": 10.0,
     "TICKER_SNAPSHOT_TTL_SECONDS": 10,
     "WS_LAST_PRICE_OVERLAY_ENABLED": True,
-
     "MARKET_SCAN_INTERVAL_SECONDS": 30,
     "LOOP_INTERVAL_SECONDS": 5,
     "MARKET_DATA_WORKERS": 8,
     "MIN_QUOTE_VOLUME_USDT_24H": 2000000,
     "MARKET_DATA_INTERVAL": "5m",
-
     "PUMP_MIN_24H_CHANGE_PCT": 5.0,
     "PUMP_MAX_24H_CHANGE_PCT": 10.0,
     "BTC_FILTER_ENABLED": False,
     "BTC_MAX_DROP_PCT": 3.0,
     "BTC_LOOKBACK_BARS": 3,
-
-
     "USE_ATR_EXIT": True,
     "ATR_PERIOD": 14,
-    "ATR_MULT_SL": 13.0, #1.5
-    "ATR_MULT_TP": 24.5, #3.0
-    "ATR_MULT_TRAIL": 8.0, #1.0
-    "ATR_MULT_BE_TRIGGER": 6.0, #1.0
-    "ATR_MULT_BE_LOCK": 0.0, #0.1
-    "ATR_MULT_TRAIL_START": 12.0, #1.5
-
+    "ATR_MULT_SL": 13.0,  # 1.5
+    "ATR_MULT_TP": 24.5,  # 3.0
+    "ATR_MULT_TRAIL": 8.0,  # 1.0
+    "ATR_MULT_BE_TRIGGER": 6.0,  # 1.0
+    "ATR_MULT_BE_LOCK": 0.0,  # 0.1
+    "ATR_MULT_TRAIL_START": 12.0,  # 1.5
     "EXTRA_EXCLUDE_SYMBOLS": [],
-
-
     "DETECTOR_ENABLED": True,
     "DETECTOR_WEIGHT_CHANGE": 25.0,
     "DETECTOR_WEIGHT_VOLUME5M": 25.0,
@@ -69,13 +58,11 @@ PUMP_CONFIG = {
     "DETECTOR_WEIGHT_ATR": 20.0,
     "DETECTOR_ATR_MIN_PCT": 0.3,
     "DETECTOR_ATR_MAX_PCT": 1.2,
-
     "BACKTEST_INITIAL_EQUITY_USDT": 0.0,
     "BACKTEST_CACHE_ENABLED": True,
     "BACKTEST_CACHE_FILE": "data/backtest_cache.sqlite3",
     "BACKTEST_CACHE_FRESH_HOURS": 24,
     "BACKTEST_CACHE_TTL_DAYS": 30,
-
     "USE_TP": True,
     "TP_PCT": 4.0,
     "USE_STOP_LOSS": True,
@@ -83,14 +70,12 @@ PUMP_CONFIG = {
     "USE_NATIVE_STOP_LOSS": True,
     "NATIVE_OCO_LIMIT_BUFFER_PCT": 0.10,
     "SL_PCT": 1.8,
-
     "USE_BREAKEVEN": True,
     "BE_TRIGGER_PCT": 1.0,
     "BE_LOCK_PCT": 0.15,
     "USE_TRAILING": True,
     "TRAILING_START_PCT": 1.5,
     "TRAILING_STEP_PCT": 0.6,
-
     "TAKER_FEE_PCT": 0.1,
     "MAKER_FEE_PCT": 0.1,
     "USE_BNB_FEE_DISCOUNT": True,
@@ -101,24 +86,19 @@ PUMP_CONFIG = {
     "DAILY_PROFIT_TARGET_PERCENT": 15.0,
     "CLOSE_ALL_AT_LIMIT": True,
     "DD_COOLDOWN_HOURS": 24,
-
     "MAX_CONSECUTIVE_ERRORS": 20,
     "SUPERVISOR_AUTO_RESTART": True,
     "SUPERVISOR_MAX_RESTARTS": 5,
     "SUPERVISOR_RESTART_WINDOW_SECONDS": 300,
     "SUPERVISOR_RESTART_BACKOFF_SECONDS": 5,
-
     "STATE_FILE": "data/pump_bot_state.json",
     "LOG_FILE": "logs/pump_bot.log",
     "HEARTBEAT_INTERVAL_SECONDS": 300,
     "CONTROL_FILE": "data/pump_bot_control.json",
-
     "USE_DUST_SWEEP": True,
-
     "TOP_N_CANDIDATES_TO_CONFIRM": 30,
     "CONFIRM_INTERVAL": "5m",
     "CONFIRM_LOOKBACK_BARS": 60,
-
     "TREND_FILTER_ENABLED": True,
     "TREND_INTERVAL": "1h",
     "TREND_EMA_FAST": 20,
@@ -157,7 +137,6 @@ PUMP_CONFIG = {
     "ORDERBOOK_DEPTH_LIMIT": 100,
     "COOLDOWN_MINUTES_AFTER_CLOSE": 5,
     "MIN_SECONDS_BETWEEN_TRADES": 60,
-
 }
 
 PUMP_DEFAULTS = deepcopy(PUMP_CONFIG)
@@ -311,7 +290,9 @@ def _mode_filename(base: str, mode: str) -> str:
 
 def get_state_file(config: dict = None) -> str:
     cfg = PUMP_CONFIG if config is None else config
-    return _mode_filename(str(cfg.get("STATE_FILE", "data/pump_bot_state.json")), get_mode(cfg))
+    return _mode_filename(
+        str(cfg.get("STATE_FILE", "data/pump_bot_state.json")), get_mode(cfg)
+    )
 
 
 def get_log_file(config: dict = None) -> str:
@@ -321,7 +302,9 @@ def get_log_file(config: dict = None) -> str:
 
 def get_control_file(config: dict = None) -> str:
     cfg = PUMP_CONFIG if config is None else config
-    return _mode_filename(str(cfg.get("CONTROL_FILE", "data/pump_bot_control.json")), get_mode(cfg))
+    return _mode_filename(
+        str(cfg.get("CONTROL_FILE", "data/pump_bot_control.json")), get_mode(cfg)
+    )
 
 
 _PROJECT_ROOT = str(PROJECT_ROOT)
@@ -354,7 +337,9 @@ def default_config_for_mode(mode: str) -> dict:
     return _finalize_config_dict(cfg)
 
 
-def build_config_for_mode(mode: str, *, validate: bool = True) -> tuple[dict, list[str]]:
+def build_config_for_mode(
+    mode: str, *, validate: bool = True
+) -> tuple[dict, list[str]]:
     from config.settings_schema import load_mode_override, validate_candidate
 
     raw = str(mode).strip().upper()

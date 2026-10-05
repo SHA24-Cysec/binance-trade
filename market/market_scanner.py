@@ -12,9 +12,23 @@ from strategy.indicators import Kline
 logger = logging.getLogger(__name__)
 
 STABLE_BASE_ASSETS = {
-    "USDC", "BUSD", "TUSD", "FDUSD", "DAI", "USDP", "EUR", "GBP", "TRY",
-    "BRL", "AEUR", "USTC", "USDD", "PYUSD", "USDE",
-    "USD1", "RLUSD",
+    "USDC",
+    "BUSD",
+    "TUSD",
+    "FDUSD",
+    "DAI",
+    "USDP",
+    "EUR",
+    "GBP",
+    "TRY",
+    "BRL",
+    "AEUR",
+    "USTC",
+    "USDD",
+    "PYUSD",
+    "USDE",
+    "USD1",
+    "RLUSD",
 }
 
 LEVERAGED_TOKEN_SUFFIXES = ("UP", "DOWN", "BULL", "BEAR")
@@ -40,8 +54,9 @@ def _looks_leveraged(base_asset: str) -> bool:
     return False
 
 
-def is_structurally_allowed_symbol(symbol: str, config: dict,
-                                   tradable_symbols: "set | None" = None) -> bool:
+def is_structurally_allowed_symbol(
+    symbol: str, config: dict, tradable_symbols: "set | None" = None
+) -> bool:
     quote_asset = str(config.get("QUOTE_ASSET", ""))
     if not quote_asset or not symbol.endswith(quote_asset):
         return False
@@ -50,8 +65,11 @@ def is_structurally_allowed_symbol(symbol: str, config: dict,
     if tradable_symbols is not None and symbol not in tradable_symbols:
         return False
     base_asset = symbol[: -len(quote_asset)]
-    return bool(base_asset and base_asset not in STABLE_BASE_ASSETS
-                and not _looks_leveraged(base_asset))
+    return bool(
+        base_asset
+        and base_asset not in STABLE_BASE_ASSETS
+        and not _looks_leveraged(base_asset)
+    )
 
 
 def spread_pct_from_book(bid: float, ask: float) -> float:
@@ -81,13 +99,16 @@ def _change_window_ok(price_change_pct, config: dict) -> tuple[bool, str]:
     if change < min_change:
         return False, f"kenaikan 24 jam {change:.2f}% di bawah ambang {min_change:g}%"
     if max_change > 0 and change > max_change:
-        return False, (f"kenaikan 24 jam {change:.2f}% melewati batas atas "
-                       f"{max_change:g}% (koin sudah terlalu tinggi)")
+        return False, (
+            f"kenaikan 24 jam {change:.2f}% melewati batas atas "
+            f"{max_change:g}% (koin sudah terlalu tinggi)"
+        )
     return True, ""
 
 
-def evaluate_pump_gate(price_change_pct, quote_volume,
-                       config: dict, btc_drop_pct: float | None = None) -> tuple[bool, str]:
+def evaluate_pump_gate(
+    price_change_pct, quote_volume, config: dict, btc_drop_pct: float | None = None
+) -> tuple[bool, str]:
     min_change = float(config.get("PUMP_MIN_24H_CHANGE_PCT", 10.0) or 0.0)
     max_change = float(config.get("PUMP_MAX_24H_CHANGE_PCT", 0.0) or 0.0)
 
@@ -96,12 +117,17 @@ def evaluate_pump_gate(price_change_pct, quote_volume,
     if config.get("BTC_FILTER_ENABLED", False):
         if btc_drop_pct is None:
             if config.get("_btc_filter_fail_closed", False):
-                return False, "data filter BTC tidak tersedia, simbol ditolak (fail closed)"
+                return (
+                    False,
+                    "data filter BTC tidak tersedia, simbol ditolak (fail closed)",
+                )
         else:
             max_drop = abs(float(config.get("BTC_MAX_DROP_PCT", 5.0) or 0.0))
             if float(btc_drop_pct) <= -max_drop:
-                return False, (f"BTC turun {float(btc_drop_pct):.2f}% dalam "
-                               f"{int(config.get('BTC_LOOKBACK_BARS', 3) or 3)} candle")
+                return False, (
+                    f"BTC turun {float(btc_drop_pct):.2f}% dalam "
+                    f"{int(config.get('BTC_LOOKBACK_BARS', 3) or 3)} candle"
+                )
 
     if not _angka_wajar(quote_volume):
         return False, f"quote_volume 24 jam tidak wajar ({quote_volume!r})"
@@ -111,26 +137,36 @@ def evaluate_pump_gate(price_change_pct, quote_volume,
         return False, window_reason
 
     change = float(price_change_pct)
-    rentang = f"{min_change:g}% sampai {max_change:g}%" if max_change > 0 else f">= {min_change:g}%"
+    rentang = (
+        f"{min_change:g}% sampai {max_change:g}%"
+        if max_change > 0
+        else f">= {min_change:g}%"
+    )
     return True, f"pump sah: naik {change:.2f}% (rentang {rentang})"
 
 
-def is_pumping_today(symbol: str, price_change_pct, quote_volume,
-                     config: dict) -> tuple[bool, str]:
+def is_pumping_today(
+    symbol: str, price_change_pct, quote_volume, config: dict
+) -> tuple[bool, str]:
     return evaluate_pump_gate(price_change_pct, quote_volume, config)
 
 
-def pump_gate_ok_at(price_change_pct, quote_volume, config: dict,
-                    btc_drop_pct: "float | None" = None) -> bool:
-    ok, _r = evaluate_pump_gate(price_change_pct, quote_volume, config,
-                                btc_drop_pct=btc_drop_pct)
+def pump_gate_ok_at(
+    price_change_pct, quote_volume, config: dict, btc_drop_pct: "float | None" = None
+) -> bool:
+    ok, _r = evaluate_pump_gate(
+        price_change_pct, quote_volume, config, btc_drop_pct=btc_drop_pct
+    )
     return ok
 
 
-def filter_and_rank_candidates(tickers: list, config: dict,
-                               tradable_symbols: "set | None" = None,
-                               *,
-                               apply_pump_gate: bool = True) -> list[Candidate]:
+def filter_and_rank_candidates(
+    tickers: list,
+    config: dict,
+    tradable_symbols: "set | None" = None,
+    *,
+    apply_pump_gate: bool = True,
+) -> list[Candidate]:
     quote_asset = config["QUOTE_ASSET"]
     min_vol = float(config.get("MIN_QUOTE_VOLUME_USDT_24H", 0) or 0)
 
@@ -160,30 +196,44 @@ def filter_and_rank_candidates(tickers: list, config: dict,
 
         if apply_pump_gate:
             ok_pump, alasan = is_pumping_today(
-                symbol, price_change_pct, quote_volume, config)
+                symbol, price_change_pct, quote_volume, config
+            )
             if not ok_pump:
                 logger.debug("Gerbang pump menolak %s: %s", symbol, alasan)
                 continue
 
-        out.append(Candidate(
-            symbol=symbol, base_asset=base_asset, price_change_pct=price_change_pct,
-            quote_volume=quote_volume, last_price=last_price,
-        ))
+        out.append(
+            Candidate(
+                symbol=symbol,
+                base_asset=base_asset,
+                price_change_pct=price_change_pct,
+                quote_volume=quote_volume,
+                last_price=last_price,
+            )
+        )
 
     out.sort(key=lambda c: c.quote_volume, reverse=True)
 
     if apply_pump_gate:
         if out:
-            logger.info("Gerbang pump: %d kandidat lolos dari %d simbol yang lolos "
-                        "saringan likuiditas.", len(out), lolos_struktural)
+            logger.info(
+                "Gerbang pump: %d kandidat lolos dari %d simbol yang lolos "
+                "saringan likuiditas.",
+                len(out),
+                lolos_struktural,
+            )
         else:
-            logger.info("Gerbang pump: 0 kandidat lolos gerbang pump (dari %d simbol "
-                        "yang lolos saringan likuiditas). Ambang: naik %g%% sampai %s.",
-                        lolos_struktural,
-                        float(config.get("PUMP_MIN_24H_CHANGE_PCT", 10.0) or 0.0),
-                        (f"{float(config.get('PUMP_MAX_24H_CHANGE_PCT', 0.0) or 0.0):g}%"
-                         if float(config.get("PUMP_MAX_24H_CHANGE_PCT", 0.0) or 0.0) > 0
-                         else "tanpa batas atas"))
+            logger.info(
+                "Gerbang pump: 0 kandidat lolos gerbang pump (dari %d simbol "
+                "yang lolos saringan likuiditas). Ambang: naik %g%% sampai %s.",
+                lolos_struktural,
+                float(config.get("PUMP_MIN_24H_CHANGE_PCT", 10.0) or 0.0),
+                (
+                    f"{float(config.get('PUMP_MAX_24H_CHANGE_PCT', 0.0) or 0.0):g}%"
+                    if float(config.get("PUMP_MAX_24H_CHANGE_PCT", 0.0) or 0.0) > 0
+                    else "tanpa batas atas"
+                ),
+            )
     return out
 
 
@@ -216,7 +266,9 @@ def _parse_levels(raw) -> list[tuple[float, float]]:
     return out
 
 
-def evaluate_orderbook(depth, planned_notional: float, config: dict) -> tuple[bool, str, dict]:
+def evaluate_orderbook(
+    depth, planned_notional: float, config: dict
+) -> tuple[bool, str, dict]:
     depth_on = bool(config.get("DEPTH_FILTER_ENABLED", False))
     book_on = bool(config.get("ORDERBOOK_FILTER_ENABLED", False))
     metrics: dict = {}
@@ -239,7 +291,11 @@ def evaluate_orderbook(depth, planned_notional: float, config: dict) -> tuple[bo
     best_ask = asks[0][0]
     best_bid = bids[0][0]
     if best_bid >= best_ask:
-        return False, (f"order book tidak wajar (bid {best_bid:g} >= ask {best_ask:g})"), metrics
+        return (
+            False,
+            (f"order book tidak wajar (bid {best_bid:g} >= ask {best_ask:g})"),
+            metrics,
+        )
     metrics.update(best_bid=best_bid, best_ask=best_ask, planned_notional=planned)
 
     def _range(pct: float) -> tuple[list[tuple[float, float]], bool]:
@@ -254,12 +310,22 @@ def evaluate_orderbook(depth, planned_notional: float, config: dict) -> tuple[bo
         inside, truncated = _range(rng)
         total = sum(p * q for p, q in inside)
         need = mult * planned
-        metrics.update(ask_depth_notional=total, ask_depth_required=need,
-                       ask_depth_range_pct=rng, ask_depth_truncated=truncated)
+        metrics.update(
+            ask_depth_notional=total,
+            ask_depth_required=need,
+            ask_depth_range_pct=rng,
+            ask_depth_truncated=truncated,
+        )
         if total < need:
             extra = " (snapshot terpotong sebelum batas rentang)" if truncated else ""
-            return False, (f"kedalaman ask {rng:g}% hanya {total:,.0f} USDT, butuh "
-                           f"{need:,.0f} USDT ({mult:g}x order {planned:,.0f}){extra}"), metrics
+            return (
+                False,
+                (
+                    f"kedalaman ask {rng:g}% hanya {total:,.0f} USDT, butuh "
+                    f"{need:,.0f} USDT ({mult:g}x order {planned:,.0f}){extra}"
+                ),
+                metrics,
+            )
 
     if book_on:
         n = max(1, int(config.get("ORDERBOOK_LEVELS", 10) or 10))
@@ -267,31 +333,58 @@ def evaluate_orderbook(depth, planned_notional: float, config: dict) -> tuple[bo
         bid_n = sum(p * q for p, q in bids[:n])
         ask_n = sum(p * q for p, q in asks[:n])
         ratio = bid_n / ask_n if ask_n > 0 else float("inf")
-        metrics.update(bid_top_notional=bid_n, ask_top_notional=ask_n,
-                       bid_ask_ratio=ratio, orderbook_levels=n)
+        metrics.update(
+            bid_top_notional=bid_n,
+            ask_top_notional=ask_n,
+            bid_ask_ratio=ratio,
+            orderbook_levels=n,
+        )
         if ratio < min_ratio:
-            return False, (f"tekanan jual: bid {n} level teratas {bid_n:,.0f} USDT hanya "
-                           f"{ratio:.2f}x ask {ask_n:,.0f} USDT, minimum {min_ratio:g}x"), metrics
+            return (
+                False,
+                (
+                    f"tekanan jual: bid {n} level teratas {bid_n:,.0f} USDT hanya "
+                    f"{ratio:.2f}x ask {ask_n:,.0f} USDT, minimum {min_ratio:g}x"
+                ),
+                metrics,
+            )
 
         wall_rng = float(config.get("SELL_WALL_RANGE_PCT", 1.0) or 0.0)
         max_share = float(config.get("SELL_WALL_MAX_SHARE_PCT", 30.0) or 0.0) / 100.0
         inside, truncated = _range(wall_rng)
         total = sum(p * q for p, q in inside)
-        metrics.update(wall_range_pct=wall_rng, wall_range_levels=len(inside),
-                       wall_range_notional=total)
+        metrics.update(
+            wall_range_pct=wall_rng,
+            wall_range_levels=len(inside),
+            wall_range_notional=total,
+        )
         if len(inside) >= SELL_WALL_MIN_LEVELS and total > 0 and max_share > 0:
             wall_price, wall_qty = max(inside, key=lambda x: x[0] * x[1])
             wall_val = wall_price * wall_qty
             share = wall_val / total
-            metrics.update(wall_price=wall_price, wall_notional=wall_val, wall_share=share)
+            metrics.update(
+                wall_price=wall_price, wall_notional=wall_val, wall_share=share
+            )
             if share > max_share:
-                return False, (f"sell wall di {wall_price:g}: {wall_val:,.0f} USDT = "
-                               f"{share * 100:.0f}% dari ask {wall_rng:g}% "
-                               f"({total:,.0f} USDT), maksimum {max_share * 100:g}%"), metrics
+                return (
+                    False,
+                    (
+                        f"sell wall di {wall_price:g}: {wall_val:,.0f} USDT = "
+                        f"{share * 100:.0f}% dari ask {wall_rng:g}% "
+                        f"({total:,.0f} USDT), maksimum {max_share * 100:g}%"
+                    ),
+                    metrics,
+                )
 
-    return True, (f"order book sehat: ask {metrics.get('ask_depth_notional', 0):,.0f} USDT, "
-                  f"bid/ask {metrics.get('bid_ask_ratio', 0):.2f}x, "
-                  f"wall {metrics.get('wall_share', 0) * 100:.0f}%"), metrics
+    return (
+        True,
+        (
+            f"order book sehat: ask {metrics.get('ask_depth_notional', 0):,.0f} USDT, "
+            f"bid/ask {metrics.get('bid_ask_ratio', 0):.2f}x, "
+            f"wall {metrics.get('wall_share', 0) * 100:.0f}%"
+        ),
+        metrics,
+    )
 
 
 DETECTOR_COMPONENTS = (
@@ -320,7 +413,7 @@ def _closed_volume_ratio(klines: "list[Kline] | None", config: dict) -> Optional
         if not math.isfinite(v) or v < 0:
             return None
         values.append(v)
-    prior = values[-1 - lookback:-1]
+    prior = values[-1 - lookback : -1]
     avg = sum(prior) / lookback
     if avg <= 0:
         return None
@@ -361,9 +454,13 @@ def orderbook_metrics(depth, planned_notional: float, config: dict) -> Optional[
     }
 
 
-def compute_detector_score(change_pct,
-                           klines_5m: "list[Kline] | None", last_price,
-                           book: Optional[dict], config: dict) -> dict:
+def compute_detector_score(
+    change_pct,
+    klines_5m: "list[Kline] | None",
+    last_price,
+    book: Optional[dict],
+    config: dict,
+) -> dict:
     comps: dict = {}
     missing: list = []
 
@@ -390,8 +487,11 @@ def compute_detector_score(change_pct,
         comps["volume5m"] = {"sub": 0.0, "value": None, "unit": "x"}
         missing.append("volume5m")
     else:
-        comps["volume5m"] = {"sub": _clamp01(r5 / mult5) if mult5 > 0 else 1.0,
-                             "value": r5, "unit": "x"}
+        comps["volume5m"] = {
+            "sub": _clamp01(r5 / mult5) if mult5 > 0 else 1.0,
+            "value": r5,
+            "unit": "x",
+        }
 
     if book is None:
         comps["orderbook"] = {"sub": 0.0, "value": None, "unit": ""}
@@ -402,7 +502,11 @@ def compute_detector_score(change_pct,
         depth_sub = _clamp01(book["ask_depth_notional"] / need) if need > 0 else 1.0
         min_ratio = float(config.get("ORDERBOOK_MIN_BID_ASK_RATIO", 0.8) or 0.0)
         ratio = book.get("bid_ask_ratio")
-        imb_sub = 0.0 if ratio is None else (_clamp01(ratio / min_ratio) if min_ratio > 0 else 1.0)
+        imb_sub = (
+            0.0
+            if ratio is None
+            else (_clamp01(ratio / min_ratio) if min_ratio > 0 else 1.0)
+        )
         max_share = float(config.get("SELL_WALL_MAX_SHARE_PCT", 30.0) or 0.0) / 100.0
         share = book.get("wall_share")
         if share is None or max_share <= 0 or share <= max_share:
@@ -411,10 +515,14 @@ def compute_detector_score(change_pct,
             wall_sub = _clamp01(1.0 - (share - max_share) / max(1e-9, 1.0 - max_share))
         comps["orderbook"] = {
             "sub": 0.4 * depth_sub + 0.3 * imb_sub + 0.3 * wall_sub,
-            "value": None, "unit": "",
-            "depth_sub": depth_sub, "imbalance_sub": imb_sub, "wall_sub": wall_sub,
+            "value": None,
+            "unit": "",
+            "depth_sub": depth_sub,
+            "imbalance_sub": imb_sub,
+            "wall_sub": wall_sub,
             "ask_depth_notional": book["ask_depth_notional"],
-            "bid_ask_ratio": ratio, "wall_share": share,
+            "bid_ask_ratio": ratio,
+            "wall_share": share,
         }
 
     band_lo = float(config.get("DETECTOR_ATR_MIN_PCT", 0.3) or 0.0)
@@ -451,10 +559,16 @@ def compute_detector_score(change_pct,
     score = (acc / total_w * 100.0) if total_w > 0 else 0.0
     for key, _wkey, _label in DETECTOR_COMPONENTS:
         w = comps[key]["weight"]
-        comps[key]["points"] = (w * comps[key]["sub"] / total_w * 100.0) if total_w > 0 else 0.0
+        comps[key]["points"] = (
+            (w * comps[key]["sub"] / total_w * 100.0) if total_w > 0 else 0.0
+        )
         comps[key]["max_points"] = (w / total_w * 100.0) if total_w > 0 else 0.0
-    return {"score": round(score, 1), "components": comps, "missing": missing,
-            "partial": bool(missing)}
+    return {
+        "score": round(score, 1),
+        "components": comps,
+        "missing": missing,
+        "partial": bool(missing),
+    }
 
 
 @dataclass
@@ -482,7 +596,10 @@ def _rolling_volume_confirmation(klines: list[Kline], config: dict) -> tuple[boo
     multiplier = float(config.get("ROLLING_VOLUME_SURGE_MULT", 2.0) or 0.0)
     required = lookback + confirmations
     if len(klines) < required:
-        return False, f"data volume rolling kurang: {len(klines)} dari minimum {required}"
+        return (
+            False,
+            f"data volume rolling kurang: {len(klines)} dari minimum {required}",
+        )
     if not math.isfinite(multiplier) or multiplier <= 0:
         return False, "ROLLING_VOLUME_SURGE_MULT tidak valid"
 
@@ -499,7 +616,7 @@ def _rolling_volume_confirmation(klines: list[Kline], config: dict) -> tuple[boo
     ratios = []
     for offset in range(confirmations):
         idx = len(values) - confirmations + offset
-        prior = values[idx - lookback:idx]
+        prior = values[idx - lookback : idx]
         average = sum(prior) / lookback
         current = values[idx]
         if average <= 0:
@@ -510,9 +627,12 @@ def _rolling_volume_confirmation(klines: list[Kline], config: dict) -> tuple[boo
             passed += 1
 
     ok = passed == confirmations
-    detail = (f"rolling volume {min(ratios):.2f}x, minimum {multiplier:g}x, "
-              f"{passed}/{confirmations} candle konfirmasi")
+    detail = (
+        f"rolling volume {min(ratios):.2f}x, minimum {multiplier:g}x, "
+        f"{passed}/{confirmations} candle konfirmasi"
+    )
     return ok, detail
+
 
 def detect_entry_setup(klines: list[Kline], config: dict) -> SetupResult:
     n = len(klines)
@@ -546,8 +666,10 @@ def detect_entry_setup(klines: list[Kline], config: dict) -> SetupResult:
         demand_close_position=demand.get("close_position"),
     )
 
+
 def setup_quality_key(setup: SetupResult, candidate: Candidate) -> tuple:
     return (-float(candidate.quote_volume),)
+
 
 def trend_verdict(symbol: str, config: dict, trend_provider) -> dict:
     """Gerbang trend timeframe tinggi untuk satu kandidat.
@@ -558,34 +680,55 @@ def trend_verdict(symbol: str, config: dict, trend_provider) -> dict:
     from strategy import indicators as strategy_mod
 
     interval = str(config.get("TREND_INTERVAL", "1h") or "1h")
-    kosong = {"interval": interval, "bars": 0,
-              "required": strategy_mod.trend_required_bars(config),
-              "window": strategy_mod.trend_window_bars(config), "close": None,
-              "ema_fast": None, "ema_slow": None, "adx": None,
-              "checks": {}, "values": {}}
+    kosong = {
+        "interval": interval,
+        "bars": 0,
+        "required": strategy_mod.trend_required_bars(config),
+        "window": strategy_mod.trend_window_bars(config),
+        "close": None,
+        "ema_fast": None,
+        "ema_slow": None,
+        "adx": None,
+        "checks": {},
+        "values": {},
+    }
     if not bool(config.get("TREND_FILTER_ENABLED", False)):
         return {"ok": True, "reason": "filter trend nonaktif", **kosong}
     if trend_provider is None:
-        return {"ok": False,
-                "reason": (f"filter trend {interval} aktif tetapi penyedia candle trend "
-                           "tidak tersedia (fail closed)"),
-                **kosong}
+        return {
+            "ok": False,
+            "reason": (
+                f"filter trend {interval} aktif tetapi penyedia candle trend "
+                "tidak tersedia (fail closed)"
+            ),
+            **kosong,
+        }
     try:
         klines = trend_provider(symbol)
     except Exception as exc:
-        return {"ok": False,
-                "reason": f"candle trend {interval} {symbol} gagal diambil: {exc}",
-                **kosong}
+        return {
+            "ok": False,
+            "reason": f"candle trend {interval} {symbol} gagal diambil: {exc}",
+            **kosong,
+        }
     if not klines:
-        return {"ok": False, "reason": f"candle trend {interval} {symbol} kosong",
-                **kosong}
+        return {
+            "ok": False,
+            "reason": f"candle trend {interval} {symbol} kosong",
+            **kosong,
+        }
     return strategy_mod.evaluate_trend_filter(list(klines), config)
 
-def find_best_candidate(tickers: list, klines_fetcher, config: dict,
-                        tradable_symbols: "set | None" = None,
-                        klines_fetcher_many: "Optional[Callable[[list], dict]]" = None,
-                        prewarm_fn: "Optional[Callable[[list], None]]" = None,
-                        trend_provider: "Optional[Callable[[str], list]]" = None) -> Optional[Candidate]:
+
+def find_best_candidate(
+    tickers: list,
+    klines_fetcher,
+    config: dict,
+    tradable_symbols: "set | None" = None,
+    klines_fetcher_many: "Optional[Callable[[list], dict]]" = None,
+    prewarm_fn: "Optional[Callable[[list], None]]" = None,
+    trend_provider: "Optional[Callable[[str], list]]" = None,
+) -> Optional[Candidate]:
     ranked = filter_and_rank_candidates(tickers, config, tradable_symbols)
     top_n = ranked[: int(config.get("TOP_N_CANDIDATES_TO_CONFIRM", 10) or 10)]
     if not top_n:

@@ -19,10 +19,15 @@ class MarketDataProvider:
         self.config = config
         base_url = get_base_url(config)
         self.rest = BinanceSpotClient(
-            "", "", base_url, allow_signed=False,
+            "",
+            "",
+            base_url,
+            allow_signed=False,
             rate_limit_state_file=config.get("RATE_LIMIT_STATE_FILE"),
             rate_limit_limit=int(config.get("RATE_LIMIT_WEIGHT_LIMIT", 6000) or 6000),
-            rate_limit_safety_margin=int(config.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100),
+            rate_limit_safety_margin=int(
+                config.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100
+            ),
         )
 
         self._use_ws = use_websocket(config)
@@ -31,9 +36,11 @@ class MarketDataProvider:
 
         self._workers = max(1, int(config.get("MARKET_DATA_WORKERS", 1) or 1))
         self._ws_overlay_enabled = bool(
-            config.get("WS_LAST_PRICE_OVERLAY_ENABLED", True))
-        self._ticker_ttl = max(0.0, float(
-            config.get("TICKER_SNAPSHOT_TTL_SECONDS", 0) or 0))
+            config.get("WS_LAST_PRICE_OVERLAY_ENABLED", True)
+        )
+        self._ticker_ttl = max(
+            0.0, float(config.get("TICKER_SNAPSHOT_TTL_SECONDS", 0) or 0)
+        )
 
         self._ticker_lock = threading.RLock()
         self._ticker_snapshot: list = []
@@ -61,12 +68,16 @@ class MarketDataProvider:
             if self._ws is None:
                 try:
                     from market.market_ws import MarketWebSocket
-                    self._ws = MarketWebSocket(self.config.get(
-                        "WS_BASE_URL", "wss://stream.binance.com:9443"))
+
+                    self._ws = MarketWebSocket(
+                        self.config.get("WS_BASE_URL", "wss://stream.binance.com:9443")
+                    )
                     self._ws.start(all_mini_ticker=True)
                     logger.info("Lapisan data pasar: WebSocket AKTIF (hybrid).")
                 except Exception as exc:
-                    logger.warning("Gagal memulai WebSocket (%s). Fallback REST penuh.", exc)
+                    logger.warning(
+                        "Gagal memulai WebSocket (%s). Fallback REST penuh.", exc
+                    )
                     self._use_ws = False
                     self._ws = None
             return self._ws
@@ -100,12 +111,17 @@ class MarketDataProvider:
     def sync_time(self) -> None:
         self.rest.sync_time()
 
-    def get_exchange_info(self, symbol: Optional[str] = None, force: bool = False) -> dict:
+    def get_exchange_info(
+        self, symbol: Optional[str] = None, force: bool = False
+    ) -> dict:
         if symbol is not None:
             return self.rest.get_exchange_info(symbol)
         with self._ei_lock:
-            fresh = (self._exchange_info is not None
-                     and (time.monotonic() - self._exchange_info_ts) < self._ei_refresh_seconds)
+            fresh = (
+                self._exchange_info is not None
+                and (time.monotonic() - self._exchange_info_ts)
+                < self._ei_refresh_seconds
+            )
             if fresh and not force:
                 return self._exchange_info
         info = self.rest.get_exchange_info()
@@ -114,9 +130,14 @@ class MarketDataProvider:
             self._exchange_info_ts = time.monotonic()
         return info
 
-    def get_klines(self, symbol: str, interval: str, limit: int = 500,
-                   start_time_ms: Optional[int] = None,
-                   end_time_ms: Optional[int] = None) -> list:
+    def get_klines(
+        self,
+        symbol: str,
+        interval: str,
+        limit: int = 500,
+        start_time_ms: Optional[int] = None,
+        end_time_ms: Optional[int] = None,
+    ) -> list:
         return self.rest.get_klines(symbol, interval, limit, start_time_ms, end_time_ms)
 
     def prewarm_book_ticker(self, symbols) -> None:
@@ -130,9 +151,14 @@ class MarketDataProvider:
         except Exception as exc:
             logger.debug("Pemanasan bookTicker WebSocket gagal: %s", exc)
 
-    def get_klines_many(self, symbols, interval: str, limit: int = 500,
-                        end_time_ms: Optional[int] = None,
-                        max_workers: Optional[int] = None) -> dict:
+    def get_klines_many(
+        self,
+        symbols,
+        interval: str,
+        limit: int = 500,
+        end_time_ms: Optional[int] = None,
+        max_workers: Optional[int] = None,
+    ) -> dict:
         unique = [str(s) for s in dict.fromkeys(symbols or ())]
         if not unique:
             return {}
@@ -149,8 +175,9 @@ class MarketDataProvider:
             return {symbol: _one(symbol) for symbol in unique}
 
         out: dict = {}
-        with ThreadPoolExecutor(max_workers=min(workers, len(unique)),
-                                thread_name_prefix="klines") as pool:
+        with ThreadPoolExecutor(
+            max_workers=min(workers, len(unique)), thread_name_prefix="klines"
+        ) as pool:
             futures = {pool.submit(_one, symbol): symbol for symbol in unique}
             for future in as_completed(futures):
                 out[futures[future]] = future.result()
@@ -171,12 +198,14 @@ class MarketDataProvider:
             if self._ticker_refresher is not None and self._ticker_refresher.is_alive():
                 return
             self._ticker_refresher = threading.Thread(
-                target=self._ticker_refresh_loop,
-                name="ticker-snapshot", daemon=True)
+                target=self._ticker_refresh_loop, name="ticker-snapshot", daemon=True
+            )
             self._ticker_refresher.start()
             logger.info(
                 "Penyegar snapshot ticker aktif (TTL %g detik): scan tidak lagi "
-                "menunggu unduhan daftar ticker 24 jam.", self._ticker_ttl)
+                "menunggu unduhan daftar ticker 24 jam.",
+                self._ticker_ttl,
+            )
 
     def _refresh_ticker_snapshot(self) -> list:
         tickers = self.rest.get_ticker_24hr_all()
@@ -229,7 +258,9 @@ class MarketDataProvider:
             logger.warning(
                 "Snapshot ticker berusia %.0f detik (TTL %g detik). Menyegarkan "
                 "secara sinkron karena penyegar latar tidak berhasil.",
-                usia, self._ticker_ttl)
+                usia,
+                self._ticker_ttl,
+            )
             try:
                 snapshot = self._refresh_ticker_snapshot()
             except Exception as exc:
