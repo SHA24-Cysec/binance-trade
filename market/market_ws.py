@@ -79,6 +79,7 @@ class MarketWebSocket:
         self._want_streams: set[str] = set()
         self._msg_id = 0
         self._last_connect_ts = 0.0
+        self._connected_once = False
 
     def start(self, all_mini_ticker: bool = True) -> None:
         with self._sub_lock:
@@ -181,6 +182,7 @@ class MarketWebSocket:
         while not self._stop.is_set():
             url = self._build_url()
             self._last_connect_ts = time.monotonic()
+            self._connected_once = False
             logger.info("WebSocket menyambung: %s", url)
             self._app = WebSocketApp(
                 url,
@@ -197,7 +199,7 @@ class MarketWebSocket:
                 )
             except Exception as exc:
                 logger.warning("WebSocket run_forever error: %s", exc)
-            connected_before_close = self._connected.is_set()
+            connected_before_close = self._connected_once
             self._connected.clear()
             if self._stop.is_set():
                 break
@@ -210,6 +212,7 @@ class MarketWebSocket:
 
     def _on_open(self, _app) -> None:
         self._connected.set()
+        self._connected_once = True
         logger.info("WebSocket tersambung.")
 
     def _on_error(self, _app, error) -> None:
