@@ -170,46 +170,6 @@ def expand_grid(
     return kombinasi, dipangkas
 
 
-def cek_relasi_exit(cfg: dict) -> Optional[str]:
-    if bool(cfg.get("USE_ATR_EXIT", False)):
-        sl = float(cfg.get("ATR_MULT_SL", 0.0))
-        tp = float(cfg.get("ATR_MULT_TP", 0.0))
-        trail = float(cfg.get("ATR_MULT_TRAIL", 0.0))
-        be_trigger = float(cfg.get("ATR_MULT_BE_TRIGGER", 0.0))
-        be_lock = float(cfg.get("ATR_MULT_BE_LOCK", 0.0))
-        trail_start = float(cfg.get("ATR_MULT_TRAIL_START", 0.0))
-        if trail > sl:
-            return (
-                f"ATR_MULT_TRAIL ({trail:g}) melebihi ATR_MULT_SL ({sl:g}); "
-                "trailing tidak boleh lebih lebar dari stop loss"
-            )
-        if be_trigger > trail_start:
-            return (
-                f"ATR_MULT_BE_TRIGGER ({be_trigger:g}) melebihi "
-                f"ATR_MULT_TRAIL_START ({trail_start:g})"
-            )
-        if be_lock > be_trigger:
-            return (
-                f"ATR_MULT_BE_LOCK ({be_lock:g}) melebihi "
-                f"ATR_MULT_BE_TRIGGER ({be_trigger:g})"
-            )
-        if tp <= sl:
-            return (
-                f"ATR_MULT_TP ({tp:g}) harus lebih besar dari "
-                f"ATR_MULT_SL ({sl:g}) agar rasio risk-reward tidak terbalik"
-            )
-    else:
-        if bool(cfg.get("USE_TP", True)) and bool(cfg.get("USE_STOP_LOSS", True)):
-            tp = float(cfg.get("TP_PCT", 0.0))
-            sl = float(cfg.get("SL_PCT", 0.0))
-            if tp <= sl:
-                return (
-                    f"TP_PCT ({tp:g}) harus lebih besar dari SL_PCT ({sl:g}) "
-                    "agar rasio risk-reward tidak terbalik"
-                )
-    return None
-
-
 def hitung_skor(ringkas: dict, metrik: str) -> float:
     if metrik == "total_return_pct":
         nilai = float(ringkas.get("total_return_pct", 0.0))
@@ -323,9 +283,6 @@ def run_grid_search(
 
         try:
             cfg = bt.apply_overrides(base_config, params)
-            pesan_relasi = cek_relasi_exit(cfg)
-            if pesan_relasi:
-                raise GridSearchError(pesan_relasi)
             bt.validate_params(cfg)
         except (bt.BacktestError, GridSearchError):
             dilewati += 1
@@ -493,9 +450,6 @@ def run_portfolio_grid_search(
         item = HasilKombinasi(params=dict(params), latih={})
         try:
             cfg = bt.apply_overrides(base_config, params)
-            pesan_relasi = cek_relasi_exit(cfg)
-            if pesan_relasi:
-                raise GridSearchError(pesan_relasi)
             bt.validate_params(cfg)
         except (bt.BacktestError, GridSearchError) as exc:
             dilewati += 1

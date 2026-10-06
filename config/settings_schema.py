@@ -995,7 +995,12 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "DEMAND_LOOKBACK_BARS": _field(
         "Konfirmasi Demand",
         "Lookback zona demand",
-        "Jumlah candle tertutup sebelumnya untuk memetakan dasar zona demand (swing support atau base akumulasi).",
+        "Jumlah candle tertutup yang memetakan dasar zona demand. Dasarnya dicari di "
+        "seluruh jendela ini (swing support), dan hanya candle yang menutup di area "
+        "dasar itu yang dihitung sebagai akumulasi; candle yang close-nya sudah "
+        "melayang dianggap kaki naik dan tidak ikut jadi dasar. Makin besar nilai ini, "
+        "makin jauh ke belakang bot mencari dasarnya, sehingga makin banyak entry yang "
+        "dianggap sudah terlalu jauh dari demand (lebih ketat).",
         "int",
         minimum=3,
         maximum=500,
@@ -1004,7 +1009,10 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "DEMAND_ZONE_BUFFER_PCT": _field(
         "Konfirmasi Demand",
         "Lebar zona demand",
-        "Toleransi persentase di atas titik base terendah yang dianggap sebagai area aktif zona demand.",
+        "Tebal zona demand di atas level dasarnya. Berfungsi ganda: menentukan candle "
+        "mana yang masih dianggap bagian dari area dasar (candle yang menutup tidak "
+        "lebih tinggi dari buffer di atas level dasar) dan menentukan "
+        "ketebalan minimum zona bila area dasarnya sendiri sempit.",
         "float",
         minimum=0.05,
         maximum=20,
@@ -1013,7 +1021,10 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "DEMAND_MAX_DISTANCE_PCT": _field(
         "Konfirmasi Demand",
         "Jarak maksimum dari zona demand",
-        "Batas jarak harga penutupan sinyal di atas batas zona demand agar bot tidak membeli terlalu jauh dari area demand (anti-pucuk).",
+        "Batas jarak harga penutupan sinyal di atas BATAS ATAS zona demand "
+        "(zone_high), bukan dari dasarnya, agar bot tidak membeli terlalu jauh dari "
+        "area demand (anti-pucuk). Toleransi riil dari dasar zona jadi sekitar "
+        "DEMAND_ZONE_BUFFER_PCT + DEMAND_MAX_DISTANCE_PCT.",
         "float",
         minimum=0.1,
         maximum=50,
@@ -1326,6 +1337,159 @@ def coerce_field(key: str, value: Any, candidate: dict) -> Any:
     return result
 
 
+def _angka_untuk_relasi(cfg: dict, key: str) -> float | None:
+    """Ambil angka untuk aturan silang. None berarti kuncinya tidak bisa dipakai."""
+    if key not in cfg or cfg[key] is None:
+        return None
+    try:
+        nilai = float(cfg[key])
+    except (TypeError, ValueError):
+        return None
+    if nilai != nilai or nilai in (float("inf"), float("-inf")):
+        return None
+    return nilai
+
+
+def _flag_untuk_relasi(cfg: dict, key: str, default: bool) -> bool:
+    if key not in cfg or cfg[key] is None:
+        return default
+    return bool(cfg[key])
+
+
+def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str]:
+    """Satu sumber kebenaran untuk aturan silang antar parameter.
+
+    Semua pemanggil (penyimpanan setting di dashboard, validasi parameter
+    backtest, dan penyaring kombinasi grid search) wajib lewat sini supaya
+    ketiganya tidak bisa berbeda pendapat lagi tentang konfigurasi yang sama.
+
+    mode_aware=False : dipakai penyimpanan setting. Relasi exit dan demand dicek
+        apa pun mode yang sedang aktif, karena mode bisa dipindah kapan saja dan
+        kombinasi yang terbalik harus ketahuan sebelum disimpan.
+    mode_aware=True  : dipakai jalur simulasi. Hanya relasi dari mode aktif yang
+        dicek, supaya kombinasi grid yang sedang menyetel parameter nonaktif tidak
+        dibatalkan tanpa sebab.
+
+    Kunci yang tidak ada di `cfg` membuat aturannya dilewati, jadi fungsi ini aman
+    untuk config sebagian (misalnya cfg milik test atau grid).
+    """
+
+    def ambil(*keys: str) -> "list[float] | None":
+        nilai = [_angka_untuk_relasi(cfg, k) for k in keys]
+        return None if any(v is None for v in nilai) else nilai
+
+    def pasangan(kiri: str, kanan: str) -> "tuple[float, float] | None":
+        nilai = ambil(kiri, kanan)
+        return None if nilai is None else (nilai[0], nilai[1])
+
+    keluar: dict[str, str] = {}
+    atr_aktif = _flag_untuk_relasi(cfg, "USE_ATR_EXIT", False)
+    cek_exit_atr = mode_aware is False or atr_aktif
+    cek_pct = mode_aware is False or not atr_aktif
+
+    if cek_exit_atr:
+        for kunci, pesan in (
+            (
+                ("ATR_MULT_TRAIL", "ATR_MULT_SL"),
+                "tidak boleh melebihi ATR_MULT_SL agar invariant trailing <= SL terjaga",
+            ),
+            (
+                ("ATR_MULT_BE_TRIGGER", "ATR_MULT_TRAIL_START"),
+                "tidak boleh melebihi trigger trailing",
+            ),
+            (
+                ("ATR_MULT_BE_LOCK", "ATR_MULT_BE_TRIGGER"),
+                "tidak boleh melebihi trigger breakeven",
+            ),
+        ):
+            nilai = pasangan(*kunci)
+            if nilai is not None and nilai[0] > nilai[1]:
+                keluar[kunci[0]] = pesan
+        nilai = pasangan("ATR_MULT_TP", "ATR_MULT_SL")
+        if nilai is not None and nilai[0] <= nilai[1]:
+            keluar["ATR_MULT_TP"] = (
+                "harus lebih besar dari ATR_MULT_SL agar rasio risk-reward tidak terbalik"
+            )
+
+    if cek_pct:
+        tp_on = _flag_untuk_relasi(cfg, "USE_TP", True)
+        sl_on = _flag_untuk_relasi(cfg, "USE_STOP_LOSS", True)
+        if tp_on and sl_on:
+            nilai = pasangan("TP_PCT", "SL_PCT")
+            if nilai is not None and nilai[0] <= nilai[1]:
+                keluar["TP_PCT"] = (
+                    "harus lebih besar dari SL_PCT agar rasio risk-reward tidak terbalik"
+                )
+        if sl_on:
+            nilai = _angka_untuk_relasi(cfg, "SL_PCT")
+            if nilai is not None and nilai <= 0:
+                keluar["SL_PCT"] = "harus lebih besar dari nol saat Stop Loss aktif"
+        if tp_on:
+            nilai = _angka_untuk_relasi(cfg, "TP_PCT")
+            if nilai is not None and nilai <= 0:
+                keluar["TP_PCT"] = "harus lebih besar dari nol saat Take Profit aktif"
+
+    nilai = pasangan("PUMP_MAX_24H_CHANGE_PCT", "PUMP_MIN_24H_CHANGE_PCT")
+    if nilai is not None and nilai[0] != 0 and nilai[0] <= nilai[1]:
+        keluar["PUMP_MAX_24H_CHANGE_PCT"] = (
+            "harus lebih besar dari PUMP_MIN_24H_CHANGE_PCT (atau 0 untuk menonaktifkan)"
+        )
+
+    nilai = pasangan("DETECTOR_ATR_MAX_PCT", "DETECTOR_ATR_MIN_PCT")
+    if nilai is not None and nilai[0] <= nilai[1]:
+        keluar["DETECTOR_ATR_MAX_PCT"] = "harus lebih besar dari DETECTOR_ATR_MIN_PCT"
+
+    bobot = [
+        _angka_untuk_relasi(cfg, k)
+        for k in (
+            "DETECTOR_WEIGHT_CHANGE",
+            "DETECTOR_WEIGHT_VOLUME5M",
+            "DETECTOR_WEIGHT_ORDERBOOK",
+            "DETECTOR_WEIGHT_ATR",
+        )
+    ]
+    if all(b is not None for b in bobot) and sum(bobot) <= 0:
+        keluar["DETECTOR_WEIGHT_CHANGE"] = "total bobot detector harus lebih dari 0"
+
+    saring_trend = mode_aware is False or _flag_untuk_relasi(
+        cfg, "TREND_FILTER_ENABLED", False
+    )
+    if saring_trend:
+        nilai = pasangan("TREND_EMA_SLOW", "TREND_EMA_FAST")
+        if nilai is not None and nilai[0] <= nilai[1]:
+            keluar["TREND_EMA_SLOW"] = (
+                "harus lebih besar dari TREND_EMA_FAST agar susunan EMA tidak terbalik"
+            )
+
+    try:
+        from strategy.indicators import INTERVAL_MINUTES as _INTERVAL_MINUTES
+
+        menit_trend = _INTERVAL_MINUTES.get(str(cfg.get("TREND_INTERVAL", "")).lower())
+        menit_konfirmasi = _INTERVAL_MINUTES.get(
+            str(cfg.get("CONFIRM_INTERVAL", "")).lower()
+        )
+    except ImportError:  # strategi belum tersedia saat skema dimuat sendiri
+        menit_trend = menit_konfirmasi = None
+    if menit_trend and menit_konfirmasi:
+        if menit_trend % menit_konfirmasi != 0 or menit_trend < menit_konfirmasi:
+            keluar["TREND_INTERVAL"] = (
+                "harus kelipatan bulat dari CONFIRM_INTERVAL dan tidak lebih pendek, "
+                "supaya backtest bisa merangkai candle trend dari candle konfirmasi"
+            )
+
+    saring_demand = mode_aware is False or _flag_untuk_relasi(
+        cfg, "DEMAND_ZONE_FILTER_ENABLED", False
+    )
+    if saring_demand:
+        nilai = pasangan("DEMAND_MAX_DISTANCE_PCT", "DEMAND_ZONE_BUFFER_PCT")
+        if nilai is not None and nilai[0] < nilai[1]:
+            keluar["DEMAND_MAX_DISTANCE_PCT"] = (
+                "harus lebih besar atau sama dengan DEMAND_ZONE_BUFFER_PCT"
+            )
+
+    return keluar
+
+
 def validate_candidate(
     candidate: dict, mode: str
 ) -> tuple[dict, dict[str, str], list[str]]:
@@ -1359,78 +1523,15 @@ def validate_candidate(
             str(cleaned.get("MODE", "")).strip().upper() == normalized_mode,
             "MODE pada konfigurasi tidak sama dengan mode yang sedang divalidasi",
         )
-        relation(
-            "PUMP_MAX_24H_CHANGE_PCT",
-            cleaned["PUMP_MAX_24H_CHANGE_PCT"] == 0
-            or cleaned["PUMP_MAX_24H_CHANGE_PCT"] > cleaned["PUMP_MIN_24H_CHANGE_PCT"],
-            "harus lebih besar dari PUMP_MIN_24H_CHANGE_PCT (atau 0 untuk menonaktifkan)",
-        )
-        relation(
-            "DETECTOR_ATR_MAX_PCT",
-            cleaned["DETECTOR_ATR_MAX_PCT"] > cleaned["DETECTOR_ATR_MIN_PCT"],
-            "harus lebih besar dari DETECTOR_ATR_MIN_PCT",
-        )
-        relation(
-            "DETECTOR_WEIGHT_CHANGE",
-            sum(
-                float(cleaned[k])
-                for k in (
-                    "DETECTOR_WEIGHT_CHANGE",
-                    "DETECTOR_WEIGHT_VOLUME5M",
-                    "DETECTOR_WEIGHT_ORDERBOOK",
-                    "DETECTOR_WEIGHT_ATR",
-                )
-            )
-            > 0,
-            "total bobot detector harus lebih dari 0",
-        )
-        relation(
-            "ATR_MULT_TRAIL",
-            cleaned["ATR_MULT_TRAIL"] <= cleaned["ATR_MULT_SL"],
-            "tidak boleh melebihi ATR_MULT_SL agar invariant trailing <= SL terjaga",
-        )
-        relation(
-            "ATR_MULT_BE_TRIGGER",
-            cleaned["ATR_MULT_BE_TRIGGER"] <= cleaned["ATR_MULT_TRAIL_START"],
-            "tidak boleh melebihi trigger trailing",
-        )
-        relation(
-            "ATR_MULT_BE_LOCK",
-            cleaned["ATR_MULT_BE_LOCK"] <= cleaned["ATR_MULT_BE_TRIGGER"],
-            "tidak boleh melebihi trigger breakeven",
-        )
-        relation(
-            "ATR_MULT_TP",
-            cleaned["ATR_MULT_TP"] > cleaned["ATR_MULT_SL"],
-            "harus lebih besar dari ATR_MULT_SL agar rasio risk-reward tidak terbalik",
-        )
-        relation(
-            "DEMAND_MAX_DISTANCE_PCT",
-            cleaned["DEMAND_MAX_DISTANCE_PCT"] >= cleaned["DEMAND_ZONE_BUFFER_PCT"],
-            "harus lebih besar atau sama dengan DEMAND_ZONE_BUFFER_PCT",
-        )
-        relation(
-            "TREND_EMA_SLOW",
-            cleaned["TREND_EMA_SLOW"] > cleaned["TREND_EMA_FAST"],
-            "harus lebih besar dari TREND_EMA_FAST agar susunan EMA tidak terbalik",
-        )
-        try:
-            from strategy.indicators import INTERVAL_MINUTES as _INTERVAL_MINUTES
+        # Semua aturan silang antar parameter diambil dari satu sumber yang sama
+        # dengan validasi parameter backtest dan penyaring kombinasi grid search.
+        # Di jalur penyimpanan setting, mode_aware dimatikan sehingga kombinasi
+        # exit yang terbalik tetap ditolak walau mode exit-nya sedang tidak aktif:
+        # mode bisa dipindah kapan saja dan settings.json tidak boleh menyimpan
+        # nilai yang begitu dipindah langsung rusak.
+        for kunci_relasi, pesan_relasi in relation_violations(cleaned).items():
+            relation(kunci_relasi, False, pesan_relasi)
 
-            _menit_trend = _INTERVAL_MINUTES.get(str(cleaned["TREND_INTERVAL"]).lower())
-            _menit_konfirmasi = _INTERVAL_MINUTES.get(
-                str(cleaned["CONFIRM_INTERVAL"]).lower()
-            )
-        except ImportError:
-            _menit_trend = _menit_konfirmasi = None
-        if _menit_trend and _menit_konfirmasi:
-            relation(
-                "TREND_INTERVAL",
-                _menit_trend % _menit_konfirmasi == 0
-                and _menit_trend >= _menit_konfirmasi,
-                "harus kelipatan bulat dari CONFIRM_INTERVAL dan tidak lebih pendek, "
-                "supaya backtest bisa merangkai candle trend dari candle konfirmasi",
-            )
         if cleaned["TREND_FILTER_ENABLED"]:
             _minimal = max(
                 int(cleaned["TREND_EMA_SLOW"]), 2 * int(cleaned["TREND_ADX_PERIOD"]) + 1
@@ -1446,12 +1547,6 @@ def validate_candidate(
                     "TREND_ADX_MIN nol: cek kekuatan trend mati, hanya susunan EMA yang "
                     "menyaring entry sehingga pasar sideways lebih mudah diloloskan."
                 )
-        if cleaned["USE_TP"] and cleaned["USE_STOP_LOSS"]:
-            relation(
-                "TP_PCT",
-                cleaned["TP_PCT"] > cleaned["SL_PCT"],
-                "harus lebih besar dari SL_PCT agar rasio risk-reward tidak terbalik",
-            )
         if cleaned["PUMP_MIN_24H_CHANGE_PCT"] <= 0:
             warnings.append(
                 "PUMP_MIN_24H_CHANGE_PCT nol atau kurang: gerbang kenaikan 24 jam "
@@ -1461,18 +1556,6 @@ def validate_candidate(
             warnings.append(
                 "PUMP_MIN_24H_CHANGE_PCT sangat tinggi, kandidat bisa nol "
                 "untuk waktu yang lama."
-            )
-        if cleaned["USE_STOP_LOSS"]:
-            relation(
-                "SL_PCT",
-                cleaned["SL_PCT"] > 0,
-                "harus lebih besar dari nol saat Stop Loss aktif",
-            )
-        if cleaned["USE_TP"]:
-            relation(
-                "TP_PCT",
-                cleaned["TP_PCT"] > 0,
-                "harus lebih besar dari nol saat Take Profit aktif",
             )
 
         relation(

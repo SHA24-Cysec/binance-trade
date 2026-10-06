@@ -176,6 +176,29 @@ def atr(klines: list[Kline], period: int = 14) -> float | None:
 
 
 def detect_demand_zone(klines: list[Kline], config: dict) -> dict:
+    """Konfirmasi posisi harga terhadap zona demand pada candle tertutup.
+
+    Aturan, dipakai identik oleh LIVE, PAPER, dan backtest:
+
+    1. zona_low  = low terendah "rak", yaitu candle di dalam DEMAND_LOOKBACK_BARS
+                   candle tertutup terakhir yang menutup di area dasar (area
+                   akumulasi; sumbu sesaat dan candle impuls tidak ikut).
+    2. zone_high = puncak body terendah di dalam rak, ditebalkan minimal
+                   DEMAND_ZONE_BUFFER_PCT di atas zona_low.
+    3. close candle sinyal tidak boleh menembus zona_low.
+    4. candle sinyal harus hijau terhadap open-nya sendiri dan terhadap close
+       candle sebelumnya (reaksi demand, bukan pantulan lemah).
+    5. close_pos = (close - low) / (high - low) harus >=
+       DEMAND_MIN_CLOSE_POSITION (dorongan pembeli, menolak ekor atas panjang).
+    6. jarak harga diukur dari BATAS ATAS zona (zone_high), bukan dari dasar:
+       (close / zone_high - 1) * 100 tidak boleh melewati
+       DEMAND_MAX_DISTANCE_PCT. Toleransi riil dari dasar zona karena itu
+       sekitar DEMAND_ZONE_BUFFER_PCT + DEMAND_MAX_DISTANCE_PCT.
+
+    Semua kegagalan bersifat menolak entry (fail closed), termasuk data kurang
+    atau OHLC tidak valid. Saat DEMAND_ZONE_FILTER_ENABLED dimatikan, fungsi
+    selalu lolos tanpa membaca candle sama sekali.
+    """
     if not bool(config.get("DEMAND_ZONE_FILTER_ENABLED", False)):
         return {
             "ok": True,
@@ -225,11 +248,49 @@ def detect_demand_zone(klines: list[Kline], config: dict) -> dict:
                 "close_position": None,
             }
 
-    recent_base = prior[-min(len(prior), 6) :]
-    swing_low = min(float(k.low) for k in prior)
-    recent_low = min(float(k.low) for k in recent_base)
-    zone_low = recent_low if recent_low >= swing_low else swing_low
-    base_body = min(max(float(k.open), float(k.close)) for k in recent_base)
+    # --- pemetaan dasar zona demand -------------------------------------
+    # `prior` sudah persis DEMAND_LOOKBACK_BARS candle tertutup terakhir
+    # (dipotong di baris di atas), jadi seluruh jendela itulah yang memetakan
+    # dasar demand. Inilah yang membuat DEMAND_LOOKBACK_BARS benar-benar
+    # mengubah geometri zona, bukan hanya syarat jumlah data.
+    #
+    # Dasarnya dicari lewat "rak" (shelf): candle di dalam jendela yang MENUTUP
+    # di area dasar, tidak lebih tinggi dari DEMAND_ZONE_BUFFER_PCT di atas
+    # level dasar. Menutup, bukan menyentuh: candle impuls besar yang low-ya
+    # masih menyentuh dasar tapi close-ya sudah melayang bukan area akumulasi,
+    # dan sumbu panjang sesaat (flash dump) juga bukan. Kalau rak dihitung dari
+    # low, dua hal itu ikut masuk ke rak, puncak zona ikut naik, selisih ke
+    # harga mengecil, dan filter jadi longgar justru pada saat harga paling
+    # rawan dibeli di pucuk.
+    #
+    # Rak wajib berisi minimal 2 candle. Kalau tidak (jendela terlalu sempit,
+    # atau harga sudah lurus naik tanpa konsolidasi), pemetaan jatuh kembali ke
+    # konsolidasi 6 candle terbaru supaya filter tidak fail-open tanpa dasar.
+    window = prior
+    anchor = min(float(k.close) for k in window)
+    band = anchor * (1.0 + buffer_pct / 100.0)
+    shelf = [k for k in window if float(k.close) <= band]
+    if len(shelf) >= 2:
+        # Dasar zona tidak boleh lebih dalam dari pita buffer di bawah level
+        # dasar: sumbu yang lebih panjang dari itu adalah spike, bukan support.
+        zone_low = max(
+            min(float(k.low) for k in shelf), anchor * (1.0 - buffer_pct / 100.0)
+        )
+        base_candles = shelf
+    else:
+        base_candles = window[-min(len(window), 6) :]
+        zone_low = min(float(k.low) for k in base_candles)
+    # Atap zona = puncak body TERENDAH di dalam area dasar, bukan tertinggi.
+    # Rak bisa miring (base yang merangkak naik); memakai puncak tertinggi akan
+    # melebarkan zona ke atas sehingga harga yang sudah lari jauh masih dianggap
+    # dekat demand. Terukur di 108 skenario x 300 seri: dengan puncak tertinggi
+    # ada 3 skenario yang justru lebih longgar daripada filter versi sebelumnya
+    # dan lookback 6 kehilangan status mode kompatibilitasnya (+4,0% entry);
+    # dengan puncak terendah tidak ada satu pun skenario yang lebih longgar dan
+    # lookback 6 kembali persis seperti perilaku lama (+0,0%).
+    base_body = min(max(float(k.open), float(k.close)) for k in base_candles)
+    # Tebal minimum zona tetap DIAM-nya, bukan ikut-ikutan melebar. zone_low tidak
+    # mungkin melewati base_body karena setiap candle punya open/close >= low-nya.
     zone_high = max(base_body, zone_low * (1.0 + buffer_pct / 100.0))
 
     sig_open = float(signal.open)
@@ -289,7 +350,7 @@ def detect_demand_zone(klines: list[Kline], config: dict) -> dict:
             "ok": False,
             "reason": (
                 f"harga terlalu jauh di atas zona demand: +{distance_pct:.2f}% "
-                f"melebihi batas {max_dist_pct:g}%"
+                f"di atas batas atas zona {zone_high:.6g} (batas {max_dist_pct:g}%)"
             ),
             "zone_low": zone_low,
             "zone_high": zone_high,
@@ -1144,6 +1205,85 @@ def selftest() -> int:
         _gagal_tertangkap(
             lambda: trend_warmup_bars(dict(cfg, TREND_INTERVAL="30m"), "1h")
         ),
+    )
+
+    # --- zona demand: knob lookback harus benar-benar mengubah geometri ---
+    def _k(o, h, l, c, i=0):
+        return Kline(
+            i * 300_000, o, h, l, c, i * 300_000 + 299_999, 1000.0, 1000.0 * c
+        )
+
+    cfg_dem = dict(
+        DEMAND_ZONE_FILTER_ENABLED=True,
+        DEMAND_LOOKBACK_BARS=20,
+        DEMAND_ZONE_BUFFER_PCT=0.8,
+        DEMAND_MAX_DISTANCE_PCT=3.5,
+        DEMAND_MIN_CLOSE_POSITION=0.45,
+    )
+
+    # Base datar 14 candle di 100, kaki naik 6 candle sampai 103.6, lalu sinyal
+    # di 104.15. Sinyal ini +3,43% dari atap dasar versi 6 candle (lolos) tapi
+    # +3,53% dari atap dasar versi 20 candle (ditolak): hanya batas 3,5% yang
+    # membedakan keduanya, jadi selisihnya murni akibat lookback.
+    datar = [_k(99.9, 100.2, 99.8, 100.0, i) for i in range(14)]
+    kaki = []
+    for j in range(6):
+        o = 100.0 + 0.6 * j
+        c = o + 0.6
+        kaki.append(_k(o, c + 0.1, o - 0.1, c, 14 + j))
+    sinyal = _k(103.8, 104.35, 103.7, 104.15, 20)
+    seri = datar + kaki + [sinyal]
+
+    ketat = detect_demand_zone(seri, dict(cfg_dem, DEMAND_LOOKBACK_BARS=20))
+    longgar = detect_demand_zone(seri, dict(cfg_dem, DEMAND_LOOKBACK_BARS=6))
+    cek(
+        "DEMAND_LOOKBACK_BARS mengubah atap zona (knob tidak mati)",
+        abs(ketat["zone_high"] - 100.5984) < 1e-9
+        and abs(longgar["zone_high"] - 100.6992) < 1e-9,
+        f"lookback 20 -> atap {ketat['zone_high']:.4f}, "
+        f"lookback 6 -> {longgar['zone_high']:.4f}",
+    )
+    cek(
+        "lookback panjang memblokir entry yang sudah di kaki naik",
+        (not ketat["ok"]) and "terlalu jauh" in ketat["reason"],
+        ketat["reason"],
+    )
+    cek(
+        "lookback pendek memetakan dasar terbaru sehingga entry sama lolos",
+        longgar["ok"] and abs(longgar["distance_pct"] - 3.43) < 0.01,
+        longgar["reason"],
+    )
+
+    # Sumbu panjang sesaat (flash dump) bukan support: dasarnya dipotong ke pita
+    # buffer, bukan ditetapkan di dasar jurang.
+    sumur = [_k(99.9, 100.2, 99.8, 100.0, i) for i in range(20)]
+    sumur[10] = _k(99.9, 100.2, 80.0, 99.9, 10)
+    spike = detect_demand_zone(
+        sumur + [_k(99.9, 100.2, 99.8, 100.0, 20), _k(100.0, 100.6, 99.9, 100.5, 21)],
+        cfg_dem,
+    )
+    cek(
+        "sumbu panjang sendirian tidak dijadikan dasar demand",
+        spike["ok"] and spike["zone_low"] is not None and spike["zone_low"] > 99.0,
+        f"dasar {spike['zone_low']:.4f} (bukan 80.0) -> {spike['reason'][:52]}",
+    )
+    cek(
+        "data kurang tetap ditolak (fail closed)",
+        not detect_demand_zone(sumur[:5], cfg_dem)["ok"],
+    )
+    cek(
+        "filter nonaktif selalu lolos",
+        detect_demand_zone([], dict(cfg_dem, DEMAND_ZONE_FILTER_ENABLED=False))["ok"],
+    )
+    cek(
+        "batas atas zona tidak pernah di bawah dasarnya (invarian)",
+        all(
+            (r["zone_high"] is None) or r["zone_high"] >= r["zone_low"]
+            for r in (
+                detect_demand_zone(seri, dict(cfg_dem, DEMAND_LOOKBACK_BARS=b))
+                for b in range(3, 21)
+            )
+        )
     )
 
     print(

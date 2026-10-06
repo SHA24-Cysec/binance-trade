@@ -622,6 +622,13 @@ def validate_params(cfg: dict) -> None:
                     f"Parameter '{key}'={val} di luar rentang wajar ({lo}..{hi})."
                 )
 
+    from config.settings_schema import relation_violations
+
+    pelanggaran = relation_violations(cfg, mode_aware=True)
+    if pelanggaran:
+        daftar = "; ".join(f"{kunci}: {pesan}" for kunci, pesan in pelanggaran.items())
+        raise BacktestError(f"Kombinasi parameter tidak konsisten: {daftar}")
+
     if bool(cfg.get("TREND_FILTER_ENABLED", False)):
         trend_checks = [
             ("TREND_EMA_FAST", 2, 500),
@@ -636,11 +643,6 @@ def validate_params(cfg: dict) -> None:
                 raise BacktestError(
                     f"Parameter '{key}'={val} di luar rentang wajar ({lo}..{hi})."
                 )
-        if int(cfg["TREND_EMA_SLOW"]) <= int(cfg["TREND_EMA_FAST"]):
-            raise BacktestError(
-                "TREND_EMA_SLOW harus lebih besar dari TREND_EMA_FAST agar susunan "
-                "EMA pada gerbang trend tidak terbalik."
-            )
         interval = cfg.get("CONFIRM_INTERVAL", "5m")
         try:
             butuh_trend = strategy.trend_required_bars(cfg)
@@ -1309,6 +1311,103 @@ def selftest():
         )
     )
     print("  apply_overrides dan validate_params untuk parameter trend -> OK")
+
+    print(
+        "\n=== SELFTEST backtest.py: aturan silang satu sumber (bt = dashboard) ==="
+    )
+    from config.settings_schema import relation_violations
+    from config.config import PUMP_CONFIG as _PC
+
+    kasus = [
+        # (nama, override, lolos di backtest?, lolos di penyimpanan setting?)
+        ("config bawaan", {}, True, True),
+        (
+            "demand: jarak maksimum di bawah lebar zona",
+            {
+                "DEMAND_ZONE_FILTER_ENABLED": True,
+                "DEMAND_MAX_DISTANCE_PCT": 0.5,
+                "DEMAND_ZONE_BUFFER_PCT": 1.2,
+            },
+            False,
+            False,
+        ),
+        (
+            "demand: aturan sama, filter dimatikan",
+            {
+                "DEMAND_ZONE_FILTER_ENABLED": False,
+                "DEMAND_MAX_DISTANCE_PCT": 0.5,
+                "DEMAND_ZONE_BUFFER_PCT": 1.2,
+            },
+            True,
+            False,
+        ),
+        (
+            "exit persen: TP tidak lebih besar dari SL",
+            {"USE_ATR_EXIT": False, "TP_PCT": 1.0, "SL_PCT": 2.0},
+            False,
+            False,
+        ),
+        (
+            "exit ATR: TP tidak lebih besar dari SL",
+            {"USE_ATR_EXIT": True, "ATR_MULT_TP": 1.0, "ATR_MULT_SL": 1.5},
+            False,
+            False,
+        ),
+        (
+            "exit ATR rusak tapi mode ATR tidak sedang dipakai",
+            {"USE_ATR_EXIT": False, "ATR_MULT_TP": 1.0, "ATR_MULT_SL": 1.5},
+            True,
+            False,
+        ),
+        (
+            "trend: EMA lambat di bawah EMA cepat",
+            {"TREND_FILTER_ENABLED": True, "TREND_EMA_FAST": 30, "TREND_EMA_SLOW": 20},
+            False,
+            False,
+        ),
+    ]
+    for nama, ov, harus_lolos_bt, harus_lolos_cfg in kasus:
+        cfg_uji = dict(_PC, **ov)
+        try:
+            validate_params(cfg_uji)
+            lolos_bt = True
+        except BacktestError:
+            lolos_bt = False
+        harus_bt = "lolos" if harus_lolos_bt else "menolak"
+        nyata_bt = "lolos" if lolos_bt else "menolak"
+        assert lolos_bt == harus_lolos_bt, (
+            f"{nama}: backtest {nyata_bt}, harusnya {harus_bt}"
+        )
+        melanggar_cfg = set(relation_violations(cfg_uji))
+        melanggar_bt = set(relation_violations(cfg_uji, mode_aware=True))
+        harus_cfg = "lolos" if harus_lolos_cfg else "menolak"
+        nyata_cfg = "lolos" if not melanggar_cfg else "menolak"
+        assert (not melanggar_cfg) == harus_lolos_cfg, (
+            f"{nama}: penyimpanan setting {nyata_cfg} "
+            f"({sorted(melanggar_cfg)}), harusnya {harus_cfg}"
+        )
+        # Invarian umum: jalur simulasi tidak pernah lebih keras dari jalur
+        # penyimpanan setting. Kalau backtest menolak, settings.json harus menolak
+        # juga, kalau tidak bot bisa dijalankan dengan config yang tidak sah.
+        assert melanggar_bt <= melanggar_cfg, (
+            f"{nama}: backtest menolak {sorted(melanggar_bt)} tapi penyimpanan "
+            f"setting hanya {sorted(melanggar_cfg)}"
+        )
+    assert bool(
+        relation_violations(
+            dict(_PC, USE_ATR_EXIT=False, ATR_MULT_TP=1.0, ATR_MULT_SL=1.5)
+        )
+    ), "penyimpanan setting harus tetap menolak invariant exit ATR walau mode ATR mati"
+    assert (
+        not relation_violations(
+            dict(_PC, USE_ATR_EXIT=False, ATR_MULT_TP=1.0, ATR_MULT_SL=1.5),
+            mode_aware=True,
+        )
+    ), "jalur simulasi tidak boleh membatalkan hanya karena parameter mode lain rusak"
+    print(
+        "  7 kasus cocok di kedua jalur, subset aturan simulasi <= aturan penyimpanan, "
+        "relasi mode nonaktif tetap dijaga jalur penyimpanan -> OK"
+    )
 
     print("\nSEMUA SELFTEST backtest.py LULUS.")
     print(
