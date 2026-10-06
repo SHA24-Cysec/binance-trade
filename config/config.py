@@ -44,12 +44,12 @@ PUMP_CONFIG = {
     "BTC_LOOKBACK_BARS": 3,
     "USE_ATR_EXIT": True,
     "ATR_PERIOD": 14,
-    "ATR_MULT_SL": 13.0,  # 1.5
-    "ATR_MULT_TP": 24.5,  # 3.0
-    "ATR_MULT_TRAIL": 8.0,  # 1.0
-    "ATR_MULT_BE_TRIGGER": 6.0,  # 1.0
-    "ATR_MULT_BE_LOCK": 0.0,  # 0.1
-    "ATR_MULT_TRAIL_START": 12.0,  # 1.5
+    "ATR_MULT_SL": 9.0,  # 1.5
+    "ATR_MULT_TP": 18.0,  # 3.0
+    "ATR_MULT_TRAIL": 9.0,  # 1.0
+    "ATR_MULT_BE_TRIGGER": 9.0,  # 1.0
+    "ATR_MULT_BE_LOCK": 4.5,  # 0.1
+    "ATR_MULT_TRAIL_START": 18.0,  # 1.5
     "EXTRA_EXCLUDE_SYMBOLS": [],
     "DETECTOR_ENABLED": True,
     "DETECTOR_WEIGHT_CHANGE": 25.0,
