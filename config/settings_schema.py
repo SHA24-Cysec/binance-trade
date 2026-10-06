@@ -368,62 +368,6 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         "list",
         editor="symbols",
     ),
-    "DETECTOR_ENABLED": _field(
-        "Skor Detector",
-        "Aktifkan skor detector",
-        "Menampilkan panel skor detector di dashboard. Hanya tampilan: skor TIDAK mempengaruhi keputusan entry bot.",
-        "bool",
-    ),
-    "DETECTOR_WEIGHT_CHANGE": _field(
-        "Skor Detector",
-        "Bobot kenaikan 24 jam",
-        "Bobot relatif komponen kenaikan 24 jam terhadap rentang gerbang pump.",
-        "float",
-        minimum=0,
-        maximum=100,
-    ),
-    "DETECTOR_WEIGHT_VOLUME5M": _field(
-        "Skor Detector",
-        "Bobot lonjakan volume 5m",
-        "Bobot relatif volume candle 5m terakhir dibanding rata-rata candle sebelumnya.",
-        "float",
-        minimum=0,
-        maximum=100,
-    ),
-    "DETECTOR_WEIGHT_ORDERBOOK": _field(
-        "Skor Detector",
-        "Bobot kualitas order book",
-        "Bobot relatif kedalaman ask, rasio bid/ask, dan sell wall.",
-        "float",
-        minimum=0,
-        maximum=100,
-    ),
-    "DETECTOR_WEIGHT_ATR": _field(
-        "Skor Detector",
-        "Bobot volatilitas ATR",
-        "Bobot relatif ATR/harga candle 5m terhadap pita sehat.",
-        "float",
-        minimum=0,
-        maximum=100,
-    ),
-    "DETECTOR_ATR_MIN_PCT": _field(
-        "Skor Detector",
-        "ATR sehat minimum",
-        "Batas bawah pita ATR/harga yang bernilai penuh. Di bawahnya skor turun.",
-        "float",
-        minimum=0.01,
-        maximum=50,
-        unit="%",
-    ),
-    "DETECTOR_ATR_MAX_PCT": _field(
-        "Skor Detector",
-        "ATR sehat maksimum",
-        "Batas atas pita ATR/harga yang bernilai penuh. Di atasnya skor turun sampai nol di dua kali batas ini.",
-        "float",
-        minimum=0.01,
-        maximum=50,
-        unit="%",
-    ),
     "BACKTEST_INITIAL_EQUITY_USDT": _field(
         "Data Backtest",
         "Modal awal backtest",
@@ -1199,6 +1143,14 @@ REMOVED_PARAMETERS = frozenset(
         "DETECTOR_WEIGHT_VOLUME24",
         "DETECTOR_TOP_N",
         "DAILY_KLINE_CACHE_TTL_SECONDS",
+        # Remove obsolete detector-score settings from older mode overrides.
+        "DETECTOR_ENABLED",
+        "DETECTOR_WEIGHT_CHANGE",
+        "DETECTOR_WEIGHT_VOLUME5M",
+        "DETECTOR_WEIGHT_ORDERBOOK",
+        "DETECTOR_WEIGHT_ATR",
+        "DETECTOR_ATR_MIN_PCT",
+        "DETECTOR_ATR_MAX_PCT",
     }
 )
 
@@ -1434,22 +1386,6 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
         keluar["PUMP_MAX_24H_CHANGE_PCT"] = (
             "harus lebih besar dari PUMP_MIN_24H_CHANGE_PCT (atau 0 untuk menonaktifkan)"
         )
-
-    nilai = pasangan("DETECTOR_ATR_MAX_PCT", "DETECTOR_ATR_MIN_PCT")
-    if nilai is not None and nilai[0] <= nilai[1]:
-        keluar["DETECTOR_ATR_MAX_PCT"] = "harus lebih besar dari DETECTOR_ATR_MIN_PCT"
-
-    bobot = [
-        _angka_untuk_relasi(cfg, k)
-        for k in (
-            "DETECTOR_WEIGHT_CHANGE",
-            "DETECTOR_WEIGHT_VOLUME5M",
-            "DETECTOR_WEIGHT_ORDERBOOK",
-            "DETECTOR_WEIGHT_ATR",
-        )
-    ]
-    if all(b is not None for b in bobot) and sum(bobot) <= 0:
-        keluar["DETECTOR_WEIGHT_CHANGE"] = "total bobot detector harus lebih dari 0"
 
     saring_trend = mode_aware is False or _flag_untuk_relasi(
         cfg, "TREND_FILTER_ENABLED", False

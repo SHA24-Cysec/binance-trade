@@ -3897,75 +3897,6 @@ def selftest() -> None:
     )
     print("  -> OK (depth, ketimpangan bid/ask, sell wall, data rusak = fail closed)")
 
-    print("=== SELFTEST: skor detector (hanya tampilan) ===")
-    det_cfg = dict(cfg)
-    det_asks = [(1.0 + i * 0.0001, 400.0 / (1.0 + i * 0.0001)) for i in range(1, 60)]
-    det_bids = [(1.0 - i * 0.0001, 400.0 / (1.0 - i * 0.0001)) for i in range(1, 60)]
-    book_good = scanner.orderbook_metrics(_book(det_asks, det_bids), 100.0, det_cfg)
-    assert book_good is not None and book_good["ask_depth_notional"] > 1000
-    k5 = [
-        strategy.Kline(
-            open_time=i * 300_000,
-            open=1.0,
-            high=1.003,
-            low=0.997,
-            close=1.0,
-            close_time=i * 300_000 + 299_999,
-            volume=1000.0,
-            quote_volume=1000.0,
-        )
-        for i in range(40)
-    ]
-    k5[-1] = strategy.Kline(
-        open_time=39 * 300_000,
-        open=1.0,
-        high=1.003,
-        low=0.997,
-        close=1.0,
-        close_time=39 * 300_000 + 299_999,
-        volume=3000.0,
-        quote_volume=3000.0,
-    )
-    full = scanner.compute_detector_score(8.0, k5, 1.0, book_good, det_cfg)
-    assert full["score"] == 100.0 and not full["partial"], full
-    miss = scanner.compute_detector_score(8.0, None, 1.0, None, det_cfg)
-    assert miss["partial"] and set(miss["missing"]) == {
-        "volume5m",
-        "orderbook",
-        "atr",
-    }, miss["missing"]
-    assert abs(miss["score"] - 25.0) < 0.2, miss["score"]
-    hi = scanner.compute_detector_score(20.0, k5, 1.0, book_good, det_cfg)
-    assert hi["components"]["change"]["sub"] == 0.0 and hi["score"] == 75.0, hi["score"]
-    k5_weak = list(k5)
-    k5_weak[-1] = strategy.Kline(
-        open_time=39 * 300_000,
-        open=1.0,
-        high=1.003,
-        low=0.997,
-        close=1.0,
-        close_time=39 * 300_000 + 299_999,
-        volume=1000.0,
-        quote_volume=1000.0,
-    )
-    weak = scanner.compute_detector_score(8.0, k5_weak, 1.0, book_good, det_cfg)
-    assert abs(weak["components"]["volume5m"]["sub"] - 0.5) < 1e-9
-    zero = dict(
-        det_cfg,
-        DETECTOR_WEIGHT_CHANGE=0,
-        DETECTOR_WEIGHT_VOLUME5M=0,
-        DETECTOR_WEIGHT_ORDERBOOK=0,
-        DETECTOR_WEIGHT_ATR=0,
-    )
-    assert scanner.compute_detector_score(8.0, k5, 1.0, book_good, zero)["score"] == 0.0
-    import inspect
-
-    assert "detector" not in inspect.getsource(scanner.find_best_candidate).lower()
-    assert "detector" not in inspect.getsource(open_position).lower()
-    print(
-        "  -> OK (skor 100 untuk data ideal, data hilang dihitung 0, bobot nol aman, tidak masuk jalur entry)"
-    )
-
     print("\n=== SELFTEST: konfirmasi entry (volume rolling, tanpa indikator) ===")
 
     def _seri_volume(volume_akhir: float):
@@ -4835,8 +4766,6 @@ def selftest() -> None:
         "ROLLING_VOLUME_SURGE_MULT": 2.0,
         "ROLLING_VOLUME_CONFIRMATION_BARS": 1,
         "CONFIRM_LOOKBACK_BARS": 60,
-        "DETECTOR_ATR_MIN_PCT": 0.01,
-        "DETECTOR_ATR_MAX_PCT": 5.0,
         "ATR_PERIOD": 14,
     }
 

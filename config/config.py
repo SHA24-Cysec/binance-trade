@@ -51,13 +51,6 @@ PUMP_CONFIG = {
     "ATR_MULT_BE_LOCK": 4.5,  # 0.1
     "ATR_MULT_TRAIL_START": 18.0,  # 1.5
     "EXTRA_EXCLUDE_SYMBOLS": [],
-    "DETECTOR_ENABLED": True,
-    "DETECTOR_WEIGHT_CHANGE": 25.0,
-    "DETECTOR_WEIGHT_VOLUME5M": 25.0,
-    "DETECTOR_WEIGHT_ORDERBOOK": 30.0,
-    "DETECTOR_WEIGHT_ATR": 20.0,
-    "DETECTOR_ATR_MIN_PCT": 0.3,
-    "DETECTOR_ATR_MAX_PCT": 1.2,
     "BACKTEST_INITIAL_EQUITY_USDT": 0.0,
     "BACKTEST_CACHE_ENABLED": True,
     "BACKTEST_CACHE_FILE": "data/backtest_cache.sqlite3",
@@ -363,14 +356,6 @@ def build_config_for_mode(
 
 _finalize_config_dict(PUMP_CONFIG)
 PUMP_DEFAULTS["BASE_URL"] = PUMP_DEFAULTS["LIVE_BASE_URL"]
-
-
-def detector_enabled(config: dict = None) -> bool:
-    cfg = PUMP_CONFIG if config is None else config
-    raw = cfg.get("DETECTOR_ENABLED", False)
-    if isinstance(raw, bool):
-        return raw
-    return str(raw).strip().lower() in ("true", "1", "yes", "ya", "on")
 
 
 def get_taker_fee_pct(config: dict = None) -> float:
