@@ -93,7 +93,18 @@ def interprocess_lock(path: os.PathLike | str) -> Iterator[None]:
             finally:
                 _release_lock(fd)
         finally:
-            os.close(fd)
+            # Penutupan tidak boleh melempar: kalau ditutup dengan galat,
+            # pengecualian asli (misalnya galat bisnis di dalam blok with) akan
+            # tertutup dan fd tetap tertinggal di beberapa jalur.
+            try:
+                os.close(fd)
+            except OSError as exc:
+                logger.warning(
+                    "Gagal menutup deskriptor lock %s (%s). Sistem akan "
+                    "melepasnya saat proses berakhir.",
+                    lock_path,
+                    exc,
+                )
 
 
 def timestamp_tag() -> str:

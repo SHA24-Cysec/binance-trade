@@ -35,6 +35,13 @@ class MarketDataProvider:
         self._depth_limit = int(config.get("PAPER_DEPTH_LIMIT", 100))
 
         self._workers = max(1, int(config.get("MARKET_DATA_WORKERS", 1) or 1))
+        # Executor klines dibuat sekali dan dipakai ulang. Sebelumnya sebuah
+        # ThreadPoolExecutor baru dilahirkan setiap kali get_klines_many
+        # dipanggil, sehingga setiap siklus scan (default 30 detik, 8 worker)
+        # meninggalkan thread baru beserta sesi HTTP miliknya. Itulah sumber
+        # utama kebocoran file descriptor yang dilaporkan 07-10-2026.
+        self._kline_executor = None
+        self._kline_executor_lock = threading.Lock()
         self._ws_overlay_enabled = bool(
             config.get("WS_LAST_PRICE_OVERLAY_ENABLED", True)
         )
@@ -98,6 +105,15 @@ class MarketDataProvider:
 
     def close(self) -> None:
         self._stop.set()
+        with self._kline_executor_lock:
+            executor, self._kline_executor = self._kline_executor, None
+        if executor is not None:
+            try:
+                executor.shutdown(wait=False)
+            except Exception:
+                logger.debug(
+                    "Executor klines gagal ditutup saat close()", exc_info=True
+                )
         with self._ws_lock:
             if self._ws is not None:
                 try:
@@ -175,13 +191,36 @@ class MarketDataProvider:
             return {symbol: _one(symbol) for symbol in unique}
 
         out: dict = {}
-        with ThreadPoolExecutor(
-            max_workers=min(workers, len(unique)), thread_name_prefix="klines"
-        ) as pool:
-            futures = {pool.submit(_one, symbol): symbol for symbol in unique}
-            for future in as_completed(futures):
-                out[futures[future]] = future.result()
+        pool = self._ensure_kline_executor(min(workers, len(unique)))
+        futures = {pool.submit(_one, symbol): symbol for symbol in unique}
+        for future in as_completed(futures):
+            out[futures[future]] = future.result()
         return out
+
+    def _ensure_kline_executor(self, worker_dibutuhkan: int):
+        """Executor klines milik provider (dibuat malas, ukuran mengikuti kebutuhan).
+
+        Executor tidak ditutup di akhir siklus. Thread pekerjanya tetap hidup dan
+        memakai ulang sesi HTTP yang sama, jadi tidak ada thread maupun sesi baru
+        per siklus scan. Kalau kebutuhan worker naik (misalnya karena jumlah
+        simbol bertambah), executor lama ditutup dulu supaya jumlah thread total
+        tetap dibatasi MARKET_DATA_WORKERS.
+        """
+        with self._kline_executor_lock:
+            if self._kline_executor is not None and getattr(
+                self._kline_executor, "_max_workers", 0
+            ) >= worker_dibutuhkan:
+                return self._kline_executor
+            lama = self._kline_executor
+            self._kline_executor = ThreadPoolExecutor(
+                max_workers=worker_dibutuhkan, thread_name_prefix="klines"
+            )
+        if lama is not None:
+            try:
+                lama.shutdown(wait=False)
+            except Exception:
+                logger.debug("Executor klines lama gagal ditutup", exc_info=True)
+        return self._kline_executor
 
     def _ticker_refresh_loop(self) -> None:
         while not self._stop.wait(self._ticker_ttl):
@@ -305,3 +344,93 @@ class MarketDataProvider:
         with self._depth_lock:
             self._depth_cache[key] = (depth, time.monotonic())
         return depth
+
+
+def selftest() -> int:
+    """Audit daur ulang executor klines (regresi OSError(24) 07-10-2026).
+
+    Pola lama: satu ThreadPoolExecutor baru per panggilan get_klines_many.
+    Dengan scan tiap 30 detik dan 8 worker, siklus ini menambah 8 thread dan 8
+    sesi HTTP per siklus yang tidak pernah ditutup.
+    """
+    import gc
+    import os
+    import tempfile
+
+    def get_klines_palsu(self, symbol, interval, limit=500, start=None, end=None):
+        return [[0, "1", "1", "1", "1", "1", 0, "1"]]
+
+    kelas_duga = type(
+        "RestDuga", (), {"get_klines": get_klines_palsu, "close": lambda self: None}
+    )
+    cfg = {
+        "LIVE_BASE_URL": "http://127.0.0.1:1",
+        "USE_WEBSOCKET": False,
+        "MARKET_DATA_WORKERS": 8,
+        "TICKER_SNAPSHOT_TTL_SECONDS": 0,
+        "PAPER_DEPTH_LIMIT": 5,
+    }
+    provider = MarketDataProvider(cfg)
+    provider.rest = kelas_duga()
+    provider._use_ws = False
+    provider._ticker_ttl = 0.0
+    gagal = 0
+    print("=== SELFTEST: executor klines dan pemakaian thread (market_data) ===")
+    try:
+        id_pakai = []
+        for siklus in range(6):
+            peta = provider.get_klines_many(
+                [f"S{nomor}USDT" for nomor in range(10)], "5m", 61
+            )
+            assert len(peta) == 10, f"semua simbol harus terisi, dapat {len(peta)}"
+            id_pakai.append(id(provider._kline_executor))
+        assert (
+            len(set(id_pakai)) == 1
+        ), f"executor harus dipakai ulang, terdeteksi {len(set(id_pakai))} executor"
+        nama = ("klines_", "klines-")
+        jumlah = sum(1 for t in threading.enumerate() if t.name.startswith(nama))
+        assert jumlah <= 8, f"thread klines tidak boleh menumpuk: {jumlah}"
+        print(
+            f"  6 siklus x 10 simbol -> 1 executor, thread klines {jumlah} "
+            f"(batas MARKET_DATA_WORKERS=8) -> OK"
+        )
+    except AssertionError as exc:
+        gagal += 1
+        print(f"  [GAGAL] daur ulang executor: {exc}")
+
+    try:
+        awal = len(os.listdir("/proc/self/fd")) if os.path.isdir("/proc/self/fd") else None
+        for siklus in range(10):
+            provider.get_klines_many(
+                [f"T{nomor}USDT" for nomor in range(10)], "5m", 61
+            )
+        gc.collect()
+        if awal is not None:
+            akhir = len(os.listdir("/proc/self/fd"))
+            assert akhir - awal <= 2, f"fd tumbuh {akhir - awal} pada 10 siklus berikutnya"
+            print(f"  10 siklus tambahan: fd {awal} -> {akhir} (mendatar) -> OK")
+        else:  # pragma: no cover - non-Linux
+            print("  [SKIP] pengukuran fd butuh /proc/self/fd (Linux)")
+    except AssertionError as exc:
+        gagal += 1
+        print(f"  [GAGAL] pengukuran fd: {exc}")
+
+    provider.close()
+    try:
+        assert provider._kline_executor is None, "close() wajib melepas executor"
+        print("  close() menghentikan executor klines -> OK")
+    except AssertionError as exc:
+        gagal += 1
+        print(f"  [GAGAL] close(): {exc}")
+
+    if gagal:
+        print(f"SELFTEST market_data: {gagal} GAGAL")
+        return 1
+    print("SEMUA SELFTEST market_data.py LULUS.")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(selftest())

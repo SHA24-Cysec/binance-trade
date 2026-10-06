@@ -32,6 +32,7 @@ from config.config import (
     get_log_file,
     get_control_file,
 )
+from infrastructure.network.file_descriptors import fd_status, raise_fd_limit
 from infrastructure.storage import state as state_mod
 from market import market_scanner as scanner
 from infrastructure.process.runtime_control import BotControlError, BotProcessManager
@@ -751,26 +752,34 @@ def _bt_prepare_universe(
     start_ms = end_ms - days * bt.MS_PER_DAY
     fetch_start_ms = start_ms - warmup_ms
 
+    def klien_pembuat(cfg: dict) -> BinanceSpotClient:
+        # Satu klien untuk satu pekerjaan backtest. Kalau tidak ditutup, setiap
+        # pekerjaan meninggalkan sesi HTTP beserta soket dan file descriptor-nya;
+        # tumpukan inilah yang dahulu menghabiskan fd proses.
+        return BinanceSpotClient(
+            "",
+            "",
+            cfg["LIVE_BASE_URL"],
+            allow_signed=False,
+            rate_limit_state_file=cfg.get("RATE_LIMIT_STATE_FILE"),
+            rate_limit_limit=int(cfg.get("RATE_LIMIT_WEIGHT_LIMIT", 6000) or 6000),
+            rate_limit_safety_margin=int(
+                cfg.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100
+            ),
+        )
+
+
+    klien = None
     if not _HAS_CLIENT:
         raise bt.BacktestError(
             "Klien Binance tidak tersedia (modul 'requests' tidak termuat). "
             "Backtest butuh akses ke data historis publik Binance."
         )
-    client = BinanceSpotClient(
-        "",
-        "",
-        PUMP_CONFIG["LIVE_BASE_URL"],
-        allow_signed=False,
-        rate_limit_state_file=PUMP_CONFIG.get("RATE_LIMIT_STATE_FILE"),
-        rate_limit_limit=int(PUMP_CONFIG.get("RATE_LIMIT_WEIGHT_LIMIT", 6000) or 6000),
-        rate_limit_safety_margin=int(
-            PUMP_CONFIG.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100
-        ),
-    )
+    klien = klien_pembuat(cfg)
 
     set_progress(0.01, "mengambil daftar pasar...")
     try:
-        tickers = client.get_ticker_24hr_all()
+        tickers = klien.get_ticker_24hr_all()
     except Exception as exc:
         raise bt.BacktestError(
             f"Gagal mengambil daftar pasar dari Binance: {exc}"
@@ -778,7 +787,7 @@ def _bt_prepare_universe(
 
     tradable_now = None
     try:
-        exchange_info = client.get_exchange_info()
+        exchange_info = klien.get_exchange_info()
         tradable_now = {
             s.get("symbol")
             for s in exchange_info.get("symbols", [])
@@ -821,7 +830,7 @@ def _bt_prepare_universe(
         store = pbt.new_backtest_store(cfg)
         kline_cache = pbt.open_kline_cache(cfg)
         symbols_with_data, failed = pbt.fetch_universe_klines(
-            client,
+            klien,
             universe,
             interval,
             fetch_start_ms,
@@ -844,7 +853,7 @@ def _bt_prepare_universe(
             set_progress(0.82, f"mengunduh {btc_symbol} untuk filter BTC...")
             try:
                 btc_klines = pbt._klines_untuk_simbol(
-                    client, btc_symbol, interval, fetch_start_ms, end_ms, kline_cache
+                    klien, btc_symbol, interval, fetch_start_ms, end_ms, kline_cache
                 )
                 if not btc_klines:
                     btc_klines = None
@@ -859,9 +868,15 @@ def _bt_prepare_universe(
             store.cleanup()
         if kline_cache is not None:
             kline_cache.close()
+        if klien is not None:
+            try:
+                klien.close()
+            except Exception:
+                logger.debug("Gagal menutup klien backtest", exc_info=True)
         raise
 
     return {
+        "client": klien,
         "store": store,
         "kline_cache": kline_cache,
         "universe": universe,
@@ -916,6 +931,7 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
 
     store = None
     kline_cache = None
+    klien = None
 
     try:
         cfg = bt.apply_overrides(PUMP_CONFIG, overrides)
@@ -927,6 +943,7 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
         )
         store = prep["store"]
         kline_cache = prep["kline_cache"]
+        klien = prep.get("client")
 
         set_progress(0.82, "menjalankan simulasi portofolio...")
         result = pbt.run_portfolio_backtest(
@@ -1113,6 +1130,11 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
             store.cleanup()
         if kline_cache is not None:
             kline_cache.close()
+        if klien is not None:
+            try:
+                klien.close()
+            except Exception:
+                logger.debug("Gagal menutup klien backtest", exc_info=True)
 
 
 def _bt_run_grid_job(
@@ -1141,6 +1163,7 @@ def _bt_run_grid_job(
 
     store = None
     kline_cache = None
+    klien = None
 
     try:
         # Nilai di luar kunci yang disapu grid (termasuk gerbang trend dan interval
@@ -1155,6 +1178,7 @@ def _bt_run_grid_job(
         )
         store = prep["store"]
         kline_cache = prep["kline_cache"]
+        klien = prep.get("client")
 
         set_progress(0.30, f"menjalankan grid search ({total_kombinasi} kombinasi)...")
         hasil = gs.run_portfolio_grid_search(
@@ -1281,6 +1305,11 @@ def _bt_run_grid_job(
             store.cleanup()
         if kline_cache is not None:
             kline_cache.close()
+        if klien is not None:
+            try:
+                klien.close()
+            except Exception:
+                logger.debug("Gagal menutup klien backtest", exc_info=True)
 
 
 def _bt_min_days_note(cfg: dict, interval: str) -> tuple[int, str]:
@@ -1913,7 +1942,13 @@ def api_control_status():
             "mode_guard": guard,
             "read_only": not _bind_is_loopback(),
             "config_errors": list(CONFIG_LOAD_ERRORS),
-            "platform": {"os_name": os.name, "windows": os.name == "nt"},
+            "platform": {
+                "os_name": os.name,
+                "windows": os.name == "nt",
+                # Gauge pemakaian file descriptor. Angka inilah yang dulu jebol
+                # sampai OSError(24) dan membuat dashboard menjawab 500.
+                "file_descriptors": fd_status(),
+            },
         }
     )
 
@@ -2443,6 +2478,13 @@ def selftest() -> int:
 
 
 def main(*, auto_start_bot: bool = False) -> int:
+    # Batas fd bawaan (1024 di banyak distro Linux) terlalu sempit untuk
+    # dashboard bertread banyak + bot + lock file. Naikkan dulu, dan hanya
+    # berhenti di bawah batas keras sistem; kegagalan di sini tidak fatal.
+    soft, hard, berubah = raise_fd_limit()
+    if berubah:
+        print(f"Batas file descriptor dinaikkan menjadi {soft} (hard {hard}).")
+
     if not _bind_is_loopback():
         if _DASHBOARD_HOST in ("0.0.0.0", "::"):
             # Mode baca-saja di semua antarmuka: Host apa pun boleh membuka

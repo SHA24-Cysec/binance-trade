@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import hmac
 import logging
@@ -8,11 +9,13 @@ import re
 import threading
 import time
 import urllib.parse
+import weakref
 from decimal import Decimal, ROUND_DOWN
 from typing import Any, Optional
 
 import requests
 
+from infrastructure.network.file_descriptors import EMFILE, is_emfile
 from infrastructure.network.rate_limiter import (
     RateLimitBlockedError,
     SharedRequestWeightLimiter,
@@ -50,6 +53,171 @@ class BinanceTransportError(BinanceAPIError):
 
     def __init__(self, msg: str):
         super().__init__(0, None, msg)
+
+
+# Batas default jumlah sesi HTTP yang dipegang satu klien. Dipilih longgar agar
+# tidak pernah memaksa penutupan sesi milik thread yang masih aktif memakai.
+MAX_SESSIONS_DEFAULT = 16
+
+
+class _SessionRegistry:
+    """Pemegang ``requests.Session`` per thread dengan batas dan pendauran ulang.
+
+    Latar belakang: tiap thread butuh sesinya sendiri, tetapi penyimpanan berupa
+    ``list`` membuat sesi dari thread yang sudah mati menumpuk selamanya. Setiap
+    sesi memegang koneksi HTTPS yang masih hidup, jadi satu sesi bocor berarti
+    satu file descriptor bocor. Pada mesin pemilik repo, tumpukan ini memicu
+    ``OSError(24, 'Too many open files')`` pada lock state, pada werkzeug, dan
+    pada permintaan harga ke Binance (log 07-10-2026).
+
+    Aturan main:
+
+    1. Sesi tetap per thread (sifat lama dipertahankan).
+    2. Registry menyimpan hanya sesi milik thread yang masih hidup, dihitung
+       lewat rujukan lemah ke objek thread.
+    3. Saat batas terlampaui, sesi milik thread yang sudah mati dan tidak sedang
+       dipakai request ditutup lebih dulu. Kalau masih lewat batas, pemanggil
+       diberi peringatan; sesi aktif tidak pernah diputus di tengah request.
+    """
+
+    def __init__(self, max_sessions: int = MAX_SESSIONS_DEFAULT) -> None:
+        self._tls = threading.local()
+        self._lock = threading.Lock()
+        # thread (rujukan lemah) -> [session, jumlah request aktif]
+        self._entries: "weakref.WeakKeyDictionary[threading.Thread, list]" = (
+            weakref.WeakKeyDictionary()
+        )
+        self._headers: dict = {}
+        self.max_sessions = max(2, int(max_sessions))
+        self.dibuat = 0
+        self.ditutup = 0
+
+    @staticmethod
+    def _konfigurasi_pool(session, pool_maxsize: int = 4) -> None:
+        """Batasi koneksi simpanan per sesi.
+
+        Bawaan urllib3 menyimpan hingga 10 soket per host per sesi. Karena sesi
+        dipegang per thread, kombinasi "banyak thread singkat x 10 soket" inilah
+        yang menghabiskan fd. Empat soket per host cukup untuk satu thread dan
+        membuat sisa soket yang menganggur ditutup oleh pool itu sendiri.
+        """
+        try:
+            adapter = requests.adapters.HTTPAdapter(
+                pool_connections=2, pool_maxsize=max(1, int(pool_maxsize))
+            )
+        except Exception:  # pragma: no cover - urllib3 selalu ada bersama requests
+            return
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+
+    def set_headers(self, headers: dict) -> None:
+        """Header yang akan dipasang pada setiap sesi baru (termasuk yang sudah ada)."""
+        with self._lock:
+            self._headers = dict(headers)
+            sesi = [entry[0] for entry in self._entries.values()]
+        for session in sesi:
+            try:
+                session.headers.update(headers)
+            except Exception:  # pragma: no cover - sesi rusak tidak boleh menjatuhkan
+                logger.debug("Gagal memperbarui header sesi", exc_info=True)
+
+    def _new_session(self):
+        session = requests.Session()
+        self._konfigurasi_pool(session)
+        if self._headers:
+            session.headers.update(self._headers)
+        return session
+
+    def bind(self, headers: dict | None = None) -> None:
+        """Daftarkan sesi untuk thread pemanggil (dipanggil sekali per thread)."""
+        if headers:
+            self.set_headers(headers)
+        thread = threading.current_thread()
+        with self._lock:
+            entry = self._entries.get(thread)
+            if entry is None:
+                entry = [self._new_session(), 0]
+                self._entries[thread] = entry
+                self.dibuat += 1
+            self._reap_locked()
+        self._tls.session = entry[0]
+
+    def get(self):
+        session = getattr(self._tls, "session", None)
+        if session is None:
+            self.bind()
+            session = self._tls.session
+        return session
+
+    @contextlib.contextmanager
+    def use(self):
+        """Tandai satu request aktif pada sesi thread ini, lalu tagih penutupan."""
+        session = self.get()
+        thread = threading.current_thread()
+        with self._lock:
+            entry = self._entries.get(thread)
+            if entry is None:
+                entry = [session, 0]
+                self._entries[thread] = entry
+                self.dibuat += 1
+            entry[1] += 1
+        try:
+            yield session
+        finally:
+            tutup = []
+            with self._lock:
+                terdaftar = self._entries.get(thread)
+                if terdaftar is not None and terdaftar[1] > 0:
+                    terdaftar[1] -= 1
+                if len(self._entries) > self.max_sessions:
+                    tutup = self._reap_locked()
+            for sesi in tutup:
+                try:
+                    sesi.close()
+                except Exception:  # pragma: no cover - penutupan best-effort
+                    logger.debug("Gagal menutup sesi usang", exc_info=True)
+
+    def _reap_locked(self) -> list:
+        """Tutup sesi milik thread mati. Panggil dengan ``_lock`` sudah digenggam."""
+        ditutup = []
+        for thread, entry in list(self._entries.items()):
+            if len(self._entries) <= self.max_sessions:
+                break
+            if entry[1] == 0 and not thread.is_alive():
+                sesi, _ = entry
+                self._entries.pop(thread, None)
+                ditutup.append(sesi)
+                self.ditutup += 1
+        if len(self._entries) > self.max_sessions:
+            logger.warning(
+                "Registry sesi memakai %d sesi (batas %d) dan tidak dapat "
+                "diturunkan: sesi tersebut masih dipakai thread aktif. Kalau "
+                "keadaan ini menetap, jumlah thread pekerja perlu dikurangi.",
+                len(self._entries),
+                self.max_sessions,
+            )
+        return ditutup
+
+    def close_all(self) -> list:
+        """Kembalikan sesi terdaftar dan kosongkan registry.
+
+        Pemanggil yang menutup sessi-nya, supaya exception dari session.close()
+        tidak terjadi sambil memegang kunci registry.
+        """
+        with self._lock:
+            items = [entry[0] for entry in self._entries.values()]
+            self._entries.clear()
+        self.ditutup += len(items)
+        return items
+
+    @property
+    def sessions(self) -> list:
+        with self._lock:
+            return [entry[0] for entry in self._entries.values()]
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._entries)
 
 
 def _build_query(params: dict) -> str:
@@ -131,15 +299,18 @@ class BinanceSpotClient:
         rate_limit_state_file: str | None = None,
         rate_limit_limit: int = 6000,
         rate_limit_safety_margin: int = 100,
+        max_sessions: int = MAX_SESSIONS_DEFAULT,
     ):
         self.api_key = api_key
         self.api_secret = api_secret
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.allow_signed = allow_signed
-        self._tls = threading.local()
-        self._sessions: list = []
-        self._sessions_lock = threading.Lock()
+        # Satu sesi per thread, disimpan di registry yang tahu diri: sesi milik
+        # thread yang sudah mati ditutup sehingga soket dan file descriptornya
+        # kembali. Sebelumnya sesi ditumpuk di list tanpa batas (penyebab
+        # "Too many open files" pada log 07-10-2026).
+        self._registry = _SessionRegistry(max_sessions=max_sessions)
         self._prime_session()
         self._time_offset_ms = 0
         self._rate_limiter = SharedRequestWeightLimiter(
@@ -151,26 +322,34 @@ class BinanceSpotClient:
         self.used_weight_1m = 0
         self.blocked_until = 0.0
 
+    @property
+    def _sessions_lock(self) -> threading.Lock:
+        # Kompatibel dengan kode/lama yang mengharapkan kunci registry.
+        return self._registry._lock
+
+    @property
+    def _sessions(self) -> list:
+        # Kompatibel dengan pembacaan diagnostik: daftar sesi yang masih terdaftar.
+        return self._registry.sessions
+
     def _new_session(self):
-        session = requests.Session()
+        session = self._registry.get()
         if self.allow_signed and self.api_key:
             session.headers.update({"X-MBX-APIKEY": self.api_key})
-        with self._sessions_lock:
-            self._sessions.append(session)
         return session
 
     def _prime_session(self):
-        session = self._new_session()
-        self._tls.session = session
-        return session
+        headers = (
+            {"X-MBX-APIKEY": self.api_key}
+            if (self.allow_signed and self.api_key)
+            else None
+        )
+        self._registry.bind(headers=headers)
+        return self._registry.get()
 
     @property
     def session(self):
-        session = getattr(self._tls, "session", None)
-        if session is None:
-            session = self._new_session()
-            self._tls.session = session
-        return session
+        return self._registry.get()
 
     def sync_time(self) -> None:
         server_time = self.get_server_time()
@@ -181,10 +360,7 @@ class BinanceSpotClient:
         )
 
     def close(self) -> None:
-        with self._sessions_lock:
-            sessions = list(self._sessions)
-            self._sessions.clear()
-        for session in sessions:
+        for session in self._registry.close_all():
             try:
                 session.close()
             except Exception:
@@ -282,7 +458,8 @@ class BinanceSpotClient:
                         retry_after=int(exc.retry_after),
                     ) from exc
                 url = build_url()
-                resp = self.session.request(method, url, timeout=self.timeout)
+                with self._registry.use() as sesi:
+                    resp = sesi.request(method, url, timeout=self.timeout)
 
                 self._record_used_weight(resp.headers)
 
@@ -366,7 +543,7 @@ class BinanceSpotClient:
                         path,
                         attempt,
                         max_retries,
-                        self._redact(exc),
+                        self._ringkas_galat(exc),
                         wait,
                     )
                     time.sleep(wait)
@@ -377,7 +554,7 @@ class BinanceSpotClient:
                         "Request %s %s ditolak tanpa retry: %s.",
                         method,
                         path,
-                        self._redact(exc),
+                        self._ringkas_galat(exc),
                     )
                     raise
 
@@ -387,16 +564,36 @@ class BinanceSpotClient:
                     path,
                     attempt,
                     max_retries,
-                    self._redact(exc),
+                    self._ringkas_galat(exc),
                 )
 
         if isinstance(last_exc, requests.exceptions.RequestException):
             raise BinanceTransportError(
-                f"gangguan transport pada {method} {path}: {self._redact(last_exc)}"
+                f"gangguan transport pada {method} {path}: "
+                f"{self._ringkas_galat(last_exc)}"
             ) from last_exc
         if isinstance(last_exc, BinanceAPIError):
             raise last_exc
         raise BinanceTransportError(f"request {method} {path} gagal tanpa detail")
+
+    @staticmethod
+    def _ringkas_galat(exc: BaseException) -> str:
+        """Ringkas pesan galat, dengan penanda khusus bila penyebabnya fd habis.
+
+        `Max retries exceeded ... SSLError(OSError(24, 'Too many open files'))`
+        sering disalahartikan sebagai gangguan jaringan Binance. Padahal artinya
+        proses sendiri kehabisan file descriptor, jadi perbaikannya di sisi proses,
+        bukan di sisi bursa.
+        """
+        teks = BinanceSpotClient._redact(exc)
+        if is_emfile(exc):
+            return (
+                f"{teks} | PENYEBAB: batas file descriptor proses tercapai "
+                "(EMFILE). Soket dan lock file tidak dapat dibuat lagi. "
+                "Lihat angka fd pada dashboard (bagian Platform) dan naikkan "
+                "`ulimit -n`, atau hentikan proses lalu perbaiki kebocoran sesi."
+            )
+        return teks
 
     def _record_used_weight(self, headers) -> None:
         try:
@@ -1025,3 +1222,200 @@ def build_filters_cache(exchange_info: dict) -> dict:
         except (KeyError, ValueError, TypeError, ArithmeticError) as exc:
             logger.debug("Lewati parsing filter untuk %s: %s", symbol, exc)
     return cache
+
+
+def selftest() -> int:
+    """Audit registry sesi: tidak ada sesi yatim, tidak ada soket yatim.
+
+    Regresi yang dijaga (log 07-10-2026): sesi HTTP per thread dulu disimpan di
+    list tanpa batas. Thread scan dan thread request dashboard lahir dan mati
+    setiap beberapa detik, tetapi sesinya (beserta soket HTTPS yang dipegangnya)
+    dibiarkan hidup. File descriptor naik terus sampai sistem menolak buka apa
+    pun lagi dan seluruh proses tumbang dengan OSError(24).
+    """
+    import gc
+    import os
+    import socket
+    import tempfile
+
+    def fd_count() -> int | None:
+        try:
+            return len(os.listdir("/proc/self/fd"))
+        except OSError:  # pragma: no cover - non-Linux
+            return None
+
+    def pasangan_soket() -> socket.socket:
+        a, b = socket.socketpair()
+        b.close()
+        return a
+
+    def klien_hampa(**kv):
+        return BinanceSpotClient(
+            "", "", "http://127.0.0.1:1", allow_signed=False, rate_limit_state_file=None, **kv
+        )
+
+    gagal = 0
+    print("=== SELFTEST: registry sesi BinanceSpotClient ===")
+
+    klien = klien_hampa()
+    try:
+        id_utama = id(klien.session)
+        assert id(klien.session) == id_utama, "sesi harus stabil dalam satu thread"
+        hasil = {}
+
+        def baca():
+            sesi1 = id(klien.session)
+            with klien._registry.use():
+                pass
+            hasil[threading.get_ident()] = (sesi1, id(klien.session))
+
+        utas = [threading.Thread(target=baca) for _ in range(3)]
+        for u in utas:
+            u.start()
+        for u in utas:
+            u.join()
+        semua = {i for pasang in hasil.values() for i in pasang}
+        assert len({p[0] for p in hasil.values()}) == 3, "tiap thread butuh sesi sendiri"
+        assert all(p[0] == p[1] for p in hasil.values()), "sesi harus stabil di thread itu"
+        assert id_utama not in semua, "thread lain tidak boleh pakai sesi thread utama"
+        print("  sesi per thread, stabil, tidak dibagikan -> OK")
+    except AssertionError as exc:
+        gagal += 1
+        print(f"  [GAGAL] isolasi sesi per thread: {exc}")
+    finally:
+        klien.close()
+
+    klien = klien_hampa(max_sessions=8)
+    try:
+        def beban():
+            sesi = klien.session
+            if not hasattr(sesi, "_soket_uji"):
+                sesi._soket_uji = []
+            sesi._soket_uji.append(pasangan_soket())
+            with klien._registry.use():
+                pass
+
+        awal = fd_count()
+        for _ in range(6):
+            utas = [threading.Thread(target=beban) for _ in range(8)]
+            for u in utas:
+                u.start()
+            for u in utas:
+                u.join()
+            del utas
+            gc.collect()
+            with klien._registry.use():
+                pass
+            gc.collect()
+        akhir = fd_count()
+        if awal is None or akhir is None:  # pragma: no cover - non-Linux
+            print("  [SKIP] pengukuran fd butuh /proc/self/fd (Linux)")
+        else:
+            assert akhir - awal <= 3, f"fd tumbuh {akhir - awal} setelah 48 thread"
+            assert (
+                klien._registry.dibuat >= 48
+            ), f"48 sesi seharusnya dibuat, tercatat {klien._registry.dibuat}"
+            assert klien._registry.ditutup > 0, "sesi thread mati wajib ditutup"
+            assert (
+                len(klien._registry) <= klien._registry.max_sessions + 1
+            ), f"registry melewati batas: {len(klien._registry)}"
+            print(
+                f"  48 thread singkat: fd {awal} -> {akhir}, sesi dibuat "
+                f"{klien._registry.dibuat}, ditutup {klien._registry.ditutup} -> OK"
+            )
+        # pola lama (list tanpa batas) sebagai pembanding, harus tetap terukur
+        tumpukan: list = []
+        awal_lama = fd_count()
+
+        def beban_lama():
+            sesi = requests.Session()
+            tumpukan.append(sesi)
+            if not hasattr(sesi, "_soket_uji"):
+                sesi._soket_uji = []
+            sesi._soket_uji.append(pasangan_soket())
+
+        utas = [threading.Thread(target=beban_lama) for _ in range(8)]
+        for u in utas:
+            u.start()
+        for u in utas:
+            u.join()
+        del utas
+        gc.collect()
+        naik_lama = (fd_count() or 0) - (awal_lama or 0)
+        for sesi in tumpukan:
+            sesi.close()
+        tumpukan.clear()
+        assert naik_lama >= 6, "pembanding pola lama harus terlihat boros fd"
+        print(
+            f"  pembanding pola lama (list tanpa batas): +{naik_lama} fd untuk 8 "
+            "thread, pola baru: 0 -> OK"
+        )
+    except AssertionError as exc:
+        gagal += 1
+        print(f"  [GAGAL] pendauran ulang sesi: {exc}")
+    finally:
+        klien.close()
+
+    klien = klien_hampa()
+    dipanggil: list = []
+
+    class Penutup:
+        def close(self):
+            dipanggil.append(1)
+
+    thread = threading.current_thread()
+    klien._registry._entries[thread] = [Penutup(), 0]
+    klien.close()
+    try:
+        assert dipanggil, "close() wajib menutup sesi milik thread utama"
+        assert len(klien._registry) == 0, "registry harus kosong setelah close()"
+        print("  close() menutup sesi terdaftar dan mengosongkan registry -> OK")
+    except AssertionError as exc:
+        gagal += 1
+        print(f"  [GAGAL] close(): {exc}")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ledger = os.path.join(tmp, "ledger.json")
+        k1 = BinanceSpotClient(
+            "KUNCI", "sekret", "http://127.0.0.1:1", rate_limit_state_file=ledger
+        )
+        try:
+            assert k1.session.headers.get("X-MBX-APIKEY") == "KUNCI", (
+                "sesi thread pembuat wajib membawa header kunci API"
+            )
+            header_thread = {}
+
+            def cek_header():
+                with k1._registry.use():
+                    header_thread["h"] = k1.session.headers.get("X-MBX-APIKEY")
+
+            u = threading.Thread(target=cek_header)
+            u.start()
+            u.join()
+            assert (
+                header_thread.get("h") == "KUNCI"
+            ), "sesi thread baru juga harus membawa header kunci API"
+            print("  header X-MBX-APIKEY terpasang di sesi setiap thread -> OK")
+        except AssertionError as exc:
+            gagal += 1
+            print(f"  [GAGAL] header kunci API: {exc}")
+        finally:
+            k1.close()
+
+    if is_emfile(OSError(EMFILE, "x")) and not is_emfile(ValueError("x")):
+        print("  penanda EMFILE pada pesan transport -> OK")
+    else:  # pragma: no cover - seharusnya tidak terjadi
+        gagal += 1
+        print("  [GAGAL] penanda EMFILE tidak bekerja")
+
+    if gagal:
+        print(f"SELFTEST binance_client: {gagal} GAGAL")
+        return 1
+    print("SEMUA SELFTEST binance_client.py LULUS.")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(selftest())

@@ -5362,6 +5362,18 @@ def main() -> int:
         selftest()
         return 0
 
+    from infrastructure.network.file_descriptors import raise_fd_limit
+
+    # Batas fd bawaan 1024 terlalu sempit untuk proses yang memegang lock file,
+    # soket Binance, dan worker klines sekaligus (lihat OSError(24) 07-10-2026).
+    soft, hard, berubah = raise_fd_limit()
+    if berubah:
+        logger.info(
+            "Batas file descriptor proses dinaikkan dari 1024 ke %s (hard %s).",
+            soft,
+            hard,
+        )
+
     from config.config import InvalidModeError
     from infrastructure.process.runtime_control import (
         BotAlreadyRunningError,

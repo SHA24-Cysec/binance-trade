@@ -273,7 +273,14 @@ class SharedRequestWeightLimiter:
             self._memory_state = state
         finally:
             _release_lock(fd)
-            os.close(fd)
+            try:
+                os.close(fd)
+            except OSError as exc:
+                logger.warning(
+                    "Gagal menutup deskriptor lock ledger %s (%s).",
+                    lock_path,
+                    exc,
+                )
 
     def reserve(self, weight: int, ignore_block: bool = False) -> None:
         requested = max(1, int(weight))
