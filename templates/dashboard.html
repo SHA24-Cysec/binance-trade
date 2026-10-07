@@ -29,6 +29,42 @@
           "IBM Plex Mono", "SF Mono", SFMono-Regular, ui-monospace, Menlo,
           Consolas, monospace;
       }
+      /* Lapisan tampilan IDR: angka USDT tetap utama, rupiah menyusul
+         sebagai sub judul kecil di bawahnya. */
+      .idrsub {
+        display: block;
+        margin-top: 3px;
+        font-size: 12.5px;
+        font-weight: 600;
+        letter-spacing: 0.2px;
+        color: var(--muted);
+      }
+      .idrsub.pos,
+      .idrsub.neg {
+        color: inherit;
+        opacity: 0.85;
+      }
+      .idrsub .flag,
+      .idrsub.flag {
+        color: var(--amber);
+        font-weight: 700;
+      }
+      .idrinline {
+        margin-left: 6px;
+        font-size: 11.5px;
+        font-weight: 600;
+        color: var(--muted);
+      }
+      .pill.stale {
+        border-color: rgba(245, 158, 11, 0.55);
+      }
+      .pill.stale #fxText {
+        color: var(--amber);
+      }
+      #fxPill #fxText {
+        color: var(--accent);
+        font-weight: 600;
+      }
       * {
         box-sizing: border-box;
         margin: 0;
@@ -1389,6 +1425,15 @@
             ><span class="dot off" id="connDot"></span
             ><span id="connText">Menghubungkan…</span></span
           >
+          <span
+            class="pill"
+            id="fxPill"
+            style="display: none"
+            title="Kurs rupiah dari pair Binance USDTIDR"
+          >
+            <span class="dot on" id="fxDot"></span
+            ><span id="fxText">1 USDT ≈ Rp -</span>
+          </span>
           <span class="refresh"
             ><span class="spin"></span
             ><span id="lastUpdate">memuat…</span></span
@@ -1550,12 +1595,13 @@
                   <th>Qty</th>
                   <th>PnL %</th>
                   <th>PnL (USDT)</th>
+                  <th>PnL (IDR)</th>
                   <th>Alasan</th>
                 </tr>
               </thead>
               <tbody id="tradeBody">
                 <tr>
-                  <td colspan="8" class="empty">Memuat…</td>
+                  <td colspan="9" class="empty">Memuat…</td>
                 </tr>
               </tbody>
             </table>
@@ -2209,6 +2255,93 @@
       const sign = n => (n>0?'+':'');
       const cls = n => n>0?'pos':(n<0?'neg':'mut');
 
+      /* ------------------------------------------------------------------
+         Lapisan tampilan IDR.
+         Semua angka utama tetap dalam USDT (mata uang kuotasi bot). Angka
+         rupiah hanya pelengkap, dihitung dari satu kurs yang dikirim server
+         pada status.fx supaya tidak ada dua sumber kebenaran. Bila kurs
+         belum tersedia, semua elemen rupiah disembunyikan dan nilai USDT
+         tampil seperti biasa. */
+      let _fx = null;
+
+      function fxRate(){
+        const r = _fx && _fx.rate!=null ? Number(_fx.rate) : NaN;
+        return isFinite(r) && r>0 ? r : null;
+      }
+
+      function fxReady(){
+        return !!(_fx && _fx.enabled!==false) && fxRate()!==null;
+      }
+
+      /* Format rupiah gaya Indonesia, ringkas untuk angka besar:
+         17.910 · 2,5 jt · 15 M · 1,2 T. Satu angka desimal dipakai hanya
+         bila memang perlu, tanpa nol ekor yang mengganggu. */
+      const ringkasRp = v => Number(v).toLocaleString(LOCALE,{minimumFractionDigits:0,maximumFractionDigits:1});
+      function fmtIDR(n, withSign){
+        if(n===null||n===undefined||isNaN(n)) return '-';
+        const value = Number(n);
+        const negatif = value < 0;
+        const a = Math.abs(value);
+        let body;
+        if(a >= 1e12) body = ringkasRp(a/1e12)+' T';
+        else if(a >= 1e9) body = ringkasRp(a/1e9)+' M';
+        else if(a >= 1e6) body = ringkasRp(a/1e6)+' jt';
+        else body = fmt(a, 0);
+        const plus = (!negatif && withSign) ? '+' : '';
+        return plus + (negatif?'-':'') + 'Rp ' + body;
+      }
+
+      function idrOf(usdtAmount){
+        const r = fxRate();
+        if(r===null) return null;
+        const v = Number(usdtAmount);
+        if(usdtAmount===null||usdtAmount===undefined||isNaN(v)) return null;
+        return v*r;
+      }
+
+      /* Baris sub judul rupiah (blok) atau sisipan dalam satu baris. */
+      function idrSub(usdtAmount, withSign, extraClass){
+        const v = idrOf(usdtAmount);
+        if(v===null) return '';
+        const flag = (_fx && _fx.stale) ? ' <span class="flag">(kurs mungkin basi)</span>' : '';
+        return '<span class="idrsub '+(extraClass||'')+'">≈ '+fmtIDR(v, withSign)+flag+'</span>';
+      }
+
+      function idrInline(usdtAmount){
+        const v = idrOf(usdtAmount);
+        if(v===null) return '';
+        return '<span class="idrinline">≈ '+fmtIDR(v, false)+'</span>';
+      }
+
+      function idrCell(usdtAmount){
+        const v = idrOf(usdtAmount);
+        if(v===null) return '-';
+        return fmtIDR(v, Number(usdtAmount)>0);
+      }
+
+      function renderFxPill(){
+        const pill = document.getElementById('fxPill');
+        if(!pill) return;
+        if(!fxReady()){ pill.style.display='none'; return; }
+        pill.style.display = '';
+        pill.classList.toggle('stale', !!_fx.stale);
+        const dot = document.getElementById('fxDot');
+        if(dot) dot.className = 'dot ' + (_fx.stale ? 'warn' : 'on');
+        const sumber = _fx.source==='BINANCE' ? ('Binance '+( _fx.symbol||''))
+          : (_fx.source==='MANUAL' ? 'kurs manual'
+          : (_fx.source==='CACHE' ? 'cache terakhir' : ''));
+        const teks = '1 USDT ≈ Rp '+fmt(_fx.rate,0)
+          + (sumber ? ' · '+sumber : '')
+          + (_fx.stale ? ' · mungkin basi' : '');
+        const el = document.getElementById('fxText');
+        if(el) el.textContent = teks;
+        let tip = 'Kurs rupiah untuk tampilan. Angka utama tetap USDT.';
+        if(_fx.updated_at) tip += ' Terakhir diperbarui: '+_fx.updated_at+'.';
+        if(_fx.age_seconds!=null) tip += ' Umur kurs: '+Math.round(_fx.age_seconds)+' detik.';
+        if(_fx.error) tip += ' Catatan: '+_fx.error;
+        pill.title = tip;
+      }
+
       const TAB_KEY = 'psb_tab';
       function showTab(name, save){
         const btns = document.querySelectorAll('.tabs button[data-tab]');
@@ -2307,18 +2440,24 @@
         else{mp.className='pill live';document.getElementById('modeText').textContent='LIVE · UANG ASLI';md.className='dot live-dot';document.getElementById('paperBanner').classList.remove('show');}
         applyBacktestVisibility(s.backtest_enabled === undefined ? true : s.backtest_enabled);
 
+        _fx = s.fx || _fx;
+        renderFxPill();
+
         const cd=document.getElementById('connDot'), ct=document.getElementById('connText');
         if(s.live_connected){cd.className='dot on';ct.textContent=s.has_api_key?'Binance terhubung':'Harga live (tanpa API key)';}
         else{cd.className='dot off';ct.textContent='Offline (data dari file)';}
 
         const a=s.account;
         document.getElementById('equityVal').textContent = a.equity_live!=null? fmt(a.equity_live)+' '+s.quote : '-';
-        document.getElementById('equitySub').textContent = a.usdt_free!=null? ('bebas: '+fmt(a.usdt_free)+' '+s.quote) : 'butuh API key untuk saldo';
+        const eqIdr = idrOf(a.equity_live);
+        document.getElementById('equitySub').textContent = a.usdt_free!=null
+          ? ((eqIdr!=null? '≈ '+fmtIDR(eqIdr,false)+' · ' : '') + 'bebas: '+fmt(a.usdt_free)+' '+s.quote)
+          : 'butuh API key untuk saldo';
 
         const p=s.position;
         const oc=document.getElementById('cardPnl');
         if(p.has_position && p.pnl_usdt!=null){
-          document.getElementById('openPnlVal').innerHTML='<span class="'+cls(p.pnl_usdt)+'">'+sign(p.pnl_usdt)+fmt(p.pnl_usdt)+' '+esc(s.quote)+'</span>';
+          document.getElementById('openPnlVal').innerHTML='<span class="'+cls(p.pnl_usdt)+'">'+sign(p.pnl_usdt)+fmt(p.pnl_usdt)+' '+esc(s.quote)+'</span>'+idrSub(p.pnl_usdt, p.pnl_usdt>0);
           document.getElementById('openPnlSub').innerHTML='<span class="'+cls(p.pnl_pct)+'">'+sign(p.pnl_pct)+fmt(p.pnl_pct)+'%</span> · '+esc(p.symbol);
           oc.className='card '+(p.pnl_usdt>=0?'good':'bad');
         } else {
@@ -2342,12 +2481,13 @@
             <div class="bigpnl">
               <div class="n ${pnlColor}">${p.pnl_pct!=null?sign(p.pnl_pct)+fmt(p.pnl_pct)+'%':'-'}</div>
               <div class="s">${p.pnl_usdt!=null?sign(p.pnl_usdt)+fmt(p.pnl_usdt)+' '+esc(s.quote):'menunggu harga live'}</div>
+              ${p.pnl_usdt!=null?idrSub(p.pnl_usdt, p.pnl_usdt>0):''}
             </div>
             <div class="posrow"><span class="k">Simbol</span><span class="v">${esc(p.symbol)}</span></div>
-            <div class="posrow"><span class="k">Harga entry</span><span class="v mono">${fmtP(p.entry_price)}</span></div>
-            <div class="posrow"><span class="k">Harga live</span><span class="v mono">${p.live_price!=null?fmtP(p.live_price):'-'}</span></div>
+            <div class="posrow"><span class="k">Harga entry</span><span class="v mono">${fmtP(p.entry_price)}${p.entry_price?idrInline(p.entry_price):''}</span></div>
+            <div class="posrow"><span class="k">Harga live</span><span class="v mono">${p.live_price!=null?fmtP(p.live_price):'-'}${p.live_price!=null?idrInline(p.live_price):''}</span></div>
             <div class="posrow"><span class="k">Qty</span><span class="v mono">${fmt(p.qty,6)}</span></div>
-            <div class="posrow"><span class="k">Nilai posisi</span><span class="v mono">${p.position_value!=null?fmt(p.position_value)+' '+esc(s.quote):'-'}</span></div>
+            <div class="posrow"><span class="k">Nilai posisi</span><span class="v mono">${p.position_value!=null?fmt(p.position_value)+' '+esc(s.quote):'-'}${p.position_value!=null?idrInline(p.position_value):''}</span></div>
             <div class="posrow"><span class="k">Lama hold</span><span class="v">${hold}</span></div>
             ${beRow}${trRow}`;
           window._currentPositionSymbol = p.symbol;
@@ -2484,7 +2624,7 @@
 
       function renderSummary(sum, quote){
         const rc=document.getElementById('cardRealized');
-        document.getElementById('realizedVal').innerHTML='<span class="'+cls(sum.total_pnl)+'">'+sign(sum.total_pnl)+fmt(sum.total_pnl)+' '+esc(quote)+'</span>';
+        document.getElementById('realizedVal').innerHTML='<span class="'+cls(sum.total_pnl)+'">'+sign(sum.total_pnl)+fmt(sum.total_pnl)+' '+esc(quote)+'</span>'+idrSub(sum.total_pnl, sum.total_pnl>0);
         document.getElementById('realizedSub').textContent=sum.total_trades+' trade selesai';
         rc.className='card '+(sum.total_pnl>=0?'good':'bad');
         document.getElementById('winVal').textContent= sum.total_trades? fmt(sum.win_rate,1)+'%':'-';
@@ -2497,7 +2637,7 @@
         if(badge) badge.textContent = trades.length? ' ('+trades.length+')' : '';
         const tb=document.getElementById('tradeBody');
         const closed=trades.filter(t=>t.sell_time);
-        if(!closed.length){tb.innerHTML='<tr><td colspan="8" class="empty">Belum ada trade yang selesai.</td></tr>';return;}
+        if(!closed.length){tb.innerHTML='<tr><td colspan="9" class="empty">Belum ada trade yang selesai.</td></tr>';return;}
         tb.innerHTML=closed.map(t=>`
           <tr>
             <td class="mono mut">${esc(t.sell_time||'-')}${t.paper?' <span class="tag dry">PAPER</span>':''}</td>
@@ -2507,6 +2647,7 @@
             <td class="mono">${fmt(t.qty,4)}</td>
             <td class="mono ${cls(t.pnl_pct)}">${sign(t.pnl_pct)}${fmt(t.pnl_pct)}%</td>
             <td class="mono ${cls(t.pnl)}">${sign(t.pnl)}${fmt(t.pnl)}</td>
+            <td class="mono mut">${idrCell(t.pnl)}</td>
             <td>${reasonTag(t.reason)}</td>
           </tr>`).join('');
       }
@@ -2543,7 +2684,7 @@
           <path d="${line}" fill="none" stroke="${col}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
           ${pts.map((v,i)=>`<circle cx="${x(i).toFixed(1)}" cy="${y(v).toFixed(1)}" r="${i===pts.length-1?4:2.5}" fill="${col}"/>`).join('')}
           <text x="${pad}" y="16" fill="#7d8899" font-size="11" font-family="monospace">PnL kumulatif</text>
-          <text x="${W-pad}" y="16" fill="${col}" font-size="13" font-weight="700" text-anchor="end" font-family="monospace">${(cum>=0?'+':'')}${cum.toFixed(2)}</text>
+          <text x="${W-pad}" y="16" fill="${col}" font-size="13" font-weight="700" text-anchor="end" font-family="monospace">${(cum>=0?'+':'')}${cum.toFixed(2)}<tspan fill="#7d8899" font-size="11" font-weight="600">${idrOf(cum)!=null?(' · ≈ '+fmtIDR(idrOf(cum), cum>=0)):''}</tspan></text>
         </svg>`;
       }
 
@@ -3504,7 +3645,7 @@
           <div class="card ${cardTone(s.total_return_pct)}"><div class="accent-bar"></div>
             <div class="label">Return bersih</div>
             <div class="value mono ${cls(s.total_return_pct)}">${sign(s.total_return_pct)}${fmt(s.total_return_pct,2)}%</div>
-            <div class="sub">${sign(s.total_pnl_quote)}${fmt(s.total_pnl_quote,2)} dari modal ${fmt(s.initial_equity,2)} · kotor ${sign(s.gross_return_pct)}${fmt(s.gross_return_pct,2)}%</div></div>
+            <div class="sub">${sign(s.total_pnl_quote)}${fmt(s.total_pnl_quote,2)} dari modal ${fmt(s.initial_equity,2)} · kotor ${sign(s.gross_return_pct)}${fmt(s.gross_return_pct,2)}%${idrOf(s.total_pnl_quote)!=null?(' · ≈ '+fmtIDR(idrOf(s.total_pnl_quote), s.total_pnl_quote>0)):''}</div></div>
           <div class="card"><div class="accent-bar"></div>
             <div class="label">Trade selesai</div>
             <div class="value mono">${fmt(s.total_trades,0)}</div>

@@ -35,6 +35,7 @@ from config.config import (
 from infrastructure.network.file_descriptors import fd_status, raise_fd_limit
 from infrastructure.storage import state as state_mod
 from market import market_scanner as scanner
+from market.fx_rate import IdrRateProvider
 from infrastructure.process.runtime_control import BotControlError, BotProcessManager
 
 try:
@@ -106,6 +107,31 @@ STATE_FILE = PUMP_CONFIG.get("STATE_FILE") or get_state_file()
 LOG_FILE = PUMP_CONFIG.get("LOG_FILE") or get_log_file()
 CONTROL_FILE = PUMP_CONFIG.get("CONTROL_FILE") or get_control_file()
 QUOTE = PUMP_CONFIG.get("QUOTE_ASSET", "USDT")
+
+# Penyedia kurs rupiah untuk lapisan tampilan. Objek ini tidak pernah
+# melempar exception ke pemanggil: kegagalan bursa dikembalikan sebagai
+# payload berisi error dan dashboard menyembunyikan elemen rupiah.
+_idr_rate_provider = IdrRateProvider(PUMP_CONFIG)
+
+
+def get_idr_rate(force: bool = False) -> dict:
+    """Payload kurs IDR terkini (selalu berbentuk dict, tidak pernah None)."""
+    try:
+        return _idr_rate_provider.refresh() if force else _idr_rate_provider.get()
+    except Exception as exc:  # noqa: BLE001 - jalur tampilan tidak boleh meledak
+        logger.warning("Penyedia kurs IDR gagal total: %s", exc)
+        return {
+            "enabled": bool(PUMP_CONFIG.get("IDR_DISPLAY_ENABLED", True)),
+            "rate": None,
+            "source": "NONE",
+            "symbol": str(PUMP_CONFIG.get("IDR_RATE_SYMBOL", "USDTIDR")),
+            "updated_at": None,
+            "updated_at_unix": None,
+            "age_seconds": None,
+            "stale": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
 
 _MANUAL_CLOSE_COOLDOWN_SECONDS = 5.0
 _last_manual_close_request = {"ts": 0.0}
@@ -552,6 +578,9 @@ def build_status():
         "read_only": not _bind_is_loopback(),
         "has_api_key": bool(PUMP_CONFIG.get("API_KEY")),
         "quote": QUOTE,
+        # Kurs rupiah untuk sub judul tampilan. Angka konversi dihitung di
+        # sisi klien dari satu kurs ini agar tidak ada dua sumber kebenaran.
+        "fx": get_idr_rate(),
         "position": {
             "has_position": has_position,
             "symbol": symbol,
@@ -1781,6 +1810,23 @@ def index():
 @app.route("/api/status")
 def api_status():
     return jsonify(build_status())
+
+
+@app.route("/api/fx")
+def api_fx():
+    """Kurs rupiah untuk tampilan.
+
+    Parameter opsional ``refresh=1`` memaksa pengambilan kurs baru dari
+    bursa. Penyedia kurs sendiri memberi jeda minimum antar permintaan
+    paksa supaya endpoint ini tidak bisa dipakai menghajar bursa.
+    """
+    forced = str(request.args.get("refresh", "")).strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "ya",
+    )
+    return jsonify(get_idr_rate(force=forced))
 
 
 @app.route("/api/trades")

@@ -1096,6 +1096,66 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         "bool",
         dangerous=True,
     ),
+    # ------------------------------------------------------------ Tampilan IDR
+    # Satu grup khusus untuk lapisan tampilan rupiah. Semua field di grup ini
+    # hanya dibaca dashboard; bot, sizing, order, dan backtest tidak memakainya.
+    # Nilai kurs selalu ditampilkan sebagai pelengkap: angka USDT tetap menjadi
+    # angka utama, rupiah menyusul di baris sub judul.
+    "IDR_DISPLAY_ENABLED": _field(
+        "Tampilan IDR",
+        "Tampilkan nilai rupiah",
+        "Menampilkan sub judul rupiah (kurs USDT/IDR) di kartu equity, PnL, dan tabel riwayat trade. Tidak memengaruhi trading.",
+        "bool",
+    ),
+    "IDR_RATE_MODE": _field(
+        "Tampilan IDR",
+        "Sumber kurs",
+        "AUTO mengambil kurs dari pair spot Binance (bawaan USDTIDR, aktif sejak November 2025). MANUAL memakai angka tetap pada IDR_RATE_MANUAL.",
+        "str",
+        editor="select",
+        options=["AUTO", "MANUAL"],
+    ),
+    "IDR_RATE_MANUAL": _field(
+        "Tampilan IDR",
+        "Kurs manual",
+        "Jumlah rupiah untuk 1 USDT saat sumber kurs MANUAL. Dipakai juga sebagai cadangan terakhir bila mode AUTO sedang tidak bisa menghubungi bursa. Isi 0 untuk menonaktifkan cadangan manual.",
+        "float",
+        minimum=0,
+        maximum=1_000_000_000,
+        unit="IDR/USDT",
+    ),
+    "IDR_RATE_SYMBOL": _field(
+        "Tampilan IDR",
+        "Pair sumber kurs",
+        "Pair Binance yang harganya dipakai sebagai kurs. USDTIDR adalah pasangan resmi rupiah untuk Tether; ganti hanya bila user memakai pair lain seperti USDCIDR.",
+        "str",
+        editor="select",
+        options=["USDTIDR", "USDCIDR"],
+    ),
+    "IDR_RATE_REFRESH_SECONDS": _field(
+        "Tampilan IDR",
+        "Interval segarkan kurs",
+        "Jeda minimum antar pengambilan kurs dari bursa. Satu request ticker berbobot kecil, tetapi nilai di bawah 15 detik tidak diizinkan agar limit IP bersama bot tetap aman.",
+        "int",
+        minimum=15,
+        maximum=86400,
+        unit="detik",
+    ),
+    "IDR_RATE_MAX_AGE_SECONDS": _field(
+        "Tampilan IDR",
+        "Ambang kurs basi",
+        "Umur kurs saat penanda basi mulai muncul di dashboard. Kurs lama tetap ditampilkan agar tidak ada angka menyesatkan, tetapi diberi tanda.",
+        "int",
+        minimum=60,
+        maximum=604800,
+        unit="detik",
+    ),
+    "IDR_RATE_STATE_FILE": _field(
+        "Tampilan IDR",
+        "Berkas cache kurs",
+        "Berkas JSON tempat kurs terakhir disimpan, supaya rupiah tetap tampil saat bursa tidak bisa dihubungi atau setelah dashboard dijalankan ulang.",
+        "str",
+    ),
 }
 
 
@@ -1427,6 +1487,18 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
         keluar["PUMP_MAX_24H_CHANGE_PCT"] = (
             "harus lebih besar dari PUMP_MIN_24H_CHANGE_PCT (atau 0 untuk menonaktifkan)"
         )
+
+    # Tampilan IDR: mode MANUAL tanpa angka kurs hanya menghasilkan dashboard
+    # tanpa elemen rupiah sama sekali, jadi lebih baik ditolak saat disimpan
+    # daripada baru ketahuan saat halaman dibuka. Relasi ini dicek di semua
+    # jalur karena sifatnya statis (tidak bergantung mode PAPER/LIVE).
+    if "IDR_RATE_MODE" in cfg and "IDR_RATE_MANUAL" in cfg:
+        mode_kurs = str(cfg.get("IDR_RATE_MODE", "AUTO") or "AUTO").strip().upper()
+        nilai_kurs = _angka_untuk_relasi(cfg, "IDR_RATE_MANUAL")
+        if mode_kurs == "MANUAL" and nilai_kurs is not None and nilai_kurs <= 0:
+            keluar["IDR_RATE_MANUAL"] = (
+                "wajib diisi lebih besar dari nol saat IDR_RATE_MODE = MANUAL"
+            )
 
     saring_trend = mode_aware is False or _flag_untuk_relasi(
         cfg, "TREND_FILTER_ENABLED", False
