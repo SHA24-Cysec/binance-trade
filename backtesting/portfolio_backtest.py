@@ -81,6 +81,8 @@ class PortfolioResult:
     chase_skips: int = 0
     trend_skips: int = 0
     trend_scans: int = 0
+    htf_demand_skips: int = 0
+    htf_demand_scans: int = 0
 
 
 def select_universe(
@@ -272,9 +274,10 @@ class EntrySignalCache(dict):
     """Peta waktu candle -> (jumlah kandidat, daftar sinyal lolos).
 
     Turunan dict supaya pemanggil lama tetap bisa memakai operasi dict apa
-    adanya (len, iterasi, .get). Dua penghitung gerbang trend dibawa ikut
-    supaya laporan hasil tetap jujur ketika sinyal dihitung sekali lalu
-    dipakai ulang oleh banyak kombinasi parameter exit (dashboard dan grid).
+    adanya (len, iterasi, .get). Penghitung gerbang trend dan gerbang demand
+    H1 dibawa ikut supaya laporan hasil tetap jujur ketika sinyal dihitung
+    sekali lalu dipakai ulang oleh banyak kombinasi parameter exit (dashboard
+    dan grid).
     """
 
     def __init__(self, *args, **kwargs) -> None:
@@ -282,6 +285,9 @@ class EntrySignalCache(dict):
         self.trend_scans = 0
         self.trend_skips = 0
         self.trend_events: list = []
+        self.htf_demand_scans = 0
+        self.htf_demand_skips = 0
+        self.htf_demand_events: list = []
 
 
 def build_trend_lookups(
@@ -295,7 +301,9 @@ def build_trend_lookups(
     """
     from strategy import indicators as strategy_mod
 
-    if not config.get("TREND_FILTER_ENABLED", False):
+    if not config.get("TREND_FILTER_ENABLED", False) and not config.get(
+        "HTF_DEMAND_FILTER_ENABLED", False
+    ):
         return {}
     target = strategy_mod.trend_interval_minutes(config)
     source = strategy_mod.INTERVAL_MINUTES.get(str(interval))
@@ -384,12 +392,12 @@ def precompute_entry_signals(
         butuh_warmup = parity.trend_warmup_ms(config, interval)
         if int(warmup_ms) < butuh_warmup:
             logger.warning(
-                "Warmup %d ms dinaikkan menjadi %d ms karena gerbang trend %s butuh "
-                "%d candle trend tertutup.",
+                "Warmup %d ms dinaikkan menjadi %d ms karena gerbang timeframe tinggi "
+                "%s (trend + zona demand) butuh %d candle tertutup.",
                 warmup_ms,
                 butuh_warmup,
                 config.get("TREND_INTERVAL", "1h"),
-                strategy.trend_window_bars(config),
+                strategy.htf_window_bars(config),
             )
             warmup_ms = butuh_warmup
     first_allowed_time = timeline[0] + int(warmup_ms)
@@ -454,6 +462,19 @@ def precompute_entry_signals(
                         signals.trend_skips += 1
                         if len(signals.trend_events) < max_skipped_records:
                             signals.trend_events.append((int(t_now), sym))
+                        continue
+            if (
+                setup.ok
+                and trend_of
+                and bool(config.get("HTF_DEMAND_FILTER_ENABLED", False))
+            ):
+                lock = trend_of.get(sym)
+                if lock is not None and signal_candle is not None:
+                    signals.htf_demand_scans += 1
+                    if not lock.htf_demand_at(signal_candle.close_time)["ok"]:
+                        signals.htf_demand_skips += 1
+                        if len(signals.htf_demand_events) < max_skipped_records:
+                            signals.htf_demand_events.append((int(t_now), sym))
                         continue
             if setup.ok:
                 lolos.append((rank, pct24, sym, index, vol24, setup))
@@ -563,9 +584,9 @@ def run_portfolio_backtest(
         if int(warmup_ms) < _butuh_trend:
             _pre_warnings.append(
                 f"Warmup {warmup_ms} ms dinaikkan menjadi {_butuh_trend} ms karena gerbang "
-                f"trend {config.get('TREND_INTERVAL', '1h')} butuh "
-                f"{strategy.trend_window_bars(config)} candle trend tertutup sebelum bar "
-                "entry pertama. Unduhan data harus mencakup rentang warmup ini."
+                f"timeframe tinggi {config.get('TREND_INTERVAL', '1h')} (trend + zona "
+                f"demand) butuh {strategy.htf_window_bars(config)} candle tertutup sebelum "
+                "bar entry pertama. Unduhan data harus mencakup rentang warmup ini."
             )
             warmup_ms = _butuh_trend
     _butuh = strategy.required_lookback_bars(config)
@@ -607,6 +628,8 @@ def run_portfolio_backtest(
     chase_skips = 0
     trend_skips = 0
     trend_scans = 0
+    htf_demand_skips = 0
+    htf_demand_scans = 0
     max_chase_pct = float(config.get("MAX_CHASE_PCT", 0) or 0)
 
     controls = parity.AccountRiskControls(config, initial_equity)
@@ -627,9 +650,12 @@ def run_portfolio_backtest(
 
     if entry_signal_cache is not None:
         # Sinyal dihitung sekali di precompute_entry_signals, jadi penghitung
-        # gerbang trend dibawa dari cache supaya laporan tidak menampilkan nol.
+        # gerbang trend dan demand H1 dibawa dari cache supaya laporan tidak
+        # menampilkan nol.
         trend_scans += int(getattr(entry_signal_cache, "trend_scans", 0))
         trend_skips += int(getattr(entry_signal_cache, "trend_skips", 0))
+        htf_demand_scans += int(getattr(entry_signal_cache, "htf_demand_scans", 0))
+        htf_demand_skips += int(getattr(entry_signal_cache, "htf_demand_skips", 0))
         for waktu_event, simbol_event in getattr(
             entry_signal_cache, "trend_events", []
         ):
@@ -640,6 +666,19 @@ def run_portfolio_backtest(
                     time=waktu_event,
                     symbol=simbol_event,
                     reason="FILTER_TREND",
+                    holding=None,
+                )
+            )
+        for waktu_event, simbol_event in getattr(
+            entry_signal_cache, "htf_demand_events", []
+        ):
+            if len(skipped) >= max_skipped_records:
+                break
+            skipped.append(
+                SkippedSignal(
+                    time=waktu_event,
+                    symbol=simbol_event,
+                    reason="FILTER_HTF_DEMAND",
                     holding=None,
                 )
             )
@@ -818,6 +857,22 @@ def run_portfolio_backtest(
                                     )
                                 )
                             continue
+                if trend_of and bool(config.get("HTF_DEMAND_FILTER_ENABLED", False)):
+                    lock = trend_of.get(sym)
+                    if lock is not None:
+                        htf_demand_scans += 1
+                        if not lock.htf_demand_at(kl[i].close_time)["ok"]:
+                            htf_demand_skips += 1
+                            if len(skipped) < max_skipped_records:
+                                skipped.append(
+                                    SkippedSignal(
+                                        time=t_now,
+                                        symbol=sym,
+                                        reason="FILTER_HTF_DEMAND",
+                                        holding=None,
+                                    )
+                                )
+                            continue
                 lolos.append((rank, pct, sym, i, vol24, setup))
 
             if not lolos:
@@ -956,6 +1011,15 @@ def run_portfolio_backtest(
                     if trend_of and trend_skips
                     else []
                 )
+                + (
+                    [
+                        f"{htf_demand_skips} dari {htf_demand_scans} sinyal konfirmasi "
+                        f"dilewati oleh gerbang zona demand "
+                        f"{config.get('TREND_INTERVAL', '1h')}, sama seperti bot live."
+                    ]
+                    if trend_of and htf_demand_skips
+                    else []
+                )
             )
         ),
         initial_equity=initial_equity,
@@ -964,6 +1028,8 @@ def run_portfolio_backtest(
         chase_skips=chase_skips,
         trend_skips=trend_skips,
         trend_scans=trend_scans,
+        htf_demand_skips=htf_demand_skips,
+        htf_demand_scans=htf_demand_scans,
     )
 
 
@@ -1072,6 +1138,8 @@ def summarize_portfolio(result: PortfolioResult) -> dict:
         "chase_skips": int(result.chase_skips),
         "trend_skips": int(getattr(result, "trend_skips", 0)),
         "trend_scans": int(getattr(result, "trend_scans", 0)),
+        "htf_demand_skips": int(getattr(result, "htf_demand_skips", 0)),
+        "htf_demand_scans": int(getattr(result, "htf_demand_scans", 0)),
         **parity.per_trade_metrics(trades),
     }
 

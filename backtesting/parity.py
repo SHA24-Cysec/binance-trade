@@ -287,7 +287,10 @@ class TrendLookup:
         self.interval = (
             strategy_mod.trend_interval(config) if _interval_ok(config) else None
         )
-        self.window = strategy_mod.trend_window_bars(config)
+        # Jendela gabungan (gerbang trend + gerbang demand HTF), sama dengan
+        # jendela unduhan TrendCache di bot live. evaluate_trend_filter
+        # memotong sendiri jendelanya, jadi verdict EMA/ADX tidak berubah.
+        self.window = strategy_mod.htf_window_bars(config)
         self.required = strategy_mod.trend_required_bars(config)
         self.klines = list(trend_klines)
         self.close_times = [int(k.close_time) for k in self.klines]
@@ -298,6 +301,14 @@ class TrendLookup:
 
     def verdict_at(self, signal_close_time_ms: int) -> dict:
         return evaluate_trend(self.window_at(signal_close_time_ms), self.config)
+
+    def htf_demand_at(self, signal_close_time_ms: int) -> dict:
+        """Verdict gerbang zona demand HTF pada jendela yang sama dengan live."""
+        from strategy import indicators as strategy_mod
+
+        return strategy_mod.evaluate_htf_demand(
+            self.window_at(signal_close_time_ms), self.config
+        )
 
 
 def _interval_ok(config: dict) -> bool:
@@ -332,13 +343,18 @@ def make_trend_lookup(
     *,
     sudah_dirangkai: bool = False,
 ) -> Optional[TrendLookup]:
-    """Lookup gerbang trend untuk backtest satu simbol.
+    """Lookup gerbang timeframe tinggi (trend + demand HTF) untuk backtest.
 
     `sudah_dirangkai=True` dipakai kalau pemanggil sudah merangkai candle trend
     sendiri (mis. trend_latih/trend_uji di pencarian grid), supaya candle trend
     tidak dirangkai dua kali dan jendelanya tidak melar.
+
+    Lookup dibangun kalau GERBANG TREND atau GERBANG DEMAND HTF aktif; kalau
+    keduanya mati, tidak ada candle timeframe tinggi yang perlu dirangkai.
     """
-    if not config.get("TREND_FILTER_ENABLED", False):
+    if not config.get("TREND_FILTER_ENABLED", False) and not config.get(
+        "HTF_DEMAND_FILTER_ENABLED", False
+    ):
         return None
     bars = (
         list(klines)

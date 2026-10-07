@@ -982,6 +982,47 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         minimum=0.0,
         maximum=1.0,
     ),
+    "HTF_DEMAND_FILTER_ENABLED": _field(
+        "Demand H1",
+        "Filter zona demand timeframe tinggi",
+        "Wajibkan candle timeframe tinggi (TREND_INTERVAL, default 1h) terakhir yang sudah tutup juga bereaksi di dekat zona demand H1, supaya entry M5 tidak terjadi saat harga sedang melayang jauh di atas dasar timeframe tinggi. Memakai candle H1 yang sama dengan gerbang trend (tanpa unduhan tambahan). Berlaku di LIVE, PAPER, dan backtest; gagal ambil data berarti kandidat ditolak (fail closed).",
+        "bool",
+    ),
+    "HTF_DEMAND_LOOKBACK_BARS": _field(
+        "Demand H1",
+        "Lookback zona demand H1",
+        "Jumlah candle H1 tertutup yang memetakan dasar zona demand timeframe tinggi. Default 72 candle = 3 hari struktur harga. Makin besar, makin jauh ke belakang dasarnya dicari dan makin ketat menolak entry yang sudah jauh dari dasar.",
+        "int",
+        minimum=3,
+        maximum=500,
+        unit="candle",
+    ),
+    "HTF_DEMAND_ZONE_BUFFER_PCT": _field(
+        "Demand H1",
+        "Tebal zona demand H1",
+        "Tebal minimum zona demand H1 dalam persen di atas dasar zona. Candle H1 lebih lebar daripada M5, jadi defaultnya lebih tebal (1.5% vs 0.8%).",
+        "float",
+        minimum=0.0,
+        maximum=20.0,
+        unit="%",
+    ),
+    "HTF_DEMAND_MAX_DISTANCE_PCT": _field(
+        "Demand H1",
+        "Jarak maksimum dari zona H1",
+        "Jarak maksimum close candle H1 di atas ATAP zona demand H1, dalam persen. Default 10% (bandingkan 3.5% di M5): longgar untuk pump awal dari dasar H1, tapi menolak entry yang sudah terbang jauh. Harus lebih besar atau sama dengan tebal zona.",
+        "float",
+        minimum=0.0,
+        maximum=50.0,
+        unit="%",
+    ),
+    "HTF_DEMAND_MIN_CLOSE_POSITION": _field(
+        "Demand H1",
+        "Posisi close minimum candle H1",
+        "Posisi penutupan minimum di dalam rentang high-low candle H1 sinyal (0.0 di low, 1.0 di high) sebagai bukti dorongan demand pembeli. Default 0.40, sedikit lebih longgar dari M5 (0.45) karena ekor candle H1 lebih panjang.",
+        "float",
+        minimum=0.0,
+        maximum=1.0,
+    ),
     "TOP_N_CANDIDATES_TO_CONFIRM": _field(
         "Scan",
         "Jumlah kandidat konfirmasi",
@@ -1421,6 +1462,16 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
         if nilai is not None and nilai[0] < nilai[1]:
             keluar["DEMAND_MAX_DISTANCE_PCT"] = (
                 "harus lebih besar atau sama dengan DEMAND_ZONE_BUFFER_PCT"
+            )
+
+    saring_htf_demand = mode_aware is False or _flag_untuk_relasi(
+        cfg, "HTF_DEMAND_FILTER_ENABLED", False
+    )
+    if saring_htf_demand:
+        nilai = pasangan("HTF_DEMAND_MAX_DISTANCE_PCT", "HTF_DEMAND_ZONE_BUFFER_PCT")
+        if nilai is not None and nilai[0] < nilai[1]:
+            keluar["HTF_DEMAND_MAX_DISTANCE_PCT"] = (
+                "harus lebih besar atau sama dengan HTF_DEMAND_ZONE_BUFFER_PCT"
             )
 
     return keluar

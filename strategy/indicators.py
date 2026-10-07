@@ -467,11 +467,143 @@ def trend_window_bars(config: dict) -> int:
     return max(trend_required_bars(config), diminta)
 
 
+HTF_DEMAND_DEFAULTS = {
+    "HTF_DEMAND_LOOKBACK_BARS": 72,
+    "HTF_DEMAND_ZONE_BUFFER_PCT": 1.5,
+    "HTF_DEMAND_MAX_DISTANCE_PCT": 10.0,
+    "HTF_DEMAND_MIN_CLOSE_POSITION": 0.40,
+}
+
+
+def htf_demand_enabled(config: dict) -> bool:
+    return bool(config.get("HTF_DEMAND_FILTER_ENABLED", False))
+
+
+def htf_demand_lookback_bars(config: dict) -> int:
+    """Lookback gerbang demand HTF, dijepit ke rentang yang bisa diunduh."""
+    lookback = int(
+        config.get(
+            "HTF_DEMAND_LOOKBACK_BARS",
+            HTF_DEMAND_DEFAULTS["HTF_DEMAND_LOOKBACK_BARS"],
+        )
+        or HTF_DEMAND_DEFAULTS["HTF_DEMAND_LOOKBACK_BARS"]
+    )
+    return max(3, min(TREND_KLINE_LIMIT - 2, lookback))
+
+
+def htf_demand_window_bars(config: dict) -> int:
+    """Candle HTF minimum untuk gerbang zona demand (0 kalau nonaktif)."""
+    if not htf_demand_enabled(config):
+        return 0
+    return htf_demand_lookback_bars(config) + 1
+
+
+def htf_window_bars(config: dict) -> int:
+    """Jendela gabungan penyedia candle HTF (gerbang trend + gerbang demand).
+
+    evaluate_trend_filter memotong sendiri jendelanya (TREND_LOOKBACK_BARS),
+    jadi melebarkan unduhan/cache demi gerbang demand TIDAK mengubah verdict
+    EMA/ADX. Bot live (TrendCache) dan backtest (TrendLookup) sama-sama
+    memakai fungsi ini supaya jendela keduanya selalu identik.
+    """
+    return max(trend_window_bars(config), htf_demand_window_bars(config))
+
+
+def htf_demand_gate_config(config: dict) -> dict:
+    """Terjemahkan kunci HTF_DEMAND_* ke kunci DEMAND_* milik detect_demand_zone.
+
+    Logika zona tidak diduplikasi: gerbang timeframe tinggi memanggil fungsi
+    yang sama persis dengan gerbang chart (M5), hanya parameternya yang
+    berbeda, sehingga keputusan LIVE, PAPER, dan backtest otomatis identik.
+    """
+    return {
+        "DEMAND_ZONE_FILTER_ENABLED": htf_demand_enabled(config),
+        "DEMAND_LOOKBACK_BARS": htf_demand_lookback_bars(config),
+        "DEMAND_ZONE_BUFFER_PCT": max(
+            0.0,
+            float(
+                config.get(
+                    "HTF_DEMAND_ZONE_BUFFER_PCT",
+                    HTF_DEMAND_DEFAULTS["HTF_DEMAND_ZONE_BUFFER_PCT"],
+                )
+                or 0.0
+            ),
+        ),
+        "DEMAND_MAX_DISTANCE_PCT": max(
+            0.0,
+            float(
+                config.get(
+                    "HTF_DEMAND_MAX_DISTANCE_PCT",
+                    HTF_DEMAND_DEFAULTS["HTF_DEMAND_MAX_DISTANCE_PCT"],
+                )
+                or 0.0
+            ),
+        ),
+        "DEMAND_MIN_CLOSE_POSITION": float(
+            config.get(
+                "HTF_DEMAND_MIN_CLOSE_POSITION",
+                HTF_DEMAND_DEFAULTS["HTF_DEMAND_MIN_CLOSE_POSITION"],
+            )
+            or 0.0
+        ),
+    }
+
+
+def evaluate_htf_demand(
+    klines: list[Kline], config: dict, signal_close_time_ms: Optional[int] = None
+) -> dict:
+    """Gerbang zona demand timeframe tinggi (default H1) untuk menyaring entry.
+
+    Melengkapi gerbang demand chart (M5): entry hanya lolos kalau candle HTF
+    terakhir yang SUDAH TUTUP juga bereaksi di dekat zona demand HTF (dasar
+    akumulasi timeframe tinggi), bukan sedang melayang jauh di atasnya.
+    Aturan zonanya identik dengan detect_demand_zone (satu sumber kode),
+    hanya parameternya yang diambil dari kunci HTF_DEMAND_*:
+
+      * HTF_DEMAND_LOOKBACK_BARS      (default 72 candle H1 = 3 hari struktur)
+      * HTF_DEMAND_ZONE_BUFFER_PCT    (default 1.5%)
+      * HTF_DEMAND_MAX_DISTANCE_PCT   (default 10%, diukur dari atap zona)
+      * HTF_DEMAND_MIN_CLOSE_POSITION (default 0.40)
+
+    Fail closed seperti gerbang trend: data kurang atau OHLC tidak valid
+    menolak entry, bukan meloloskannya. Candle yang belum tutup dibuang di
+    sini walaupun pemanggil lupa menyaringnya (anti repaint), sama seperti
+    evaluate_trend_filter. Saat HTF_DEMAND_FILTER_ENABLED dimatikan, fungsi
+    selalu lolos tanpa membaca candle sama sekali.
+    """
+    interval = str(config.get("TREND_INTERVAL", "1h") or "1h").strip().lower()
+    wajib = htf_demand_window_bars(config)
+    if not htf_demand_enabled(config):
+        return {
+            "ok": True,
+            "reason": f"filter demand {interval} nonaktif",
+            "interval": interval,
+            "bars": 0,
+            "required": 0,
+            "zone_low": None,
+            "zone_high": None,
+            "distance_pct": None,
+            "close_position": None,
+        }
+    siap = [
+        k
+        for k in (klines or [])
+        if signal_close_time_ms is None
+        or int(k.close_time) <= int(signal_close_time_ms)
+    ]
+    hasil = detect_demand_zone(siap, htf_demand_gate_config(config))
+    hasil["interval"] = interval
+    hasil["bars"] = len(siap)
+    hasil["required"] = wajib
+    return hasil
+
+
 def trend_warmup_bars(config: dict, interval: str) -> int:
     """Candle interval simulasi yang wajib tersedia sebelum bar entry pertama.
 
-    Backtest membentuk candle trend dengan merangkai candle interval simulasi,
-    jadi warmup harus menutupi (jumlah candle trend + 1 bucket) x rasio.
+    Backtest membentuk candle timeframe tinggi dengan merangkai candle
+    interval simulasi, jadi warmup harus menutupi (jumlah candle HTF pada
+    jendela gabungan trend + demand + 1 bucket) x rasio.
     """
     sim_minutes = int(INTERVAL_MINUTES.get(str(interval), 5))
     trend_minutes = trend_interval_minutes(config)
@@ -482,7 +614,7 @@ def trend_warmup_bars(config: dict, interval: str) -> int:
             "supaya backtest bisa merangkai candle trend dari data yang sudah diunduh."
         )
     rasio = trend_minutes // sim_minutes
-    return trend_window_bars(config) * rasio + rasio
+    return htf_window_bars(config) * rasio + rasio
 
 
 def aggregate_klines(
@@ -1284,6 +1416,74 @@ def selftest() -> int:
                 for b in range(3, 21)
             )
         )
+    )
+
+    # --- Gerbang demand timeframe tinggi (H1): logika zona sama, parameter sendiri ---
+    cfg_htf = dict(
+        HTF_DEMAND_FILTER_ENABLED=True,
+        HTF_DEMAND_LOOKBACK_BARS=6,
+        HTF_DEMAND_ZONE_BUFFER_PCT=1.0,
+        HTF_DEMAND_MAX_DISTANCE_PCT=8.0,
+        HTF_DEMAND_MIN_CLOSE_POSITION=0.4,
+        TREND_INTERVAL="1h",
+    )
+
+    def _k_jam(o, h, l, c, i=0):
+        return Kline(
+            i * 3_600_000, o, h, l, c, i * 3_600_000 + 3_599_999, 1000.0, 1000.0 * c
+        )
+
+    dasar_jam = [_k_jam(99.9, 100.2, 99.8, 100.0, i) for i in range(10)]
+    reaksi_jam = dasar_jam + [_k_jam(100.0, 101.2, 99.9, 101.0, 10)]
+    lolos_htf = evaluate_htf_demand(reaksi_jam, cfg_htf)
+    cek(
+        "reaksi hijau segar di dekat zona demand H1 lolos",
+        lolos_htf["ok"] and lolos_htf["interval"] == "1h",
+        lolos_htf["reason"],
+    )
+    banding = detect_demand_zone(reaksi_jam, htf_demand_gate_config(cfg_htf))
+    cek(
+        "gerbang H1 identik dengan detect_demand_zone berparameter terpetakan",
+        lolos_htf["ok"] == banding["ok"]
+        and lolos_htf["zone_low"] == banding["zone_low"]
+        and lolos_htf["zone_high"] == banding["zone_high"]
+        and lolos_htf["distance_pct"] == banding["distance_pct"],
+    )
+    melambung = list(dasar_jam)
+    for j in range(3):
+        o = 100.0 + 5.0 * (j + 1)
+        melambung.append(_k_jam(o, o + 1.0, o - 0.5, o + 0.5, 10 + j))
+    jauh_htf = evaluate_htf_demand(melambung, cfg_htf)
+    cek(
+        "harga yang sudah terbang jauh di atas dasar H1 ditolak (anti pucuk)",
+        (not jauh_htf["ok"]) and "terlalu jauh" in jauh_htf["reason"],
+        jauh_htf["reason"],
+    )
+    cek(
+        "data H1 kurang tetap ditolak (fail closed)",
+        not evaluate_htf_demand(dasar_jam[:3], cfg_htf)["ok"],
+    )
+    mati_htf = evaluate_htf_demand([], dict(cfg_htf, HTF_DEMAND_FILTER_ENABLED=False))
+    cek(
+        "gerbang H1 nonaktif selalu lolos tanpa membaca candle",
+        mati_htf["ok"] and "nonaktif" in mati_htf["reason"],
+        mati_htf["reason"],
+    )
+    belum_tutup = reaksi_jam + [_k_jam(101.0, 120.0, 100.9, 119.0, 11)]
+    anti_repaint = evaluate_htf_demand(
+        belum_tutup, cfg_htf, signal_close_time_ms=reaksi_jam[-1].close_time
+    )
+    cek(
+        "candle H1 yang belum tutup tidak dipakai (anti repaint)",
+        anti_repaint["ok"] and anti_repaint["bars"] == len(reaksi_jam),
+        f"bars={anti_repaint['bars']}",
+    )
+    cek(
+        "jendela HTF gabungan mengikuti lookback terbesar (trend vs demand)",
+        htf_window_bars(dict(cfg_htf, TREND_LOOKBACK_BARS=120)) == 120
+        and htf_window_bars(dict(cfg_htf, HTF_DEMAND_LOOKBACK_BARS=200)) == 201,
+        f"{htf_window_bars(dict(cfg_htf, TREND_LOOKBACK_BARS=120))} / "
+        f"{htf_window_bars(dict(cfg_htf, HTF_DEMAND_LOOKBACK_BARS=200))}",
     )
 
     print(

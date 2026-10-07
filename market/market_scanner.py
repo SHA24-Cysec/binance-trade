@@ -45,6 +45,7 @@ class Candidate:
     confirm_reason: str = ""
     setup: "Optional[SetupResult]" = None
     trend: "Optional[dict]" = None
+    htf_demand: "Optional[dict]" = None
 
 
 def _looks_leveraged(base_asset: str) -> bool:
@@ -536,6 +537,55 @@ def trend_verdict(symbol: str, config: dict, trend_provider) -> dict:
     return strategy_mod.evaluate_trend_filter(list(klines), config)
 
 
+def htf_demand_verdict(symbol: str, config: dict, trend_provider) -> dict:
+    """Gerbang zona demand timeframe tinggi (default H1) untuk satu kandidat.
+
+    Melengkapi gerbang trend: memakai candle timeframe tinggi yang SAMA dari
+    penyedia yang sama (TrendCache di live, TrendLookup di backtest), jadi
+    tidak ada unduhan tambahan ke Binance. Fail closed seperti gerbang trend:
+    kalau candle tidak bisa diambil atau riwayatnya kurang, kandidat DITOLAK,
+    bukan diloloskan.
+    """
+    from strategy import indicators as strategy_mod
+
+    interval = str(config.get("TREND_INTERVAL", "1h") or "1h")
+    kosong = {
+        "interval": interval,
+        "bars": 0,
+        "required": strategy_mod.htf_demand_window_bars(config),
+        "zone_low": None,
+        "zone_high": None,
+        "distance_pct": None,
+        "close_position": None,
+    }
+    if not bool(config.get("HTF_DEMAND_FILTER_ENABLED", False)):
+        return {"ok": True, "reason": f"filter demand {interval} nonaktif", **kosong}
+    if trend_provider is None:
+        return {
+            "ok": False,
+            "reason": (
+                f"filter demand {interval} aktif tetapi penyedia candle timeframe "
+                "tinggi tidak tersedia (fail closed)"
+            ),
+            **kosong,
+        }
+    try:
+        klines = trend_provider(symbol)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "reason": f"candle demand {interval} {symbol} gagal diambil: {exc}",
+            **kosong,
+        }
+    if not klines:
+        return {
+            "ok": False,
+            "reason": f"candle demand {interval} {symbol} kosong",
+            **kosong,
+        }
+    return strategy_mod.evaluate_htf_demand(list(klines), config)
+
+
 def find_best_candidate(
     tickers: list,
     klines_fetcher,
@@ -593,6 +643,17 @@ def find_best_candidate(
                 )
                 continue
             cand.confirm_reason = f"{hasil.reason} | {trend['reason']}"
+        if bool(config.get("HTF_DEMAND_FILTER_ENABLED", False)):
+            htf_demand = htf_demand_verdict(cand.symbol, config, trend_provider)
+            cand.htf_demand = htf_demand
+            if not htf_demand["ok"]:
+                cand.confirmed = False
+                cand.confirm_reason = (
+                    f"demand {htf_demand.get('interval') or 'HTF'} ditolak: "
+                    f"{htf_demand['reason']}"
+                )
+                continue
+            cand.confirm_reason = f"{cand.confirm_reason} | {htf_demand['reason']}"
         lolos.append(cand)
 
     if not lolos:

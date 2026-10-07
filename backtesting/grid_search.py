@@ -12,9 +12,14 @@ from strategy.indicators import Kline
 
 
 def parity_trend_window(config: dict) -> int:
+    """Jendela candle timeframe tinggi yang dipakai gerbang trend + demand H1.
+
+    Harus sama dengan jendela unduhan TrendCache di bot live dan jendela
+    TrendLookup di backtest, supaya keputusan grid search tidak melenceng.
+    """
     from strategy import indicators as strategy_mod
 
-    return strategy_mod.trend_window_bars(config)
+    return strategy_mod.htf_window_bars(config)
 
 
 KUNCI_ATR = (
@@ -227,7 +232,9 @@ def run_grid_search(
 
     interval_sim = str(base_config.get("CONFIRM_INTERVAL", "5m") or "5m")
     trend_latih = trend_uji = None
-    if bool(base_config.get("TREND_FILTER_ENABLED", False)):
+    if bool(base_config.get("TREND_FILTER_ENABLED", False)) or bool(
+        base_config.get("HTF_DEMAND_FILTER_ENABLED", False)
+    ):
         try:
             butuh_warmup = parity.trend_warmup_bars(base_config, interval_sim)
         except ValueError as exc:
@@ -235,9 +242,9 @@ def run_grid_search(
         if int(warmup_bars) < butuh_warmup:
             hasil_grid.peringatan.append(
                 f"Warmup {warmup_bars} bar dinaikkan menjadi {butuh_warmup} bar karena "
-                f"gerbang trend {base_config.get('TREND_INTERVAL', '1h')} butuh "
-                f"{parity_trend_window(base_config)} candle trend tertutup. Unduhan data "
-                "harus mencakup rentang warmup ini."
+                f"gerbang timeframe tinggi {base_config.get('TREND_INTERVAL', '1h')} "
+                f"(trend + zona demand) butuh {parity_trend_window(base_config)} candle "
+                "tertutup. Unduhan data harus mencakup rentang warmup ini."
             )
             warmup_bars = butuh_warmup
 
@@ -435,8 +442,8 @@ def run_portfolio_grid_search(
         if int(warmup_ms) < butuh_warmup:
             hasil_grid.peringatan.append(
                 f"Warmup {warmup_ms} ms dinaikkan menjadi {butuh_warmup} ms karena gerbang "
-                f"trend {base_config.get('TREND_INTERVAL', '1h')} butuh "
-                f"{parity_trend_window(base_config)} candle trend tertutup."
+                f"timeframe tinggi {base_config.get('TREND_INTERVAL', '1h')} (trend + zona "
+                f"demand) butuh {parity_trend_window(base_config)} candle tertutup."
             )
             warmup_ms = butuh_warmup
     prebuilt = (timeline, series_of, trend_of)

@@ -56,6 +56,7 @@ class BacktestResult:
     risk_events: dict = field(default_factory=dict)
     chase_skips: int = 0
     trend_skips: int = 0
+    htf_demand_skips: int = 0
 
 
 def bars_per_day(interval: str) -> int:
@@ -187,6 +188,8 @@ def run_backtest(
     warnings: list[str] = []
     trend_scans = 0
     trend_skips = 0
+    htf_demand_scans = 0
+    htf_demand_skips = 0
 
     initial_equity = initial_backtest_equity(config)
     symbol = str(config.get("_symbol", "") or "")
@@ -250,10 +253,10 @@ def run_backtest(
         if int(warmup_bars) < butuh_warmup:
             warnings.append(
                 f"Warmup {warmup_bars} bar {interval} dinaikkan menjadi {butuh_warmup} bar "
-                f"karena gerbang trend {config.get('TREND_INTERVAL', '1h')} butuh "
-                f"{trend_lookup.window} candle trend tertutup. Naikkan warmup di pemanggil "
-                "(atau perpanjang rentang data) supaya backtest dan live memakai riwayat "
-                "trend yang sama."
+                f"karena gerbang timeframe tinggi {config.get('TREND_INTERVAL', '1h')} "
+                f"(trend + zona demand) butuh {trend_lookup.window} candle tertutup. "
+                "Naikkan warmup di pemanggil (atau perpanjang rentang data) supaya "
+                "backtest dan live memakai riwayat yang sama."
             )
             warmup_bars = butuh_warmup
 
@@ -292,6 +295,17 @@ def run_backtest(
                     verdict = trend_lookup.verdict_at(candle.close_time)
                     if not verdict["ok"]:
                         trend_skips += 1
+                        i += 1
+                        continue
+                if (
+                    setup.ok
+                    and trend_lookup is not None
+                    and bool(config.get("HTF_DEMAND_FILTER_ENABLED", False))
+                ):
+                    htf_demand_scans += 1
+                    verdict_htf = trend_lookup.htf_demand_at(candle.close_time)
+                    if not verdict_htf["ok"]:
+                        htf_demand_skips += 1
                         i += 1
                         continue
                 if setup.ok:
@@ -431,6 +445,15 @@ def run_backtest(
             f"{int(config.get('TREND_ADX_PERIOD', 14))} >= "
             f"{float(config.get('TREND_ADX_MIN', 20.0) or 0.0):g}), sama seperti bot live."
         )
+    if trend_lookup is not None and htf_demand_skips:
+        warnings.append(
+            f"{htf_demand_skips} dari {htf_demand_scans} sinyal konfirmasi dilewati oleh "
+            f"gerbang zona demand {config.get('TREND_INTERVAL', '1h')} "
+            f"(lookback {int(config.get('HTF_DEMAND_LOOKBACK_BARS', 72) or 72)} candle, "
+            f"jarak maks "
+            f"{float(config.get('HTF_DEMAND_MAX_DISTANCE_PCT', 10.0) or 0.0):g}% dari atap "
+            "zona), sama seperti bot live."
+        )
     result = BacktestResult(
         symbol=config.get("_symbol", "?"),
         interval=interval,
@@ -450,6 +473,7 @@ def run_backtest(
         risk_events=dict(controls.events),
         chase_skips=chase_skips,
         trend_skips=trend_skips,
+        htf_demand_skips=htf_demand_skips,
     )
     return result
 
@@ -524,6 +548,7 @@ def summarize(result: BacktestResult) -> dict:
         "risk_events": dict(result.risk_events),
         "chase_skips": int(result.chase_skips),
         "trend_skips": int(getattr(result, "trend_skips", 0)),
+        "htf_demand_skips": int(getattr(result, "htf_demand_skips", 0)),
         **parity.per_trade_metrics(trades),
     }
 
@@ -561,6 +586,11 @@ def apply_overrides(base_config: dict, overrides: dict) -> dict:
         "DEMAND_ZONE_BUFFER_PCT": float,
         "DEMAND_MAX_DISTANCE_PCT": float,
         "DEMAND_MIN_CLOSE_POSITION": float,
+        "HTF_DEMAND_FILTER_ENABLED": _as_bool,
+        "HTF_DEMAND_LOOKBACK_BARS": int,
+        "HTF_DEMAND_ZONE_BUFFER_PCT": float,
+        "HTF_DEMAND_MAX_DISTANCE_PCT": float,
+        "HTF_DEMAND_MIN_CLOSE_POSITION": float,
         "TREND_FILTER_ENABLED": _as_bool,
         "TREND_INTERVAL": str,
         "TREND_EMA_FAST": int,
@@ -616,6 +646,20 @@ def validate_params(cfg: dict) -> None:
             ("DEMAND_MIN_CLOSE_POSITION", 0.0, 1.0),
         ]
         for key, lo, hi in demand_checks:
+            val = cfg.get(key)
+            if val is None or not (lo <= float(val) <= hi):
+                raise BacktestError(
+                    f"Parameter '{key}'={val} di luar rentang wajar ({lo}..{hi})."
+                )
+
+    if bool(cfg.get("HTF_DEMAND_FILTER_ENABLED", False)):
+        htf_demand_checks = [
+            ("HTF_DEMAND_LOOKBACK_BARS", 3, 500),
+            ("HTF_DEMAND_ZONE_BUFFER_PCT", 0.05, 20.0),
+            ("HTF_DEMAND_MAX_DISTANCE_PCT", 0.1, 50.0),
+            ("HTF_DEMAND_MIN_CLOSE_POSITION", 0.0, 1.0),
+        ]
+        for key, lo, hi in htf_demand_checks:
             val = cfg.get(key)
             if val is None or not (lo <= float(val) <= hi):
                 raise BacktestError(
@@ -709,6 +753,9 @@ def selftest():
     # Gerbang trend dimatikan dulu supaya tes-tes di bawah fokus pada logika lain.
     # Gerbang trend diuji khusus di bagian "paritas gerbang trend timeframe tinggi".
     cfg["TREND_FILTER_ENABLED"] = False
+    # Gerbang demand H1 juga dimatikan di fixture dasar supaya warmup tidak
+    # melompat; gerbang ini diuji khusus di bagian "paritas gerbang zona demand H1".
+    cfg["HTF_DEMAND_FILTER_ENABLED"] = False
     cfg["MIN_QUOTE_VOLUME_USDT_24H"] = 1_000_000
     cfg["BACKTEST_ENTRY_DELAY_BARS"] = 0
     cfg["BACKTEST_ENTRY_SPREAD_PCT"] = 0.0
@@ -1106,6 +1153,75 @@ def selftest():
         "  filter zona demand memblokir entry pucuk dan meloloskan saat di area demand -> OK"
     )
 
+    print(
+        "\n=== SELFTEST backtest.py: paritas gerbang zona demand H1 (HTF_DEMAND_*) ==="
+    )
+    # Jendela HTF sengaja diringkas supaya warmup cukup untuk fixture pendek:
+    # gerbang trend mati sehingga EMA/ADX tidak dihitung; angka TREND_* di sini
+    # hanya mempersempit jendela gabungan (htf_window_bars) yang memaksa warmup.
+    cfg_htf = dict(
+        cfg,
+        TREND_EMA_FAST=2,
+        TREND_EMA_SLOW=3,
+        TREND_ADX_PERIOD=2,
+        TREND_LOOKBACK_BARS=6,
+        HTF_DEMAND_FILTER_ENABLED=True,
+        HTF_DEMAND_LOOKBACK_BARS=6,
+        HTF_DEMAND_ZONE_BUFFER_PCT=1.0,
+        HTF_DEMAND_MAX_DISTANCE_PCT=8.0,
+        HTF_DEMAND_MIN_CLOSE_POSITION=0.4,
+        DEMAND_ZONE_FILTER_ENABLED=False,
+    )
+    assert strategy.htf_window_bars(cfg_htf) == 7
+    assert strategy.trend_warmup_bars(cfg_htf, "5m") == 7 * 12 + 12
+
+    # (a) blokir: candle 1h terakhir yang sudah tutup bearish (bukan reaksi
+    # demand) -> entry ditolak di backtest persis seperti keputusan live.
+    r_htf_block = run_backtest(k_overext, cfg_htf, warmup_bars=0)
+    r_htf_off = run_backtest(
+        k_overext, dict(cfg_htf, HTF_DEMAND_FILTER_ENABLED=False), warmup_bars=0
+    )
+    assert len(r_htf_off.trades) >= 1, "kontrol: gerbang H1 mati harus entry"
+    assert (
+        len(r_htf_block.trades) == 0 and r_htf_block.htf_demand_skips >= 1
+    ), (len(r_htf_block.trades), r_htf_block.htf_demand_skips)
+    assert any(
+        "gerbang zona demand 1h" in w for w in r_htf_block.warnings
+    ), r_htf_block.warnings
+    assert any("Warmup" in w for w in r_htf_block.warnings), r_htf_block.warnings
+    print(
+        f"  candle H1 bearish memblokir entry ({r_htf_block.htf_demand_skips} sinyal "
+        "dilewati), kontrol tanpa gerbang tetap entry -> OK"
+    )
+
+    # (b) lolos: dasar H1 datar lalu reaksi hijau segar di dekat zona -> entry,
+    # dan tidak ada sinyal yang dilewati gerbang demand H1.
+    kl_htf_ok = [
+        _make_candle(i * 300_000, 100.0, 101.0, 99.0, 100.0, vol=5_000_000.0)
+        for i in range(288)
+    ]
+    p_htf = 100.0
+    for j in range(12):
+        o_htf = p_htf
+        c_htf = p_htf + 0.09
+        kl_htf_ok.append(
+            _make_candle(
+                (288 + j) * 300_000,
+                o_htf,
+                c_htf + 0.05,
+                o_htf - 0.02,
+                c_htf,
+                vol=(10_000_000.0 if j >= 10 else 5_000_000.0),
+            )
+        )
+        p_htf = c_htf
+    r_htf_ok = run_backtest(kl_htf_ok, cfg_htf, warmup_bars=96)
+    assert len(r_htf_ok.trades) >= 1, r_htf_ok.warnings
+    assert r_htf_ok.htf_demand_skips == 0, r_htf_ok.htf_demand_skips
+    ringkasan_htf = summarize(r_htf_ok)
+    assert "htf_demand_skips" in ringkasan_htf
+    print("  reaksi hijau segar di dekat zona demand H1 tetap entry -> OK")
+
     print("\n=== SELFTEST backtest.py: paritas gerbang trend timeframe tinggi (H1) ===")
     from backtesting.synthetic_data import seri_trend_dengan_setup
 
@@ -1365,6 +1481,26 @@ def selftest():
             False,
             False,
         ),
+        (
+            "demand H1: jarak maksimum di bawah tebal zona",
+            {
+                "HTF_DEMAND_FILTER_ENABLED": True,
+                "HTF_DEMAND_MAX_DISTANCE_PCT": 0.5,
+                "HTF_DEMAND_ZONE_BUFFER_PCT": 1.2,
+            },
+            False,
+            False,
+        ),
+        (
+            "demand H1: aturan sama, filter dimatikan",
+            {
+                "HTF_DEMAND_FILTER_ENABLED": False,
+                "HTF_DEMAND_MAX_DISTANCE_PCT": 0.5,
+                "HTF_DEMAND_ZONE_BUFFER_PCT": 1.2,
+            },
+            True,
+            False,
+        ),
     ]
     for nama, ov, harus_lolos_bt, harus_lolos_cfg in kasus:
         cfg_uji = dict(_PC, **ov)
@@ -1405,7 +1541,7 @@ def selftest():
         )
     ), "jalur simulasi tidak boleh membatalkan hanya karena parameter mode lain rusak"
     print(
-        "  7 kasus cocok di kedua jalur, subset aturan simulasi <= aturan penyimpanan, "
+        "  9 kasus cocok di kedua jalur, subset aturan simulasi <= aturan penyimpanan, "
         "relasi mode nonaktif tetap dijaga jalur penyimpanan -> OK"
     )
 

@@ -49,8 +49,10 @@ class TrendCache:
 
     Perilaku yang dijaga:
       * hanya candle yang SUDAH TUTUP yang dikembalikan (tanpa repaint),
-      * jendela yang dikembalikan persis TREND_LOOKBACK_BARS candle, sama
-        seperti potongan jendela di backtest,
+      * jendela yang dikembalikan adalah jendela gabungan timeframe tinggi
+        (gerbang trend + gerbang demand H1), sama seperti potongan jendela
+        TrendLookup di backtest; gerbang trend tetap memotong sendiri
+        jendelanya di evaluate_trend_filter,
       * hasil disimpan selama candle trend terakhir belum berganti, jadi satu
         simbol tidak diunduh berulang tiap scan,
       * kegagalan pengambilan tidak pernah menghilangkan riwayat lama lalu
@@ -72,7 +74,7 @@ class TrendCache:
         return ((int(now_ms) // step) - 1) * step
 
     def window_klines(self, symbol: str, now_ms: int) -> list:
-        jendela = strategy.trend_window_bars(self._config)
+        jendela = strategy.htf_window_bars(self._config)
         terakhir_tutup = self._last_closed_open_time(now_ms)
         with self._lock:
             tersimpan = self._cache.get(symbol)
@@ -3226,12 +3228,16 @@ def run(config: dict, lifecycle=None) -> int:
                 strategy.trend_interval(config),
                 jendela_trend,
             )
+    if config.get("TREND_FILTER_ENABLED", False) or config.get(
+        "HTF_DEMAND_FILTER_ENABLED", False
+    ):
         try:
             strategy.trend_warmup_bars(config, config["CONFIRM_INTERVAL"])
         except ValueError as exc:
             logger.warning(
                 "%s Backtest akan menolak kombinasi ini sampai diperbaiki.", exc
             )
+    if config.get("TREND_FILTER_ENABLED", False):
         logger.info(
             "Gerbang trend AKTIF (%s): entry lolos hanya kalau candle %s terakhir yang sudah "
             "tutup memenuhi close > EMA%d, EMA%d > EMA%d, dan ADX%d >= %g. Kalau candle trend "
@@ -3248,6 +3254,26 @@ def run(config: dict, lifecycle=None) -> int:
         logger.info(
             "Gerbang trend NONAKTIF: entry hanya memakai konfirmasi %s.",
             config.get("CONFIRM_INTERVAL", "5m"),
+        )
+    if config.get("HTF_DEMAND_FILTER_ENABLED", False):
+        logger.info(
+            "Gerbang demand AKTIF (%s): entry lolos hanya kalau candle %s terakhir yang "
+            "sudah tutup bereaksi di dekat zona demand %s (lookback %d candle, jarak maks "
+            "%.2f%% dari atap zona, tebal zona min %.2f%%, close_pos min %.2f). Memakai "
+            "cache candle yang sama dengan gerbang trend. Kalau candle gagal diambil atau "
+            "riwayatnya kurang, kandidat DITOLAK (fail closed).",
+            config.get("TREND_INTERVAL", "1h"),
+            config.get("TREND_INTERVAL", "1h"),
+            config.get("TREND_INTERVAL", "1h"),
+            strategy.htf_demand_lookback_bars(config),
+            float(config.get("HTF_DEMAND_MAX_DISTANCE_PCT", 10.0) or 0.0),
+            float(config.get("HTF_DEMAND_ZONE_BUFFER_PCT", 1.5) or 0.0),
+            float(config.get("HTF_DEMAND_MIN_CLOSE_POSITION", 0.4) or 0.0),
+        )
+    else:
+        logger.info(
+            "Gerbang demand %s NONAKTIF.",
+            config.get("TREND_INTERVAL", "1h"),
         )
     logger.info("=" * 70)
 
@@ -3359,13 +3385,14 @@ def run(config: dict, lifecycle=None) -> int:
         }
 
     trend_cache = TrendCache(client, config)
-    trend_provider = (
-        trend_cache.provider if config.get("TREND_FILTER_ENABLED", False) else None
+    butuh_candle_htf = bool(config.get("TREND_FILTER_ENABLED", False)) or bool(
+        config.get("HTF_DEMAND_FILTER_ENABLED", False)
     )
+    trend_provider = trend_cache.provider if butuh_candle_htf else None
     if trend_provider is None:
         logger.warning(
-            "Gerbang trend timeframe tinggi NONAKTIF (TREND_FILTER_ENABLED=False). "
-            "Entry hanya memakai konfirmasi %s.",
+            "Gerbang timeframe tinggi NONAKTIF (TREND_FILTER_ENABLED=False dan "
+            "HTF_DEMAND_FILTER_ENABLED=False). Entry hanya memakai konfirmasi %s.",
             config["CONFIRM_INTERVAL"],
         )
     else:
@@ -3575,6 +3602,12 @@ def run(config: dict, lifecycle=None) -> int:
                                 )
                                 if nilai.get("adx") is not None:
                                     trend_info += " (ADX %.1f)" % float(nilai["adx"])
+                            if best.htf_demand is not None:
+                                trend_info += " | demand %s: %s" % (
+                                    best.htf_demand.get("interval")
+                                    or strategy.trend_interval(config),
+                                    best.htf_demand.get("reason"),
+                                )
                             logger.info(
                                 "Kandidat terpilih: %s (vol24h=%.0f, 24h=%.2f%%, spread=%.3f%%) | %s%s",
                                 best.symbol,
@@ -3754,6 +3787,11 @@ def selftest() -> None:
         and PUMP_CONFIG.get("TREND_ADX_MIN") == 20.0
     )
     assert PUMP_CONFIG.get("TREND_LOOKBACK_BARS") == 120
+    assert PUMP_CONFIG.get("HTF_DEMAND_FILTER_ENABLED") is True
+    assert PUMP_CONFIG.get("HTF_DEMAND_LOOKBACK_BARS") == 72
+    assert PUMP_CONFIG.get("HTF_DEMAND_ZONE_BUFFER_PCT") == 1.5
+    assert PUMP_CONFIG.get("HTF_DEMAND_MAX_DISTANCE_PCT") == 10.0
+    assert PUMP_CONFIG.get("HTF_DEMAND_MIN_CLOSE_POSITION") == 0.4
 
     cfg = dict(PUMP_CONFIG)
     cfg["STATE_FILE"] = os.path.join(
@@ -5345,6 +5383,171 @@ def selftest() -> None:
         "  scanner: lolos saat trend naik, ditolak saat turun, fail closed saat error,"
     )
     print("           tanpa panggilan API tambahan saat filter nonaktif -> OK")
+
+    print("\n=== SELFTEST: gerbang zona demand H1 (HTF_DEMAND_*) ===")
+    # cfg_konfirmasi tidak memuat kunci HTF_DEMAND_* sehingga gerbang H1 mati di
+    # semua seksi lain; hanya seksi ini yang mengaktifkannya dengan parameter
+    # kecil supaya fixture pendek tetap cukup.
+    cfg_htf = dict(
+        cfg_konfirmasi,
+        TREND_FILTER_ENABLED=False,
+        TREND_INTERVAL="1h",
+        HTF_DEMAND_FILTER_ENABLED=True,
+        HTF_DEMAND_LOOKBACK_BARS=6,
+        HTF_DEMAND_ZONE_BUFFER_PCT=1.0,
+        HTF_DEMAND_MAX_DISTANCE_PCT=8.0,
+        HTF_DEMAND_MIN_CLOSE_POSITION=0.4,
+    )
+
+    def _baris_h1_dasar(lonjakan: bool = False, sekarang_ms: int = 0) -> list:
+        """Candle H1: 10 jam dasar datar + 1 candle reaksi terakhir yang tutup."""
+        batas = ((int(sekarang_ms) // MS_JAM) - 1) * MS_JAM
+        rows = []
+        for i in range(11):
+            open_time = batas - (10 - i) * MS_JAM
+            if i < 10:
+                o, h, l, c = 99.9, 100.2, 99.8, 100.0
+            elif lonjakan:
+                o, h, l, c = 100.0, 116.0, 99.9, 115.0
+            else:
+                o, h, l, c = 100.0, 101.2, 99.9, 101.0
+            rows.append(
+                [
+                    open_time,
+                    str(o),
+                    str(h),
+                    str(l),
+                    str(c),
+                    "1000",
+                    open_time + MS_JAM - 1,
+                    str(c * 1000),
+                    10,
+                    "500",
+                    "500000",
+                    "0",
+                ]
+            )
+        return rows
+
+    klien_dasar = KlienH1(_baris_h1_dasar(False, NOW_H1))
+    klien_lonjakan = KlienH1(_baris_h1_dasar(True, NOW_H1))
+    cache_dasar = TrendCache(klien_dasar, cfg_htf)
+    cache_lonjakan = TrendCache(klien_lonjakan, cfg_htf)
+
+    # Jendela unduhan mengikuti lookback terbesar (demand 200 > trend default).
+    cfg_htf_besar = dict(cfg_htf, HTF_DEMAND_LOOKBACK_BARS=200)
+    klien_besar = KlienH1(_baris_h1_dasar(False, NOW_H1) * 20)
+    cache_besar = TrendCache(klien_besar, cfg_htf_besar)
+    jendela_besar = cache_besar.window_klines("BESARUSDT", NOW_H1)
+    assert len(jendela_besar) == 201, len(jendela_besar)
+    assert klien_besar.limit_terakhir == 202, klien_besar.limit_terakhir
+    verdict_besar = scanner.htf_demand_verdict(
+        "BESARUSDT", cfg_htf_besar, lambda s: cache_besar.window_klines(s, NOW_H1)
+    )
+    assert verdict_besar["ok"] and verdict_besar["bars"] == 201, verdict_besar
+
+    asli_now_htf = state_mod.now_ms
+    state_mod.now_ms = lambda: NOW_H1
+    try:
+        verdict_dasar = scanner.htf_demand_verdict(
+            "DASARUSDT", cfg_htf, lambda s: cache_dasar.window_klines(s, NOW_H1)
+        )
+        verdict_lonjakan = scanner.htf_demand_verdict(
+            "PUCUKUSDT", cfg_htf, lambda s: cache_lonjakan.window_klines(s, NOW_H1)
+        )
+        assert verdict_dasar["ok"], verdict_dasar["reason"]
+        assert (
+            verdict_dasar["zone_low"] is not None
+            and verdict_dasar["zone_high"] is not None
+        ), "batas zona demand H1 harus terisi saat lolos"
+        assert (
+            not verdict_lonjakan["ok"] and "terlalu jauh" in verdict_lonjakan["reason"]
+        ), verdict_lonjakan["reason"]
+
+        def _rusak_htf(_simbol):
+            raise RuntimeError("jaringan putus")
+
+        verdict_rusak = scanner.htf_demand_verdict("XUSDT", cfg_htf, _rusak_htf)
+        verdict_tanpa = scanner.htf_demand_verdict("XUSDT", cfg_htf, None)
+        verdict_nonaktif = scanner.htf_demand_verdict(
+            "XUSDT", dict(cfg_htf, HTF_DEMAND_FILTER_ENABLED=False), _rusak_htf
+        )
+        assert (
+            not verdict_rusak["ok"] and "gagal diambil" in verdict_rusak["reason"]
+        ), verdict_rusak["reason"]
+        assert (
+            not verdict_tanpa["ok"] and "tidak tersedia" in verdict_tanpa["reason"]
+        ), verdict_tanpa["reason"]
+        assert verdict_nonaktif[
+            "ok"
+        ], "gerbang nonaktif tidak boleh memanggil penyedia candle"
+
+        # Integrasi pemilihan kandidat: konfirmasi 5m fixture L-03 sudah lolos,
+        # gerbang demand H1 yang menentukan.
+        pilih_htf_ok = scanner.find_best_candidate(
+            ticker_konfirmasi,
+            _serial,
+            cfg_htf,
+            None,
+            trend_provider=lambda s: cache_dasar.window_klines(s, NOW_H1),
+        )
+        assert (
+            pilih_htf_ok is not None and pilih_htf_ok.symbol == "LONJAKUSDT"
+        ), pilih_htf_ok
+        assert (
+            "demand zone valid" in pilih_htf_ok.confirm_reason
+        ), pilih_htf_ok.confirm_reason
+        assert pilih_htf_ok.htf_demand is not None and pilih_htf_ok.htf_demand["ok"]
+
+        pilih_htf_tolak = scanner.find_best_candidate(
+            ticker_konfirmasi,
+            _serial,
+            cfg_htf,
+            None,
+            trend_provider=lambda s: cache_lonjakan.window_klines(s, NOW_H1),
+        )
+        assert (
+            pilih_htf_tolak is None
+        ), "harga H1 yang sudah jauh di atas zona harus menolak semua kandidat"
+
+        klien_pendek_htf = KlienH1(_baris_h1_dasar(False, NOW_H1)[-3:])
+        cache_pendek_htf = TrendCache(klien_pendek_htf, cfg_htf)
+        pilih_kurang_htf = scanner.find_best_candidate(
+            ticker_konfirmasi,
+            _serial,
+            cfg_htf,
+            None,
+            trend_provider=lambda s: cache_pendek_htf.window_klines(s, NOW_H1),
+        )
+        assert (
+            pilih_kurang_htf is None
+        ), "riwayat H1 kurang harus fail closed, bukan lolos"
+
+        panggilan_htf = {"n": 0}
+
+        def provider_hitung_htf(_simbol):
+            panggilan_htf["n"] += 1
+            return cache_dasar.window_klines(_simbol, NOW_H1)
+
+        pilih_htf_mati = scanner.find_best_candidate(
+            ticker_konfirmasi,
+            _serial,
+            dict(cfg_htf, HTF_DEMAND_FILTER_ENABLED=False),
+            None,
+            trend_provider=provider_hitung_htf,
+        )
+        assert (
+            pilih_htf_mati is not None and panggilan_htf["n"] == 0
+        ), "gerbang nonaktif tidak boleh menambah panggilan penyedia candle"
+    finally:
+        state_mod.now_ms = asli_now_htf
+    print(
+        "  zona H1: reaksi di dekat dasar lolos, harga sudah terbang ditolak,"
+    )
+    print(
+        "           data kurang/error fail closed, jendela mengikuti lookback terbesar,"
+    )
+    print("           nonaktif -> tanpa panggilan tambahan -> OK")
 
     print("\nSEMUA SELFTEST LULUS.")
     print("(Selftest ini TIDAK menghubungi Binance sama sekali -- murni logika lokal.)")
