@@ -2510,6 +2510,11 @@ def main(*, auto_start_bot: bool = False) -> int:
     print(
         f"Dashboard berjalan di http://{tampil}:{_DASHBOARD_PORT}  (Ctrl+C untuk berhenti)"
     )
+    from infrastructure.process import runtime_cleanup
+
+    # Registri PID dashboard: dipakai gerbang keamanan pembersihan runtime
+    # supaya proses lain tidak menghapus file yang masih dashboard pakai.
+    runtime_cleanup.register_dashboard()
     try:
         app.run(
             host=_DASHBOARD_HOST,
@@ -2520,6 +2525,19 @@ def main(*, auto_start_bot: bool = False) -> int:
         )
     finally:
         _process_manager.shutdown_dashboard()
+        runtime_cleanup.unregister_dashboard()
+        try:
+            laporan = runtime_cleanup.cleanup_runtime_leftovers()
+        except Exception as exc:
+            laporan = {"deleted": [], "aborted": f"galat: {exc}"}
+        if laporan.get("aborted"):
+            print(f"Catatan pembersihan runtime: {laporan['aborted']}")
+        dihapus = laporan.get("deleted") or []
+        if dihapus:
+            print(
+                f"File runtime dibersihkan ({len(dihapus)}): "
+                + ", ".join(str(item) for item in dihapus)
+            )
     return 0
 
 

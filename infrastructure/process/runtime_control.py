@@ -418,6 +418,12 @@ class BotRuntime:
         finally:
             self.lock.release()
             self.global_lock.release()
+        try:
+            from infrastructure.process import runtime_cleanup
+
+            runtime_cleanup.cleanup_runtime_leftovers()
+        except Exception:
+            pass
         return False
 
 
