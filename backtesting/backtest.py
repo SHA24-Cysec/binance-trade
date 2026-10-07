@@ -553,20 +553,20 @@ def summarize(result: BacktestResult) -> dict:
     }
 
 
-def apply_overrides(base_config: dict, overrides: dict) -> dict:
-    def _as_bool(v):
-        if isinstance(v, bool):
-            return v
-        if isinstance(v, (int, float)):
-            return bool(v)
-        s = str(v).strip().lower()
-        if s in ("true", "1", "on", "yes", "ya"):
-            return True
-        if s in ("false", "0", "off", "no", "tidak"):
-            return False
-        raise ValueError(f"bukan boolean: {v!r}")
+def _as_bool(v):
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return bool(v)
+    s = str(v).strip().lower()
+    if s in ("true", "1", "on", "yes", "ya"):
+        return True
+    if s in ("false", "0", "off", "no", "tidak"):
+        return False
+    raise ValueError(f"bukan boolean: {v!r}")
 
-    ALLOWED = {
+
+OVERRIDE_CASTERS = {
         "USE_ATR_EXIT": _as_bool,
         "ATR_PERIOD": int,
         "ATR_MULT_SL": float,
@@ -598,9 +598,19 @@ def apply_overrides(base_config: dict, overrides: dict) -> dict:
         "TREND_ADX_PERIOD": int,
         "TREND_ADX_MIN": float,
         "TREND_LOOKBACK_BARS": int,
-    }
+        "PUMP_MIN_24H_CHANGE_PCT": float,
+        "PUMP_MAX_24H_CHANGE_PCT": float,
+        "MIN_QUOTE_VOLUME_USDT_24H": float,
+        "ROLLING_VOLUME_FILTER_ENABLED": _as_bool,
+        "ROLLING_VOLUME_LOOKBACK_BARS": int,
+        "ROLLING_VOLUME_SURGE_MULT": float,
+        "ROLLING_VOLUME_CONFIRMATION_BARS": int,
+}
+
+
+def apply_overrides(base_config: dict, overrides: dict) -> dict:
     cfg = copy.deepcopy(base_config)
-    for key, caster in ALLOWED.items():
+    for key, caster in OVERRIDE_CASTERS.items():
         if key in overrides and overrides[key] is not None and overrides[key] != "":
             try:
                 cfg[key] = caster(overrides[key])
@@ -708,6 +718,25 @@ def validate_params(cfg: dict) -> None:
             "candle yang dibutuhkan konfirmasi volume dan ATR. Naikkan nilainya supaya backtest "
             "dan bot live memakai jendela yang sama."
         )
+
+    pump_min = cfg.get("PUMP_MIN_24H_CHANGE_PCT")
+    pump_max = cfg.get("PUMP_MAX_24H_CHANGE_PCT")
+    if pump_min is not None:
+        if not (-1000.0 <= float(pump_min) <= 1000.0):
+            raise BacktestError(
+                f"Parameter 'PUMP_MIN_24H_CHANGE_PCT'={pump_min} di luar rentang wajar (-1000..1000)."
+            )
+    if pump_max is not None:
+        if not (0.0 <= float(pump_max) <= 1000.0):
+            raise BacktestError(
+                f"Parameter 'PUMP_MAX_24H_CHANGE_PCT'={pump_max} di luar rentang wajar (0..1000)."
+            )
+    if pump_min is not None and pump_max is not None:
+        if float(pump_max) != 0.0 and float(pump_max) <= float(pump_min):
+            raise BacktestError(
+                f"PUMP_MAX_24H_CHANGE_PCT={pump_max} harus lebih besar dari "
+                f"PUMP_MIN_24H_CHANGE_PCT={pump_min} (atau 0 untuk menonaktifkan batas atas)."
+            )
 
 
 def _make_candle(t, o, h, low, c, vol=1_000_000.0, qvol=None):

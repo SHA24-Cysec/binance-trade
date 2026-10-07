@@ -101,7 +101,28 @@ def buat_rentang(
     return [round(mulai + i * langkah, bulatkan) for i in range(n)]
 
 
+def _pastikan_kunci_berefek(spec: dict) -> None:
+    """Tolak spec yang memuat parameter di luar daftar override backtest.
+
+    Tanpa penjagaan ini, kunci yang tidak dikenal apply_overrides() akan
+    diabaikan tanpa suara: grid tetap berjalan, tetapi semua kombinasi memakai
+    konfigurasi yang persis sama sehingga tabel hasil penuh baris kembar yang
+    menyesatkan. Lebih baik gagal cepat dengan pesan yang jelas.
+    """
+    tidak_dikenal = [k for k in spec if k not in bt.OVERRIDE_CASTERS]
+    if tidak_dikenal:
+        raise GridSearchError(
+            "Parameter berikut tidak bisa dioptimasi oleh backtest sehingga "
+            "nilainya tidak akan berpengaruh: "
+            + ", ".join(sorted(tidak_dikenal))
+            + ". Parameter yang didukung: "
+            + ", ".join(sorted(bt.OVERRIDE_CASTERS))
+            + "."
+        )
+
+
 def _normalkan_spec(spec: dict) -> dict[str, list]:
+    _pastikan_kunci_berefek(spec)
     keluar: dict[str, list] = {}
     for kunci, nilai in spec.items():
         if isinstance(nilai, dict):
