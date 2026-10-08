@@ -598,6 +598,189 @@ def evaluate_htf_demand(
     return hasil
 
 
+DAILY_DEMAND_DEFAULTS = {
+    "DAILY_DEMAND_INTERVAL": "1d",
+    "DAILY_DEMAND_LOOKBACK_BARS": 20,
+    "DAILY_DEMAND_ZONE_BUFFER_PCT": 2.0,
+    "DAILY_DEMAND_MAX_DISTANCE_PCT": 12.0,
+    "DAILY_DEMAND_MIN_CLOSE_POSITION": 0.40,
+}
+
+
+def daily_demand_interval(config: dict) -> str:
+    """Interval gerbang demand harian (default 1d)."""
+    raw = str(
+        config.get("DAILY_DEMAND_INTERVAL", DAILY_DEMAND_DEFAULTS["DAILY_DEMAND_INTERVAL"])
+        or DAILY_DEMAND_DEFAULTS["DAILY_DEMAND_INTERVAL"]
+    ).strip().lower()
+    if raw not in INTERVAL_MINUTES:
+        raise ValueError(
+            f"DAILY_DEMAND_INTERVAL '{raw}' tidak dikenal. Pilihan: "
+            + ", ".join(sorted(INTERVAL_MINUTES, key=INTERVAL_MINUTES.get))
+        )
+    return raw
+
+
+def daily_demand_interval_minutes(config: dict) -> int:
+    return int(INTERVAL_MINUTES[daily_demand_interval(config)])
+
+
+def daily_demand_enabled(config: dict) -> bool:
+    return bool(config.get("DAILY_DEMAND_FILTER_ENABLED", False))
+
+
+def daily_demand_lookback_bars(config: dict) -> int:
+    """Lookback gerbang demand harian, dijepit ke rentang yang bisa diunduh."""
+    lookback = int(
+        config.get(
+            "DAILY_DEMAND_LOOKBACK_BARS",
+            DAILY_DEMAND_DEFAULTS["DAILY_DEMAND_LOOKBACK_BARS"],
+        )
+        or DAILY_DEMAND_DEFAULTS["DAILY_DEMAND_LOOKBACK_BARS"]
+    )
+    return max(3, min(TREND_KLINE_LIMIT - 2, lookback))
+
+
+def daily_demand_window_bars(config: dict) -> int:
+    """Candle harian minimum untuk gerbang zona demand (0 kalau nonaktif)."""
+    if not daily_demand_enabled(config):
+        return 0
+    return daily_demand_lookback_bars(config) + 1
+
+
+def daily_demand_gate_config(config: dict) -> dict:
+    """Terjemahkan kunci DAILY_DEMAND_* ke kunci DEMAND_* milik detect_demand_zone.
+
+    Sama seperti gerbang demand H1: logika zona tidak diduplikasi, fungsinya
+    yang dipanggil ulang dengan parameter berbeda. Itu yang menjaga keputusan
+    LIVE, PAPER, dan backtest tetap identik tanpa tiga salinan aturan.
+    """
+    return {
+        "DEMAND_ZONE_FILTER_ENABLED": daily_demand_enabled(config),
+        "DEMAND_LOOKBACK_BARS": daily_demand_lookback_bars(config),
+        "DEMAND_ZONE_BUFFER_PCT": max(
+            0.0,
+            float(
+                config.get(
+                    "DAILY_DEMAND_ZONE_BUFFER_PCT",
+                    DAILY_DEMAND_DEFAULTS["DAILY_DEMAND_ZONE_BUFFER_PCT"],
+                )
+                or 0.0
+            ),
+        ),
+        "DEMAND_MAX_DISTANCE_PCT": max(
+            0.0,
+            float(
+                config.get(
+                    "DAILY_DEMAND_MAX_DISTANCE_PCT",
+                    DAILY_DEMAND_DEFAULTS["DAILY_DEMAND_MAX_DISTANCE_PCT"],
+                )
+                or 0.0
+            ),
+        ),
+        "DEMAND_MIN_CLOSE_POSITION": float(
+            config.get(
+                "DAILY_DEMAND_MIN_CLOSE_POSITION",
+                DAILY_DEMAND_DEFAULTS["DAILY_DEMAND_MIN_CLOSE_POSITION"],
+            )
+            or 0.0
+        ),
+    }
+
+
+def evaluate_daily_demand(
+    klines: list[Kline], config: dict, signal_close_time_ms: Optional[int] = None
+) -> dict:
+    """Gerbang zona demand harian (default 1d) sebagai lapisan ketiga konfirmasi.
+
+    Melengkapi gerbang demand chart (M5) dan gerbang demand H1: entry hanya lolos
+    kalau candle harian terakhir yang SUDAH TUTUP juga bereaksi di dekat dasar
+    akumulasi harian, bukan sedang melayang jauh di atasnya. Aturan zonanya
+    identik dengan detect_demand_zone (satu sumber kode), hanya parameternya yang
+    diambil dari kunci DAILY_DEMAND_*:
+
+      * DAILY_DEMAND_INTERVAL          (default 1d)
+      * DAILY_DEMAND_LOOKBACK_BARS     (default 20 hari struktur harga)
+      * DAILY_DEMAND_ZONE_BUFFER_PCT   (default 2.0%)
+      * DAILY_DEMAND_MAX_DISTANCE_PCT  (default 12%, diukur dari atap zona)
+      * DAILY_DEMAND_MIN_CLOSE_POSITION (default 0.40)
+
+    Candle harian jauh lebih lebar daripada H1, jadi ambang jarak dan tebal zona
+    memang lebih longgar; itu sebabnya parameter harian dipisahkan dari H1
+    walau mesin zonanya sama.
+
+    Fail closed seperti gerbang lain: data kurang, OHLC tidak valid, atau candle
+    gagal diambil berarti entry DITOLAK. Candle yang belum tutup dibuang di sini
+    walaupun pemanggil lupa menyaringnya (anti repaint). Saat
+    DAILY_DEMAND_FILTER_ENABLED dimatikan, fungsi selalu lolos tanpa membaca
+    candle sama sekali.
+    """
+    interval = daily_demand_interval(config)
+    wajib = daily_demand_window_bars(config)
+    if not daily_demand_enabled(config):
+        return {
+            "ok": True,
+            "reason": f"filter demand {interval} nonaktif",
+            "interval": interval,
+            "bars": 0,
+            "required": 0,
+            "zone_low": None,
+            "zone_high": None,
+            "distance_pct": None,
+            "close_position": None,
+        }
+    siap = [
+        k
+        for k in (klines or [])
+        if signal_close_time_ms is None
+        or int(k.close_time) <= int(signal_close_time_ms)
+    ]
+    hasil = detect_demand_zone(siap, daily_demand_gate_config(config))
+    hasil["interval"] = interval
+    hasil["bars"] = len(siap)
+    hasil["required"] = wajib
+    return hasil
+
+
+def daily_warmup_bars(config: dict, interval: str) -> int:
+    """Candle interval simulasi yang wajib ada untuk gerbang demand harian (0 kalau nonaktif).
+
+    Candle harian dirangkai dari candle interval simulasi (default 288 candle 5m
+    per hari), jadi warmup backtest harus menutupi
+    (lookback harian + 1 candle sinyal) x rasio + satu bucket cadangan.
+    """
+    if not daily_demand_enabled(config):
+        return 0
+    sim_minutes = int(INTERVAL_MINUTES.get(str(interval), 5))
+    daily_minutes = daily_demand_interval_minutes(config)
+    if daily_minutes % sim_minutes:
+        raise ValueError(
+            f"DAILY_DEMAND_INTERVAL '{daily_demand_interval(config)}' ({daily_minutes} "
+            f"menit) harus kelipatan bulat dari interval simulasi '{interval}' "
+            f"({sim_minutes} menit) supaya backtest bisa merangkai candle harian dari "
+            "data yang sudah diunduh."
+        )
+    rasio = daily_minutes // sim_minutes
+    return daily_demand_window_bars(config) * rasio + rasio
+
+
+def htf_gate_warmup_bars(config: dict, interval: str) -> int:
+    """Warmup gabungan SEMUA gerbang timeframe tinggi yang aktif (0 kalau tidak ada).
+
+    Gerbang trend dan gerbang demand H1 memakai interval TREND_INTERVAL yang
+    sama, sedangkan gerbang demand harian memakai interval sendiri. Ketiganya
+    membaca dari awal rentang data yang sama, jadi kebutuhan yang dipakai adalah
+    yang TERBESAR, bukan jumlahnya. Tanpa ini, backtest bisa mulai mengevaluasi
+    bar sebelum candle harian cukup, dan hasilnya nol trade tanpa penjelasan.
+    """
+    butuh = 0
+    if bool(config.get("TREND_FILTER_ENABLED", False)) or htf_demand_enabled(config):
+        butuh = max(butuh, trend_warmup_bars(config, interval))
+    if daily_demand_enabled(config):
+        butuh = max(butuh, daily_warmup_bars(config, interval))
+    return butuh
+
+
 def trend_warmup_bars(config: dict, interval: str) -> int:
     """Candle interval simulasi yang wajib tersedia sebelum bar entry pertama.
 
@@ -1484,6 +1667,112 @@ def selftest() -> int:
         and htf_window_bars(dict(cfg_htf, HTF_DEMAND_LOOKBACK_BARS=200)) == 201,
         f"{htf_window_bars(dict(cfg_htf, TREND_LOOKBACK_BARS=120))} / "
         f"{htf_window_bars(dict(cfg_htf, HTF_DEMAND_LOOKBACK_BARS=200))}",
+    )
+
+
+    # --- Gerbang demand harian (D1): mesin zona sama, parameter sendiri ---
+    cfg_daily = dict(
+        DAILY_DEMAND_FILTER_ENABLED=True,
+        DAILY_DEMAND_INTERVAL="1d",
+        DAILY_DEMAND_LOOKBACK_BARS=3,
+        DAILY_DEMAND_ZONE_BUFFER_PCT=1.0,
+        DAILY_DEMAND_MAX_DISTANCE_PCT=8.0,
+        DAILY_DEMAND_MIN_CLOSE_POSITION=0.4,
+    )
+
+    def _k_hari(o, h, l, c, i=0):
+        return Kline(
+            i * 86_400_000, o, h, l, c, i * 86_400_000 + 86_399_999, 1000.0, 1000.0 * c
+        )
+
+    cek(
+        "interval harian default 1d dan jendelanya lookback + 1 candle sinyal",
+        daily_demand_interval(cfg_daily) == "1d"
+        and daily_demand_interval_minutes(cfg_daily) == 1440
+        and daily_demand_window_bars(cfg_daily) == 4,
+    )
+    cek(
+        "warmup harian = (lookback + 1) hari x 288 candle 5m + 1 bucket",
+        daily_warmup_bars(cfg_daily, "5m") == 4 * 288 + 288
+        and htf_gate_warmup_bars(cfg_daily, "5m") == 4 * 288 + 288,
+    )
+    cek(
+        "warmup gabungan mengambil kebutuhan TERBESAR, bukan jumlahnya",
+        htf_gate_warmup_bars(
+            dict(cfg_daily, TREND_FILTER_ENABLED=True, TREND_INTERVAL="1h", TREND_LOOKBACK_BARS=120),
+            "5m",
+        )
+        == max(4 * 288 + 288, 120 * 12 + 12),
+    )
+    cek(
+        "gerbang harian nonaktif selalu lolos dan warmupnya nol",
+        evaluate_daily_demand([], dict(cfg_daily, DAILY_DEMAND_FILTER_ENABLED=False))["ok"]
+        and daily_warmup_bars(dict(cfg_daily, DAILY_DEMAND_FILTER_ENABLED=False), "5m") == 0
+        and htf_gate_warmup_bars(
+            dict(cfg_daily, DAILY_DEMAND_FILTER_ENABLED=False), "5m"
+        )
+        == 0,
+    )
+    cek(
+        "data harian kurang tetap ditolak (fail closed)",
+        not evaluate_daily_demand(
+            [_k_hari(100.0, 100.5, 99.5, 100.0, i) for i in range(3)], cfg_daily
+        )["ok"],
+    )
+    cek(
+        "interval harian tak dikenal ditolak",
+        _gagal_tertangkap(lambda: daily_demand_interval(dict(cfg_daily, DAILY_DEMAND_INTERVAL="2d"))),
+    )
+    cek(
+        "interval harian yang bukan kelipatan interval simulasi ditolak",
+        _gagal_tertangkap(
+            lambda: daily_warmup_bars(dict(cfg_daily, DAILY_DEMAND_INTERVAL="12h"), "8h")
+        ),
+    )
+    cek(
+        "warmup harian mengikuti interval yang dipilih (12h dengan simulasi 1h)",
+        daily_warmup_bars(dict(cfg_daily, DAILY_DEMAND_INTERVAL="12h"), "1h") == 4 * 12 + 12,
+    )
+
+    dasar_hari = [_k_hari(100.0, 100.2, 99.8, 100.0, i) for i in range(3)]
+    reaksi_hari = dasar_hari + [_k_hari(100.0, 100.8, 99.9, 100.7, 3)]
+    lolos_harian = evaluate_daily_demand(reaksi_hari, cfg_daily)
+    cek(
+        "reaksi hijau segar di dekat dasar harian lolos",
+        lolos_harian["ok"] and lolos_harian["interval"] == "1d",
+        lolos_harian["reason"],
+    )
+    banding_harian = detect_demand_zone(reaksi_hari, daily_demand_gate_config(cfg_daily))
+    cek(
+        "gerbang harian identik dengan detect_demand_zone berparameter terpetakan",
+        lolos_harian["ok"] == banding_harian["ok"]
+        and lolos_harian["zone_low"] == banding_harian["zone_low"]
+        and lolos_harian["zone_high"] == banding_harian["zone_high"]
+        and lolos_harian["distance_pct"] == banding_harian["distance_pct"],
+    )
+    jauh_harian = evaluate_daily_demand(
+        dasar_hari + [_k_hari(100.0, 110.5, 99.9, 110.0, 3)], cfg_daily
+    )
+    cek(
+        "harga yang sudah terbang jauh di atas dasar harian ditolak (anti pucuk)",
+        (not jauh_harian["ok"]) and "terlalu jauh" in jauh_harian["reason"],
+        jauh_harian["reason"],
+    )
+    belum_tutup_harian = reaksi_hari + [_k_hari(100.7, 120.0, 100.6, 119.0, 4)]
+    anti_repaint_harian = evaluate_daily_demand(
+        belum_tutup_harian, cfg_daily, signal_close_time_ms=reaksi_hari[-1].close_time
+    )
+    cek(
+        "candle harian yang belum tutup tidak dipakai (anti repaint)",
+        anti_repaint_harian["ok"] and anti_repaint_harian["bars"] == len(reaksi_hari),
+        f"bars={anti_repaint_harian['bars']}",
+    )
+    cek(
+        "jendela harian dipakai persis lookback + 1 candle",
+        evaluate_daily_demand(
+            [_k_hari(100.0, 100.2, 99.8, 100.0, i) for i in range(10)], cfg_daily
+        )["required"]
+        == 4,
     )
 
     print(

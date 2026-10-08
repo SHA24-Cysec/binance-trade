@@ -384,10 +384,128 @@ def trend_warmup_ms(config: dict, interval: str) -> int:
     ) * strategy_mod.interval_to_ms(interval)
 
 
+def daily_demand_enabled(config: dict) -> bool:
+    """Gerbang zona demand harian aktif atau tidak (satu sumber dengan live)."""
+    from strategy import indicators as strategy_mod
+
+    return strategy_mod.daily_demand_enabled(config)
+
+
+def daily_demand_window_bars(config: dict) -> int:
+    """Jumlah candle harian untuk satu jendela gerbang demand harian."""
+    from strategy import indicators as strategy_mod
+
+    return strategy_mod.daily_demand_window_bars(config)
+
+
+def daily_demand_lookback_bars(config: dict) -> int:
+    """Lookback candle harian gerbang demand harian (dipakai laporan peringatan)."""
+    from strategy import indicators as strategy_mod
+
+    return strategy_mod.daily_demand_lookback_bars(config)
+
+
+def htf_gate_warmup_bars(config: dict, interval: str) -> int:
+    """Warmup gabungan semua gerbang timeframe tinggi yang aktif (0 kalau tidak ada).
+
+    Dipakai jalur pencarian grid (satuan bar); jalur portofolio memakai
+    htf_gate_warmup_ms. Isinya satu sumber dengan strategy.indicators supaya
+    live, backtest, dan grid search tidak pernah memakai angka berbeda.
+    """
+    from strategy import indicators as strategy_mod
+
+    return strategy_mod.htf_gate_warmup_bars(config, interval)
+
+
+def htf_gate_warmup_ms(config: dict, interval: str) -> int:
+    """Warmup (ms) gerbang timeframe tinggi gabungan (trend + demand H1 + demand harian)."""
+    from strategy import indicators as strategy_mod
+
+    return strategy_mod.htf_gate_warmup_bars(
+        config, interval
+    ) * strategy_mod.interval_to_ms(interval)
+
+
 def evaluate_trend(klines: Sequence[Kline], config: dict) -> dict:
     from strategy import indicators as strategy_mod
 
     return strategy_mod.evaluate_trend_filter(list(klines), config)
+
+
+class DailyDemandLookup:
+    """Jendela candle harian untuk gerbang demand harian di backtest.
+
+    Aturannya harus sama persis dengan bot live (DailyDemandCache pada
+    trading/pump_scanner_bot.py): pakai DAILY_DEMAND_LOOKBACK_BARS + 1 candle
+    harian terakhir yang SUDAH TUTUP pada saat candle sinyal ditutup, lalu
+    jalankan mesin zona yang sama (evaluate_daily_demand). Candle harian di
+    sini dirangkai dari candle interval simulasi, jadi nilainya identik dengan
+    candle harian asli Binance untuk rentang yang sama dan tidak ada unduhan
+    tambahan ke bursa.
+    """
+
+    def __init__(self, daily_klines: Sequence[Kline], config: dict) -> None:
+        from strategy import indicators as strategy_mod
+
+        self.config = config
+        self.interval = strategy_mod.daily_demand_interval(config)
+        self.window = strategy_mod.daily_demand_window_bars(config)
+        self.klines = list(daily_klines)
+        self.close_times = [int(k.close_time) for k in self.klines]
+
+    def window_at(self, signal_close_time_ms: int) -> list:
+        idx = bisect_right(self.close_times, int(signal_close_time_ms))
+        return self.klines[max(0, idx - self.window) : idx]
+
+    def daily_demand_at(self, signal_close_time_ms: int) -> dict:
+        """Verdict gerbang demand harian pada jendela yang sama dengan live."""
+        from strategy import indicators as strategy_mod
+
+        return strategy_mod.evaluate_daily_demand(
+            self.window_at(signal_close_time_ms), self.config
+        )
+
+
+def make_daily_lookup(
+    klines: Sequence[Kline],
+    config: dict,
+    interval: str,
+    *,
+    sudah_dirangkai: bool = False,
+) -> Optional[DailyDemandLookup]:
+    """Lookup gerbang demand harian untuk backtest (None kalau gerbang mati).
+
+    `sudah_dirangkai=True` dipakai kalau pemanggil sudah merangkai candle harian
+    sendiri (mis. jalur pencarian grid yang membagi data latih dan data uji),
+    supaya candle harian tidak dirangkai dua kali dan jendelanya tidak melar.
+    """
+    from strategy import indicators as strategy_mod
+
+    if not strategy_mod.daily_demand_enabled(config):
+        return None
+    bars = (
+        list(klines) if sudah_dirangkai else build_daily_klines(klines, config, interval)
+    )
+    return DailyDemandLookup(bars, config)
+
+
+def build_daily_klines(
+    klines: Sequence[Kline], config: dict, interval: str
+) -> list[Kline]:
+    """Candle harian untuk backtest, dirangkai dari candle interval simulasi."""
+    from strategy import indicators as strategy_mod
+
+    source_minutes = strategy_mod.INTERVAL_MINUTES.get(str(interval))
+    if source_minutes is None:
+        raise ValueError(
+            f"Interval simulasi '{interval}' tidak dikenal sehingga candle "
+            f"'{strategy_mod.daily_demand_interval(config)}' tidak bisa dirangkai."
+        )
+    return strategy_mod.aggregate_klines(
+        list(klines),
+        strategy_mod.daily_demand_interval_minutes(config),
+        source_minutes,
+    )
 
 
 def per_trade_metrics(trades: Sequence) -> dict:

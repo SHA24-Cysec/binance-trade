@@ -727,7 +727,16 @@ def _bt_simulation_interval(cfg: dict) -> str:
 def _bt_estimate_requests(days: int, max_symbols: int, cfg: dict) -> int:
     interval = _bt_simulation_interval(cfg)
     bars_per_hari = 1440 // bt.INTERVAL_MINUTES.get(interval, 5)
-    halaman = max(1, -(-(days + 1) * bars_per_hari // 1000))
+    # Rentang unduhan = periode uji + warmup gerbang timeframe tinggi, jadi warmup
+    # WAJIB ikut dihitung: gerbang demand harian default menambah sekitar 22 hari
+    # candle 5m (6336 bar) per simbol, dan tanpa itu estimasi request di layar
+    # akan jauh lebih kecil dari kenyataan.
+    try:
+        warmup_bars = pbt.parity.htf_gate_warmup_bars(cfg, interval)
+    except ValueError:
+        warmup_bars = 0
+    total_bars = (days + 1) * bars_per_hari + warmup_bars
+    halaman = max(1, -(-total_bars // 1000))
     return max_symbols * halaman
 
 
@@ -754,6 +763,33 @@ def _bt_trend_warmup_note(cfg: dict, interval: str) -> str:
     )
 
 
+def _bt_demand_harian_note(cfg: dict, interval: str) -> str:
+    """Kalimat keterangan warmup gerbang demand harian (kosong kalau nonaktif)."""
+    if not bool(cfg.get("DAILY_DEMAND_FILTER_ENABLED", False)):
+        return (
+            "Gerbang demand harian sedang NONAKTIF, jadi tidak ada candle harian yang "
+            "dirangkai dan tidak ada sinyal yang disaring olehnya."
+        )
+    try:
+        hari = pbt.parity.htf_gate_warmup_ms(cfg, interval) / float(bt.MS_PER_DAY)
+    except ValueError:
+        return (
+            "Gerbang demand harian aktif, tetapi intervalnya tidak sepadan dengan "
+            "interval simulasi sehingga backtest ini akan menolak berjalan."
+        )
+    return (
+        f"Gerbang demand harian {cfg.get('DAILY_DEMAND_INTERVAL', '1d')} aktif dan "
+        "dihitung terpisah dari lapisan H1. Candle hariannya dirangkai dari candle "
+        f"{interval} yang diunduh dari Binance, jadi tidak ada permintaan data "
+        f"terpisah, tetapi rentang unduhan ditarik sekitar {hari:.1f} hari lebih awal "
+        f"sebagai pemanasan ({hari:.1f} hari pertama rentang itu tidak menghasilkan "
+        "bar yang bisa ditradingkan). Candle harian yang jamnya bolong sebagian "
+        "dibuang di backtest, sedangkan bot live memakai candle harian asli dari "
+        "bursa. Lihat penghitung sinyal yang disaring gerbang demand harian pada "
+        "ringkasan di atas."
+    )
+
+
 def _bt_prepare_universe(
     job_id: str, cfg: dict, days: int, max_symbols: int, set_progress, cancelled
 ) -> dict:
@@ -761,21 +797,23 @@ def _bt_prepare_universe(
     bt.bars_per_day(interval)
     bar_ms = bt.INTERVAL_MINUTES[interval] * 60_000
     warmup_ms = bt.MS_PER_DAY + 30 * bar_ms
-    if bool(cfg.get("TREND_FILTER_ENABLED", False)):
-        try:
-            butuh_trend_ms = pbt.parity.trend_warmup_ms(cfg, interval)
-        except ValueError as exc:
-            raise bt.BacktestError(str(exc)) from exc
-        if butuh_trend_ms > warmup_ms:
-            logger.info(
-                "Warmup backtest dinaikkan dari %.1f jam menjadi %.1f jam karena "
-                "gerbang trend %s butuh %d candle trend tertutup.",
-                warmup_ms / 3_600_000.0,
-                butuh_trend_ms / 3_600_000.0,
-                cfg.get("TREND_INTERVAL", "1h"),
-                int(cfg.get("TREND_LOOKBACK_BARS", 120) or 120),
-            )
-            warmup_ms = butuh_trend_ms
+    try:
+        butuh_gerbang_ms = pbt.parity.htf_gate_warmup_ms(cfg, interval)
+    except ValueError as exc:
+        raise bt.BacktestError(str(exc)) from exc
+    if butuh_gerbang_ms > warmup_ms:
+        logger.info(
+            "Warmup backtest dinaikkan dari %.1f jam menjadi %.1f jam karena "
+            "gerbang trend/demand pada %s dan gerbang demand harian %s butuh "
+            "paling sedikit %d candle %s sebagai pemanasan.",
+            warmup_ms / 3_600_000.0,
+            butuh_gerbang_ms / 3_600_000.0,
+            cfg.get("TREND_INTERVAL", "1h"),
+            cfg.get("DAILY_DEMAND_INTERVAL", "1d"),
+            pbt.parity.htf_gate_warmup_bars(cfg, interval),
+            interval,
+        )
+        warmup_ms = butuh_gerbang_ms
 
     end_ms = int(time.time() * 1000)
     start_ms = end_ms - days * bt.MS_PER_DAY
@@ -1053,10 +1091,33 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "skips": int(getattr(result, "trend_skips", 0)),
                 "scans": int(getattr(result, "trend_scans", 0)),
             },
+            # Setelan gerbang demanda yang BENAR-BENAR dipakai simulasi ini, supaya
+            # angka penyaring di layar bisa diverifikasi tanpa menebak dari config.py.
+            "htf_demand": {
+                "enabled": bool(cfg.get("HTF_DEMAND_FILTER_ENABLED", False)),
+                "interval": cfg.get("TREND_INTERVAL", "1h"),
+                "lookback_bars": int(cfg.get("HTF_DEMAND_LOOKBACK_BARS", 72) or 72),
+                "zone_buffer_pct": float(cfg.get("HTF_DEMAND_ZONE_BUFFER_PCT", 1.5) or 0.0),
+                "max_distance_pct": float(cfg.get("HTF_DEMAND_MAX_DISTANCE_PCT", 20.0) or 0.0),
+                "min_close_position": float(cfg.get("HTF_DEMAND_MIN_CLOSE_POSITION", 0.4) or 0.0),
+                "skips": int(getattr(result, "htf_demand_skips", 0)),
+                "scans": int(getattr(result, "htf_demand_scans", 0)),
+            },
+            "daily_demand": {
+                "enabled": bool(cfg.get("DAILY_DEMAND_FILTER_ENABLED", False)),
+                "interval": cfg.get("DAILY_DEMAND_INTERVAL", "1d"),
+                "lookback_bars": int(cfg.get("DAILY_DEMAND_LOOKBACK_BARS", 20) or 20),
+                "zone_buffer_pct": float(cfg.get("DAILY_DEMAND_ZONE_BUFFER_PCT", 2.0) or 0.0),
+                "max_distance_pct": float(cfg.get("DAILY_DEMAND_MAX_DISTANCE_PCT", 12.0) or 0.0),
+                "min_close_position": float(cfg.get("DAILY_DEMAND_MIN_CLOSE_POSITION", 0.4) or 0.0),
+                "skips": int(getattr(result, "daily_demand_skips", 0)),
+                "scans": int(getattr(result, "daily_demand_scans", 0)),
+            },
             "trades": trades_out,
             "skipped": skipped_out,
             "warnings": (
                 list(result.warnings)
+                + _bt_peringatan_harian(cfg, days)
                 + (
                     [
                         f"Data BTC gagal diunduh ({prep.get('btc_error')}) sehingga filter BTC "
@@ -1110,7 +1171,8 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "dibuang, sedangkan live memakai candle asli dari bursa; dan riwayat EMA/ADX di "
                 "backtest dimulai dari awal rentang data yang diunduh, bukan riwayat penuh simbol. "
                 + _bt_trend_warmup_note(cfg, prep["interval"])
-                + "Filter live yang SUDAH disimulasikan dari candle: filter BTC (BTC_MAX_DROP_PCT, "
+                + _bt_demand_limitations(cfg, prep["interval"])
+                + " Filter live yang SUDAH disimulasikan dari candle: filter BTC (BTC_MAX_DROP_PCT, "
                 "memakai candle BTC historis), MAX_CHASE_PCT, MIN_SECONDS_BETWEEN_TRADES, "
                 "COOLDOWN_MINUTES_AFTER_CLOSE, equity stop (drawdown), stop harian, dan "
                 "CLOSE_ALL_AT_LIMIT. Kontrol akun dicek saat candle ditutup, bukan tiap "
@@ -1341,25 +1403,92 @@ def _bt_run_grid_job(
                 logger.debug("Gagal menutup klien backtest", exc_info=True)
 
 
+def _bt_demand_limitations(cfg: dict, interval: str) -> str:
+    """Paragraf batasan untuk kedua gerbang zona demand timeframe tinggi.
+
+    Dipisah sebagai fungsi supaya teks yang benar-benar dikirim ke layar bisa
+    diuji selftest, bukan disalin ulang di dua tempat.
+    """
+    return (
+        "Gerbang zona demand timeframe tinggi juga SUDAH disimulasikan dengan aturan "
+        "yang sama seperti bot live: lapisan H1 (HTF_DEMAND_*, memakai candle "
+        + str(cfg.get("TREND_INTERVAL", "1h"))
+        + " yang sudah tutup) dan lapisan harian (DAILY_DEMAND_*, candle "
+        + str(cfg.get("DAILY_DEMAND_INTERVAL", "1d"))
+        + " yang sudah tutup). Keduanya memakai mesin zona yang sama dengan filter "
+        "demand M5, hanya parameternya berbeda, keduanya diperiksa SETELAH gerbang "
+        "tren, dan keduanya fail closed bila candle tidak cukup. Penghitung "
+        "\"disaring X dari Y sinyal\" pada ringkasan hanya menghitung sinyal yang "
+        "SUDAH lolos gerbang sebelumnya: angka 0 berarti lapisan itu tidak pernah "
+        "diperiksa (karena gerbang di atasnya menolak lebih dulu), bukan berarti "
+        "lapisan itu meloloskan semuanya. "
+        + _bt_demand_harian_note(cfg, interval)
+    )
+
+
 def _bt_min_days_note(cfg: dict, interval: str) -> tuple[int, str]:
     """Berapa hari minimal supaya backtest masih menyisakan bar yang bisa ditradingkan.
 
-    Statistik 24 jam butuh satu hari, dan gerbang trend (kalau aktif) butuh
-    TREND_LOOKBACK_BARS candle trend tertutup. Tanpa rentang tambahan itu,
-    simulasi hanya berisi pemanasan dan hasilnya nol trade tanpa penjelasan.
+    Statistik 24 jam butuh satu hari, dan setiap gerbang timeframe tinggi yang
+    aktif (trend + demand H1 pada TREND_INTERVAL, serta demand harian pada
+    DAILY_DEMAND_INTERVAL) butuh riwayatnya sendiri sebagai pemanasan. Tanpa
+    rentang tambahan itu, simulasi hanya berisi pemanasan dan hasilnya nol
+    trade tanpa penjelasan. Kebutuhan yang dipakai adalah yang TERBESAR.
     """
     dasar = 2
-    if not bool(cfg.get("TREND_FILTER_ENABLED", False)):
-        return dasar, ""
+    if not bool(cfg.get("TREND_FILTER_ENABLED", False)) and not bool(
+        cfg.get("HTF_DEMAND_FILTER_ENABLED", False)
+    ):
+        return dasar, _bt_catatan_harian_min(cfg, interval)
     try:
         hari_warmup = pbt.parity.trend_warmup_ms(cfg, interval) / float(bt.MS_PER_DAY)
     except ValueError as exc:
         return dasar, str(exc)
     minimal = max(dasar, int(math.ceil(hari_warmup)) + 1)
     return minimal, (
-        f"Gerbang trend {cfg.get('TREND_INTERVAL', '1h')} butuh sekitar "
+        f"Gerbang timeframe tinggi {cfg.get('TREND_INTERVAL', '1h')} butuh sekitar "
         f"{hari_warmup:.1f} hari riwayat sebelum bar pertama bisa dievaluasi."
+        + _bt_catatan_harian_min(cfg, interval)
     )
+
+
+def _bt_catatan_harian_min(cfg: dict, interval: str) -> str:
+    """Catatan tambahan soal kebutuhan hari gerbang demand harian.
+
+    Gerbang demand harian TIDAK menaikkan jumlah hari minimum yang ditolak
+    (agar rentang pendek tetap bisa diuji), tetapi angkanya dilaporkan supaya
+    pengguna tahu berapa lama pemanasannya dan kapan rentang uji terlalu pendek
+    untuk menilai lapisan ini. Peringatannya sendiri menempel di hasil job.
+    """
+    if not bool(cfg.get("DAILY_DEMAND_FILTER_ENABLED", False)):
+        return ""
+    try:
+        hari_harian = pbt.parity.htf_gate_warmup_ms(cfg, interval) / float(bt.MS_PER_DAY)
+    except ValueError as exc:
+        return f" Gerbang demand harian: {exc}"
+    return (
+        f" Gerbang demand {cfg.get('DAILY_DEMAND_INTERVAL', '1d')} sendiri butuh "
+        f"sekitar {hari_harian:.1f} hari pemanasan (rentang itu otomatis ikut "
+        "diunduh), dan periode uji di bawah "
+        f"{pbt.parity.daily_demand_lookback_bars(cfg)} hari ditandai belum cukup "
+        "untuk menilai lapisan ini."
+    )
+
+
+def _bt_peringatan_harian(cfg: dict, days: int) -> list:
+    """Peringatan rentang uji terlalu pendek untuk gerbang demand harian."""
+    if not bool(cfg.get("DAILY_DEMAND_FILTER_ENABLED", False)):
+        return []
+    lookback = pbt.parity.daily_demand_lookback_bars(cfg)
+    if int(days) >= int(lookback):
+        return []
+    return [
+        f"Rentang uji {int(days)} hari lebih pendek dari jendela zona demand "
+        f"{cfg.get('DAILY_DEMAND_INTERVAL', '1d')} (lookback {lookback} hari). "
+        "Gerbang demand harian tetap dijalankan, tetapi hasilnya belum bisa "
+        "dinilai dari rentang sesingkat ini: perpanjang rentang hari atau "
+        "kecilkan DAILY_DEMAND_LOOKBACK_BARS."
+    ]
 
 
 @app.route("/api/backtest/start", methods=["POST"])
@@ -1799,6 +1928,28 @@ def api_backtest_defaults():
     out["grid_max_kombinasi"] = gs.MAX_KOMBINASI_PORTFOLIO
     out["grid_metrik"] = list(gs.METRIK_TERSEDIA)
     out["grid_params"] = list(GRID_PARAM_KEYS)
+    # Info pemanasan gerbang timeframe tinggi supaya perkiraan beban unduhan di
+    # layar (dan catatan tanggal minimal) memakai angka yang SAMA dengan yang
+    # benar-benar diunduh job, termasuk lapisan demand harian.
+    try:
+        out["warmup_bars"] = int(
+            pbt.parity.htf_gate_warmup_bars(
+                PUMP_CONFIG, _bt_simulation_interval(PUMP_CONFIG)
+            )
+        )
+    except ValueError:
+        out["warmup_bars"] = 0
+    out["warmup_days"] = round(
+        out["warmup_bars"] / float(bt.bars_per_day(_bt_simulation_interval(PUMP_CONFIG))),
+        1,
+    )
+    out["daily_demand_enabled"] = bool(
+        PUMP_CONFIG.get("DAILY_DEMAND_FILTER_ENABLED", False)
+    )
+    out["daily_demand_interval"] = PUMP_CONFIG.get("DAILY_DEMAND_INTERVAL", "1d")
+    out["daily_demand_lookback_bars"] = int(
+        PUMP_CONFIG.get("DAILY_DEMAND_LOOKBACK_BARS", 20) or 20
+    )
     return jsonify(out)
 
 
@@ -2308,13 +2459,18 @@ def selftest() -> int:
         if asli_klien is not None:
             globals()["BinanceSpotClient"] = asli_klien
 
-    # tanggal minimum: rentang hari tidak boleh habis untuk pemanasan saja
+
+    # tanggal minimum: rentang hari tidak boleh habis untuk pemanasan saja.
+    # Gerbang demand harian dimatikan dulu supaya uji ini murni mengukur kebutuhan
+    # gerbang trend; kebutuhan gerbang harian diuji terpisah di bawah.
     cfg_hari = dict(
         PUMP_CONFIG,
         TREND_FILTER_ENABLED=True,
         TREND_INTERVAL="1h",
         TREND_LOOKBACK_BARS=120,
         CONFIRM_INTERVAL="5m",
+        HTF_DEMAND_FILTER_ENABLED=False,
+        DAILY_DEMAND_FILTER_ENABLED=False,
     )
     minimal, catatan = _bt_min_days_note(cfg_hari, "5m")
     cek(
@@ -2338,6 +2494,78 @@ def selftest() -> int:
     _bt_days_guard(cfg_hari, minimal)
     _bt_days_guard(dict(cfg_hari, TREND_FILTER_ENABLED=False), 2)
     cek("rentang cukup dan filter nonaktif tetap diloloskan", True)
+
+    # Gerbang demand harian punya jendela terpanjang (default lookback 20 hari
+    # pada candle 1d berarti pemanasan sekitar 22 hari simulasi 5m). Pilihan
+    # produknya: rentang pendek TIDAK ditolak (biar tetap bisa diuji), tetapi
+    # kebutuhannya dilaporkan di catatan dan hasil job memberi peringatan keras.
+    cfg_harian_hari = dict(
+        cfg_hari, HTF_DEMAND_FILTER_ENABLED=True, DAILY_DEMAND_FILTER_ENABLED=True
+    )
+    minimal_harian, catatan_harian = _bt_min_days_note(cfg_harian_hari, "5m")
+    cek(
+        "catatan rentang hari menyebut kebutuhan pemanasan gerbang demand harian",
+        "1d" in catatan_harian and "22" in catatan_harian,
+        f"minimal {minimal_harian} hari | {catatan_harian[:70]}",
+    )
+    _bt_days_guard(cfg_harian_hari, 14)
+    cek(
+        "rentang 14 hari dengan gerbang demand harian tetap boleh dijalankan",
+        True,
+        f"minimal tetap {minimal_harian} hari",
+    )
+    peringatan_pendek = _bt_peringatan_harian(cfg_harian_hari, 14)
+    peringatan_panjang = _bt_peringatan_harian(cfg_harian_hari, 30)
+    cek(
+        "rentang uji lebih pendek dari lookback harian memunculkan peringatan",
+        len(peringatan_pendek) == 1
+        and "lookback 20 hari" in peringatan_pendek[0]
+        and not peringatan_panjang,
+        (peringatan_pendek[0][:70] if peringatan_pendek else "kosong"),
+    )
+    cek(
+        "tanpa gerbang demand harian tidak ada peringatan apa pun",
+        not _bt_peringatan_harian(dict(cfg_harian_hari, DAILY_DEMAND_FILTER_ENABLED=False), 2),
+    )
+    cek(
+        "catatan gerbang demand harian nonaktif menyebut nonaktif",
+        "NONAKTIF"
+        in _bt_demand_harian_note(
+            dict(cfg_hari, DAILY_DEMAND_FILTER_ENABLED=False), "5m"
+        ),
+    )
+    note_limitations = _bt_demand_limitations(
+        dict(
+            PUMP_CONFIG,
+            TREND_FILTER_ENABLED=True,
+            TREND_INTERVAL="1h",
+            DAILY_DEMAND_FILTER_ENABLED=True,
+        ),
+        "5m",
+    )
+    cek(
+        "keterangan batasan hasil menyebut kedua lapisan gerbang demand",
+        "HTF_DEMAND_" in note_limitations
+        and "DAILY_DEMAND_" in note_limitations
+        and "1d" in note_limitations
+        and _bt_demand_limitations(
+            dict(PUMP_CONFIG, DAILY_DEMAND_FILTER_ENABLED=False), "5m"
+        ).endswith("olehnya."),
+        note_limitations[:60],
+    )
+
+    # Estimasi request harus ikut menghitung warmup, bukan hanya periode uji.
+    est_tanpa_harian = _bt_estimate_requests(
+        30, 10, dict(PUMP_CONFIG, CONFIRM_INTERVAL="5m", DAILY_DEMAND_FILTER_ENABLED=False)
+    )
+    est_dengan_harian = _bt_estimate_requests(
+        30, 10, dict(PUMP_CONFIG, CONFIRM_INTERVAL="5m", DAILY_DEMAND_FILTER_ENABLED=True)
+    )
+    cek(
+        "estimasi request ikut menghitung warmup gerbang demand harian",
+        est_dengan_harian > est_tanpa_harian,
+        f"{est_tanpa_harian} -> {est_dengan_harian}",
+    )
 
     # --- peta rute dan smoke test HTTP ---
     # Penjaga kelas bug yang pernah lolos ke pengguna: fungsi bantu disisipkan tepat
@@ -2442,6 +2670,22 @@ def selftest() -> int:
             and "minimal" in isi2
             and "hari" in isi2,
             f"{resp2.status_code} {isi2[:60]}",
+        )
+
+        # Layar backtest memakai info pemanasan dari server supaya perkiraan beban
+        # unduhan dan catatan "minimal N hari" memakai angka yang sama dengan job.
+        resp_def = klien.get("/api/backtest/defaults", headers=kepala)
+        data_def = resp_def.get_json() or {}
+        cek(
+            "GET /api/backtest/defaults membawa info pemanasan gerbang demand",
+            resp_def.status_code == 200
+            and int(data_def.get("warmup_bars", 0)) >= 1440
+            and float(data_def.get("warmup_days", 0)) >= 5.0
+            and "daily_demand_interval" in data_def
+            and int(data_def.get("daily_demand_lookback_bars", 0)) == 20,
+            f"warmup_bars={data_def.get('warmup_bars')} "
+            f"warmup_days={data_def.get('warmup_days')} "
+            f"daily={data_def.get('daily_demand_enabled')}",
         )
 
         with _bt_jobs_lock:

@@ -83,6 +83,8 @@ class PortfolioResult:
     trend_scans: int = 0
     htf_demand_skips: int = 0
     htf_demand_scans: int = 0
+    daily_demand_skips: int = 0
+    daily_demand_scans: int = 0
 
 
 def select_universe(
@@ -274,10 +276,10 @@ class EntrySignalCache(dict):
     """Peta waktu candle -> (jumlah kandidat, daftar sinyal lolos).
 
     Turunan dict supaya pemanggil lama tetap bisa memakai operasi dict apa
-    adanya (len, iterasi, .get). Penghitung gerbang trend dan gerbang demand
-    H1 dibawa ikut supaya laporan hasil tetap jujur ketika sinyal dihitung
-    sekali lalu dipakai ulang oleh banyak kombinasi parameter exit (dashboard
-    dan grid).
+    adanya (len, iterasi, .get). Penghitung gerbang trend, gerbang demand H1,
+    dan gerbang demand harian dibawa ikut supaya laporan hasil tetap jujur
+    ketika sinyal dihitung sekali lalu dipakai ulang oleh banyak kombinasi
+    parameter exit (dashboard dan grid).
     """
 
     def __init__(self, *args, **kwargs) -> None:
@@ -288,6 +290,9 @@ class EntrySignalCache(dict):
         self.htf_demand_scans = 0
         self.htf_demand_skips = 0
         self.htf_demand_events: list = []
+        self.daily_demand_scans = 0
+        self.daily_demand_skips = 0
+        self.daily_demand_events: list = []
 
 
 def build_trend_lookups(
@@ -324,22 +329,64 @@ def build_trend_lookups(
     return lookups
 
 
+def build_daily_lookups(
+    store: KlineStore, symbols: list, config: dict, interval: str
+) -> dict:
+    """Siapkan jendela candle harian per simbol untuk gerbang demand harian.
+
+    Candle harian dirangkai dari candle interval simulasi yang sudah diunduh
+    (288 candle 5m per hari), jadi tidak ada unduhan tambahan ke Binance dan
+    nilainya identik dengan candle harian asli untuk rentang yang sama.
+    """
+    from strategy import indicators as strategy_mod
+
+    if not strategy_mod.daily_demand_enabled(config):
+        return {}
+    lookups: dict = {}
+    for sym in symbols:
+        klines = store.klines(sym)
+        if not klines:
+            continue
+        lookups[sym] = parity.DailyDemandLookup(
+            parity.build_daily_klines(klines, config, interval), config
+        )
+        del klines
+    return lookups
+
+
 def unpack_prebuilt(prebuilt: Optional[tuple]):
-    """Terima prebuilt 2 elemen (lama) atau 3 elemen (dengan lookup trend)."""
+    """Terima prebuilt 2, 3, atau 4 elemen (lama: tanpa lookup apa pun).
+
+    Urutannya: (timeline, series_of, lookup_gerbang_H1?, lookup_gerbang_harian?).
+    Bentuk lama tetap sah supaya pemanggil yang belum diperbarui tidak rusak.
+    """
     if prebuilt is None:
-        return None, None, None
-    if len(prebuilt) >= 3:
-        return prebuilt[0], prebuilt[1], prebuilt[2]
-    return prebuilt[0], prebuilt[1], None
+        return None, None, None, None
+    if len(prebuilt) >= 4:
+        return prebuilt[0], prebuilt[1], prebuilt[2], prebuilt[3]
+    if len(prebuilt) == 3:
+        return prebuilt[0], prebuilt[1], prebuilt[2], None
+    return prebuilt[0], prebuilt[1], None, None
 
 
 def _siapkan_trend(prebuilt, store, series_of, config, interval):
-    _, _, trend_of = unpack_prebuilt(prebuilt)
+    _, _, trend_of, _ = unpack_prebuilt(prebuilt)
     if trend_of is not None:
         return trend_of
-    if not config.get("TREND_FILTER_ENABLED", False):
+    if not config.get("TREND_FILTER_ENABLED", False) and not config.get(
+        "HTF_DEMAND_FILTER_ENABLED", False
+    ):
         return {}
     return build_trend_lookups(store, list(series_of), config, interval)
+
+
+def _siapkan_harian(prebuilt, store, series_of, config, interval):
+    _, _, _, daily_of = unpack_prebuilt(prebuilt)
+    if daily_of is not None:
+        return daily_of
+    if not config.get("DAILY_DEMAND_FILTER_ENABLED", False):
+        return {}
+    return build_daily_lookups(store, list(series_of), config, interval)
 
 
 def precompute_entry_signals(
@@ -388,16 +435,18 @@ def precompute_entry_signals(
     btc_lookup = parity.make_btc_lookup(btc_klines, config, bar_ms)
     gate_cfg = parity.gate_config(config, btc_lookup)
     trend_of = _siapkan_trend(prebuilt, store, series_of, config, interval)
-    if trend_of:
-        butuh_warmup = parity.trend_warmup_ms(config, interval)
+    daily_of = _siapkan_harian(prebuilt, store, series_of, config, interval)
+    if trend_of or daily_of:
+        butuh_warmup = parity.htf_gate_warmup_ms(config, interval)
         if int(warmup_ms) < butuh_warmup:
             logger.warning(
-                "Warmup %d ms dinaikkan menjadi %d ms karena gerbang timeframe tinggi "
-                "%s (trend + zona demand) butuh %d candle tertutup.",
+                "Warmup %d ms dinaikkan menjadi %d ms karena gerbang timeframe "
+                "tinggi yang aktif (trend + demand H1 + demand harian) butuh paling "
+                "sedikit %d candle %s sebagai pemanasan.",
                 warmup_ms,
                 butuh_warmup,
-                config.get("TREND_INTERVAL", "1h"),
-                strategy.htf_window_bars(config),
+                strategy.htf_gate_warmup_bars(config, interval),
+                interval,
             )
             warmup_ms = butuh_warmup
     first_allowed_time = timeline[0] + int(warmup_ms)
@@ -476,6 +525,19 @@ def precompute_entry_signals(
                         if len(signals.htf_demand_events) < max_skipped_records:
                             signals.htf_demand_events.append((int(t_now), sym))
                         continue
+            if (
+                setup.ok
+                and daily_of
+                and bool(config.get("DAILY_DEMAND_FILTER_ENABLED", False))
+            ):
+                lock = daily_of.get(sym)
+                if lock is not None and signal_candle is not None:
+                    signals.daily_demand_scans += 1
+                    if not lock.daily_demand_at(signal_candle.close_time)["ok"]:
+                        signals.daily_demand_skips += 1
+                        if len(signals.daily_demand_events) < max_skipped_records:
+                            signals.daily_demand_events.append((int(t_now), sym))
+                        continue
             if setup.ok:
                 lolos.append((rank, pct24, sym, index, vol24, setup))
 
@@ -541,7 +603,7 @@ def run_portfolio_backtest(
         raise BacktestError("Tidak ada data yang lolos policy semesta bersama.")
     lolos_policy = len(symbols)
 
-    timeline, series_of, _trend_prebuilt = unpack_prebuilt(prebuilt)
+    timeline, series_of, _trend_prebuilt, _daily_prebuilt = unpack_prebuilt(prebuilt)
     if timeline is None:
         timeline, series_of = build_timeline(store, interval, symbols)
     if not timeline:
@@ -579,16 +641,29 @@ def run_portfolio_backtest(
             "Status TRADING historis tidak tersedia dari candle Binance. Policy status hanya dapat diverifikasi dari metadata saat ini bila caller menyediakannya."
         )
     trend_of = _siapkan_trend(prebuilt, store, series_of, config, interval)
-    if trend_of:
-        _butuh_trend = parity.trend_warmup_ms(config, interval)
-        if int(warmup_ms) < _butuh_trend:
+    daily_of = _siapkan_harian(prebuilt, store, series_of, config, interval)
+    if trend_of or daily_of:
+        _butuh_gerbang = parity.htf_gate_warmup_ms(config, interval)
+        if int(warmup_ms) < _butuh_gerbang:
+            _bagian = []
+            if trend_of:
+                _bagian.append(
+                    f"gerbang timeframe tinggi {config.get('TREND_INTERVAL', '1h')} "
+                    f"(trend + zona demand) butuh {strategy.htf_window_bars(config)} candle "
+                    "tertutup"
+                )
+            if daily_of:
+                _bagian.append(
+                    f"gerbang zona demand {strategy.daily_demand_interval(config)} butuh "
+                    f"{strategy.daily_demand_window_bars(config)} candle "
+                    f"{strategy.daily_demand_interval(config)} tertutup"
+                )
             _pre_warnings.append(
-                f"Warmup {warmup_ms} ms dinaikkan menjadi {_butuh_trend} ms karena gerbang "
-                f"timeframe tinggi {config.get('TREND_INTERVAL', '1h')} (trend + zona "
-                f"demand) butuh {strategy.htf_window_bars(config)} candle tertutup sebelum "
-                "bar entry pertama. Unduhan data harus mencakup rentang warmup ini."
+                f"Warmup {warmup_ms} ms dinaikkan menjadi {_butuh_gerbang} ms karena "
+                f"{' dan '.join(_bagian)} sebelum bar entry pertama. Unduhan data harus "
+                "mencakup rentang warmup ini."
             )
-            warmup_ms = _butuh_trend
+            warmup_ms = _butuh_gerbang
     _butuh = strategy.required_lookback_bars(config)
     if int(config.get("CONFIRM_LOOKBACK_BARS", 0)) < _butuh:
         _pre_warnings.append(
@@ -630,6 +705,8 @@ def run_portfolio_backtest(
     trend_scans = 0
     htf_demand_skips = 0
     htf_demand_scans = 0
+    daily_demand_skips = 0
+    daily_demand_scans = 0
     max_chase_pct = float(config.get("MAX_CHASE_PCT", 0) or 0)
 
     controls = parity.AccountRiskControls(config, initial_equity)
@@ -642,6 +719,18 @@ def run_portfolio_backtest(
 
     first_allowed_time = timeline[0] + warmup_ms
     total_bars = len(timeline)
+    if daily_of:
+        _hari_uji = (int(timeline[-1]) - int(first_allowed_time)) / float(
+            MS_PER_MIN * 1440
+        )
+        if _hari_uji < float(strategy.daily_demand_lookback_bars(config)):
+            _pre_warnings.append(
+                f"Periode uji hanya sekitar {_hari_uji:.1f} hari, lebih pendek dari "
+                f"jendela zona demand harian "
+                f"({strategy.daily_demand_lookback_bars(config)} hari lookback). "
+                "Perpanjang rentang hari (atau kecilkan DAILY_DEMAND_LOOKBACK_BARS) "
+                "supaya gerbang harian benar-benar teruji."
+            )
 
     papan_input = []
     for sym in symbols:
@@ -656,6 +745,8 @@ def run_portfolio_backtest(
         trend_skips += int(getattr(entry_signal_cache, "trend_skips", 0))
         htf_demand_scans += int(getattr(entry_signal_cache, "htf_demand_scans", 0))
         htf_demand_skips += int(getattr(entry_signal_cache, "htf_demand_skips", 0))
+        daily_demand_scans += int(getattr(entry_signal_cache, "daily_demand_scans", 0))
+        daily_demand_skips += int(getattr(entry_signal_cache, "daily_demand_skips", 0))
         for waktu_event, simbol_event in getattr(
             entry_signal_cache, "trend_events", []
         ):
@@ -679,6 +770,19 @@ def run_portfolio_backtest(
                     time=waktu_event,
                     symbol=simbol_event,
                     reason="FILTER_HTF_DEMAND",
+                    holding=None,
+                )
+            )
+        for waktu_event, simbol_event in getattr(
+            entry_signal_cache, "daily_demand_events", []
+        ):
+            if len(skipped) >= max_skipped_records:
+                break
+            skipped.append(
+                SkippedSignal(
+                    time=waktu_event,
+                    symbol=simbol_event,
+                    reason="FILTER_DAILY_DEMAND",
                     holding=None,
                 )
             )
@@ -873,6 +977,22 @@ def run_portfolio_backtest(
                                     )
                                 )
                             continue
+                if daily_of and bool(config.get("DAILY_DEMAND_FILTER_ENABLED", False)):
+                    lock = daily_of.get(sym)
+                    if lock is not None:
+                        daily_demand_scans += 1
+                        if not lock.daily_demand_at(kl[i].close_time)["ok"]:
+                            daily_demand_skips += 1
+                            if len(skipped) < max_skipped_records:
+                                skipped.append(
+                                    SkippedSignal(
+                                        time=t_now,
+                                        symbol=sym,
+                                        reason="FILTER_DAILY_DEMAND",
+                                        holding=None,
+                                    )
+                                )
+                            continue
                 lolos.append((rank, pct, sym, i, vol24, setup))
 
             if not lolos:
@@ -1020,6 +1140,15 @@ def run_portfolio_backtest(
                     if trend_of and htf_demand_skips
                     else []
                 )
+                + (
+                    [
+                        f"{daily_demand_skips} dari {daily_demand_scans} sinyal konfirmasi "
+                        f"dilewati oleh gerbang zona demand "
+                        f"{config.get('DAILY_DEMAND_INTERVAL', '1d')}, sama seperti bot live."
+                    ]
+                    if daily_of and daily_demand_skips
+                    else []
+                )
             )
         ),
         initial_equity=initial_equity,
@@ -1030,6 +1159,8 @@ def run_portfolio_backtest(
         trend_scans=trend_scans,
         htf_demand_skips=htf_demand_skips,
         htf_demand_scans=htf_demand_scans,
+        daily_demand_skips=daily_demand_skips,
+        daily_demand_scans=daily_demand_scans,
     )
 
 
@@ -1140,6 +1271,8 @@ def summarize_portfolio(result: PortfolioResult) -> dict:
         "trend_scans": int(getattr(result, "trend_scans", 0)),
         "htf_demand_skips": int(getattr(result, "htf_demand_skips", 0)),
         "htf_demand_scans": int(getattr(result, "htf_demand_scans", 0)),
+        "daily_demand_skips": int(getattr(result, "daily_demand_skips", 0)),
+        "daily_demand_scans": int(getattr(result, "daily_demand_scans", 0)),
         **parity.per_trade_metrics(trades),
     }
 
@@ -1607,6 +1740,163 @@ def selftest() -> bool:
         "warmup trend otomatis dinaikkan dan dilaporkan",
         any("Warmup" in w for w in res_warmup.warnings),
         res_warmup.warnings[:1],
+    )
+
+
+    print("\nSelftest gerbang zona demand harian (D1) di portofolio")
+    cfg_harian_p = dict(
+        cfg,
+        DAILY_DEMAND_FILTER_ENABLED=True,
+        DAILY_DEMAND_INTERVAL="1d",
+        DAILY_DEMAND_LOOKBACK_BARS=3,
+        DAILY_DEMAND_ZONE_BUFFER_PCT=1.0,
+        DAILY_DEMAND_MAX_DISTANCE_PCT=8.0,
+        DAILY_DEMAND_MIN_CLOSE_POSITION=0.4,
+    )
+    BAR_HARI_P = 288
+
+    def _hari_datar_p(idx_hari: int, harga: float = 100.0) -> list:
+        return [
+            _mk(idx_hari * BAR_HARI_P + j, harga, harga * 1.001, harga * 0.999, harga)
+            for j in range(BAR_HARI_P)
+        ]
+
+    def _hari_naik_p(idx_hari: int, buka: float, tutup: float) -> list:
+        out = []
+        for j in range(BAR_HARI_P):
+            o = buka + (tutup - buka) * j / float(BAR_HARI_P)
+            c = buka + (tutup - buka) * (j + 1) / float(BAR_HARI_P)
+            out.append(
+                _mk(
+                    idx_hari * BAR_HARI_P + j,
+                    o,
+                    max(o, c) * 1.0005,
+                    min(o, c) * 0.9995,
+                    c,
+                )
+            )
+        return out
+
+    def _seri_harian_p(tutup_hari_sinyal: float) -> list:
+        """4 hari dasar + 1 hari sinyal harian + 1 hari penuh sinyal 5m."""
+        seri: list = []
+        for hari in range(4):
+            seri.extend(_hari_datar_p(hari))
+        seri.extend(_hari_naik_p(4, 100.0, tutup_hari_sinyal))
+        seri.extend(_hari_datar_p(5, tutup_hari_sinyal))
+        return seri
+
+    seri_jauh_p = _seri_harian_p(110.0)
+    seri_dasar_p = _seri_harian_p(100.7)
+
+    with KlineStore.from_klines({"AUSDT": seri_dasar_p}) as _st_p:
+        look_p = build_daily_lookups(_st_p, ["AUSDT"], cfg_harian_p, "5m")
+        look_mati = build_daily_lookups(
+            _st_p,
+            ["AUSDT"],
+            dict(cfg_harian_p, DAILY_DEMAND_FILTER_ENABLED=False),
+            "5m",
+        )
+        tl_p, seri_p = build_timeline(_st_p, "5m")
+        res_p_prebuilt4 = run_portfolio_backtest(
+            _st_p,
+            cfg_harian_p,
+            "5m",
+            warmup_ms=0,
+            prebuilt=(tl_p, seri_p, {}, look_p),
+        )
+    check(
+        "lookup harian dibangun hanya saat gerbang aktif",
+        set(look_p) == {"AUSDT"} and look_mati == {},
+        sorted(look_p),
+    )
+
+    res_p_jauh = _jalankan({"AUSDT": seri_jauh_p}, cfg_harian_p)
+    res_p_jauh_off = _jalankan(
+        {"AUSDT": seri_jauh_p}, dict(cfg_harian_p, DAILY_DEMAND_FILTER_ENABLED=False)
+    )
+    res_p_dasar = _jalankan({"AUSDT": seri_dasar_p}, cfg_harian_p)
+    check(
+        "gerbang demand harian memblokir entry portofolio saat harga jauh dari dasar harian",
+        len(res_p_jauh.trades) == 0 and res_p_jauh.daily_demand_skips >= 1,
+        f"{len(res_p_jauh.trades)} trade, {res_p_jauh.daily_demand_skips} disaring",
+    )
+    check(
+        "catatan FILTER_DAILY_DEMAND tersedia di daftar sinyal yang dilewati",
+        any(sk.reason == "FILTER_DAILY_DEMAND" for sk in res_p_jauh.skipped),
+        [sk.reason for sk in res_p_jauh.skipped][:3],
+    )
+    check(
+        "kontrol negatif: tanpa gerbang harian data yang sama tetap entry",
+        len(res_p_jauh_off.trades) >= 1,
+        len(res_p_jauh_off.trades),
+    )
+    # Pembanding kontrol harus memakai warmup yang sama: tanpa gerbang harian,
+    # warmup 0 membuat simulasi boleh entry sejak hari pertama, sehingga
+    # perbandingan entry time-nya bukan perbandingan keputusan gerbang.
+    _warmup_harian_p = parity.htf_gate_warmup_ms(cfg_harian_p, "5m")
+    with KlineStore.from_klines({"AUSDT": seri_dasar_p}) as _st_pb:
+        res_p_dasar_off = run_portfolio_backtest(
+            _st_pb,
+            dict(cfg_harian_p, DAILY_DEMAND_FILTER_ENABLED=False),
+            "5m",
+            warmup_ms=_warmup_harian_p,
+        )
+    check(
+        "reaksi dekat dasar harian tidak mengurangi trade sama sekali",
+        len(res_p_dasar.trades) >= 1
+        and res_p_dasar.daily_demand_skips == 0
+        and [t.entry_time for t in res_p_dasar.trades]
+        == [t.entry_time for t in res_p_dasar_off.trades],
+        f"{len(res_p_dasar.trades)} trade vs {len(res_p_dasar_off.trades)} tanpa gerbang, "
+        f"{res_p_dasar.daily_demand_skips} disaring",
+    )
+    check(
+        "ringkasan memuat penghitung demand harian",
+        {"daily_demand_skips", "daily_demand_scans"}
+        <= set(summarize_portfolio(res_p_jauh)),
+    )
+    check(
+        "warmup gerbang harian otomatis dinaikkan dan dilaporkan",
+        any("demand 1d" in w for w in res_p_jauh.warnings),
+        res_p_jauh.warnings[:1],
+    )
+    check(
+        "prebuilt 4 elemen (dengan lookup harian) sama dengan dihitung ulang",
+        len(res_p_prebuilt4.trades) == len(res_p_dasar.trades)
+        and res_p_prebuilt4.daily_demand_skips == res_p_dasar.daily_demand_skips,
+        f"{len(res_p_prebuilt4.trades)} vs {len(res_p_dasar.trades)} trade",
+    )
+
+    with KlineStore.from_klines({"AUSDT": seri_dasar_p}) as _st_pc:
+        cache_harian = precompute_entry_signals(_st_pc, cfg_harian_p, "5m", 0)
+        res_p_cache = run_portfolio_backtest(
+            _st_pc, cfg_harian_p, "5m", warmup_ms=0, entry_signal_cache=cache_harian
+        )
+    check(
+        "jalur sinyal yang di-cache memakai gerbang harian yang sama",
+        [t.entry_time for t in res_p_cache.trades]
+        == [t.entry_time for t in res_p_dasar.trades]
+        and res_p_cache.daily_demand_scans >= res_p_cache.daily_demand_skips,
+        f"{len(res_p_cache.trades)} vs {len(res_p_dasar.trades)} trade",
+    )
+
+    with KlineStore.from_klines({"AUSDT": seri_jauh_p}) as _st_pc2:
+        cache_jauh = precompute_entry_signals(_st_pc2, cfg_harian_p, "5m", 0)
+        res_p_cache_jauh = run_portfolio_backtest(
+            _st_pc2, cfg_harian_p, "5m", warmup_ms=0, entry_signal_cache=cache_jauh
+        )
+    check(
+        "penghitung gerbang harian ikut terbawa saat sinyal di-cache",
+        res_p_cache_jauh.daily_demand_skips >= 1
+        and res_p_cache_jauh.daily_demand_scans >= res_p_cache_jauh.daily_demand_skips
+        and any("gerbang zona demand" in w for w in res_p_cache_jauh.warnings),
+        f"{res_p_cache_jauh.daily_demand_skips} disaring dari "
+        f"{res_p_cache_jauh.daily_demand_scans} penilaian",
+    )
+    check(
+        "catatan FILTER_DAILY_DEMAND tersedia di jalur cache",
+        any(sk.reason == "FILTER_DAILY_DEMAND" for sk in res_p_cache_jauh.skipped),
     )
 
     print("\nHASIL: " + ("SEMUA LULUS" if ok_all else "ADA YANG GAGAL"))

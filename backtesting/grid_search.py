@@ -252,22 +252,33 @@ def run_grid_search(
     )
 
     interval_sim = str(base_config.get("CONFIRM_INTERVAL", "5m") or "5m")
-    trend_latih = trend_uji = None
-    if bool(base_config.get("TREND_FILTER_ENABLED", False)) or bool(
+    butuh_trend = bool(base_config.get("TREND_FILTER_ENABLED", False)) or bool(
         base_config.get("HTF_DEMAND_FILTER_ENABLED", False)
-    ):
-        try:
-            butuh_warmup = parity.trend_warmup_bars(base_config, interval_sim)
-        except ValueError as exc:
-            raise GridSearchError(str(exc)) from exc
-        if int(warmup_bars) < butuh_warmup:
-            hasil_grid.peringatan.append(
-                f"Warmup {warmup_bars} bar dinaikkan menjadi {butuh_warmup} bar karena "
+    )
+    butuh_harian = bool(base_config.get("DAILY_DEMAND_FILTER_ENABLED", False))
+    try:
+        butuh_warmup = parity.htf_gate_warmup_bars(base_config, interval_sim)
+    except ValueError as exc:
+        raise GridSearchError(str(exc)) from exc
+    if int(warmup_bars) < butuh_warmup:
+        bagian = []
+        if butuh_trend:
+            bagian.append(
                 f"gerbang timeframe tinggi {base_config.get('TREND_INTERVAL', '1h')} "
                 f"(trend + zona demand) butuh {parity_trend_window(base_config)} candle "
-                "tertutup. Unduhan data harus mencakup rentang warmup ini."
+                "tertutup"
             )
-            warmup_bars = butuh_warmup
+        if butuh_harian:
+            bagian.append(
+                f"gerbang zona demand {base_config.get('DAILY_DEMAND_INTERVAL', '1d')} "
+                f"butuh {parity.daily_demand_window_bars(base_config)} candle "
+                f"{base_config.get('DAILY_DEMAND_INTERVAL', '1d')} tertutup"
+            )
+        hasil_grid.peringatan.append(
+            f"Warmup {warmup_bars} bar dinaikkan menjadi {butuh_warmup} bar karena "
+            f"{' dan '.join(bagian)}. Unduhan data harus mencakup rentang warmup ini."
+        )
+        warmup_bars = butuh_warmup
 
     if rasio_latih >= 1.0:
         potong = n
@@ -285,10 +296,22 @@ def run_grid_search(
     hasil_grid.bar_latih = max(0, len(kl_latih) - warmup_bars)
     hasil_grid.bar_uji = max(0, len(kl_uji) - warmup_bars) if kl_uji else 0
 
-    if bool(base_config.get("TREND_FILTER_ENABLED", False)):
+    # Candle timeframe tinggi dirangkai sekali dari potongan data masing-masing
+    # periode (bukan dari seluruh rentang) supaya jendela tiap periode tidak
+    # melar melewati batasnya. Nilainya sama dengan candle asli Binance.
+    trend_latih = trend_uji = None
+    if butuh_trend:
         trend_latih = parity.build_trend_klines(kl_latih, base_config, interval_sim)
         trend_uji = (
             parity.build_trend_klines(kl_uji, base_config, interval_sim)
+            if kl_uji
+            else []
+        )
+    daily_latih = daily_uji = None
+    if butuh_harian:
+        daily_latih = parity.build_daily_klines(kl_latih, base_config, interval_sim)
+        daily_uji = (
+            parity.build_daily_klines(kl_uji, base_config, interval_sim)
             if kl_uji
             else []
         )
@@ -325,6 +348,7 @@ def run_grid_search(
                 warmup_bars,
                 btc_klines=btc_klines,
                 trend_klines=trend_latih,
+                daily_klines=daily_latih,
             )
             s_latih = bt.summarize(r_latih)
         except Exception:
@@ -352,6 +376,7 @@ def run_grid_search(
                     warmup_bars,
                     btc_klines=btc_klines,
                     trend_klines=trend_uji,
+                    daily_klines=daily_uji,
                 )
                 s_uji = bt.summarize(r_uji)
                 item.uji = s_uji
@@ -458,16 +483,18 @@ def run_portfolio_grid_search(
         )
 
     trend_of = pbt.build_trend_lookups(store, list(series_of), base_config, interval)
-    if trend_of:
-        butuh_warmup = parity.trend_warmup_ms(base_config, interval)
+    daily_of = pbt.build_daily_lookups(store, list(series_of), base_config, interval)
+    if trend_of or daily_of:
+        butuh_warmup = parity.htf_gate_warmup_ms(base_config, interval)
         if int(warmup_ms) < butuh_warmup:
             hasil_grid.peringatan.append(
                 f"Warmup {warmup_ms} ms dinaikkan menjadi {butuh_warmup} ms karena gerbang "
-                f"timeframe tinggi {base_config.get('TREND_INTERVAL', '1h')} (trend + zona "
-                f"demand) butuh {parity_trend_window(base_config)} candle tertutup."
+                f"timeframe tinggi yang aktif (trend + demand H1 + demand harian) butuh "
+                f"paling sedikit {parity.htf_gate_warmup_bars(base_config, interval)} "
+                f"candle {interval} sebagai pemanasan."
             )
             warmup_ms = butuh_warmup
-    prebuilt = (timeline, series_of, trend_of)
+    prebuilt = (timeline, series_of, trend_of, daily_of)
     dilewati = 0
     total = len(kombinasi)
 
@@ -820,6 +847,16 @@ def selftest() -> int:
                 "TREND_ADX_PERIOD": 14,
                 "TREND_ADX_MIN": 20.0,
                 "TREND_LOOKBACK_BARS": 120,
+                # Dua gerbang demand dimatikan di fixture ini supaya uji fokus pada
+                # gerbang trend. Warmup harian (default 21 hari x 288 candle 5m)
+                # jauh lebih panjang dari data uji sintetis di sini dan akan
+                # menghabiskan seluruh periode uji, sedangkan gerbang demand H1
+                # menolak seluruh sinyal pada seri drift buatan ini sehingga uji
+                # trend jadi tidak bisa membedakan apa pun (terbukti: sebelum baris
+                # ini ditambahkan, uji trend_off selalu 0 sinyal). Keduanya diuji
+                # khusus di bagian uji gerbang demand masing-masing.
+                "DAILY_DEMAND_FILTER_ENABLED": False,
+                "HTF_DEMAND_FILTER_ENABLED": False,
             }
         )
         return cfg
@@ -883,6 +920,106 @@ def selftest() -> int:
         "grid portofolio memakai gerbang trend yang sama",
         any("Warmup" in w for w in on_pf.peringatan) and 0 < total_on < total_off,
         f"trend_on={total_on} trend_off={total_off}",
+    )
+
+
+    print("\n=== SELFTEST grid_search.py: gerbang demand harian di jalur grid ===")
+    from backtesting.synthetic_data import make_candle as _mc
+
+    BAR_HARI_G = 288
+
+    def _hari_datar_g(idx_hari: int, harga: float = 100.0) -> list:
+        return [
+            _mc(idx_hari * BAR_HARI_G + j, harga, harga * 1.001, harga * 0.999, harga)
+            for j in range(BAR_HARI_G)
+        ]
+
+    def _hari_naik_g(idx_hari: int, buka: float, tutup: float) -> list:
+        out = []
+        for j in range(BAR_HARI_G):
+            o = buka + (tutup - buka) * j / float(BAR_HARI_G)
+            c = buka + (tutup - buka) * (j + 1) / float(BAR_HARI_G)
+            out.append(
+                _mc(
+                    idx_hari * BAR_HARI_G + j,
+                    o,
+                    max(o, c) * 1.0005,
+                    min(o, c) * 0.9995,
+                    c,
+                )
+            )
+        return out
+
+    def _seri_harian_g(tutup_hari_sinyal: float) -> list:
+        seri: list = []
+        for hari in range(4):
+            seri.extend(_hari_datar_g(hari))
+        seri.extend(_hari_naik_g(4, 100.0, tutup_hari_sinyal))
+        seri.extend(_hari_datar_g(5, tutup_hari_sinyal)[: BAR_HARI_G - 20])
+        blok, _harga, _i = blok_setup_volume(tutup_hari_sinyal, 5 * BAR_HARI_G + BAR_HARI_G - 20)
+        seri.extend(blok)
+        return seri
+
+    def konfig_harian(tutup_gate: bool) -> dict:
+        cfg = konfig(False)
+        cfg.update(
+            {
+                "DAILY_DEMAND_FILTER_ENABLED": True,
+                "DAILY_DEMAND_INTERVAL": "1d",
+                "DAILY_DEMAND_LOOKBACK_BARS": 3,
+                "DAILY_DEMAND_ZONE_BUFFER_PCT": 1.0,
+                "DAILY_DEMAND_MAX_DISTANCE_PCT": 8.0,
+                "DAILY_DEMAND_MIN_CLOSE_POSITION": 0.4,
+                "DEMAND_ZONE_FILTER_ENABLED": False,
+                "HTF_DEMAND_FILTER_ENABLED": False,
+            }
+        )
+        cfg["DAILY_DEMAND_FILTER_ENABLED"] = bool(tutup_gate)
+        return cfg
+
+    kl_jauh_g = _seri_harian_g(110.0)
+    kl_dasar_g = _seri_harian_g(100.7)
+    # Pembanding tanpa gerbang memakai warmup yang SAMA (1440 bar) supaya kedua
+    # jalur mulai menilai dari bar yang sama; kalau tidak, perbandingannya cuma
+    # mengukur perbedaan warmup, bukan keputusan gerbang hariannya.
+    warmup_harian_g = parity.htf_gate_warmup_bars(konfig_harian(True), "5m")
+    grid_jauh_on = run_grid_search(
+        kl_jauh_g, konfig_harian(True), spec, warmup_bars=0, min_trades=1, rasio_latih=0.6
+    )
+    grid_jauh_off = run_grid_search(
+        kl_jauh_g,
+        konfig_harian(False),
+        spec,
+        warmup_bars=warmup_harian_g,
+        min_trades=1,
+        rasio_latih=0.6,
+    )
+    grid_dasar_on = run_grid_search(
+        kl_dasar_g, konfig_harian(True), spec, warmup_bars=0, min_trades=1, rasio_latih=0.6
+    )
+    tr_jauh_on = total_trade(grid_jauh_on, "trades_latih") + total_trade(
+        grid_jauh_on, "trades_uji"
+    )
+    tr_jauh_off = total_trade(grid_jauh_off, "trades_latih") + total_trade(
+        grid_jauh_off, "trades_uji"
+    )
+    tr_dasar_on = total_trade(grid_dasar_on, "trades_latih") + total_trade(
+        grid_dasar_on, "trades_uji"
+    )
+    cek(
+        "gerbang demand harian memblokir sinyal di jalur grid",
+        tr_jauh_on == 0 and tr_jauh_off >= 1,
+        f"harian_on={tr_jauh_on} harian_off={tr_jauh_off}",
+    )
+    cek(
+        "warmup gerbang harian dilaporkan di peringatan",
+        any("demand 1d" in w for w in grid_jauh_on.peringatan),
+        grid_jauh_on.peringatan[:1],
+    )
+    cek(
+        "sinyal yang dekat dasar harian tetap dinilai (gerbang tidak memblokir semua)",
+        tr_dasar_on >= 1,
+        f"harian_on={tr_dasar_on}",
     )
 
     print(

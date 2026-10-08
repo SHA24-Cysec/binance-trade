@@ -1727,7 +1727,7 @@
                 id="btDays"
                 min="2"
                 value="30"
-                title="Hari pertama dipakai sebagai warmup statistik 24 jam, jadi minimal 2 hari. Kalau gerbang trend timeframe tinggi aktif (default 1h, jendela 120 candle), server meminta rentang lebih panjang supaya masih ada bar yang bisa ditradingkan: sekitar 7 hari untuk simulasi 5m, karena sekitar 5 hari pertama habis untuk pemanasan trend."
+                title="Hari pertama dipakai sebagai warmup statistik 24 jam, jadi minimal 2 hari. Gerbang timeframe tinggi meminta rentang lebih panjang supaya masih ada bar yang bisa ditradingkan: sekitar 7 hari untuk simulasi 5m saat gerbang trend 1h aktif, dan sekitar 23 hari saat gerbang demand harian (1d, lookback 20) aktif, karena pemanasannya paling lama. Data pemanasan itu otomatis ikut diunduh, dan kalau rentangnya lebih pendek dari lookback harian hasilnya tetap jalan tetapi diberi peringatan bahwa lapisan demand harian belum bisa dinilai."
                 oninput="btUpdateEstimate()"
               />
             </div>
@@ -2390,6 +2390,7 @@
       let _connWasDown = false;
 
       let _btVisibility = null;
+      let _btDefaults = null;
       let _btDefaultsLoaded = false;
 
       function applyBacktestVisibility(enabled){
@@ -2994,6 +2995,7 @@
             if(d && d.backtest_disabled) applyBacktestVisibility(false);
             return;
           }
+          _btDefaults = d;
           document.getElementById('btDays').value = d.default_days;
           document.getElementById('btExitMode').value = d.USE_ATR_EXIT ? 'atr' : 'fixed';
           document.getElementById('btAtrPeriod').value = d.ATR_PERIOD;
@@ -3064,7 +3066,11 @@
         const days = parseInt(document.getElementById('btDays').value || '0', 10);
         const sym = parseInt(document.getElementById('btMaxSymbols').value || '0', 10);
         if(!(days >= 2) || !(sym >= 2)){ el.textContent = ''; return; }
-        const barsPerSym = (days + 1) * 288;
+        // Pemanasan gerbang timeframe tinggi (trend, demand H1, demand harian)
+        // ikut diunduh, jadi angkanya datang dari server lewat /api/backtest/defaults
+        // supaya layar dan job yang benar-benar berjalan memakai hitungan yang sama.
+        const warmupBars = (_btDefaults && _btDefaults.warmup_bars) || 0;
+        const barsPerSym = (days + 1) * 288 + warmupBars;
         const reqPerSym = Math.ceil(barsPerSym / 1000);
         const totalReq = sym * reqPerSym;
         const weight = totalReq * 2;
@@ -3072,11 +3078,16 @@
         const warn = totalReq > 20000
           ? ' <b style="color:#f43f5e">Melebihi batas 20.000 request, kurangi simbol atau hari.</b>'
           : '';
+        const warmupInfo = warmupBars > 0
+          ? ' Sudah termasuk pemanasan gerbang timeframe tinggi (±'
+            + ((_btDefaults && _btDefaults.warmup_days) || (warmupBars / 288).toFixed(1))
+            + ' hari data tambahan per simbol).'
+          : '';
         el.innerHTML = 'Perkiraan beban: <b>' + sym.toLocaleString(LOCALE) + '</b> simbol x <b>'
           + reqPerSym + '</b> request = <b>' + totalReq.toLocaleString(LOCALE)
           + '</b> request ke Binance (bobot ' + weight.toLocaleString(LOCALE)
           + '). Perkiraan waktu unduh minimal <b>' + (mins < 1 ? '<1' : Math.ceil(mins))
-          + ' menit</b>.' + warn;
+          + ' menit</b>.' + warmupInfo + warn;
       }
 
       async function startBacktest(){
@@ -3624,7 +3635,10 @@
       function btReasonLabel(r){
         const key=String(r===null||r===undefined?'':r).toUpperCase();
         const map = {STOP_LOSS:'SL', TAKE_PROFIT:'TP', BREAKEVEN:'BE', TRAILING_STOP:'TRAIL',
-                     END_OF_DATA:'DATA HABIS', RISK_LIMIT_TRIGGERED:'BATAS RISIKO'};
+                     END_OF_DATA:'DATA HABIS', RISK_LIMIT_TRIGGERED:'BATAS RISIKO',
+                     FILTER_HTF_DEMAND:'GERBANG DEMAND H1',
+                     FILTER_DAILY_DEMAND:'GERBANG DEMAND D1',
+                     FILTER_TREND:'GERBANG TREND'};
         return esc(map[key] || key);
       }
 
@@ -3665,7 +3679,7 @@
           <div class="card ${riskTotal||s.chase_skips?'warn':''}"><div class="accent-bar"></div>
             <div class="label">Filter dan kontrol akun</div>
             <div class="value mono">${fmt(riskTotal+(re.forced_close||0)+(s.chase_skips||0),0)}</div>
-            <div class="sub">DD stop ${fmt(re.dd_stop||0,0)} · stop rugi harian ${fmt(re.daily_loss_stop||0,0)} · target profit ${fmt(re.daily_profit_stop||0,0)} · tutup paksa ${fmt(re.forced_close||0,0)} · chase dilewati ${fmt(s.chase_skips||0,0)}</div></div>
+            <div class="sub">DD stop ${fmt(re.dd_stop||0,0)} · stop rugi harian ${fmt(re.daily_loss_stop||0,0)} · target profit ${fmt(re.daily_profit_stop||0,0)} · tutup paksa ${fmt(re.forced_close||0,0)} · chase dilewati ${fmt(s.chase_skips||0,0)} · gerbang demand D1 ${fmt(((res.daily_demand||{}).skips)||0,0)} · gerbang trend ${fmt(((res.trend||{}).skips)||0,0)}</div></div>
           <div class="card"><div class="accent-bar"></div>
             <div class="label">Candle diproses</div>
             <div class="value mono">${fmt(res.bars_total,0)}</div>
@@ -3687,11 +3701,24 @@
              <div class="posrow"><span class="k">ATR multiplier Trail (start,step)</span><span class="v mono">${esc(p.ATR_MULT_TRAIL_START)},${esc(p.ATR_MULT_TRAIL)}</span></div>`
           : `<div class="posrow"><span class="k">Mode exit</span><span class="v mono">Persentase tetap</span></div>
              <div class="posrow"><span class="k">SL / TP / BE (trig,lock) / Trail (start,step)</span><span class="v mono" style="font-size:11.5px">${esc(p.SL_PCT)}% / ${esc(p.TP_PCT)}% / ${esc(p.BE_TRIGGER_PCT)}%,${esc(p.BE_LOCK_PCT)}% / ${esc(p.TRAILING_START_PCT)}%,${esc(p.TRAILING_STEP_PCT)}%</span></div>`;
+        const ddInfo = res.daily_demand || null;
+        const hdInfo = res.htf_demand || null;
+        const gateText = (g, labelInterval) => {
+          if(!g || !g.enabled) return 'nonaktif';
+          return 'aktif ' + esc(g.interval || labelInterval)
+            + ', lookback ' + fmt(g.lookback_bars, 0) + ' candle'
+            + ', jarak maks ' + fmt(g.max_distance_pct, 1) + '%'
+            + ', disaring ' + fmt(g.skips, 0) + ' dari ' + fmt(g.scans, 0) + ' sinyal';
+        };
+        const demandRows = (ddInfo || hdInfo) ? `
+          <div class="posrow"><span class="k">Gerbang demand H1</span><span class="v mono" style="font-size:11.5px">${gateText(hdInfo, '1h')}</span></div>
+          <div class="posrow"><span class="k">Gerbang demand D1</span><span class="v mono" style="font-size:11.5px">${gateText(ddInfo, '1d')}</span></div>` : '';
         document.getElementById('btInfoBox').innerHTML = `
           <div class="posrow"><span class="k">Semesta simbol</span><span class="v mono">${fmt(res.universe_with_data,0)} berhasil / ${fmt(res.universe_requested,0)} diminta${res.symbols_failed_count? ' ('+fmt(res.symbols_failed_count,0)+' gagal)':''}</span></div>
           <div class="posrow"><span class="k">Rentang data</span><span class="v mono" style="font-size:11.5px">${esc(res.start_time||'-')} &rarr; ${esc(res.end_time||'-')}</span></div>
           <div class="posrow"><span class="k">Titik waktu diproses</span><span class="v mono">${fmt(res.bars_total,0)} bar ${esc(res.interval)}</span></div>
           ${exitRows}
+          ${demandRows}
           <div style="border-top:1px solid var(--border);margin:4px 0"></div>
           ${reasonRows || '<div class="posrow"><span class="k mut">Tidak ada trade terjadi pada rentang & parameter ini.</span></div>'}
           ${(res.warnings&&res.warnings.length)? '<div style="border-top:1px solid var(--border);margin:4px 0"></div>'+res.warnings.map(w=>`<div class="posrow"><span class="k" style="color:var(--amber)">⚠ ${esc(w)}</span></div>`).join('') : ''}

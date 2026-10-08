@@ -44,20 +44,27 @@ _shutdown_requested = False
 _shutdown_event = threading.Event()
 
 
-class TrendCache:
-    """Penyedia candle trend timeframe tinggi (default H1) untuk gerbang entry.
+class HtfKlineCache:
+    """Penyedia candle timeframe tinggi yang SUDAH TUTUP untuk gerbang entry.
 
-    Perilaku yang dijaga:
+    Dua gerbang memakai basis yang sama, jadi logikanya tidak diduplikasi:
+
+      * TrendCache       -> candle TREND_INTERVAL (default 1h) untuk gerbang
+                            trend dan gerbang demand H1,
+      * DailyDemandCache -> candle DAILY_DEMAND_INTERVAL (default 1d) untuk
+                            gerbang demand harian.
+
+    Perilaku yang dijaga (identik untuk keduanya):
       * hanya candle yang SUDAH TUTUP yang dikembalikan (tanpa repaint),
-      * jendela yang dikembalikan adalah jendela gabungan timeframe tinggi
-        (gerbang trend + gerbang demand H1), sama seperti potongan jendela
-        TrendLookup di backtest; gerbang trend tetap memotong sendiri
-        jendelanya di evaluate_trend_filter,
-      * hasil disimpan selama candle trend terakhir belum berganti, jadi satu
-        simbol tidak diunduh berulang tiap scan,
+      * hasil disimpan selama candle terakhir belum berganti, jadi satu simbol
+        tidak diunduh berulang tiap scan; untuk candle harian artinya cukup
+        sekali sehari per simbol,
+      * jendela yang dikembalikan sudah dipotong ke ukuran yang sama dengan
+        potongan jendela di backtest (TrendLookup/DailyDemandLookup), sehingga
+        keputusan live dan backtest tidak bisa berbeda,
       * kegagalan pengambilan tidak pernah menghilangkan riwayat lama lalu
-        diam-diam meloloskan entry: pemanggil menerima None dan scanner
-        menolak kandidat (fail closed).
+        diam-diam meloloskan entry: pemanggil menerima daftar kosong atau
+        pengecualian, dan scanner menolak kandidat (fail closed).
     """
 
     def __init__(self, client, config: dict) -> None:
@@ -66,15 +73,35 @@ class TrendCache:
         self._lock = threading.RLock()
         self._cache: dict[str, tuple[int, list]] = {}
 
+    def interval(self) -> str:
+        """Interval candle gerbang ini. Wajib diisi kelas turunan."""
+        raise NotImplementedError
+
+    def window_bars(self) -> int:
+        """Jumlah candle tertutup yang dipakai gerbang ini. Wajib diisi kelas turunan."""
+        raise NotImplementedError
+
+    def verdict(self, symbol: str, now_ms: int) -> dict:
+        """Verdict gerbang untuk satu simbol. Wajib diisi kelas turunan."""
+        raise NotImplementedError
+
     def _interval_ms(self) -> int:
-        return strategy.trend_interval_minutes(self._config) * 60_000
+        return int(strategy.INTERVAL_MINUTES[self.interval()]) * 60_000
 
     def _last_closed_open_time(self, now_ms: int) -> int:
         step = self._interval_ms()
         return ((int(now_ms) // step) - 1) * step
 
     def window_klines(self, symbol: str, now_ms: int) -> list:
-        jendela = strategy.htf_window_bars(self._config)
+        jendela = self.window_bars()
+        if jendela <= 0:
+            # Gerbang nonaktif: jangan mengembalikan apa pun. Penjaga ini penting
+            # karena potongan Python `closed[-0:]` sama dengan `closed[0:]`, yaitu
+            # SELURUH riwayat, bukan nol candle. Dengan penjaga ini, kesalahan
+            # pemanggilan yang tidak seharusnya (mis. provider dipakai saat
+            # gerbang mati) berakhir sebagai penolakan biasa, bukan keputusan
+            # yang memakai seluruh riwayat.
+            return []
         terakhir_tutup = self._last_closed_open_time(now_ms)
         with self._lock:
             tersimpan = self._cache.get(symbol)
@@ -83,7 +110,7 @@ class TrendCache:
 
         raw = self._client.get_klines(
             symbol,
-            strategy.trend_interval(self._config),
+            self.interval(),
             limit=min(strategy.TREND_KLINE_LIMIT, jendela + 1),
         )
         closed = [
@@ -98,13 +125,39 @@ class TrendCache:
                 self._cache[symbol] = (int(siap[-1].open_time), siap)
         return list(siap)
 
-    def verdict(self, symbol: str, now_ms: int) -> dict:
-        jendela = self.window_klines(symbol, now_ms)
-        return strategy.evaluate_trend_filter(jendela, self._config)
-
     def provider(self, symbol: str) -> list:
         """Callable yang dipakai scanner.find_best_candidate()."""
         return self.window_klines(symbol, state_mod.now_ms())
+
+
+class TrendCache(HtfKlineCache):
+    """Candle TREND_INTERVAL untuk gerbang trend dan gerbang demand H1."""
+
+    def interval(self) -> str:
+        return strategy.trend_interval(self._config)
+
+    def window_bars(self) -> int:
+        return strategy.htf_window_bars(self._config)
+
+    def verdict(self, symbol: str, now_ms: int) -> dict:
+        return strategy.evaluate_trend_filter(
+            self.window_klines(symbol, now_ms), self._config
+        )
+
+
+class DailyDemandCache(HtfKlineCache):
+    """Candle DAILY_DEMAND_INTERVAL untuk gerbang demand harian."""
+
+    def interval(self) -> str:
+        return strategy.daily_demand_interval(self._config)
+
+    def window_bars(self) -> int:
+        return strategy.daily_demand_window_bars(self._config)
+
+    def verdict(self, symbol: str, now_ms: int) -> dict:
+        return strategy.evaluate_daily_demand(
+            self.window_klines(symbol, now_ms), self._config
+        )
 
 
 DEFAULT_STATE = {
@@ -3275,6 +3328,27 @@ def run(config: dict, lifecycle=None) -> int:
             "Gerbang demand %s NONAKTIF.",
             config.get("TREND_INTERVAL", "1h"),
         )
+    if config.get("DAILY_DEMAND_FILTER_ENABLED", False):
+        logger.info(
+            "Gerbang demand harian AKTIF (%s): entry lolos hanya kalau candle %s terakhir "
+            "yang sudah tutup bereaksi di dekat zona demand %s (lookback %d candle, jarak "
+            "maks %.2f%% dari atap zona, tebal zona min %.2f%%, close_pos min %.2f). "
+            "Candle harian diambil langsung dari Binance (tanpa menumpang cache trend) dan "
+            "disimpan sekali sehari per simbol. Kalau candle gagal diambil atau riwayatnya "
+            "kurang, kandidat DITOLAK (fail closed).",
+            config.get("DAILY_DEMAND_INTERVAL", "1d"),
+            config.get("DAILY_DEMAND_INTERVAL", "1d"),
+            config.get("DAILY_DEMAND_INTERVAL", "1d"),
+            strategy.daily_demand_lookback_bars(config),
+            float(config.get("DAILY_DEMAND_MAX_DISTANCE_PCT", 12.0) or 0.0),
+            float(config.get("DAILY_DEMAND_ZONE_BUFFER_PCT", 2.0) or 0.0),
+            float(config.get("DAILY_DEMAND_MIN_CLOSE_POSITION", 0.4) or 0.0),
+        )
+    else:
+        logger.info(
+            "Gerbang demand %s NONAKTIF.",
+            config.get("DAILY_DEMAND_INTERVAL", "1d"),
+        )
     logger.info("=" * 70)
 
     client = None
@@ -3385,10 +3459,13 @@ def run(config: dict, lifecycle=None) -> int:
         }
 
     trend_cache = TrendCache(client, config)
+    daily_cache = DailyDemandCache(client, config)
     butuh_candle_htf = bool(config.get("TREND_FILTER_ENABLED", False)) or bool(
         config.get("HTF_DEMAND_FILTER_ENABLED", False)
     )
+    butuh_candle_harian = bool(config.get("DAILY_DEMAND_FILTER_ENABLED", False))
     trend_provider = trend_cache.provider if butuh_candle_htf else None
+    daily_provider = daily_cache.provider if butuh_candle_harian else None
     if trend_provider is None:
         logger.warning(
             "Gerbang timeframe tinggi NONAKTIF (TREND_FILTER_ENABLED=False dan "
@@ -3405,6 +3482,20 @@ def run(config: dict, lifecycle=None) -> int:
             int(config.get("TREND_ADX_PERIOD", 14)),
             float(config.get("TREND_ADX_MIN", 20.0) or 0.0),
             strategy.trend_window_bars(config),
+        )
+    if daily_provider is None:
+        logger.info(
+            "Gerbang demand %s NONAKTIF: tidak ada permintaan candle harian ke Binance.",
+            config.get("DAILY_DEMAND_INTERVAL", "1d"),
+        )
+    else:
+        logger.info(
+            "Gerbang demand %s AKTIF: jendela %d candle %s tertutup per simbol, "
+            "di-cache sampai candle harian berganti (fail closed bila data gagal "
+            "diambil).",
+            strategy.daily_demand_interval(config),
+            strategy.daily_demand_window_bars(config),
+            strategy.daily_demand_interval(config),
         )
 
     exit_code = 0
@@ -3564,6 +3655,7 @@ def run(config: dict, lifecycle=None) -> int:
                         klines_fetcher_many=klines_fetcher_many,
                         prewarm_fn=client.prewarm_book_ticker,
                         trend_provider=trend_provider,
+                        daily_provider=daily_provider,
                     )
                     if best:
                         book = client.get_book_ticker(best.symbol)
@@ -3607,6 +3699,12 @@ def run(config: dict, lifecycle=None) -> int:
                                     best.htf_demand.get("interval")
                                     or strategy.trend_interval(config),
                                     best.htf_demand.get("reason"),
+                                )
+                            if best.daily_demand is not None:
+                                trend_info += " | demand %s: %s" % (
+                                    best.daily_demand.get("interval")
+                                    or strategy.daily_demand_interval(config),
+                                    best.daily_demand.get("reason"),
                                 )
                             logger.info(
                                 "Kandidat terpilih: %s (vol24h=%.0f, 24h=%.2f%%, spread=%.3f%%) | %s%s",
@@ -3662,12 +3760,31 @@ def run(config: dict, lifecycle=None) -> int:
                                 config["MAX_SPREAD_PCT"],
                             )
                     else:
-                        if trend_provider is not None:
+                        # Pesan ini menyebut SEMUA gerbang yang aktif saat scan, bukan
+                        # hanya gerbang trend: kandidat juga bisa ditolak lapisan demand
+                        # H1 atau demand harian, dan tanpa itu penyebabnya tidak terbaca
+                        # dari log (pengguna hanya melihat "tidak ada kandidat").
+                        gerbang_aktif = []
+                        if bool(config.get("TREND_FILTER_ENABLED", False)):
+                            gerbang_aktif.append(
+                                f"gerbang trend {strategy.trend_interval(config)}"
+                            )
+                        if bool(config.get("HTF_DEMAND_FILTER_ENABLED", False)):
+                            gerbang_aktif.append(
+                                "gerbang zona demand "
+                                f"{strategy.trend_interval(config)}"
+                            )
+                        if bool(config.get("DAILY_DEMAND_FILTER_ENABLED", False)):
+                            gerbang_aktif.append(
+                                "gerbang zona demand "
+                                f"{strategy.daily_demand_interval(config)}"
+                            )
+                        if gerbang_aktif:
                             logger.info(
-                                "Tidak ada kandidat yang lolos konfirmasi %s dan gerbang "
-                                "trend %s pada scan ini.",
+                                "Tidak ada kandidat yang lolos konfirmasi %s dan %s pada "
+                                "scan ini.",
                                 config["CONFIRM_INTERVAL"],
-                                strategy.trend_interval(config),
+                                " serta ".join(gerbang_aktif),
                             )
                         else:
                             logger.info(
@@ -3767,8 +3884,12 @@ def run(config: dict, lifecycle=None) -> int:
 def selftest() -> None:
     import tempfile
 
-    assert PUMP_CONFIG.get("PUMP_MIN_24H_CHANGE_PCT") == 5.0
-    assert PUMP_CONFIG.get("PUMP_MAX_24H_CHANGE_PCT") == 10.0
+    # Nilai default di bawah ini disinkronkan dengan config/config.py. Sebelum
+    # disinkronkan, selftest ini berhenti di baris pertama (AssertionError) karena
+    # commit "Optimasi min max kenaikan 24h" mengubah default 5/10 -> 2/20 tanpa
+    # memperbarui assertion, sehingga seluruh selftest bot tidak pernah berjalan.
+    assert PUMP_CONFIG.get("PUMP_MIN_24H_CHANGE_PCT") == 2.0
+    assert PUMP_CONFIG.get("PUMP_MAX_24H_CHANGE_PCT") == 20.0
     assert PUMP_CONFIG.get("BTC_FILTER_ENABLED") is False
     assert PUMP_CONFIG.get("TOP_N_CANDIDATES_TO_CONFIRM") == 30
     assert PUMP_CONFIG.get("ROLLING_VOLUME_SURGE_MULT") == 1.3
@@ -3790,8 +3911,14 @@ def selftest() -> None:
     assert PUMP_CONFIG.get("HTF_DEMAND_FILTER_ENABLED") is True
     assert PUMP_CONFIG.get("HTF_DEMAND_LOOKBACK_BARS") == 72
     assert PUMP_CONFIG.get("HTF_DEMAND_ZONE_BUFFER_PCT") == 1.5
-    assert PUMP_CONFIG.get("HTF_DEMAND_MAX_DISTANCE_PCT") == 10.0
+    assert PUMP_CONFIG.get("HTF_DEMAND_MAX_DISTANCE_PCT") == 20.0
     assert PUMP_CONFIG.get("HTF_DEMAND_MIN_CLOSE_POSITION") == 0.4
+    assert PUMP_CONFIG.get("DAILY_DEMAND_FILTER_ENABLED") is True
+    assert PUMP_CONFIG.get("DAILY_DEMAND_INTERVAL") == "1d"
+    assert PUMP_CONFIG.get("DAILY_DEMAND_LOOKBACK_BARS") == 20
+    assert PUMP_CONFIG.get("DAILY_DEMAND_ZONE_BUFFER_PCT") == 2.0
+    assert PUMP_CONFIG.get("DAILY_DEMAND_MAX_DISTANCE_PCT") == 12.0
+    assert PUMP_CONFIG.get("DAILY_DEMAND_MIN_CLOSE_POSITION") == 0.4
 
     cfg = dict(PUMP_CONFIG)
     cfg["STATE_FILE"] = os.path.join(
@@ -5548,6 +5675,193 @@ def selftest() -> None:
         "           data kurang/error fail closed, jendela mengikuti lookback terbesar,"
     )
     print("           nonaktif -> tanpa panggilan tambahan -> OK")
+
+
+    print("\n=== SELFTEST: gerbang zona demand harian (DAILY_DEMAND_*) ===")
+    # cfg_konfirmasi tidak memuat kunci DAILY_DEMAND_* sehingga gerbang harian
+    # mati di seluruh seksi lain; hanya seksi ini yang mengaktifkannya dengan
+    # parameter kecil supaya fixture pendek tetap cukup.
+    cfg_daily_bot = dict(
+        cfg_konfirmasi,
+        DAILY_DEMAND_FILTER_ENABLED=True,
+        DAILY_DEMAND_INTERVAL="1d",
+        DAILY_DEMAND_LOOKBACK_BARS=3,
+        DAILY_DEMAND_ZONE_BUFFER_PCT=1.0,
+        DAILY_DEMAND_MAX_DISTANCE_PCT=8.0,
+        DAILY_DEMAND_MIN_CLOSE_POSITION=0.4,
+    )
+    MS_HARI = 86_400_000
+    NOW_HARIAN = NOW_T
+
+    def _baris_harian_dasar(lonjakan: bool = False, sekarang_ms: int = 0) -> list:
+        """Candle harian: 4 hari dasar datar + 1 hari reaksi terakhir yang sudah tutup."""
+        batas = ((int(sekarang_ms) // MS_HARI) - 1) * MS_HARI
+        rows = []
+        for i in range(5):
+            open_time = batas - (4 - i) * MS_HARI
+            if i < 4:
+                o, h, l, c = 99.9, 100.2, 99.8, 100.0
+            elif lonjakan:
+                o, h, l, c = 100.0, 111.0, 99.9, 110.0
+            else:
+                o, h, l, c = 100.0, 101.2, 99.9, 101.0
+            rows.append(
+                [
+                    open_time,
+                    str(o),
+                    str(h),
+                    str(l),
+                    str(c),
+                    "1000",
+                    open_time + MS_HARI - 1,
+                    str(c * 1000),
+                    10,
+                    "500",
+                    "500000",
+                    "0",
+                ]
+            )
+        return rows
+
+    class KlienHarian:
+        def __init__(self, rows, gagal: bool = False):
+            self.rows = rows
+            self.calls = 0
+            self.gagal = gagal
+            self.limit_terakhir = None
+            self.interval_terakhir = None
+
+        def get_klines(
+            self, symbol, interval, limit=500, start_time_ms=None, end_time_ms=None
+        ):
+            self.calls += 1
+            self.limit_terakhir = limit
+            self.interval_terakhir = interval
+            if self.gagal:
+                raise RuntimeError("rate limit Binance")
+            return [list(r) for r in self.rows][-limit:]
+
+    klien_dasar_h = KlienHarian(_baris_harian_dasar(False, NOW_HARIAN))
+    klien_lonjak_h = KlienHarian(_baris_harian_dasar(True, NOW_HARIAN))
+    cache_dasar_h = DailyDemandCache(klien_dasar_h, cfg_daily_bot)
+    cache_lonjak_h = DailyDemandCache(klien_lonjak_h, cfg_daily_bot)
+
+    jendela_h = cache_dasar_h.window_klines("DASARUSDT", NOW_HARIAN)
+    assert len(jendela_h) == 4, len(jendela_h)
+    assert klien_dasar_h.interval_terakhir == "1d", klien_dasar_h.interval_terakhir
+    assert klien_dasar_h.limit_terakhir == 5, klien_dasar_h.limit_terakhir
+    assert all(
+        k.close_time < NOW_HARIAN for k in jendela_h
+    ), "hanya candle harian tertutup yang boleh dipakai"
+    cache_dasar_h.window_klines("DASARUSDT", NOW_HARIAN)
+    assert klien_dasar_h.calls == 1, "candle harian harus di-cache, bukan diunduh ulang"
+    assert cache_dasar_h.verdict("DASARUSDT", NOW_HARIAN)["ok"]
+
+    verdict_dasar_h = scanner.daily_demand_verdict(
+        "DASARUSDT", cfg_daily_bot, lambda s: cache_dasar_h.window_klines(s, NOW_HARIAN)
+    )
+    verdict_lonjak_h = scanner.daily_demand_verdict(
+        "LONJAKUSDT",
+        cfg_daily_bot,
+        lambda s: cache_lonjak_h.window_klines(s, NOW_HARIAN),
+    )
+    assert (
+        verdict_dasar_h["ok"] and verdict_dasar_h["interval"] == "1d"
+    ), verdict_dasar_h["reason"]
+    assert verdict_dasar_h["bars"] == 4, verdict_dasar_h
+    assert (
+        not verdict_lonjak_h["ok"] and "terlalu jauh" in verdict_lonjak_h["reason"]
+    ), verdict_lonjak_h["reason"]
+
+    def _rusak_harian(_simbol):
+        raise RuntimeError("jaringan putus")
+
+    verdict_rusak_h = scanner.daily_demand_verdict(
+        "XUSDT", cfg_daily_bot, _rusak_harian
+    )
+    verdict_tanpa_h = scanner.daily_demand_verdict("XUSDT", cfg_daily_bot, None)
+    assert (
+        not verdict_rusak_h["ok"] and "gagal diambil" in verdict_rusak_h["reason"]
+    ), verdict_rusak_h["reason"]
+    assert (
+        not verdict_tanpa_h["ok"] and "tidak tersedia" in verdict_tanpa_h["reason"]
+    ), verdict_tanpa_h["reason"]
+    assert scanner.daily_demand_verdict(
+        "XUSDT", dict(cfg_daily_bot, DAILY_DEMAND_FILTER_ENABLED=False), _rusak_harian
+    )["ok"], "gerbang nonaktif tidak boleh memanggil penyedia candle"
+
+    # Integrasi pemilihan kandidat: konfirmasi 5m fixture sudah lolos, gerbang
+    # harian yang menentukan.
+    pilih_harian_ok = scanner.find_best_candidate(
+        ticker_konfirmasi,
+        _serial,
+        cfg_daily_bot,
+        None,
+        daily_provider=lambda s: cache_dasar_h.window_klines(s, NOW_HARIAN),
+    )
+    assert (
+        pilih_harian_ok is not None
+        and pilih_harian_ok.daily_demand is not None
+        and pilih_harian_ok.daily_demand["ok"]
+    ), pilih_harian_ok
+    assert (
+        "demand zone valid" in pilih_harian_ok.confirm_reason
+    ), pilih_harian_ok.confirm_reason
+
+    pilih_harian_tolak = scanner.find_best_candidate(
+        ticker_konfirmasi,
+        _serial,
+        cfg_daily_bot,
+        None,
+        daily_provider=lambda s: cache_lonjak_h.window_klines(s, NOW_HARIAN),
+    )
+    assert (
+        pilih_harian_tolak is None
+    ), "harga yang sudah jauh di atas dasar harian harus menolak semua kandidat"
+
+    klien_pendek_h = KlienHarian(_baris_harian_dasar(False, NOW_HARIAN)[-2:])
+    cache_pendek_h = DailyDemandCache(klien_pendek_h, cfg_daily_bot)
+    pilih_kurang_h = scanner.find_best_candidate(
+        ticker_konfirmasi,
+        _serial,
+        cfg_daily_bot,
+        None,
+        daily_provider=lambda s: cache_pendek_h.window_klines(s, NOW_HARIAN),
+    )
+    assert pilih_kurang_h is None, "riwayat harian kurang harus fail closed, bukan lolos"
+
+    panggilan_h = {"n": 0}
+
+    def provider_hitung_h(_simbol):
+        panggilan_h["n"] += 1
+        return cache_dasar_h.window_klines(_simbol, NOW_HARIAN)
+
+    pilih_harian_mati = scanner.find_best_candidate(
+        ticker_konfirmasi,
+        _serial,
+        dict(cfg_daily_bot, DAILY_DEMAND_FILTER_ENABLED=False),
+        None,
+        daily_provider=provider_hitung_h,
+    )
+    assert (
+        pilih_harian_mati is not None and panggilan_h["n"] == 0
+    ), "gerbang nonaktif tidak boleh menambah panggilan penyedia candle harian"
+
+    klien_gagal_h = KlienHarian([], gagal=True)
+    cache_gagal_h = DailyDemandCache(klien_gagal_h, cfg_daily_bot)
+    try:
+        cache_gagal_h.window_klines("XUSDT", NOW_HARIAN)
+    except RuntimeError as exc:
+        assert "rate limit" in str(exc)
+    else:
+        raise AssertionError("kegagalan pengambilan candle harian harus terlihat")
+    print(
+        "  zona harian: reaksi di dekat dasar lolos, harga sudah terbang ditolak,"
+    )
+    print(
+        "               data kurang/error fail closed, cache sekali per hari,"
+    )
+    print("               nonaktif -> tanpa panggilan tambahan -> OK")
 
     print("\nSEMUA SELFTEST LULUS.")
     print("(Selftest ini TIDAK menghubungi Binance sama sekali -- murni logika lokal.)")

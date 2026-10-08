@@ -57,6 +57,7 @@ class BacktestResult:
     chase_skips: int = 0
     trend_skips: int = 0
     htf_demand_skips: int = 0
+    daily_demand_skips: int = 0
 
 
 def bars_per_day(interval: str) -> int:
@@ -175,6 +176,7 @@ def run_backtest(
     progress_cb: Optional[Callable[[float], None]] = None,
     btc_klines: Optional[list[Kline]] = None,
     trend_klines: Optional[list[Kline]] = None,
+    daily_klines: Optional[list[Kline]] = None,
 ) -> BacktestResult:
     interval = config.get("CONFIRM_INTERVAL", "5m")
     window = bars_per_day(interval)
@@ -190,6 +192,8 @@ def run_backtest(
     trend_skips = 0
     htf_demand_scans = 0
     htf_demand_skips = 0
+    daily_demand_scans = 0
+    daily_demand_skips = 0
 
     initial_equity = initial_backtest_equity(config)
     symbol = str(config.get("_symbol", "") or "")
@@ -248,13 +252,29 @@ def run_backtest(
         interval,
         sudah_dirangkai=trend_klines is not None,
     )
-    if trend_lookup is not None:
-        butuh_warmup = strategy.trend_warmup_bars(config, interval)
+    daily_lookup = parity.make_daily_lookup(
+        daily_klines if daily_klines is not None else klines,
+        config,
+        interval,
+        sudah_dirangkai=daily_klines is not None,
+    )
+    if trend_lookup is not None or daily_lookup is not None:
+        butuh_warmup = strategy.htf_gate_warmup_bars(config, interval)
         if int(warmup_bars) < butuh_warmup:
+            bagian = []
+            if trend_lookup is not None:
+                bagian.append(
+                    f"gerbang timeframe tinggi {config.get('TREND_INTERVAL', '1h')} "
+                    f"(trend + zona demand) butuh {trend_lookup.window} candle tertutup"
+                )
+            if daily_lookup is not None:
+                bagian.append(
+                    f"gerbang zona demand {daily_lookup.interval} butuh "
+                    f"{daily_lookup.window} candle {daily_lookup.interval} tertutup"
+                )
             warnings.append(
                 f"Warmup {warmup_bars} bar {interval} dinaikkan menjadi {butuh_warmup} bar "
-                f"karena gerbang timeframe tinggi {config.get('TREND_INTERVAL', '1h')} "
-                f"(trend + zona demand) butuh {trend_lookup.window} candle tertutup. "
+                f"karena {' dan '.join(bagian)}. "
                 "Naikkan warmup di pemanggil (atau perpanjang rentang data) supaya "
                 "backtest dan live memakai riwayat yang sama."
             )
@@ -262,6 +282,17 @@ def run_backtest(
 
     i = max(warmup_bars, window - 1, lookback)
     start_idx = i
+    if daily_lookup is not None:
+        hari_uji = max(0.0, (n - start_idx) / float(bars_per_day(interval)))
+        if hari_uji < float(strategy.daily_demand_lookback_bars(config)):
+            warnings.append(
+                f"Periode uji hanya {hari_uji:.1f} hari (bar {start_idx}..{n - 1}), lebih "
+                f"pendek dari jendela zona demand harian "
+                f"({strategy.daily_demand_lookback_bars(config)} hari lookback). Rentang "
+                "hari yang diuji terlalu pendek untuk menguji gerbang harian secara "
+                "berarti: perpanjang --days supaya mencakup beberapa kali rotasi zona "
+                "harian, atau kecilkan DAILY_DEMAND_LOOKBACK_BARS."
+            )
 
     while i < n:
         if progress_cb and i % 200 == 0:
@@ -306,6 +337,17 @@ def run_backtest(
                     verdict_htf = trend_lookup.htf_demand_at(candle.close_time)
                     if not verdict_htf["ok"]:
                         htf_demand_skips += 1
+                        i += 1
+                        continue
+                if (
+                    setup.ok
+                    and daily_lookup is not None
+                    and bool(config.get("DAILY_DEMAND_FILTER_ENABLED", False))
+                ):
+                    daily_demand_scans += 1
+                    verdict_daily = daily_lookup.daily_demand_at(candle.close_time)
+                    if not verdict_daily["ok"]:
+                        daily_demand_skips += 1
                         i += 1
                         continue
                 if setup.ok:
@@ -454,6 +496,15 @@ def run_backtest(
             f"{float(config.get('HTF_DEMAND_MAX_DISTANCE_PCT', 10.0) or 0.0):g}% dari atap "
             "zona), sama seperti bot live."
         )
+    if daily_lookup is not None and daily_demand_skips:
+        warnings.append(
+            f"{daily_demand_skips} dari {daily_demand_scans} sinyal konfirmasi dilewati "
+            f"oleh gerbang zona demand {daily_lookup.interval} "
+            f"(lookback {strategy.daily_demand_lookback_bars(config)} candle, "
+            f"jarak maks "
+            f"{float(config.get('DAILY_DEMAND_MAX_DISTANCE_PCT', 12.0) or 0.0):g}% dari "
+            "atap zona), sama seperti bot live."
+        )
     result = BacktestResult(
         symbol=config.get("_symbol", "?"),
         interval=interval,
@@ -474,6 +525,7 @@ def run_backtest(
         chase_skips=chase_skips,
         trend_skips=trend_skips,
         htf_demand_skips=htf_demand_skips,
+        daily_demand_skips=daily_demand_skips,
     )
     return result
 
@@ -549,6 +601,7 @@ def summarize(result: BacktestResult) -> dict:
         "chase_skips": int(result.chase_skips),
         "trend_skips": int(getattr(result, "trend_skips", 0)),
         "htf_demand_skips": int(getattr(result, "htf_demand_skips", 0)),
+        "daily_demand_skips": int(getattr(result, "daily_demand_skips", 0)),
         **parity.per_trade_metrics(trades),
     }
 
@@ -591,6 +644,12 @@ OVERRIDE_CASTERS = {
         "HTF_DEMAND_ZONE_BUFFER_PCT": float,
         "HTF_DEMAND_MAX_DISTANCE_PCT": float,
         "HTF_DEMAND_MIN_CLOSE_POSITION": float,
+        "DAILY_DEMAND_FILTER_ENABLED": _as_bool,
+        "DAILY_DEMAND_INTERVAL": str,
+        "DAILY_DEMAND_LOOKBACK_BARS": int,
+        "DAILY_DEMAND_ZONE_BUFFER_PCT": float,
+        "DAILY_DEMAND_MAX_DISTANCE_PCT": float,
+        "DAILY_DEMAND_MIN_CLOSE_POSITION": float,
         "TREND_FILTER_ENABLED": _as_bool,
         "TREND_INTERVAL": str,
         "TREND_EMA_FAST": int,
@@ -619,6 +678,27 @@ def apply_overrides(base_config: dict, overrides: dict) -> dict:
                     f"Nilai parameter '{key}' tidak valid: {overrides[key]!r}"
                 ) from exc
     return cfg
+
+
+def _rentang_demand(key: str, lo: float, hi: float) -> tuple:
+    """Rentang validasi parameter demand, diselaraskan dengan skema pengaturan.
+
+    Skema di config/settings_schema.py adalah kontrak yang dilihat pengguna saat
+    menyimpan setelan. Kalau backtest memakai rentang yang lebih sempit, setelan
+    yang sah disimpan tetap ditolak backtest dengan pesan yang membingungkan.
+    Karena itu batas diambil dari skema saat tersedia; angka yang dioper ke sini
+    hanya cadangan kalau skema tidak bisa dibaca.
+    """
+    try:
+        from config.settings_schema import PARAMETER_SCHEMA
+
+        spec = PARAMETER_SCHEMA.get(key) or {}
+        smin, smax = spec.get("min"), spec.get("max")
+        if isinstance(smin, (int, float)) and isinstance(smax, (int, float)):
+            return float(smin), float(smax)
+    except Exception:
+        pass
+    return float(lo), float(hi)
 
 
 def validate_params(cfg: dict) -> None:
@@ -656,10 +736,11 @@ def validate_params(cfg: dict) -> None:
             ("DEMAND_MIN_CLOSE_POSITION", 0.0, 1.0),
         ]
         for key, lo, hi in demand_checks:
+            lo, hi = _rentang_demand(key, lo, hi)
             val = cfg.get(key)
             if val is None or not (lo <= float(val) <= hi):
                 raise BacktestError(
-                    f"Parameter '{key}'={val} di luar rentang wajar ({lo}..{hi})."
+                    f"Parameter '{key}'={val} di luar rentang wajar ({lo:g}..{hi:g})."
                 )
 
     if bool(cfg.get("HTF_DEMAND_FILTER_ENABLED", False)):
@@ -670,11 +751,32 @@ def validate_params(cfg: dict) -> None:
             ("HTF_DEMAND_MIN_CLOSE_POSITION", 0.0, 1.0),
         ]
         for key, lo, hi in htf_demand_checks:
+            lo, hi = _rentang_demand(key, lo, hi)
             val = cfg.get(key)
             if val is None or not (lo <= float(val) <= hi):
                 raise BacktestError(
-                    f"Parameter '{key}'={val} di luar rentang wajar ({lo}..{hi})."
+                    f"Parameter '{key}'={val} di luar rentang wajar ({lo:g}..{hi:g})."
                 )
+
+    if bool(cfg.get("DAILY_DEMAND_FILTER_ENABLED", False)):
+        daily_demand_checks = [
+            ("DAILY_DEMAND_LOOKBACK_BARS", 3, 500),
+            ("DAILY_DEMAND_ZONE_BUFFER_PCT", 0.05, 20.0),
+            ("DAILY_DEMAND_MAX_DISTANCE_PCT", 0.1, 50.0),
+            ("DAILY_DEMAND_MIN_CLOSE_POSITION", 0.0, 1.0),
+        ]
+        for key, lo, hi in daily_demand_checks:
+            lo, hi = _rentang_demand(key, lo, hi)
+            val = cfg.get(key)
+            if val is None or not (lo <= float(val) <= hi):
+                raise BacktestError(
+                    f"Parameter '{key}'={val} di luar rentang wajar ({lo:g}..{hi:g})."
+                )
+        try:
+            strategy.daily_demand_interval(cfg)
+            strategy.daily_warmup_bars(cfg, cfg.get("CONFIRM_INTERVAL", "5m"))
+        except ValueError as exc:
+            raise BacktestError(str(exc)) from exc
 
     from config.settings_schema import relation_violations
 
@@ -785,6 +887,10 @@ def selftest():
     # Gerbang demand H1 juga dimatikan di fixture dasar supaya warmup tidak
     # melompat; gerbang ini diuji khusus di bagian "paritas gerbang zona demand H1".
     cfg["HTF_DEMAND_FILTER_ENABLED"] = False
+    # Gerbang demand harian dimatikan atas alasan yang sama (warmupnya paling
+    # besar, ~22 hari untuk lookback 20 hari + 1 candle sinyal pada interval 5m);
+    # gerbang ini diuji khusus di bagian "paritas gerbang zona demand harian".
+    cfg["DAILY_DEMAND_FILTER_ENABLED"] = False
     cfg["MIN_QUOTE_VOLUME_USDT_24H"] = 1_000_000
     cfg["BACKTEST_ENTRY_DELAY_BARS"] = 0
     cfg["BACKTEST_ENTRY_SPREAD_PCT"] = 0.0
@@ -1251,6 +1357,331 @@ def selftest():
     assert "htf_demand_skips" in ringkasan_htf
     print("  reaksi hijau segar di dekat zona demand H1 tetap entry -> OK")
 
+    print(
+        "\n=== SELFTEST backtest.py: paritas gerbang zona demand harian "
+        "(DAILY_DEMAND_*) ==="
+    )
+    # Lookback harian dikecilkan (3 hari) supaya fixture pendek pun cukup: yang
+    # diuji di sini urutan keputusannya, bukan panjang jendela default (20 hari).
+    cfg_harian = dict(
+        cfg,
+        TREND_FILTER_ENABLED=False,
+        HTF_DEMAND_FILTER_ENABLED=False,
+        DEMAND_ZONE_FILTER_ENABLED=False,
+        DAILY_DEMAND_FILTER_ENABLED=True,
+        DAILY_DEMAND_INTERVAL="1d",
+        DAILY_DEMAND_LOOKBACK_BARS=3,
+        DAILY_DEMAND_ZONE_BUFFER_PCT=1.0,
+        DAILY_DEMAND_MAX_DISTANCE_PCT=8.0,
+        DAILY_DEMAND_MIN_CLOSE_POSITION=0.4,
+    )
+    assert strategy.daily_demand_window_bars(cfg_harian) == 4
+    # (lookback 3 + 1 candle sinyal) hari x 288 candle 5m + satu bucket cadangan.
+    assert strategy.daily_warmup_bars(cfg_harian, "5m") == 4 * 288 + 288
+    assert strategy.htf_gate_warmup_bars(cfg_harian, "5m") == 4 * 288 + 288
+    assert parity.htf_gate_warmup_bars(cfg_harian, "5m") == 4 * 288 + 288
+    assert parity.htf_gate_warmup_ms(cfg_harian, "5m") == (
+        (4 * 288 + 288) * 300_000
+    )
+    assert parity.make_daily_lookup(
+        [], dict(cfg_harian, DAILY_DEMAND_FILTER_ENABLED=False), "5m"
+    ) is None
+
+    BAR_HARI = 288
+
+    def _hari_datar(idx_hari: int, harga: float = 100.0) -> list:
+        return [
+            _make_candle(
+                (idx_hari * BAR_HARI + j) * 300_000,
+                harga,
+                harga * 1.001,
+                harga * 0.999,
+                harga,
+                vol=5_000_000.0,
+            )
+            for j in range(BAR_HARI)
+        ]
+
+    def _hari_bergerak(idx_hari: int, buka: float, tutup: float) -> list:
+        """Satu hari 5m yang naik lurus, sehingga OHLC hariannya bisa ditentukan."""
+        out = []
+        for j in range(BAR_HARI):
+            o = buka + (tutup - buka) * j / float(BAR_HARI)
+            c = buka + (tutup - buka) * (j + 1) / float(BAR_HARI)
+            out.append(
+                _make_candle(
+                    (idx_hari * BAR_HARI + j) * 300_000,
+                    o,
+                    max(o, c) * 1.0005,
+                    min(o, c) * 0.9995,
+                    c,
+                    vol=5_000_000.0,
+                )
+            )
+        return out
+
+    def _hari_dengan_setup(idx_hari: int, harga: float, ekor: int = 12) -> list:
+        """Hari tempat candle sinyal 5m muncul: datar dulu, lalu naik di akhir."""
+        out = _hari_datar(idx_hari, harga)[: BAR_HARI - ekor]
+        p = harga
+        for j in range(ekor):
+            c = p + 0.09
+            out.append(
+                _make_candle(
+                    (idx_hari * BAR_HARI + BAR_HARI - ekor + j) * 300_000,
+                    p,
+                    c + 0.05,
+                    p - 0.02,
+                    c,
+                    vol=(10_000_000.0 if j >= ekor - 2 else 5_000_000.0),
+                )
+            )
+            p = c
+        return out
+
+    def _seri_harian(tutup_hari_sinyal: float) -> list:
+        """4 hari dasar + 1 hari sinyal harian + 1 hari sinyal 5m."""
+        seri: list = []
+        for hari in range(4):
+            seri.extend(_hari_datar(hari))
+        seri.extend(_hari_bergerak(4, 100.0, tutup_hari_sinyal))
+        seri.extend(_hari_dengan_setup(5, tutup_hari_sinyal))
+        return seri
+
+    # (a) blokir: hari terakhir yang sudah tutup melonjak jauh dari dasar harian
+    # (distance 9,1% > batas 8%) -> entry ditolak persis seperti keputusan live.
+    seri_jauh = _seri_harian(110.0)
+    r_harian_block = run_backtest(seri_jauh, cfg_harian, warmup_bars=0)
+    r_harian_off = run_backtest(
+        seri_jauh, dict(cfg_harian, DAILY_DEMAND_FILTER_ENABLED=False), warmup_bars=0
+    )
+    assert len(r_harian_off.trades) >= 1, "kontrol: gerbang harian mati harus entry"
+    assert (
+        len(r_harian_block.trades) == 0 and r_harian_block.daily_demand_skips >= 1
+    ), (len(r_harian_block.trades), r_harian_block.daily_demand_skips)
+    assert any(
+        "gerbang zona demand 1d" in w for w in r_harian_block.warnings
+    ), r_harian_block.warnings
+    assert any("Warmup" in w for w in r_harian_block.warnings), r_harian_block.warnings
+    assert any(
+        "lebih pendek dari jendela zona demand harian" in w
+        for w in r_harian_block.warnings
+    ), r_harian_block.warnings
+    tolak_jauh = parity.make_daily_lookup(seri_jauh, cfg_harian, "5m").daily_demand_at(
+        seri_jauh[-1].close_time
+    )
+    assert (not tolak_jauh["ok"]) and "terlalu jauh" in tolak_jauh["reason"], tolak_jauh
+    print(
+        f"  hari yang sudah terbang jauh memblokir entry "
+        f"({r_harian_block.daily_demand_skips} sinyal dilewati), kontrol tanpa gerbang "
+        "tetap entry -> OK"
+    )
+
+    # (b) lolos: hari terakhir yang sudah tutup masih bereaksi dekat dasar harian.
+    seri_dasar = _seri_harian(100.7)
+    r_harian_ok = run_backtest(seri_dasar, cfg_harian, warmup_bars=0)
+    assert len(r_harian_ok.trades) >= 1, r_harian_ok.warnings
+    assert r_harian_ok.daily_demand_skips == 0, r_harian_ok.daily_demand_skips
+    ringkasan_harian = summarize(r_harian_ok)
+    assert "daily_demand_skips" in ringkasan_harian
+
+    # (c) fail closed: candle harian tidak cukup -> ditolak, bukan diloloskan.
+    r_harian_pendek = run_backtest(
+        _seri_harian(100.7)[: 4 * BAR_HARI + 100], cfg_harian, warmup_bars=0
+    )
+    assert len(r_harian_pendek.trades) == 0, len(r_harian_pendek.trades)
+
+    # (d) paritas helper: gerbang backtest == mesin zona yang sama dipakai live.
+    kl_harian_uji = _seri_harian(100.7)
+    lookup_harian = parity.make_daily_lookup(kl_harian_uji, cfg_harian, "5m")
+    waktu_sinyal = kl_harian_uji[-1].close_time
+    banding_harian = strategy.evaluate_daily_demand(
+        lookup_harian.window_at(waktu_sinyal), cfg_harian
+    )
+    assert (
+        lookup_harian.daily_demand_at(waktu_sinyal)["ok"] == banding_harian["ok"]
+    ), "lookup harian harus memakai evaluate_daily_demand yang sama"
+    assert lookup_harian.window_at(waktu_sinyal)[-1].close > 100.0
+    print(
+        "  reaksi hijau segar di dekat dasar harian tetap entry, data harian kurang "
+        "tetap ditolak, lookup identik dengan mesin zona live -> OK"
+    )
+
+    # (e) paritas jalur LIVE: market_scanner.daily_demand_verdict (fungsi yang
+    # dipakai bot live dan PAPER) harus memutuskan SAMA dengan lookup backtest
+    # atas data yang sama, pada banyak waktu evaluasi sekaligus. Candle harian
+    # versi live di sini "diunduh" dari hasil rangkaian 5m -> 1d supaya kedua
+    # jalur benar-benar diberi masukan yang identik.
+    harian_untuk_live = strategy.aggregate_klines(list(kl_harian_uji), 1440, 5)
+    assert len(harian_untuk_live) >= 5, len(harian_untuk_live)
+
+    def _window_live(symbol: str, waktu: int) -> list:
+        # Meniru aturan DailyDemandCache: hanya candle harian yang SUDAH TUTUP
+        # pada saat itu, lalu dipotong sepanjang jendela (lookback + 1).
+        tutup = [k for k in harian_untuk_live if int(k.close_time) <= int(waktu)]
+        return tutup[-strategy.daily_demand_window_bars(cfg_harian) :]
+
+    waktu_banding = [
+        int(k.close_time)
+        for k in kl_harian_uji[-4 * BAR_HARI :][:: 97]
+    ] + [int(waktu_sinyal)]
+    beda_live = 0
+    for t_uji in waktu_banding:
+        verdict_live = scanner.daily_demand_verdict(
+            "UJIUSDT", cfg_harian, lambda symbol, _t=t_uji: _window_live(symbol, _t)
+        )
+        verdict_back = lookup_harian.daily_demand_at(t_uji)
+        if (verdict_live["ok"], verdict_live["reason"]) != (
+            verdict_back["ok"],
+            verdict_back["reason"],
+        ):
+            beda_live += 1
+            print(
+                f"   beda pada {t_uji}: live={verdict_live['reason']} | "
+                f"backtest={verdict_back['reason']}"
+            )
+    assert beda_live == 0, beda_live
+    assert len(waktu_banding) >= 10, len(waktu_banding)
+    print(
+        f"  jalur live (market_scanner.daily_demand_verdict) dan backtest memutuskan "
+        f"identik pada {len(waktu_banding)} waktu evaluasi -> OK"
+    )
+
+    # (f) fail closed di kedua jalur: penyedia candle harian kosong/gagal harus
+    # MENOLAK, bukan meloloskan; dan gerbang yang dimatikan meloloskan tanpa
+    # menyentuh penyedia sama sekali.
+    verdict_kosong = scanner.daily_demand_verdict("UJIUSDT", cfg_harian, lambda s: [])
+    assert not verdict_kosong["ok"] and "kosong" in verdict_kosong["reason"], verdict_kosong
+
+    def _provider_gagal(symbol: str):
+        raise RuntimeError("rate limit")
+
+    verdict_gagal = scanner.daily_demand_verdict("UJIUSDT", cfg_harian, _provider_gagal)
+    assert (
+        not verdict_gagal["ok"] and "rate limit" in verdict_gagal["reason"]
+    ), verdict_gagal
+    panggilan = {"n": 0}
+
+    def _provider_dihitung(symbol: str) -> list:
+        panggilan["n"] += 1
+        return _window_live(symbol, int(waktu_sinyal))
+
+    verdict_off = scanner.daily_demand_verdict(
+        "UJIUSDT",
+        dict(cfg_harian, DAILY_DEMAND_FILTER_ENABLED=False),
+        _provider_dihitung,
+    )
+    assert verdict_off["ok"] and panggilan["n"] == 0, (verdict_off, panggilan)
+    print(
+        "  candle harian kosong atau gagal diambil ditolak (fail closed), gerbang "
+        "nonaktif tidak menyentuh penyedia -> OK"
+    )
+
+    # (g) paritas dengan KELAS CACHE LIVE yang asli (bukan tiruan test): provider
+    # DailyDemandCache di trading/pump_scanner_bot.py diuji langsung atas candle
+    # harian yang sama, lalu dibandingkan dengan lookup backtest. Ini yang menutup
+    # risiko "selftest menguji tiruannya sendiri" kalau suatu saat aturan jendela
+    # di cache live diubah.
+    try:
+        from trading import pump_scanner_bot as bot_harian
+
+        kelas_cache_harian = bot_harian.DailyDemandCache
+    except Exception as exc:  # mis. klien bursa tidak bisa diimpor tanpa requests
+        kelas_cache_harian = None
+        print(f"  paritas dengan DailyDemandCache live dilewati: {exc}")
+
+    if kelas_cache_harian is not None:
+
+        def _baris_dari_harian(klines: list) -> list:
+            baris = []
+            for k in klines:
+                baris.append(
+                    [
+                        int(k.open_time),
+                        str(k.open),
+                        str(k.high),
+                        str(k.low),
+                        str(k.close),
+                        str(k.volume),
+                        int(k.close_time),
+                        str(k.quote_volume),
+                    ]
+                )
+            return baris
+
+        class KlienHarianUji:
+            """Klien tiruan Binance: baris klines yang SUDAH TERBIT saat pemindaian.
+
+            Binance selalu mengembalikan candle terakhir yang sudah terbit pada
+            saat permintaan (termasuk candle yang masih berjalan), bukan candle
+            paling akhir dari seluruh berkas. Karena itu `sekarang_ms` wajib
+            disetel sebelum pemanggilan, kalau tidak klien tiruan ini memberi
+            candle masa depan ke cache live dan perbandingannya jadi palsu.
+            """
+
+            def __init__(self, rows):
+                self.rows = rows
+                self.calls = 0
+                self.sekarang_ms = 0
+                self.limit_terakhir = None
+                self.interval_terakhir = None
+
+            def get_klines(self, symbol, interval, limit=500, **kwargs):
+                self.calls += 1
+                self.limit_terakhir = limit
+                self.interval_terakhir = interval
+                terbit = [r for r in self.rows if int(r[0]) <= int(self.sekarang_ms)]
+                return [list(r) for r in terbit][-limit:]
+
+        klien_cache = KlienHarianUji(_baris_dari_harian(harian_untuk_live))
+        cache_live = kelas_cache_harian(klien_cache, cfg_harian)
+
+        # Waktu evaluasi: sebaran dalam beberapa hari terakhir, plus satu waktu
+        # yang PERSIS sama dengan penutupan candle harian (kasus batas).
+        waktu_cache = [
+            int(k.close_time) for k in kl_harian_uji[-3 * BAR_HARI :][:: 89]
+        ]
+        waktu_cache.append(int(harian_untuk_live[2].close_time))
+        waktu_cache.append(int(waktu_sinyal))
+        waktu_cache = sorted(set(waktu_cache))
+
+        beda_cache = 0
+        for t_uji in waktu_cache:
+            # now_ms live selalu sedikit SETELAH candle sinyal tutup, karena bot
+            # hanya menilai candle yang sudah tutup pada saat pemindaian.
+            klien_cache.sekarang_ms = int(t_uji) + 1
+            jendela_live = cache_live.window_klines("UJIUSDT", int(t_uji) + 1)
+            jendela_back = lookup_harian.window_at(int(t_uji))
+            tupel_live = [(int(k.open_time), round(k.close, 8)) for k in jendela_live]
+            tupel_back = [(int(k.open_time), round(k.close, 8)) for k in jendela_back]
+            verdict_cache = strategy.evaluate_daily_demand(jendela_live, cfg_harian)
+            verdict_back = lookup_harian.daily_demand_at(int(t_uji))
+            if (
+                tupel_live != tupel_back
+                or (verdict_cache["ok"], verdict_cache["reason"])
+                != (verdict_back["ok"], verdict_back["reason"])
+            ):
+                beda_cache += 1
+                print(
+                    f"   beda pada {t_uji}: live={len(jendela_live)} candle "
+                    f"({verdict_cache['reason']}) | backtest={len(jendela_back)} "
+                    f"candle ({verdict_back['reason']})"
+                )
+        assert beda_cache == 0, beda_cache
+        assert len(waktu_cache) >= 10, len(waktu_cache)
+        assert klien_cache.interval_terakhir == "1d", klien_cache.interval_terakhir
+        # Cache harian harus hemat: satu unduhan per pergantian candle harian,
+        # bukan sekali per waktu evaluasi.
+        assert klien_cache.calls < len(waktu_cache), (
+            klien_cache.calls,
+            len(waktu_cache),
+        )
+        print(
+            f"  cache live asli (DailyDemandCache) dan lookup backtest memakai jendela "
+            f"dan verdict yang identik pada {len(waktu_cache)} waktu evaluasi "
+            f"({klien_cache.calls} unduhan saja, termasuk kasus batas penutupan hari) -> OK"
+        )
+
     print("\n=== SELFTEST backtest.py: paritas gerbang trend timeframe tinggi (H1) ===")
     from backtesting.synthetic_data import seri_trend_dengan_setup
 
@@ -1569,9 +2000,77 @@ def selftest():
             mode_aware=True,
         )
     ), "jalur simulasi tidak boleh membatalkan hanya karena parameter mode lain rusak"
+
+    # Rentang validasi parameter demand harus SAMA dengan rentang yang dipakai
+    # skema pengaturan (satu sumber). Kalau backtest lebih sempit, setelan yang
+    # sah disimpan lewat dashboard tetap ditolak backtest tanpa alasan yang jelas.
+    from config.settings_schema import PARAMETER_SCHEMA as _SKEMA
+
+    kunci_demand = (
+        "DEMAND_LOOKBACK_BARS",
+        "DEMAND_ZONE_BUFFER_PCT",
+        "DEMAND_MAX_DISTANCE_PCT",
+        "DEMAND_MIN_CLOSE_POSITION",
+        "HTF_DEMAND_LOOKBACK_BARS",
+        "HTF_DEMAND_ZONE_BUFFER_PCT",
+        "HTF_DEMAND_MAX_DISTANCE_PCT",
+        "HTF_DEMAND_MIN_CLOSE_POSITION",
+        "DAILY_DEMAND_LOOKBACK_BARS",
+        "DAILY_DEMAND_ZONE_BUFFER_PCT",
+        "DAILY_DEMAND_MAX_DISTANCE_PCT",
+        "DAILY_DEMAND_MIN_CLOSE_POSITION",
+    )
+    beda_rentang = [
+        f"{kunci}: {_rentang_demand(kunci, -999.0, 999.0)} != "
+        f"({float(_SKEMA[kunci]['min'])}, {float(_SKEMA[kunci]['max'])})"
+        for kunci in kunci_demand
+        if _rentang_demand(kunci, -999.0, 999.0)
+        != (float(_SKEMA[kunci]["min"]), float(_SKEMA[kunci]["max"]))
+    ]
+    assert not beda_rentang, beda_rentang
+
+    # Nilai paling longgar yang MASIH sah di skema wajib diterima backtest
+    # (kasus yang dulu ditolak: tebal zona dan jarak 0 di grup H1 dan harian).
+    validate_params(
+        dict(
+            _PC,
+            HTF_DEMAND_FILTER_ENABLED=True,
+            HTF_DEMAND_ZONE_BUFFER_PCT=0.0,
+            HTF_DEMAND_MAX_DISTANCE_PCT=0.0,
+            DAILY_DEMAND_FILTER_ENABLED=True,
+            DAILY_DEMAND_ZONE_BUFFER_PCT=0.0,
+            DAILY_DEMAND_MAX_DISTANCE_PCT=0.0,
+            DEMAND_ZONE_FILTER_ENABLED=False,
+        )
+    )
+
+    # Dan nilai di luar rentang skema wajib ditolak backtest.
+    for kunci, nilai in (
+        ("DAILY_DEMAND_LOOKBACK_BARS", 2),
+        ("DAILY_DEMAND_LOOKBACK_BARS", 501),
+        ("DAILY_DEMAND_ZONE_BUFFER_PCT", 20.5),
+        ("HTF_DEMAND_MAX_DISTANCE_PCT", 50.5),
+    ):
+        cfg_luar = dict(
+            _PC,
+            DAILY_DEMAND_FILTER_ENABLED=True,
+            HTF_DEMAND_FILTER_ENABLED=True,
+            DAILY_DEMAND_ZONE_BUFFER_PCT=0.0,
+            DAILY_DEMAND_MAX_DISTANCE_PCT=0.0,
+            HTF_DEMAND_ZONE_BUFFER_PCT=0.0,
+            HTF_DEMAND_MAX_DISTANCE_PCT=0.0,
+        )
+        cfg_luar[kunci] = nilai
+        try:
+            validate_params(cfg_luar)
+        except BacktestError:
+            continue
+        raise AssertionError(f"{kunci}={nilai} seharusnya ditolak")
+
     print(
         "  9 kasus cocok di kedua jalur, subset aturan simulasi <= aturan penyimpanan, "
-        "relasi mode nonaktif tetap dijaga jalur penyimpanan -> OK"
+        "relasi mode nonaktif tetap dijaga jalur penyimpanan, dan rentang validasi "
+        "12 kunci demand sama persis dengan skema pengaturan -> OK"
     )
 
     print("\nSEMUA SELFTEST backtest.py LULUS.")
@@ -1602,10 +2101,18 @@ def print_single_result(result: BacktestResult) -> None:
     print(f"Modal awal         : {summary['initial_equity']:.2f}")
     print(f"Alasan exit        : {dict(sorted(summary['reason_counts'].items()))}")
     risk_info = {k: v for k, v in summary.get("risk_events", {}).items() if v}
-    if risk_info or summary.get("chase_skips") or summary.get("trend_skips"):
+    if (
+        risk_info
+        or summary.get("chase_skips")
+        or summary.get("trend_skips")
+        or summary.get("htf_demand_skips")
+        or summary.get("daily_demand_skips")
+    ):
         print(
             f"Kontrol akun/filter: {risk_info}, chase dilewati {summary.get('chase_skips', 0)}, "
-            f"trend dilewati {summary.get('trend_skips', 0)}"
+            f"trend dilewati {summary.get('trend_skips', 0)}, "
+            f"demand H1 dilewati {summary.get('htf_demand_skips', 0)}, "
+            f"demand harian dilewati {summary.get('daily_demand_skips', 0)}"
         )
     if result.warnings:
         print("Peringatan:")
@@ -1679,15 +2186,36 @@ def main():
 
     interval = cfg["CONFIRM_INTERVAL"]
     warmup = bars_per_day(interval)
-    if bool(cfg.get("TREND_FILTER_ENABLED", False)):
-        warmup = max(warmup, strategy.trend_warmup_bars(cfg, interval))
+    try:
+        butuh_gerbang = strategy.htf_gate_warmup_bars(cfg, interval)
+    except ValueError as exc:
+        raise BacktestError(str(exc)) from exc
+    warmup = max(warmup, butuh_gerbang)
     total_bars = warmup + bars_per_day(interval) * args.days
+    bar_per_hari = float(bars_per_day(interval))
 
     print(
         f"Mengambil {total_bars} candle {interval} untuk {args.symbol} "
         f"({args.days} hari + warmup {warmup} candle = "
-        f"{warmup / float(bars_per_day(interval)):.2f} hari)..."
+        f"{warmup / bar_per_hari:.2f} hari)..."
     )
+    if strategy.daily_demand_enabled(cfg):
+        harian_bars = strategy.daily_warmup_bars(cfg, interval)
+        print(
+            f"  Gerbang demand harian {strategy.daily_demand_interval(cfg)} aktif: "
+            f"{harian_bars} candle {interval} (~{harian_bars / bar_per_hari:.1f} hari) "
+            "dari warmup itu khusus untuk memetakan dasar harian. Rentang unduhan "
+            "diperpanjang otomatis supaya warmup ini TIDAK memakan periode uji."
+        )
+        lookback_hari = strategy.daily_demand_lookback_bars(cfg)
+        if args.days < lookback_hari:
+            print(
+                f"PERINGATAN: --days {args.days} lebih pendek dari jendela zona demand "
+                f"harian (lookback {lookback_hari} hari). Periode uji belum mencakup "
+                "satu putaran penuh dasar harian, jadi hasil gerbang harian belum layak "
+                "dinilai. Pakai --days minimal 60-90 supaya mencakup beberapa kali "
+                "rotasi zona harian."
+            )
     client = BinanceSpotClient(
         "",
         "",
@@ -1698,7 +2226,10 @@ def main():
         rate_limit_safety_margin=int(cfg.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100),
     )
     end_ms = int(time.time() * 1000)
-    start_ms = end_ms - (args.days + 1) * MS_PER_DAY
+    # Rentang unduhan = periode uji (args.days) + warmup, bukan cuma args.days + 1
+    # hari: gerbang timeframe tinggi (termasuk demand harian) membaca dari awal
+    # rentang yang sama, jadi warmupnya wajib ikut terunduh.
+    start_ms = end_ms - (total_bars + 1) * strategy.interval_to_ms(interval)
     klines = fetch_full_klines(client, args.symbol, interval, start_ms, end_ms)
     print(f"Dapat {len(klines)} candle.")
 

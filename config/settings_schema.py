@@ -1023,6 +1023,55 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         minimum=0.0,
         maximum=1.0,
     ),
+    "DAILY_DEMAND_FILTER_ENABLED": _field(
+        "Demand Daily",
+        "Filter zona demand harian",
+        "Wajibkan candle harian (DAILY_DEMAND_INTERVAL, default 1d) terakhir yang sudah tutup juga bereaksi di dekat zona demand harian, supaya entry M5 tidak terjadi saat harga sedang melayang jauh di atas dasar akumulasi harian. Ini lapisan KETIGA setelah zona demand M5 dan zona demand H1. Candle harian diambil langsung dari Binance dan disimpan sehari sekali per simbol; gagal ambil data berarti kandidat ditolak (fail closed).",
+        "bool",
+    ),
+    "DAILY_DEMAND_INTERVAL": _field(
+        "Demand Daily",
+        "Interval demand harian",
+        "Timeframe untuk gerbang demand harian. Wajib kelipatan bulat dari interval konfirmasi dan tidak lebih pendek, supaya backtest bisa merangkai candle ini dari data yang sama. Pilihan dibatasi pada interval yang dikenali aplikasi (12h atau 1d).",
+        "str",
+        editor="select",
+        options=["12h", "1d"],
+    ),
+    "DAILY_DEMAND_LOOKBACK_BARS": _field(
+        "Demand Daily",
+        "Lookback zona demand harian",
+        "Jumlah candle harian tertutup yang memetakan dasar zona demand harian. Default 20 hari struktur harga. Makin besar, makin jauh ke belakang dasarnya dicari dan makin ketat menolak entry yang sudah jauh dari dasar. Perlu diingat: backtest merangkai candle harian dari candle konfirmasi, jadi lookback besar menambah kebutuhan warmup sekitar (lookback + 1) hari data.",
+        "int",
+        minimum=3,
+        maximum=500,
+        unit="candle",
+    ),
+    "DAILY_DEMAND_ZONE_BUFFER_PCT": _field(
+        "Demand Daily",
+        "Tebal zona demand harian",
+        "Tebal minimum zona demand harian dalam persen di atas dasar zona. Candle harian paling lebar dari semua timeframe, jadi defaultnya paling tebal (2.0%, bandingkan 1.5% di H1 dan 0.8% di M5).",
+        "float",
+        minimum=0.0,
+        maximum=20.0,
+        unit="%",
+    ),
+    "DAILY_DEMAND_MAX_DISTANCE_PCT": _field(
+        "Demand Daily",
+        "Jarak maksimum dari zona harian",
+        "Jarak maksimum close candle harian di atas ATAP zona demand harian, dalam persen. Default 12%: memberi ruang untuk pump yang baru mulai dari dasar harian, tapi menolak entry yang sudah terbang jauh dari area demand hari-hari terakhir. Harus lebih besar atau sama dengan tebal zona.",
+        "float",
+        minimum=0.0,
+        maximum=50.0,
+        unit="%",
+    ),
+    "DAILY_DEMAND_MIN_CLOSE_POSITION": _field(
+        "Demand Daily",
+        "Posisi close minimum candle harian",
+        "Posisi penutupan minimum di dalam rentang high-low candle harian sinyal (0.0 di low, 1.0 di high) sebagai bukti dorongan demand pembeli pada hari itu. Default 0.40, sama seperti H1.",
+        "float",
+        minimum=0.0,
+        maximum=1.0,
+    ),
     "TOP_N_CANDIDATES_TO_CONFIRM": _field(
         "Scan",
         "Jumlah kandidat konfirmasi",
@@ -1526,6 +1575,26 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
                 "supaya backtest bisa merangkai candle trend dari candle konfirmasi"
             )
 
+    try:
+        from strategy.indicators import INTERVAL_MINUTES as _INTERVAL_MINUTES_HARIAN
+
+        menit_harian = _INTERVAL_MINUTES_HARIAN.get(
+            str(cfg.get("DAILY_DEMAND_INTERVAL", "")).lower()
+        )
+        menit_konfirmasi_harian = _INTERVAL_MINUTES_HARIAN.get(
+            str(cfg.get("CONFIRM_INTERVAL", "")).lower()
+        )
+    except ImportError:  # strategi belum tersedia saat skema dimuat sendiri
+        menit_harian = menit_konfirmasi_harian = None
+    if menit_harian and menit_konfirmasi_harian:
+        if menit_harian % menit_konfirmasi_harian != 0 or (
+            menit_harian < menit_konfirmasi_harian
+        ):
+            keluar["DAILY_DEMAND_INTERVAL"] = (
+                "harus kelipatan bulat dari CONFIRM_INTERVAL dan tidak lebih pendek, "
+                "supaya backtest bisa merangkai candle harian dari candle konfirmasi"
+            )
+
     saring_demand = mode_aware is False or _flag_untuk_relasi(
         cfg, "DEMAND_ZONE_FILTER_ENABLED", False
     )
@@ -1544,6 +1613,16 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
         if nilai is not None and nilai[0] < nilai[1]:
             keluar["HTF_DEMAND_MAX_DISTANCE_PCT"] = (
                 "harus lebih besar atau sama dengan HTF_DEMAND_ZONE_BUFFER_PCT"
+            )
+
+    saring_daily_demand = mode_aware is False or _flag_untuk_relasi(
+        cfg, "DAILY_DEMAND_FILTER_ENABLED", False
+    )
+    if saring_daily_demand:
+        nilai = pasangan("DAILY_DEMAND_MAX_DISTANCE_PCT", "DAILY_DEMAND_ZONE_BUFFER_PCT")
+        if nilai is not None and nilai[0] < nilai[1]:
+            keluar["DAILY_DEMAND_MAX_DISTANCE_PCT"] = (
+                "harus lebih besar atau sama dengan DAILY_DEMAND_ZONE_BUFFER_PCT"
             )
 
     return keluar
