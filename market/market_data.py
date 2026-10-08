@@ -355,7 +355,6 @@ def selftest() -> int:
     """
     import gc
     import os
-    import tempfile
 
     def get_klines_palsu(self, symbol, interval, limit=500, start=None, end=None):
         return [[0, "1", "1", "1", "1", "1", 0, "1"]]

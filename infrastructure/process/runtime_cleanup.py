@@ -35,7 +35,6 @@ membersihkan manual, atau ``--selftest`` untuk menguji modul ini.
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 import time

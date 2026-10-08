@@ -34,7 +34,6 @@ from config.config import (
 )
 from infrastructure.network.file_descriptors import fd_status, raise_fd_limit
 from infrastructure.storage import state as state_mod
-from market import market_scanner as scanner
 from market.fx_rate import IdrRateProvider
 from infrastructure.process.runtime_control import BotControlError, BotProcessManager
 
@@ -316,7 +315,6 @@ def _active_control_operation() -> dict | None:
 
 
 def _update_control_operation(operation_id: str, **updates) -> bool:
-    global _control_operation
     with _control_operation_lock:
         if not _control_operation or _control_operation.get("id") != operation_id:
             return False
