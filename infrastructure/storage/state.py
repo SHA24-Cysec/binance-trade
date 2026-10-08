@@ -21,12 +21,9 @@ DEFAULT_STATE = {
     "trailing_active": False,
     "trailing_stop_price": 0.0,
     "cooldown_until": 0,
-    "day_start_equity": None,
-    "day_start_date": None,
     "peak_equity": None,
     "dd_stopped": False,
     "dd_stop_until": 0,
-    "daily_stopped": False,
 }
 
 

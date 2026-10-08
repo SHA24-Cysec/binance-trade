@@ -177,13 +177,9 @@ DEFAULT_STATE = {
     "trail_step_pct": 0.0,
     "exit_source": "",
     "last_scan_time": 0,
-    "day_start_equity": None,
-    "day_start_date": None,
     "peak_equity": None,
     "dd_stopped": False,
     "dd_stop_until": 0,
-    "daily_stopped": False,
-    "daily_stop_source": None,
     "_limit_close_done": False,
     "sell_fail_count": 0,
     "pending_order": None,
@@ -297,7 +293,6 @@ def load_pump_state(path: str, *, fail_closed: bool = False) -> dict:
         "be_active",
         "trailing_active",
         "dd_stopped",
-        "daily_stopped",
         "_limit_close_done",
         "_native_stop_exit_blocked",
         "reconciliation_required",
@@ -310,7 +305,7 @@ def load_pump_state(path: str, *, fail_closed: bool = False) -> dict:
             validation_errors.append(f"{key} harus object atau null")
     if not isinstance(merged.get("reconciliation_assets"), list):
         validation_errors.append("reconciliation_assets harus list")
-    for key in ("day_start_equity", "peak_equity"):
+    for key in ("peak_equity",):
         value = merged.get(key)
         if value is None:
             continue
@@ -520,7 +515,7 @@ def get_equity(
 def account_risk_gate(config: dict) -> "tuple[bool, str]":
     if str(config.get("MODE", "")).strip().upper() != "LIVE":
         return True, ""
-    if config.get("USE_EQUITY_STOP") or config.get("USE_DAILY_STOP"):
+    if config.get("USE_EQUITY_STOP"):
         return True, ""
     override = (
         str(os.environ.get("ALLOW_LIVE_WITHOUT_ACCOUNT_STOP", "")).strip().lower()
@@ -528,13 +523,13 @@ def account_risk_gate(config: dict) -> "tuple[bool, str]":
     if override in ("1", "true", "yes", "on"):
         logger.critical(
             "ALLOW_LIVE_WITHOUT_ACCOUNT_STOP aktif: bot LIVE dijalankan TANPA rem "
-            "drawdown maupun rem kerugian harian atas permintaan eksplisit operator."
+            "drawdown atas permintaan eksplisit operator."
         )
         return True, ""
     return False, (
-        "MODE=LIVE ditolak: USE_EQUITY_STOP dan USE_DAILY_STOP dua-duanya nonaktif. "
-        "Tidak ada rem drawdown maupun rem kerugian harian, dan CLOSE_ALL_AT_LIMIT "
-        "tidak akan pernah terpicu. Aktifkan minimal salah satu melalui override "
+        "MODE=LIVE ditolak: USE_EQUITY_STOP nonaktif. "
+        "Tidak ada rem drawdown tingkat akun, dan CLOSE_ALL_AT_LIMIT "
+        "tidak akan pernah terpicu. Aktifkan USE_EQUITY_STOP melalui override "
         "konfigurasi, atau setel environment ALLOW_LIVE_WITHOUT_ACCOUNT_STOP=1 bila risiko ini memang "
         "disengaja."
     )
@@ -565,19 +560,6 @@ def describe_exit_mode(config: dict, state: dict) -> str:
 
 
 def update_equity_controls(state: dict, equity: float, config: dict) -> bool:
-    today = state_mod.today_str()
-    if state.get("day_start_date") != today:
-        state["day_start_date"] = today
-        state["day_start_equity"] = equity
-        state["daily_stopped"] = False
-        state["daily_stop_source"] = None
-        logger.info(
-            "Hari baru (UTC): %s. Equity awal hari = %.2f %s",
-            today,
-            equity,
-            config["QUOTE_ASSET"],
-        )
-
     if state.get("peak_equity") is None or equity > state["peak_equity"]:
         state["peak_equity"] = equity
 
@@ -621,30 +603,7 @@ def update_equity_controls(state: dict, equity: float, config: dict) -> bool:
             state["peak_equity"] = equity
             logger.info("Cooldown drawdown selesai. Entry baru diaktifkan lagi.")
 
-    if (
-        config.get("USE_DAILY_STOP", True)
-        and not state.get("daily_stopped")
-        and state.get("day_start_equity")
-    ):
-        change_pct = (
-            (equity - state["day_start_equity"]) / state["day_start_equity"] * 100.0
-        )
-        if change_pct <= -config["MAX_DAILY_LOSS_PERCENT"]:
-            state["daily_stopped"] = True
-            state["daily_stop_source"] = "LOSS"
-            logger.warning(
-                "STOP HARIAN: rugi harian %.2f%%. Tidak ada entry baru sampai hari berikutnya (UTC).",
-                change_pct,
-            )
-        elif change_pct >= config["DAILY_PROFIT_TARGET_PERCENT"]:
-            state["daily_stopped"] = True
-            state["daily_stop_source"] = "PROFIT"
-            logger.info(
-                "TARGET HARIAN TERCAPAI: profit harian %.2f%%. Tidak ada entry baru sampai hari berikutnya (UTC).",
-                change_pct,
-            )
-
-    return bool(state.get("dd_stopped") or state.get("daily_stopped"))
+    return bool(state.get("dd_stopped"))
 
 
 def maybe_force_close_at_risk_limit(
@@ -655,15 +614,7 @@ def maybe_force_close_at_risk_limit(
     entries_paused: bool,
     current_price,
 ) -> None:
-    profit_stop_only = (
-        bool(state.get("daily_stopped"))
-        and not state.get("dd_stopped")
-        and str(state.get("daily_stop_source") or "LOSS").upper() == "PROFIT"
-    )
-    limit_now = (
-        bool(state.get("dd_stopped") or state.get("daily_stopped"))
-        and not profit_stop_only
-    )
+    limit_now = bool(state.get("dd_stopped"))
     if (
         config.get("CLOSE_ALL_AT_LIMIT")
         and entries_paused
@@ -3808,8 +3759,6 @@ def run(config: dict, lifecycle=None) -> int:
                 flags = []
                 if state.get("dd_stopped"):
                     flags.append("DD-STOP")
-                if state.get("daily_stopped"):
-                    flags.append("DAILY-STOP")
                 flag_str = f" | status: {', '.join(flags)}" if flags else ""
                 equity_str = (
                     f"{equity:.2f}"

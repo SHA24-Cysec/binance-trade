@@ -538,14 +538,14 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         "bool",
     ),
     "USE_EQUITY_STOP": _field(
-        "Drawdown dan Daily Stop",
+        "Drawdown",
         "Aktifkan equity stop",
         "Menghentikan operasi ketika drawdown maksimum tercapai.",
         "bool",
         dangerous=True,
     ),
     "MAX_DRAWDOWN_PERCENT": _field(
-        "Drawdown dan Daily Stop",
+        "Drawdown",
         "Drawdown maksimum",
         "Penurunan dari peak equity sebelum stop.",
         "float",
@@ -554,41 +554,15 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         unit="%",
         dangerous=True,
     ),
-    "USE_DAILY_STOP": _field(
-        "Drawdown dan Daily Stop",
-        "Aktifkan daily stop",
-        "Menghentikan operasi pada limit harian.",
-        "bool",
-        dangerous=True,
-    ),
-    "MAX_DAILY_LOSS_PERCENT": _field(
-        "Drawdown dan Daily Stop",
-        "Rugi harian maksimum",
-        "Kerugian harian sebelum stop.",
-        "float",
-        minimum=0.01,
-        maximum=100,
-        unit="%",
-        dangerous=True,
-    ),
-    "DAILY_PROFIT_TARGET_PERCENT": _field(
-        "Drawdown dan Daily Stop",
-        "Target profit harian",
-        "Profit harian sebelum operasi baru dihentikan.",
-        "float",
-        minimum=0.01,
-        maximum=10000,
-        unit="%",
-    ),
     "CLOSE_ALL_AT_LIMIT": _field(
-        "Drawdown dan Daily Stop",
+        "Drawdown",
         "Tutup posisi saat limit",
         "Tutup posisi saat kill switch aktif.",
         "bool",
         dangerous=True,
     ),
     "DD_COOLDOWN_HOURS": _field(
-        "Drawdown dan Daily Stop",
+        "Drawdown",
         "Cooldown drawdown",
         "Durasi jeda setelah drawdown stop.",
         "int",
@@ -1293,6 +1267,10 @@ REMOVED_PARAMETERS = frozenset(
         "DETECTOR_WEIGHT_VOLUME24",
         "DETECTOR_TOP_N",
         "DAILY_KLINE_CACHE_TTL_SECONDS",
+        # Stop harian dihapus total: kunci lama di settings.json dibuang diam-diam.
+        "USE_DAILY_STOP",
+        "MAX_DAILY_LOSS_PERCENT",
+        "DAILY_PROFIT_TARGET_PERCENT",
         # Remove obsolete detector-score settings from older mode overrides.
         "DETECTOR_ENABLED",
         "DETECTOR_WEIGHT_CHANGE",
@@ -1745,9 +1723,9 @@ def validate_candidate(
                     "USE_NATIVE_STOP_LOSS memerlukan Stop Loss aktif",
                 )
 
-        if not cleaned["USE_EQUITY_STOP"] and not cleaned["USE_DAILY_STOP"]:
+        if not cleaned["USE_EQUITY_STOP"]:
             pesan = (
-                "USE_EQUITY_STOP dan USE_DAILY_STOP dua-duanya nonaktif: "
+                "USE_EQUITY_STOP nonaktif: "
                 "tidak ada rem kerugian tingkat akun sama sekali."
             )
             if cleaned.get("CLOSE_ALL_AT_LIMIT"):

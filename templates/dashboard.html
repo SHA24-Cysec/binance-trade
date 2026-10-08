@@ -2469,7 +2469,6 @@
 
         let flags=[];
         if(s.flags.dd_stopped) flags.push('🛑 DD-STOP aktif');
-        if(s.flags.daily_stopped) flags.push('🛑 DAILY-STOP aktif');
         document.getElementById('footer').innerHTML='Dashboard kontrol lokal · bot dijalankan manual melalui Resume Bot.'+(flags.length?' &nbsp;|&nbsp; '+flags.join(' · '):'');
 
         const pb=document.getElementById('positionBox');
@@ -3654,7 +3653,7 @@
           ? (s.wins>0 && s.losses===0 ? '∞' : '-') : fmt(s.profit_factor,2);
         const cardTone = v => v>0?'good':(v<0?'bad':'');
         const re = s.risk_events || {};
-        const riskTotal = (re.dd_stop||0)+(re.daily_loss_stop||0)+(re.daily_profit_stop||0);
+        const riskTotal = (re.dd_stop||0);
         const cardsHtml = `
           <div class="card ${cardTone(s.total_return_pct)}"><div class="accent-bar"></div>
             <div class="label">Return bersih</div>
@@ -3679,7 +3678,7 @@
           <div class="card ${riskTotal||s.chase_skips?'warn':''}"><div class="accent-bar"></div>
             <div class="label">Filter dan kontrol akun</div>
             <div class="value mono">${fmt(riskTotal+(re.forced_close||0)+(s.chase_skips||0),0)}</div>
-            <div class="sub">DD stop ${fmt(re.dd_stop||0,0)} · stop rugi harian ${fmt(re.daily_loss_stop||0,0)} · target profit ${fmt(re.daily_profit_stop||0,0)} · tutup paksa ${fmt(re.forced_close||0,0)} · chase dilewati ${fmt(s.chase_skips||0,0)} · gerbang demand D1 ${fmt(((res.daily_demand||{}).skips)||0,0)} · gerbang trend ${fmt(((res.trend||{}).skips)||0,0)}</div></div>
+            <div class="sub">DD stop ${fmt(re.dd_stop||0,0)} · tutup paksa ${fmt(re.forced_close||0,0)} · chase dilewati ${fmt(s.chase_skips||0,0)} · gerbang demand D1 ${fmt(((res.daily_demand||{}).skips)||0,0)} · gerbang trend ${fmt(((res.trend||{}).skips)||0,0)}</div></div>
           <div class="card"><div class="accent-bar"></div>
             <div class="label">Candle diproses</div>
             <div class="value mono">${fmt(res.bars_total,0)}</div>

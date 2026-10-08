@@ -7,7 +7,6 @@ from typing import Optional, Sequence
 from strategy.indicators import Kline
 
 MS_PER_MIN = 60_000
-MS_PER_DAY = 86_400_000
 
 RISK_LIMIT_REASON = "RISK_LIMIT_TRIGGERED"
 
@@ -103,38 +102,19 @@ class AccountRiskControls:
         self.dd_cooldown_ms = (
             float(config.get("DD_COOLDOWN_HOURS", 0.0) or 0.0) * 3_600_000
         )
-        self.use_daily_stop = bool(config.get("USE_DAILY_STOP", False))
-        self.max_daily_loss_pct = float(
-            config.get("MAX_DAILY_LOSS_PERCENT", 0.0) or 0.0
-        )
-        self.daily_profit_target_pct = float(
-            config.get("DAILY_PROFIT_TARGET_PERCENT", 0.0) or 0.0
-        )
         self.close_all_at_limit = bool(config.get("CLOSE_ALL_AT_LIMIT", False))
 
         self.peak_equity: Optional[float] = float(initial_equity)
-        self.day_index: Optional[int] = None
-        self.day_start_equity: Optional[float] = None
         self.dd_stopped = False
         self.dd_stop_until = 0.0
-        self.daily_stopped = False
-        self.daily_stop_source: Optional[str] = None
         self._limit_close_done = False
         self.events = {
             "dd_stop": 0,
-            "daily_loss_stop": 0,
-            "daily_profit_stop": 0,
             "forced_close": 0,
         }
 
     def update(self, now_ms: int, equity: float) -> bool:
         equity = float(equity)
-        day = int(now_ms) // MS_PER_DAY
-        if self.day_index != day:
-            self.day_index = day
-            self.day_start_equity = equity
-            self.daily_stopped = False
-            self.daily_stop_source = None
 
         if self.peak_equity is None or equity > self.peak_equity:
             self.peak_equity = equity
@@ -161,31 +141,10 @@ class AccountRiskControls:
                 self.dd_stop_until = 0.0
                 self.peak_equity = equity
 
-        if self.use_daily_stop and not self.daily_stopped and self.day_start_equity:
-            change_pct = (
-                (equity - self.day_start_equity) / self.day_start_equity * 100.0
-            )
-            if self.max_daily_loss_pct > 0 and change_pct <= -self.max_daily_loss_pct:
-                self.daily_stopped = True
-                self.daily_stop_source = "LOSS"
-                self.events["daily_loss_stop"] += 1
-            elif (
-                self.daily_profit_target_pct > 0
-                and change_pct >= self.daily_profit_target_pct
-            ):
-                self.daily_stopped = True
-                self.daily_stop_source = "PROFIT"
-                self.events["daily_profit_stop"] += 1
-
-        return bool(self.dd_stopped or self.daily_stopped)
+        return bool(self.dd_stopped)
 
     def force_close_due(self, entries_paused: bool, in_position: bool) -> bool:
-        profit_stop_only = (
-            self.daily_stopped
-            and not self.dd_stopped
-            and str(self.daily_stop_source or "LOSS").upper() == "PROFIT"
-        )
-        limit_now = bool(self.dd_stopped or self.daily_stopped) and not profit_stop_only
+        limit_now = bool(self.dd_stopped)
         due = False
         if (
             self.close_all_at_limit

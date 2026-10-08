@@ -1500,17 +1500,17 @@ def selftest() -> bool:
     )
     cfg_risk = dict(
         cfg,
-        USE_DAILY_STOP=True,
-        MAX_DAILY_LOSS_PERCENT=0.01,
-        DAILY_PROFIT_TARGET_PERCENT=1000.0,
+        USE_EQUITY_STOP=True,
+        MAX_DRAWDOWN_PERCENT=0.01,
+        DD_COOLDOWN_HOURS=24,
         CLOSE_ALL_AT_LIMIT=True,
         BACKTEST_INITIAL_EQUITY_USDT=1000.0,
         MAX_POSITION_USDT=100.0,
     )
     r_risk = _jalankan({"AUSDT": up_a}, cfg_risk)
     check(
-        "stop harian menjeda entry dan tercatat",
-        r_risk.risk_events.get("daily_loss_stop", 0) > 0
+        "stop drawdown menjeda entry dan tercatat",
+        r_risk.risk_events.get("dd_stop", 0) > 0
         and len(r_risk.trades) < len(res.trades),
         r_risk.risk_events,
     )

@@ -600,12 +600,9 @@ def build_status():
             "usdt_free": usdt_free,
             "equity_live": equity_live,
             "peak_equity": state.get("peak_equity"),
-            "day_start_equity": state.get("day_start_equity"),
-            "day_start_date": state.get("day_start_date"),
         },
         "flags": {
             "dd_stopped": bool(state.get("dd_stopped")),
-            "daily_stopped": bool(state.get("daily_stopped")),
         },
         "config": {
             "sl_pct": (
@@ -1174,7 +1171,7 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 + _bt_demand_limitations(cfg, prep["interval"])
                 + " Filter live yang SUDAH disimulasikan dari candle: filter BTC (BTC_MAX_DROP_PCT, "
                 "memakai candle BTC historis), MAX_CHASE_PCT, MIN_SECONDS_BETWEEN_TRADES, "
-                "COOLDOWN_MINUTES_AFTER_CLOSE, equity stop (drawdown), stop harian, dan "
+                "COOLDOWN_MINUTES_AFTER_CLOSE, equity stop (drawdown), dan "
                 "CLOSE_ALL_AT_LIMIT. Kontrol akun dicek saat candle ditutup, bukan tiap "
                 + str(PUMP_CONFIG.get("LOOP_INTERVAL_SECONDS", 15))
                 + " detik, sehingga "
@@ -1361,7 +1358,7 @@ def _bt_run_grid_job(
                 "(PUMP_MAX_24H_CHANGE_PCT) SUDAH diterapkan di backtest.",
                 "Filter live yang SUDAH disimulasikan dari candle: filter BTC, "
                 "MAX_CHASE_PCT, MIN_SECONDS_BETWEEN_TRADES, COOLDOWN_MINUTES_AFTER_CLOSE, "
-                "equity stop, stop harian, dan CLOSE_ALL_AT_LIMIT (dicek saat candle "
+                "equity stop, dan CLOSE_ALL_AT_LIMIT (dicek saat candle "
                 "ditutup, bukan tiap beberapa detik). Yang BELUM: spread order book "
                 "(MAX_SPREAD_PCT), usia listing, lot size dan min notional, serta gap "
                 "yang melewati buffer stop-limit native.",

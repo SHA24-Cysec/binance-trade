@@ -1163,7 +1163,6 @@ def selftest():
             "USE_EQUITY_STOP": True,
             "MAX_DRAWDOWN_PERCENT": 10.0,
             "DD_COOLDOWN_HOURS": 1,
-            "USE_DAILY_STOP": False,
             "CLOSE_ALL_AT_LIMIT": True,
         },
         1000.0,
@@ -1176,45 +1175,17 @@ def selftest():
     )
     assert ctl.update(1_800_000, 880.0) is True
     assert ctl.update(3_700_000, 880.0) is False and ctl.peak_equity == 880.0
-    ctl2 = parity.AccountRiskControls(
-        {
-            "USE_DAILY_STOP": True,
-            "MAX_DAILY_LOSS_PERCENT": 5.0,
-            "DAILY_PROFIT_TARGET_PERCENT": 15.0,
-            "CLOSE_ALL_AT_LIMIT": True,
-        },
-        1000.0,
-    )
-    assert ctl2.update(0, 1000.0) is False
-    assert ctl2.update(10_000, 940.0) is True and ctl2.events["daily_loss_stop"] == 1
-    assert (
-        ctl2.update(86_400_000 + 1, 940.0) is False
-    ), "Stop harian harus reset di hari UTC baru"
-    ctl3 = parity.AccountRiskControls(
-        {
-            "USE_DAILY_STOP": True,
-            "MAX_DAILY_LOSS_PERCENT": 5.0,
-            "DAILY_PROFIT_TARGET_PERCENT": 15.0,
-            "CLOSE_ALL_AT_LIMIT": True,
-        },
-        1000.0,
-    )
-    ctl3.update(0, 1000.0)
-    assert ctl3.update(10_000, 1200.0) is True and ctl3.events["daily_profit_stop"] == 1
-    assert (
-        ctl3.force_close_due(True, True) is False
-    ), "Target profit harian tidak menutup posisi"
     assert (
         parity.AccountRiskControls({}, 1000.0).update(0, 1.0) is False
     ), "Tanpa konfigurasi tidak ada stop"
     # Stop Loss dimatikan khusus untuk tes ini: dengan ukuran posisi 100 USDT dari modal
-    # 1000 USDT, SL sekitar 3 persen hanya merugi sekitar 0.3 persen modal sehingga stop
-    # harian 1 persen tidak akan pernah mendahului SL. Tanpa SL, jalur penutupan paksa
-    # (CLOSE_ALL_AT_LIMIT) benar-benar diuji.
+    # 1000 USDT, SL sekitar 3 persen hanya merugi sekitar 0.3 persen modal sehingga
+    # drawdown stop 1 persen tidak akan pernah mendahului SL. Tanpa SL, jalur penutupan
+    # paksa (CLOSE_ALL_AT_LIMIT) benar-benar diuji.
     cfg_fc = dict(
         cfg,
         BACKTEST_INITIAL_EQUITY_USDT=1000.0,
-        MAX_DAILY_LOSS_PERCENT=1.0,
+        MAX_DRAWDOWN_PERCENT=1.0,
         USE_STOP_LOSS=False,
     )
     k_fc = list(kl_setup)
@@ -1228,7 +1199,7 @@ def selftest():
     assert (
         r_nf.trades[0].reason == "END_OF_DATA"
     ), "CLOSE_ALL_AT_LIMIT=False tidak menutup posisi"
-    print("  kontrol akun (DD, harian, force close, reset) -> OK")
+    print("  kontrol akun (DD, force close, reset) -> OK")
 
     base_eq = {"QUOTE_ASSET": "USDT", "PAPER_INITIAL_BALANCES": {"USDT": 1000.0}}
     assert (
