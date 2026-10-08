@@ -182,6 +182,11 @@ DEFAULT_STATE = {
     # (diisi oleh aturan SAME_COIN_BLOCK_HOURS setelah trade loss).
     "symbol_block_until": {},
     "peak_equity": None,
+    # Max drawdown (%) terbesar sejak reset terakhir. Di-reset ke 0 setiap kali
+    # ambang MAX_DRAWDOWN_PERCENT tercapai (bersamaan dengan jeda entry).
+    "max_dd_pct": 0.0,
+    # Berapa kali ambang drawdown tercapai dan angka max DD di-reset.
+    "dd_reset_count": 0,
     "dd_stopped": False,
     "dd_stop_until": 0,
     "_limit_close_done": False,
@@ -343,7 +348,7 @@ def load_pump_state(path: str, *, fail_closed: bool = False) -> dict:
                 continue  # blokir sudah kedaluwarsa, tidak perlu disimpan lagi
             blocks_bersih[sym] = nilai
         merged["symbol_block_until"] = blocks_bersih
-    for key in ("peak_equity",):
+    for key in ("peak_equity", "max_dd_pct"):
         value = merged.get(key)
         if value is None:
             continue
@@ -356,6 +361,15 @@ def load_pump_state(path: str, *, fail_closed: bool = False) -> dict:
             validation_errors.append(f"{key} tidak finite/nonnegatif")
         else:
             merged[key] = number
+    try:
+        dd_reset_count = int(merged.get("dd_reset_count", 0) or 0)
+        if dd_reset_count < 0:
+            raise ValueError
+        merged["dd_reset_count"] = dd_reset_count
+    except (TypeError, ValueError):
+        # Hanya penghitung statistik: nilai rusak cukup direset ke 0 tanpa
+        # menghentikan bot (fail_closed hanya untuk state yang berisiko).
+        merged["dd_reset_count"] = 0
     try:
         sell_fail_count = int(merged.get("sell_fail_count", 0) or 0)
         if sell_fail_count < 0:
@@ -601,22 +615,33 @@ def update_equity_controls(state: dict, equity: float, config: dict) -> bool:
     if state.get("peak_equity") is None or equity > state["peak_equity"]:
         state["peak_equity"] = equity
 
+    peak = state["peak_equity"]
+    dd_pct = (peak - equity) / peak * 100.0 if peak else 0.0
+    dd_pct = max(dd_pct, 0.0)
+    if dd_pct > float(state.get("max_dd_pct") or 0.0):
+        state["max_dd_pct"] = dd_pct
+
     if (
         config["USE_EQUITY_STOP"]
         and not state.get("dd_stopped")
         and state["peak_equity"]
     ):
-        dd_pct = (state["peak_equity"] - equity) / state["peak_equity"] * 100.0
         if dd_pct >= config["MAX_DRAWDOWN_PERCENT"]:
             state["dd_stopped"] = True
             state["dd_stop_until"] = (
                 state_mod.now_ms() + config["DD_COOLDOWN_HOURS"] * 3600 * 1000
             )
+            state["dd_reset_count"] = int(state.get("dd_reset_count") or 0) + 1
+            # Ambang tercapai: angka max drawdown kembali ke 0 dan puncak equity
+            # dimulai ulang dari equity sekarang.
             logger.critical(
-                "STOP DRAWDOWN: turun %.2f%% dari puncak equity. Entry baru dijeda %d jam.",
+                "STOP DRAWDOWN: turun %.2f%% dari puncak equity (max DD di-reset ke 0). "
+                "Entry baru dijeda %d jam.",
                 dd_pct,
                 config["DD_COOLDOWN_HOURS"],
             )
+            state["max_dd_pct"] = 0.0
+            state["peak_equity"] = equity
 
     if state.get("dd_stopped"):
         deadline = state.get("dd_stop_until") or 0

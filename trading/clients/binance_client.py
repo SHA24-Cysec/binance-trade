@@ -637,6 +637,12 @@ class BinanceSpotClient:
     def get_ticker_24hr_all(self) -> list:
         return self._request("GET", "/api/v3/ticker/24hr", {})
 
+    def get_ticker_24hr(self, symbol: str, max_retries: int = 2) -> dict:
+        # Satu simbol: bobot 2 (dibanding 80 untuk semua simbol).
+        return self._request(
+            "GET", "/api/v3/ticker/24hr", {"symbol": symbol}, max_retries=max_retries
+        )
+
     def get_klines(
         self,
         symbol: str,

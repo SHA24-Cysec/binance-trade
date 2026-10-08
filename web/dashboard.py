@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from hmac import compare_digest
 from urllib.parse import urlsplit
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, abort, jsonify, redirect, render_template, request
 
 from infrastructure.paths import PROJECT_ROOT
 
@@ -34,6 +34,7 @@ from config.config import (
 )
 from infrastructure.network.file_descriptors import fd_status, raise_fd_limit
 from infrastructure.storage import state as state_mod
+from market import coin_icons
 from market.fx_rate import IdrRateProvider
 from infrastructure.process.runtime_control import BotControlError, BotProcessManager
 
@@ -73,6 +74,9 @@ class _PaperDashboardClient:
     def get_ticker_24hr_all(self):
         return self._market.get_ticker_24hr_all()
 
+    def get_ticker_24hr(self, symbol, max_retries: int = 2):
+        return self._market.get_ticker_24hr(symbol, max_retries=max_retries)
+
     def get_klines(
         self, symbol, interval, limit=500, start_time_ms=None, end_time_ms=None
     ):
@@ -103,6 +107,7 @@ from backtesting import portfolio_backtest as pbt
 app = Flask(__name__, template_folder=str(PROJECT_ROOT / "templates"))
 
 STATE_FILE = PUMP_CONFIG.get("STATE_FILE") or get_state_file()
+coin_icons.configure(PROJECT_ROOT / "data" / "coin_icons.json")
 LOG_FILE = PUMP_CONFIG.get("LOG_FILE") or get_log_file()
 CONTROL_FILE = PUMP_CONFIG.get("CONTROL_FILE") or get_control_file()
 QUOTE = PUMP_CONFIG.get("QUOTE_ASSET", "USDT")
@@ -358,6 +363,8 @@ _client = None
 _price_cache: dict = {}
 _balance_cache: dict = {"data": None, "ts": 0}
 PRICE_TTL = 5.0
+VOLUME_TTL = 30.0
+_volume_cache: dict = {}
 BALANCE_TTL = 30.0
 
 
@@ -396,6 +403,28 @@ def load_state() -> dict:
             return json.load(f)
     except (json.JSONDecodeError, OSError):
         return {}
+
+
+def get_volume_24h_quote(symbol: str):
+    """Volume transaksi 24 jam dalam quote asset (USDT), atau None bila tidak tersedia."""
+    if not symbol:
+        return None
+    now = time.time()
+    with _cache_lock:
+        cached = _volume_cache.get(symbol)
+        if cached and now - cached[1] < VOLUME_TTL:
+            return cached[0]
+    client = get_client()
+    if client is None or not hasattr(client, "get_ticker_24hr"):
+        return None
+    try:
+        data = client.get_ticker_24hr(symbol)
+        value = float(data.get("quoteVolume", 0) or 0)
+    except Exception:
+        return cached[0] if cached else None
+    with _cache_lock:
+        _volume_cache[symbol] = (value, now)
+    return value
 
 
 def get_live_price(symbol: str):
@@ -589,6 +618,7 @@ def build_status():
             "pnl_usdt": pnl_usdt,
             "position_value": position_value,
             "hold_minutes": hold_minutes,
+            "volume_24h_quote": get_volume_24h_quote(symbol) if has_position else None,
             "be_active": bool(state.get("be_active")),
             "be_stop_price": float(state.get("be_stop_price", 0) or 0),
             "trailing_active": bool(state.get("trailing_active")),
@@ -598,6 +628,11 @@ def build_status():
             "usdt_free": usdt_free,
             "equity_live": equity_live,
             "peak_equity": state.get("peak_equity"),
+            "max_drawdown_pct": float(state.get("max_dd_pct") or 0.0),
+            "dd_reset_count": int(state.get("dd_reset_count") or 0),
+            "max_drawdown_limit_pct": float(
+                PUMP_CONFIG.get("MAX_DRAWDOWN_PERCENT") or 0.0
+            ),
         },
         "flags": {
             "dd_stopped": bool(state.get("dd_stopped")),
@@ -1948,6 +1983,12 @@ def api_backtest_defaults():
     return jsonify(out)
 
 
+@app.route("/favicon.ico")
+def favicon():
+    # Browser meminta /favicon.ico di akar situs; arahkan ke aset statis.
+    return redirect("/static/favicon.ico", code=302)
+
+
 @app.route("/")
 def index():
     return render_template("dashboard.html", admin_token=_ADMIN_TOKEN)
@@ -1956,6 +1997,16 @@ def index():
 @app.route("/api/status")
 def api_status():
     return jsonify(build_status())
+
+
+@app.route("/api/coin-icon/<symbol>")
+def api_coin_icon(symbol):
+    # Mengalihkan ke gambar ikon koin. 404 bila tidak ada, sehingga klien
+    # bisa lanjut ke sumber cadangan (CDN) atau huruf inisial.
+    url = coin_icons.resolve_icon_url(symbol)
+    if not url:
+        abort(404)
+    return redirect(url, code=302)
 
 
 @app.route("/api/fx")

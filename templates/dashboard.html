@@ -1,6 +1,9 @@
 <!doctype html>
 <html lang="id">
   <head>
+    <link rel="icon" href="/static/favicon.ico" sizes="any" />
+    <link rel="icon" type="image/png" sizes="256x256" href="/static/logo.png" />
+    <link rel="apple-touch-icon" href="/static/apple-touch-icon.png" />
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Pump Scanner Bot - Dashboard</title>
@@ -163,13 +166,8 @@
         width: 40px;
         height: 40px;
         border-radius: 11px;
-        background: linear-gradient(135deg, var(--accent), var(--accent2));
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-weight: 800;
-        font-size: 18px;
-        color: #04140a;
+        display: block;
+        object-fit: cover;
         box-shadow: 0 5px 16px rgba(74, 222, 128, 0.25);
         flex: none;
       }
@@ -300,7 +298,33 @@
         min-width: 0;
       }
       .cards {
-        grid-template-columns: repeat(4, 1fr);
+        grid-template-columns: repeat(5, 1fr);
+      }
+      .symname {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        vertical-align: middle;
+      }
+      .coin-logo,
+      .coin-fallback {
+        width: 20px;
+        height: 20px;
+        flex: 0 0 20px;
+        border-radius: 50%;
+        display: inline-block;
+      }
+      .coin-fallback {
+        background: var(--panel2);
+        border: 1px solid var(--border);
+        color: var(--text, #e6e8ee);
+        font-size: 11px;
+        font-weight: 700;
+        line-height: 18px;
+        text-align: center;
+      }
+      .posrow .v .symname {
+        justify-content: flex-end;
       }
       .card {
         background: var(--panel);
@@ -1181,6 +1205,157 @@
         max-width: min(360px, calc(100vw - 32px));
         pointer-events: none;
       }
+      .cnotice-stack {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+      .cnotice-stack:not(:has(.cnotice.show)) {
+        display: none;
+      }
+      .cnotice {
+        display: none;
+        align-items: center;
+        gap: 8px;
+        padding: 7px 8px 7px 11px;
+        border-radius: 8px;
+        border: 1px solid;
+        border-left-width: 3px;
+        font-size: 12px;
+        line-height: 1.45;
+      }
+      .cnotice.show {
+        display: flex;
+        animation: cnIn 0.2s ease-out;
+      }
+      @keyframes cnIn {
+        from { opacity: 0; transform: translateY(-3px); }
+        to { opacity: 1; transform: none; }
+      }
+      .cnotice.ok {
+        background: rgba(74, 222, 128, 0.1);
+        border-color: rgba(74, 222, 128, 0.28);
+        border-left-color: var(--green);
+        color: var(--green);
+      }
+      .cnotice.info {
+        background: rgba(56, 189, 248, 0.1);
+        border-color: rgba(56, 189, 248, 0.28);
+        border-left-color: #38bdf8;
+        color: #7dd3fc;
+      }
+      .cnotice.warn {
+        background: rgba(245, 158, 11, 0.1);
+        border-color: rgba(245, 158, 11, 0.28);
+        border-left-color: var(--amber);
+        color: var(--amber);
+      }
+      .cnotice.err {
+        background: rgba(244, 63, 94, 0.09);
+        border-color: rgba(244, 63, 94, 0.3);
+        border-left-color: var(--red);
+        color: #fda4af;
+      }
+      .cn-icon {
+        flex: 0 0 auto;
+      }
+      .cn-icon:empty {
+        display: none;
+      }
+      .cn-text {
+        flex: 1;
+        min-width: 0;
+        word-break: break-word;
+      }
+      .cn-x {
+        flex: 0 0 auto;
+        background: none;
+        border: 0;
+        color: inherit;
+        opacity: 0.6;
+        font-size: 15px;
+        line-height: 1;
+        padding: 3px 5px;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+      .cn-x:hover {
+        opacity: 1;
+        background: rgba(255, 255, 255, 0.06);
+      }
+
+      .bt-seg {
+        display: inline-flex;
+        gap: 2px;
+        padding: 3px;
+        margin-bottom: 14px;
+        background: var(--panel2);
+        border: 1px solid var(--border);
+        border-radius: 9px;
+      }
+      .bt-seg-btn {
+        background: transparent;
+        border: 0;
+        color: var(--muted);
+        font-size: 12.5px;
+        font-weight: 600;
+        padding: 6px 13px;
+        border-radius: 7px;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .bt-seg-btn:hover {
+        color: var(--text, #e6e8ee);
+      }
+      .bt-seg-btn.active {
+        background: var(--panel);
+        color: var(--text, #e6e8ee);
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+      }
+      .bt-seg-btn:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 1px;
+      }
+
+      /* Latar gradien berwarna di belakang kartu kaca, agar efek blur terlihat. */
+      .glass-cards {
+        position: relative;
+        padding: 14px;
+        border-radius: 18px;
+        background: transparent;
+        border: 1px solid rgba(255, 255, 255, 0.07);
+      }
+      /* Kartu ringkasan Ikhtisar: gaya glassmorphism (tanpa garis tepi kiri). */
+      .glass-cards .card {
+        background: rgba(255, 255, 255, 0.05);
+        -webkit-backdrop-filter: blur(18px) saturate(160%);
+        backdrop-filter: blur(18px) saturate(160%);
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        border-top-color: rgba(255, 255, 255, 0.24);
+        border-radius: 16px;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35),
+          inset 0 1px 0 rgba(255, 255, 255, 0.08);
+      }
+      .glass-cards .card.good {
+        border-color: rgba(74, 222, 128, 0.38);
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35),
+          0 0 22px rgba(74, 222, 128, 0.08),
+          inset 0 1px 0 rgba(255, 255, 255, 0.08);
+      }
+      .glass-cards .card.warn {
+        border-color: rgba(245, 158, 11, 0.38);
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35),
+          0 0 22px rgba(245, 158, 11, 0.08),
+          inset 0 1px 0 rgba(255, 255, 255, 0.08);
+      }
+      .glass-cards .card.bad {
+        border-color: rgba(244, 63, 94, 0.38);
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35),
+          0 0 22px rgba(244, 63, 94, 0.08),
+          inset 0 1px 0 rgba(255, 255, 255, 0.08);
+      }
+
       .toast {
         pointer-events: auto;
         display: flex;
@@ -1411,7 +1586,7 @@
     <div class="wrap">
       <header>
         <div class="brand">
-          <div class="logo">₿</div>
+          <img class="logo" src="/static/logo.png" alt="Logo Pump Scanner Bot" width="40" height="40" />
           <div>
             <h1>Pump Scanner Bot</h1>
             <p>Dashboard pemantauan · Binance Spot</p>
@@ -1495,38 +1670,41 @@
       </nav>
 
       <div class="tabpane" id="paneIkhtisar" role="tabpanel">
-        <div class="grid cards" style="margin-bottom: 16px">
+        <div class="grid cards glass-cards" style="margin-bottom: 16px">
           <div class="card" id="cardEquity">
-            <div class="accent-bar"></div>
-            <div class="label">Equity (Live)</div>
+                        <div class="label" id="equityLabel">Equity (Live)</div>
             <div class="value mono" id="equityVal">
               <span class="skel" style="width: 70%"></span>
             </div>
             <div class="sub" id="equitySub">saldo + nilai posisi</div>
           </div>
           <div class="card" id="cardPnl">
-            <div class="accent-bar"></div>
-            <div class="label">PnL Posisi Terbuka</div>
+                        <div class="label">PnL Posisi Terbuka</div>
             <div class="value mono" id="openPnlVal">
               <span class="skel" style="width: 70%"></span>
             </div>
             <div class="sub" id="openPnlSub">belum ada posisi</div>
           </div>
           <div class="card" id="cardRealized">
-            <div class="accent-bar"></div>
-            <div class="label">Total PnL Terealisasi</div>
+                        <div class="label">Total PnL Terealisasi</div>
             <div class="value mono" id="realizedVal">
               <span class="skel" style="width: 70%"></span>
             </div>
             <div class="sub" id="realizedSub">dari riwayat trade</div>
           </div>
           <div class="card" id="cardWin">
-            <div class="accent-bar"></div>
-            <div class="label">Win Rate</div>
+                        <div class="label">Win Rate</div>
             <div class="value mono" id="winVal">
               <span class="skel" style="width: 70%"></span>
             </div>
             <div class="sub" id="winSub">-</div>
+          </div>
+          <div class="card" id="cardDd">
+                        <div class="label">Max Drawdown</div>
+            <div class="value mono" id="ddVal">
+              <span class="skel" style="width: 70%"></span>
+            </div>
+            <div class="sub" id="ddSub">dari puncak equity</div>
           </div>
         </div>
 
@@ -1620,22 +1798,17 @@
             <div id="processStatusBox" class="ctl-status">
               Memuat status proses...
             </div>
-            <div
-              id="controlActionStatus"
-              class="manual-status"
-              role="status"
-              aria-live="assertive"
-            ></div>
-            <div
-              id="modeConflictWarning"
-              class="banner err"
-              style="margin-bottom: 12px"
-            ></div>
-            <div
-              id="openPositionWarning"
-              class="banner err"
-              style="margin-bottom: 12px"
-            ></div>
+            <div id="controlNotices" class="cnotice-stack">
+              <div id="controlActionStatus" class="cnotice" role="status" aria-live="polite">
+                <span class="cn-icon"></span><span class="cn-text"></span><button type="button" class="cn-x" aria-label="Tutup" onclick="closeNotice(this.parentNode)">×</button>
+              </div>
+              <div id="modeConflictWarning" class="cnotice err" role="alert">
+                <span class="cn-icon"></span><span class="cn-text"></span><button type="button" class="cn-x" aria-label="Tutup" onclick="closeNotice(this.parentNode)">×</button>
+              </div>
+              <div id="openPositionWarning" class="cnotice err" role="alert">
+                <span class="cn-icon"></span><span class="cn-text"></span><button type="button" class="cn-x" aria-label="Tutup" onclick="closeNotice(this.parentNode)">×</button>
+              </div>
+            </div>
             <div class="ctl-actions">
               <button
                 id="resumeBotBtn"
@@ -1681,30 +1854,24 @@
               baik daripada kenyataan.</span
             >
           </div>
-          <div
-            id="btModeToggle"
-            style="
-              display: flex;
-              gap: 8px;
-              margin-bottom: 14px;
-              flex-wrap: wrap;
-            "
-          >
+          <div id="btModeToggle" class="bt-seg" role="group" aria-label="Mode backtest">
             <button
               type="button"
               id="btModePortfolio"
+              class="bt-seg-btn active"
+              aria-pressed="true"
               onclick="btSetMode('portfolio')"
-              style="flex: 1; min-width: 220px"
             >
               📊 Simulasi Portofolio
             </button>
             <button
               type="button"
               id="btModeGrid"
+              class="bt-seg-btn"
+              aria-pressed="false"
               onclick="btSetMode('grid')"
-              style="flex: 1; min-width: 220px"
             >
-              🧮 Grid Search (latih/uji)
+              🧮 Grid Search
             </button>
           </div>
           <div id="btForm" class="bt-form">
@@ -1980,7 +2147,7 @@
           </div>
           <div id="btResult" style="display: none; margin-top: 18px">
             <div
-              class="grid cards"
+              class="grid cards glass-cards"
               style="margin-bottom: 14px"
               id="btCards"
             ></div>
@@ -2434,6 +2601,45 @@
         return parts.join(' ');
       }
 
+      // Logo simbol: ambil ikon koin dari CDN publik (spothq/cryptocurrency-icons)
+      // berdasarkan aset dasar (BOMEUSDT -> bome). Bila gagal dimuat (koin tidak
+      // ada di CDN atau tidak ada internet), ditampilkan lingkaran huruf inisial.
+      const LOGO_QUOTES = ['FDUSD','USDT','USDC','BUSD','TUSD','BTC','ETH','BNB'];
+      const LOGO_CDN = 'https://cdn.jsdelivr.net/gh/spothq/cryptocurrency-icons@master/128/color/';
+      function baseAsset(sym){
+        const s = String(sym||'').toUpperCase();
+        for(const q of LOGO_QUOTES){ if(s.endsWith(q) && s.length>q.length) return s.slice(0, -q.length); }
+        return s;
+      }
+      // Urutan sumber: 1) /api/coin-icon (CoinGecko, di-cache backend),
+      // 2) CDN spothq, 3) lingkaran huruf inisial.
+      function coinLogo(sym, size=20){
+        const base = baseAsset(sym);
+        const letter = (base.charAt(0) || '?');
+        const primary = '/api/coin-icon/' + encodeURIComponent(base);
+        const fallback = LOGO_CDN + encodeURIComponent(base.toLowerCase()) + '.png';
+        return '<img class="coin-logo" src="'+esc(primary)+'" data-fb="'+esc(fallback)+'" data-letter="'+esc(letter)+'" width="'+size+'" height="'+size+'" alt="" loading="lazy">';
+      }
+      function symLabel(sym, size=20){
+        return '<span class="symname">'+coinLogo(sym, size)+'<b>'+esc(sym)+'</b></span>';
+      }
+      // Gambar yang gagal dimuat diganti huruf inisial (event error tidak naik ke atas, jadi pakai capture).
+      document.addEventListener('error', function(e){
+        const t = e.target;
+        if(t && t.classList && t.classList.contains('coin-logo')){
+          if(t.dataset.fb){
+            const next = t.dataset.fb;
+            t.dataset.fb = '';
+            t.src = next;
+            return;
+          }
+          const f = document.createElement('span');
+          f.className = 'coin-fallback';
+          f.textContent = t.dataset.letter || '?';
+          t.replaceWith(f);
+        }
+      }, true);
+
       function renderStatus(s){
         const mp=document.getElementById('modePill'), md=mp.querySelector('.dot');
         var isPaper = (s.mode==='PAPER') || !!s.paper;
@@ -2449,7 +2655,17 @@
         else{cd.className='dot off';ct.textContent='Offline (data dari file)';}
 
         const a=s.account;
+        document.getElementById('equityLabel').textContent = isPaper ? 'Equity (Paper)' : 'Equity (Live)';
         document.getElementById('equityVal').textContent = a.equity_live!=null? fmt(a.equity_live)+' '+s.quote : '-';
+        const ddEl = document.getElementById('ddVal');
+        if(a.max_drawdown_pct!=null){
+          const ddv = Number(a.max_drawdown_pct);
+          ddEl.innerHTML = '<span class="'+(ddv>0?'neg':'')+'">'+fmt(ddv,2)+'%</span>';
+          document.getElementById('ddSub').textContent = 'batas reset '+fmt(a.max_drawdown_limit_pct,1)+'% · direset '+fmt(a.dd_reset_count||0,0)+'x';
+        } else {
+          ddEl.textContent = '-';
+          document.getElementById('ddSub').textContent = 'belum ada data equity';
+        }
         const eqIdr = idrOf(a.equity_live);
         document.getElementById('equitySub').textContent = a.usdt_free!=null
           ? ((eqIdr!=null? '≈ '+fmtIDR(eqIdr,false)+' · ' : '') + 'bebas: '+fmt(a.usdt_free)+' '+s.quote)
@@ -2483,11 +2699,12 @@
               <div class="s">${p.pnl_usdt!=null?sign(p.pnl_usdt)+fmt(p.pnl_usdt)+' '+esc(s.quote):'menunggu harga live'}</div>
               ${p.pnl_usdt!=null?idrSub(p.pnl_usdt, p.pnl_usdt>0):''}
             </div>
-            <div class="posrow"><span class="k">Simbol</span><span class="v">${esc(p.symbol)}</span></div>
+            <div class="posrow"><span class="k">Simbol</span><span class="v">${symLabel(p.symbol, 22)}</span></div>
             <div class="posrow"><span class="k">Harga entry</span><span class="v mono">${fmtP(p.entry_price)}${p.entry_price?idrInline(p.entry_price):''}</span></div>
             <div class="posrow"><span class="k">Harga live</span><span class="v mono">${p.live_price!=null?fmtP(p.live_price):'-'}${p.live_price!=null?idrInline(p.live_price):''}</span></div>
             <div class="posrow"><span class="k">Qty</span><span class="v mono">${fmt(p.qty,6)}</span></div>
             <div class="posrow"><span class="k">Nilai posisi</span><span class="v mono">${p.position_value!=null?fmt(p.position_value)+' '+esc(s.quote):'-'}${p.position_value!=null?idrInline(p.position_value):''}</span></div>
+            <div class="posrow"><span class="k">Volume 24 jam</span><span class="v mono">${p.volume_24h_quote!=null?fmt(p.volume_24h_quote,0)+' '+esc(s.quote):'-'}${p.volume_24h_quote!=null?idrInline(p.volume_24h_quote):''}</span></div>
             <div class="posrow"><span class="k">Lama hold</span><span class="v">${hold}</span></div>
             ${beRow}${trRow}`;
           window._currentPositionSymbol = p.symbol;
@@ -2641,7 +2858,7 @@
         tb.innerHTML=closed.map(t=>`
           <tr>
             <td class="mono mut">${esc(t.sell_time||'-')}${t.paper?' <span class="tag dry">PAPER</span>':''}</td>
-            <td><b>${esc(t.symbol)}</b></td>
+            <td>${symLabel(t.symbol, 20)}</td>
             <td class="mono">${fmtP(t.entry||t.buy_price)}</td>
             <td class="mono">${fmtP(t.sell_price)}</td>
             <td class="mono">${fmt(t.qty,4)}</td>
@@ -2783,20 +3000,63 @@
           (p.job_warning?`<br><span style="color:var(--amber)">Proteksi child tree Windows tidak aktif: ${esc(p.job_warning)}</span>`:'');
       }
 
+      // Notifikasi kontrol bot: tampil di satu tumpukan, bisa ditutup dengan tombol x.
+      // Hasil aksi (ok/warn/err) hilang otomatis; kondisi (posisi terbuka, mode konflik)
+      // tetap tampil selama masih berlaku, kecuali ditutup pengguna.
+      const _noticeTimers = new WeakMap();
+      const NOTICE_AUTO_MS = { ok: 5000, warn: 7000, err: 10000 };
+
+      function closeNotice(el){
+        if(!el) return;
+        clearTimeout(_noticeTimers.get(el));
+        _noticeTimers.delete(el);
+        if(el.dataset.key) el.dataset.dismissed = el.dataset.key;
+        el.classList.remove('show');
+      }
+
+      function showNotice(el, kind, icon, content, isHtml, autoMs){
+        if(!el) return;
+        clearTimeout(_noticeTimers.get(el));
+        _noticeTimers.delete(el);
+        el.className = 'cnotice show ' + (kind || 'info');
+        el.querySelector('.cn-icon').textContent = icon || '';
+        const t = el.querySelector('.cn-text');
+        if(isHtml) t.innerHTML = content || ''; else t.textContent = content || '';
+        if(autoMs){
+          _noticeTimers.set(el, setTimeout(() => closeNotice(el), autoMs));
+        }
+      }
+
+      function hideNotice(el){
+        if(!el) return;
+        clearTimeout(_noticeTimers.get(el));
+        _noticeTimers.delete(el);
+        el.classList.remove('show');
+        delete el.dataset.key;
+        delete el.dataset.dismissed;
+      }
+
+      // Peringatan kondisi: tidak hilang sendiri, tapi tidak muncul lagi setelah ditutup
+      // selama kuncinya (key) sama. Kunci berubah berarti kondisi baru.
+      function showPersistentNotice(el, kind, icon, html, key){
+        if(!el) return;
+        if(el.dataset.dismissed === key){ el.classList.remove('show'); return; }
+        el.dataset.key = key;
+        showNotice(el, kind, icon, html, true, 0);
+      }
+
       function setControlActionStatus(kind, message, operationId){
         const el=document.getElementById('controlActionStatus');
         if(!el) return;
-        el.className='manual-status show '+(kind||'info');
-        el.textContent=message||'';
         el.dataset.operationId=operationId||'';
+        showNotice(el, kind||'info', '', message||'', false, NOTICE_AUTO_MS[kind]||0);
       }
 
       function hideControlActionStatus(){
         const el=document.getElementById('controlActionStatus');
         if(!el) return;
-        el.className='manual-status';
-        el.textContent='';
         el.dataset.operationId='';
+        hideNotice(el);
       }
 
       function controlOperationActive(operation){
@@ -2804,6 +3064,7 @@
         return status==='PENDING'||status==='RUNNING';
       }
 
+      let _lastOpNoticeKey = '';
       function renderControlOperation(operation){
         if(!operation){
           if(_localControlBusy){
@@ -2827,15 +3088,22 @@
         _localControlBusy=false;
         if(opStatus==='SUCCEEDED'){
           const p=operation.process||{};
-          setControlActionStatus('ok','✅ '+action+' selesai. Status proses: '+(p.status||'-')+', PID '+(p.pid||'-')+'.',opId);
           const key=opId+':'+opStatus;
+          // Hanya tampilkan sekali per operasi: poll ulang tidak boleh menghidupkan notifikasi lagi.
+          if(_lastOpNoticeKey!==key){
+            _lastOpNoticeKey=key;
+            setControlActionStatus('ok','✅ '+action+' selesai. Status proses: '+(p.status||'-')+', PID '+(p.pid||'-')+'.',opId);
+          }
           if(_watchedControlOperationId===opId&&_notifiedControlResult!==key){
             _notifiedControlResult=key;
             toast('ok',action+' selesai','Status proses: '+(p.status||'-')+'.');
           }
         }else if(opStatus==='FAILED'){
-          setControlActionStatus('err','❌ '+action+' gagal: '+(operation.error||'Alasan tidak tersedia.'),opId);
           const key=opId+':'+opStatus;
+          if(_lastOpNoticeKey!==key){
+            _lastOpNoticeKey=key;
+            setControlActionStatus('err','❌ '+action+' gagal: '+(operation.error||'Alasan tidak tersedia.'),opId);
+          }
           if(_watchedControlOperationId===opId&&_notifiedControlResult!==key){
             _notifiedControlResult=key;
             toast('err',action+' gagal',operation.error||'Alasan tidak tersedia.',9000);
@@ -2880,14 +3148,12 @@
           if(!configSafe) modeProblems.push(...d.config_errors);
           if(!guardSafe) modeProblems.push(...(d.mode_guard.reasons||[]));
           if(modeProblems.length){
-            mw.classList.add('show');
-            mw.innerHTML='<span>⛔</span><span><b>Resume Bot diblokir.</b> '+modeProblems.map(esc).join(' ')+' Ubah BOT_MODE di .env hanya setelah mode lama berhenti dan posisinya kosong, lalu jalankan ulang dashboard.</span>';
-          }else{mw.classList.remove('show');mw.textContent='';}
+            showPersistentNotice(mw,'err','⛔','<b>Resume Bot diblokir.</b> '+modeProblems.map(esc).join(' ')+' Ubah BOT_MODE di .env hanya setelah mode lama berhenti dan posisinya kosong, lalu jalankan ulang dashboard.',modeProblems.join('|'));
+          }else{hideNotice(mw);}
           const w=document.getElementById('openPositionWarning');
           if(d.position&&d.position.has_position){
-            w.classList.add('show');
-            w.innerHTML=`<span>⚠️</span><span>Posisi terbuka <b>${esc(d.position.symbol)}</b>, qty ${esc(d.position.qty)}. Stop dengan posisi dipertahankan membuat SL/TP bot tidak aktif.</span>`;
-          }else{w.classList.remove('show');w.textContent='';}
+            showPersistentNotice(w,'err','⚠️',`Posisi terbuka <b>${esc(d.position.symbol)}</b>, qty ${esc(d.position.qty)}. Stop dengan posisi dipertahankan membuat SL/TP bot tidak aktif.`,'pos:'+d.position.symbol+':'+d.position.qty);
+          }else{hideNotice(w);}
         }catch(e){
           if(_pollingPaused&&(e.name==='TimeoutError'||e.name==='AbortError')) return;
           _controlState=null;
@@ -2896,7 +3162,7 @@
           if(resumeBtn) resumeBtn.disabled=true;
           if(stopBtn) stopBtn.disabled=true;
           const mw=document.getElementById('modeConflictWarning');
-          if(mw){mw.classList.remove('show');mw.textContent='';}
+          hideNotice(mw);
           document.getElementById('processStatusBox').textContent='Gagal memuat status: '+e.message;
         }finally{
           if(_controlStatusController===controller) _controlStatusController=null;
@@ -3184,10 +3450,11 @@
         document.getElementById('btEstimate').style.display = isPortfolio ? '' : 'none';
         document.getElementById('btGridForm').style.display = isPortfolio ? 'none' : '';
         document.getElementById('btGridEstimate').style.display = isPortfolio ? 'none' : '';
-        document.getElementById('btModePortfolio').style.fontWeight = isPortfolio ? '700' : '400';
-        document.getElementById('btModeGrid').style.fontWeight = isPortfolio ? '400' : '700';
-        document.getElementById('btModePortfolio').style.opacity = isPortfolio ? '1' : '0.65';
-        document.getElementById('btModeGrid').style.opacity = isPortfolio ? '0.65' : '1';
+        for(const [id, active] of [['btModePortfolio', isPortfolio], ['btModeGrid', !isPortfolio]]){
+          const btn = document.getElementById(id);
+          btn.classList.toggle('active', active);
+          btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+        }
         if(!isPortfolio) btGridUpdateEstimate();
       }
 
@@ -3469,19 +3736,19 @@
         }[g.metrik] || esc(g.metrik || '-');
 
         const cardsHtml = `
-          <div class="card good"><div class="accent-bar"></div>
+          <div class="card good">
             <div class="label">Kombinasi diuji</div>
             <div class="value mono">${fmt(g.total_kombinasi,0)}</div>
             <div class="sub">${fmt(g.dipangkas,0)} duplikat dipangkas, ${fmt(g.dilewati,0)} gagal</div></div>
-          <div class="card"><div class="accent-bar"></div>
+          <div class="card">
             <div class="label">Metrik peringkat</div>
             <div class="value" style="font-size:14px">${metrikLabel}</div>
             <div class="sub">rasio latih ${esc(g.rasio_latih)}, min ${fmt(g.min_trades,0)} trade</div></div>
-          <div class="card"><div class="accent-bar"></div>
+          <div class="card">
             <div class="label">Bar latih / uji</div>
             <div class="value mono">${fmt(g.bar_latih,0)} / ${fmt(g.bar_uji,0)}</div>
             <div class="sub">split satu kali berdasarkan waktu</div></div>
-          <div class="card"><div class="accent-bar"></div>
+          <div class="card">
             <div class="label">Durasi</div>
             <div class="value mono">${fmt(g.detik,1)} dtk</div>
             <div class="sub">${g.dibatalkan ? 'dibatalkan pengguna, hasil parsial' : 'selesai penuh'}</div></div>`;
@@ -3597,7 +3864,7 @@
           const col = pnl>=0 ? 'var(--green)' : 'var(--red)';
           return `<div style="margin-bottom:9px">
             <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:3px">
-              <span><b>${esc(x.symbol)}</b> <span class="mut">${fmt(x.trades,0)}x</span></span>
+              <span>${symLabel(x.symbol, 18)} <span class="mut">${fmt(x.trades,0)}x</span></span>
               <span class="mono ${cls(x.pnl_pct)}">${sign(x.pnl_pct)}${fmt(x.pnl_pct)}%</span>
             </div>
             <div style="height:5px;border-radius:99px;background:var(--inset,rgba(148,163,184,.12))">
@@ -3620,8 +3887,8 @@
         }
         box.innerHTML = '<div class="logbox" style="max-height:220px">' + sk.map(x=>
           (x.reason==='FILTER_CHASE'
-            ? `<div class="logline INFO"><b>${esc(x.symbol)}</b> dilewati pada ${esc(x.time)} oleh filter MAX_CHASE_PCT (harga eksekusi terlalu jauh di atas close sinyal)</div>`
-            : `<div class="logline INFO"><b>${esc(x.symbol)}</b> terlewat pada ${esc(x.time)}, bot sedang memegang ${esc(x.holding)}</div>`)
+            ? `<div class="logline INFO">${symLabel(x.symbol, 16)} dilewati pada ${esc(x.time)} oleh filter MAX_CHASE_PCT (harga eksekusi terlalu jauh di atas close sinyal)</div>`
+            : `<div class="logline INFO">${symLabel(x.symbol, 16)} terlewat pada ${esc(x.time)}, bot sedang memegang ${esc(x.holding)}</div>`)
         ).join('') + '</div>';
       }
 
@@ -3655,35 +3922,35 @@
         const re = s.risk_events || {};
         const riskTotal = (re.dd_stop||0);
         const cardsHtml = `
-          <div class="card ${cardTone(s.total_return_pct)}"><div class="accent-bar"></div>
+          <div class="card ${cardTone(s.total_return_pct)}">
             <div class="label">Return bersih</div>
             <div class="value mono ${cls(s.total_return_pct)}">${sign(s.total_return_pct)}${fmt(s.total_return_pct,2)}%</div>
             <div class="sub">${sign(s.total_pnl_quote)}${fmt(s.total_pnl_quote,2)} dari modal ${fmt(s.initial_equity,2)} · kotor ${sign(s.gross_return_pct)}${fmt(s.gross_return_pct,2)}%${idrOf(s.total_pnl_quote)!=null?(' · ≈ '+fmtIDR(idrOf(s.total_pnl_quote), s.total_pnl_quote>0)):''}</div></div>
-          <div class="card"><div class="accent-bar"></div>
+          <div class="card">
             <div class="label">Trade selesai</div>
             <div class="value mono">${fmt(s.total_trades,0)}</div>
             <div class="sub"><span class="pos">${fmt(s.wins,0)}W</span> / <span class="neg">${fmt(s.losses,0)}L</span> · win rate ${fmt(s.win_rate,1)}% · ${fmt(s.trades_per_day,2)}/hari</div></div>
-          <div class="card warn"><div class="accent-bar"></div>
+          <div class="card warn">
             <div class="label">Max drawdown</div>
             <div class="value mono">${fmt(s.max_drawdown_pct,2)}%</div>
             <div class="sub">dari trade yang selesai, bukan mark-to-market</div></div>
-          <div class="card"><div class="accent-bar"></div>
+          <div class="card">
             <div class="label">Profit factor</div>
             <div class="value mono">${pfText}</div>
             <div class="sub">payoff ${s.payoff_ratio===null||s.payoff_ratio===undefined?'-':fmt(s.payoff_ratio,2)} · rugi beruntun maks ${fmt(s.max_consecutive_losses,0)}</div></div>
-          <div class="card ${cardTone(s.avg_trade_pct)}"><div class="accent-bar"></div>
+          <div class="card ${cardTone(s.avg_trade_pct)}">
             <div class="label">Rata-rata per trade</div>
             <div class="value mono ${cls(s.avg_trade_pct)}">${sign(s.avg_trade_pct)}${fmt(s.avg_trade_pct,3)}%</div>
             <div class="sub">median ${sign(s.median_trade_pct)}${fmt(s.median_trade_pct,3)}% · terbaik ${sign(s.best_trade_pct)}${fmt(s.best_trade_pct,2)}% · terburuk ${fmt(s.worst_trade_pct,2)}%. Tidak bergantung skala modal</div></div>
-          <div class="card ${riskTotal||s.chase_skips?'warn':''}"><div class="accent-bar"></div>
+          <div class="card ${riskTotal||s.chase_skips?'warn':''}">
             <div class="label">Filter dan kontrol akun</div>
             <div class="value mono">${fmt(riskTotal+(re.forced_close||0)+(s.chase_skips||0),0)}</div>
             <div class="sub">DD stop ${fmt(re.dd_stop||0,0)} · tutup paksa ${fmt(re.forced_close||0,0)} · chase dilewati ${fmt(s.chase_skips||0,0)} · gerbang demand D1 ${fmt(((res.daily_demand||{}).skips)||0,0)} · gerbang trend ${fmt(((res.trend||{}).skips)||0,0)}</div></div>
-          <div class="card"><div class="accent-bar"></div>
+          <div class="card">
             <div class="label">Candle diproses</div>
             <div class="value mono">${fmt(res.bars_total,0)}</div>
             <div class="sub">interval ${esc(res.interval)}</div></div>
-          <div class="card"><div class="accent-bar"></div>
+          <div class="card">
             <div class="label">Simbol berhasil</div>
             <div class="value mono">${fmt(res.universe_with_data,0)}</div>
             <div class="sub">dari ${fmt(res.universe_requested,0)} diminta</div></div>`;
@@ -3733,7 +4000,7 @@
         } else {
           tb.innerHTML = trades.map(t=>`
             <tr>
-              <td><b>${esc(t.symbol)}</b></td>
+              <td>${symLabel(t.symbol, 20)}</td>
               <td class="mono mut">${esc(t.entry_time)}</td>
               <td class="mono mut">${esc(t.exit_time)}</td>
               <td class="mono">${fmtP(t.entry_price)}</td>
