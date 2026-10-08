@@ -229,6 +229,90 @@ def next_entry_allowed(close_time_ms: int, config: dict) -> int:
     return int(close_time_ms) + max(cooldown_ms, spacing_ms)
 
 
+def same_coin_block_hours(config: dict) -> float:
+    """Durasi blokir entry ulang koin yang sama dalam jam (0 = nonaktif).
+
+    Satu sumber kebenaran untuk aturan SAME_COIN_BLOCK_HOURS yang dipakai bot
+    live (trading/pump_scanner_bot.py) dan kedua jalur backtest.
+    """
+    try:
+        hours = float(config.get("SAME_COIN_BLOCK_HOURS", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(hours) or hours <= 0:
+        return 0.0
+    return hours
+
+
+def same_coin_block_loss_only(config: dict) -> bool:
+    """True kalau hanya trade loss yang memicu blokir koin sama."""
+    return bool(config.get("SAME_COIN_BLOCK_LOSS_ONLY", True))
+
+
+def same_coin_block_until_ms(close_time_ms: int, pnl_quote: float, config: dict) -> int:
+    """Waktu (ms) sampai kapan entry koin yang sama diblokir setelah trade ditutup.
+
+    Mengembalikan close_time_ms apa adanya (artinya tidak ada blokir tambahan)
+    kalau fitur nonaktif atau, pada mode loss-only, trade tidak rugi. PnL dalam
+    mata uang kuotasi, sama seperti PnL di close_position bot live.
+    """
+    hours = same_coin_block_hours(config)
+    close_time_ms = int(close_time_ms)
+    if hours <= 0:
+        return close_time_ms
+    try:
+        hasil = float(pnl_quote)
+    except (TypeError, ValueError):
+        hasil = float("-inf")
+    if not math.isfinite(hasil):
+        hasil = -1.0 if hasil < 0 else 1.0
+    if same_coin_block_loss_only(config) and hasil >= 0:
+        return close_time_ms
+    return close_time_ms + int(hours * 3_600_000)
+
+
+def same_coin_blocked(symbol: str, now_ms: int, blocks: dict) -> bool:
+    """True kalau simbol sedang diblokir aturan SAME_COIN_BLOCK pada waktu now_ms."""
+    if not isinstance(blocks, dict) or not symbol:
+        return False
+    try:
+        until = float(blocks.get(str(symbol).upper(), 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(until):
+        return False
+    return until > int(now_ms)
+
+
+def same_coin_block_record(
+    blocks: dict, symbol: str, close_time_ms: int, pnl_quote: float, config: dict
+) -> None:
+    """Catat blokir koin yang baru ditutup di simulasi.
+
+    `blocks` diubah in-place (dipanggil hanya dari backtest yang memegang
+    state lokal per jalannya). Entri kedaluwarsa dipangkas supaya pemetaan
+    tidak terus membesar.
+    """
+    if not symbol or not isinstance(blocks, dict):
+        return
+    close_time_ms = int(close_time_ms)
+    until = same_coin_block_until_ms(close_time_ms, pnl_quote, config)
+    if until <= close_time_ms:
+        return
+    kedaluwarsa = []
+    for sym, nilai in blocks.items():
+        try:
+            batas = float(nilai or 0)
+        except (TypeError, ValueError):
+            kedaluwarsa.append(sym)
+            continue
+        if not math.isfinite(batas) or batas <= close_time_ms:
+            kedaluwarsa.append(sym)
+    for sym in kedaluwarsa:
+        blocks.pop(sym, None)
+    blocks[str(symbol).upper()] = until
+
+
 class TrendLookup:
     """Jendela candle trend (timeframe tinggi) untuk gerbang entry.
 

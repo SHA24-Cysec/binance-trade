@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -58,6 +59,7 @@ class BacktestResult:
     trend_skips: int = 0
     htf_demand_skips: int = 0
     daily_demand_skips: int = 0
+    same_coin_skips: int = 0
 
 
 def bars_per_day(interval: str) -> int:
@@ -225,6 +227,10 @@ def run_backtest(
     equity_before_entry = 0.0
     next_entry_allowed_at = 0
     chase_skips = 0
+    # Pemetaan SIMBOL -> waktu (ms) sampai kapan entry diblokir karena trade
+    # sebelumnya loss (SAME_COIN_BLOCK_HOURS), paritas dengan bot live.
+    symbol_blocks: dict = {}
+    same_coin_skips = 0
 
     try:
         from config.config import get_taker_fee_pct as _fee_fn
@@ -321,6 +327,14 @@ def run_backtest(
             ):
                 window_klines = klines[max(0, i - lookback + 1) : i + 1]
                 setup = scanner.detect_entry_setup(window_klines, config)
+                if setup.ok and parity.same_coin_blocked(
+                    symbol, candle.open_time, symbol_blocks
+                ):
+                    # Koin yang sama baru ditutup dengan loss dan sedang diblokir
+                    # (SAME_COIN_BLOCK_HOURS), sama seperti bot live.
+                    same_coin_skips += 1
+                    i += 1
+                    continue
                 if setup.ok and trend_lookup is not None:
                     trend_scans += 1
                     verdict = trend_lookup.verdict_at(candle.close_time)
@@ -469,10 +483,21 @@ def run_backtest(
             pos = None
             position_notional = 0.0
             next_entry_allowed_at = parity.next_entry_allowed(candle.close_time, config)
+            # Catat blokir entry ulang koin ini (aktif bila trade loss, sesuai
+            # SAME_COIN_BLOCK_LOSS_ONLY), sama seperti bot live.
+            parity.same_coin_block_record(
+                symbol_blocks, symbol, candle.close_time, pnl_quote, config
+            )
             controls.update(candle.close_time, equity)
 
         i += 1
 
+    if same_coin_skips:
+        warnings.append(
+            f"{same_coin_skips} sinyal dilewati oleh blokir koin sama setelah loss "
+            f"(SAME_COIN_BLOCK_HOURS={parity.same_coin_block_hours(config):g} jam), "
+            "sama seperti bot live."
+        )
     if chase_skips:
         warnings.append(
             f"{chase_skips} sinyal dilewati oleh filter MAX_CHASE_PCT "
@@ -526,6 +551,7 @@ def run_backtest(
         trend_skips=trend_skips,
         htf_demand_skips=htf_demand_skips,
         daily_demand_skips=daily_demand_skips,
+        same_coin_skips=same_coin_skips,
     )
     return result
 
@@ -602,6 +628,7 @@ def summarize(result: BacktestResult) -> dict:
         "trend_skips": int(getattr(result, "trend_skips", 0)),
         "htf_demand_skips": int(getattr(result, "htf_demand_skips", 0)),
         "daily_demand_skips": int(getattr(result, "daily_demand_skips", 0)),
+        "same_coin_skips": int(getattr(result, "same_coin_skips", 0)),
         **parity.per_trade_metrics(trades),
     }
 
@@ -664,6 +691,8 @@ OVERRIDE_CASTERS = {
         "ROLLING_VOLUME_LOOKBACK_BARS": int,
         "ROLLING_VOLUME_SURGE_MULT": float,
         "ROLLING_VOLUME_CONFIRMATION_BARS": int,
+        "SAME_COIN_BLOCK_HOURS": float,
+        "SAME_COIN_BLOCK_LOSS_ONLY": _as_bool,
 }
 
 
@@ -838,6 +867,24 @@ def validate_params(cfg: dict) -> None:
             raise BacktestError(
                 f"PUMP_MAX_24H_CHANGE_PCT={pump_max} harus lebih besar dari "
                 f"PUMP_MIN_24H_CHANGE_PCT={pump_min} (atau 0 untuk menonaktifkan batas atas)."
+            )
+
+    # Rentang SAME_COIN_BLOCK_HOURS diambil dari skema pengaturan (sama seperti
+    # aturan demand) supaya backtest tidak menolak nilai sah yang sudah lolos
+    # validasi settings.
+    block_hours = cfg.get("SAME_COIN_BLOCK_HOURS")
+    if block_hours is not None:
+        lo, hi = _rentang_demand("SAME_COIN_BLOCK_HOURS", 0.0, 8760.0)
+        try:
+            nilai_block = float(block_hours)
+        except (TypeError, ValueError):
+            raise BacktestError(
+                f"Parameter 'SAME_COIN_BLOCK_HOURS'={block_hours} bukan angka."
+            ) from None
+        if not math.isfinite(nilai_block) or not (lo <= nilai_block <= hi):
+            raise BacktestError(
+                f"Parameter 'SAME_COIN_BLOCK_HOURS'={block_hours} di luar rentang "
+                f"wajar ({lo:g}..{hi:g})."
             )
 
 
@@ -1019,6 +1066,143 @@ def selftest():
     expected_fee = fee_now(cfg) * 2
     assert abs(sl_trade.fee_pct - expected_fee) < 1e-9
     print(f"  -> OK (gross {sl_trade.gross_pnl_pct:.2f}%, fee {sl_trade.fee_pct:.2f}%)")
+
+    print(
+        "\n=== SELFTEST backtest.py: blokir koin sama setelah loss (SAME_COIN_BLOCK) ==="
+    )
+    # Unit: helper parity sebagai satu sumber kebenaran aturan blokir.
+    jam = parity.same_coin_block_hours({"SAME_COIN_BLOCK_HOURS": 24.0})
+    assert jam == 24.0
+    assert parity.same_coin_block_hours({"SAME_COIN_BLOCK_HOURS": 0}) == 0.0
+    assert parity.same_coin_block_hours({}) == 0.0
+    assert (
+        parity.same_coin_block_until_ms(1_000_000, -1.0, {"SAME_COIN_BLOCK_HOURS": 24.0})
+        == 1_000_000 + 86_400_000
+    )
+    assert (
+        parity.same_coin_block_until_ms(1_000_000, 1.0, {"SAME_COIN_BLOCK_HOURS": 24.0})
+        == 1_000_000
+    )
+    assert (
+        parity.same_coin_block_until_ms(
+            1_000_000, 1.0, {"SAME_COIN_BLOCK_HOURS": 24.0, "SAME_COIN_BLOCK_LOSS_ONLY": False}
+        )
+        == 1_000_000 + 86_400_000
+    )
+    blocks = {}
+    parity.same_coin_block_record(
+        blocks, "testusdt", 1_000_000, -1.0, {"SAME_COIN_BLOCK_HOURS": 24.0}
+    )
+    assert parity.same_coin_blocked("TESTUSDT", 1_000_000 + 1000, blocks)
+    assert not parity.same_coin_blocked("TESTUSDT", 1_000_000 + 86_400_000, blocks)
+    assert not parity.same_coin_blocked("LAINUSDT", 1_000_000, blocks)
+    blocks_prune = {"OLDBUSDT": 500_000, "BADUSDT": "x"}
+    parity.same_coin_block_record(
+        blocks_prune, "NEWUSDT", 1_000_000, -1.0, {"SAME_COIN_BLOCK_HOURS": 24.0}
+    )
+    assert set(blocks_prune) == {"NEWUSDT"}, blocks_prune
+    print("  -> OK (helper parity: hitung, cek, catat, pangkas)")
+
+    # Integrasi: fixture sl_klines = trade pertama pasti STOP_LOSS (loss), lalu
+    # setup baru tidak lama setelah loss, lalu rentang panjang (> 24 jam) dan
+    # setup ketiga di ujung data.
+    HARI_MS = 24 * 3_600_000
+    int_klines = list(sl_klines)
+    t3 = int_klines[-1].close_time + 1
+    vals2 = [100.0] * 20 + [
+        100.2, 100.4, 99.4, 98.4, 97.4, 97.6, 98.6, 98.1, 98.3, 97.8,
+        98.8, 99.8, 98.8, 99.8, 99.3, 99.5, 98.5, 99.5, 98.5, 100.0, 100.5,
+    ]
+    for j, v in enumerate(vals2):
+        int_klines.append(
+            _make_candle(
+                t3,
+                v,
+                v + 1,
+                max(0.01, v - 1),
+                v,
+                vol=(10_000_000.0 if j >= len(vals2) - 2 else 5_000_000.0),
+            )
+        )
+        t3 += 300_000
+    for _ in range(400):
+        int_klines.append(_make_candle(t3, 100.5, 101.0, 100.0, 100.5, vol=5_000_000.0))
+        t3 += 300_000
+    vals3 = [100.5] * 20 + [
+        100.7, 100.9, 99.9, 98.9, 97.9, 98.1, 99.1, 98.6, 98.8, 98.3,
+        99.3, 100.3, 99.3, 100.3, 99.8, 100.0, 99.0, 100.0, 99.0, 100.5, 101.0,
+    ]
+    for j, v in enumerate(vals3):
+        int_klines.append(
+            _make_candle(
+                t3,
+                v,
+                v + 1,
+                max(0.01, v - 1),
+                v,
+                vol=(10_000_000.0 if j >= len(vals3) - 2 else 5_000_000.0),
+            )
+        )
+        t3 += 300_000
+
+    blk_cfg = dict(sl_cfg)
+    blk_cfg["SAME_COIN_BLOCK_HOURS"] = 24.0
+    blk_cfg["SAME_COIN_BLOCK_LOSS_ONLY"] = True
+    r_blk = run_backtest(int_klines, blk_cfg, warmup_bars=0)
+    assert (
+        len(r_blk.trades) >= 2
+    ), f"Perlu sedikitnya 2 trade (loss lalu entry setelah blokir), dapat {len(r_blk.trades)}"
+    first = r_blk.trades[0]
+    assert first.pnl_quote < 0, "Trade pertama harus loss (fixture sl_klines)"
+    viol = 0
+    for i in range(1, len(r_blk.trades)):
+        prev = r_blk.trades[i - 1]
+        if prev.pnl_quote < 0 and r_blk.trades[i].entry_time < prev.exit_time + HARI_MS:
+            viol += 1
+    assert viol == 0, f"{viol} entry melanggar blokir 24 jam setelah loss"
+    assert r_blk.same_coin_skips > 0, "Harus ada sinyal yang diblokir"
+    assert any("blokir koin sama" in w for w in r_blk.warnings)
+    summary_blk = summarize(r_blk)
+    assert summary_blk["same_coin_skips"] == r_blk.same_coin_skips
+    print(
+        f"  -> OK (trade={len(r_blk.trades)}, sinyal diblokir={r_blk.same_coin_skips}, "
+        f"loss pertama exit={first.exit_time})"
+    )
+
+    r_off = run_backtest(
+        int_klines, dict(sl_cfg, SAME_COIN_BLOCK_HOURS=0), warmup_bars=0
+    )
+    assert r_off.same_coin_skips == 0
+    assert len(r_off.trades) >= len(r_blk.trades)
+    print(
+        f"  -> OK (tanpa blokir: trade={len(r_off.trades)}, diblokir=0, "
+        "blokir hanya menunda entry)"
+    )
+
+    r_all = run_backtest(
+        int_klines, dict(blk_cfg, SAME_COIN_BLOCK_LOSS_ONLY=False), warmup_bars=0
+    )
+    viol_all = 0
+    for i in range(1, len(r_all.trades)):
+        prev = r_all.trades[i - 1]
+        if r_all.trades[i].entry_time < prev.exit_time + HARI_MS:
+            viol_all += 1
+    assert viol_all == 0, f"{viol_all} entry melanggar blokir 24 jam (loss_only=False)"
+    print(f"  -> OK (loss_only=False: trade={len(r_all.trades)}, semua jarak >= 24 jam)")
+
+    try:
+        validate_params(dict(sl_cfg, SAME_COIN_BLOCK_HOURS=-1))
+        raise AssertionError("Harusnya menolak SAME_COIN_BLOCK_HOURS negatif")
+    except BacktestError:
+        pass
+    merged_blk = apply_overrides(
+        dict(PUMP_CONFIG),
+        {"SAME_COIN_BLOCK_HOURS": "12", "SAME_COIN_BLOCK_LOSS_ONLY": "false"},
+    )
+    assert merged_blk["SAME_COIN_BLOCK_HOURS"] == 12.0
+    assert merged_blk["SAME_COIN_BLOCK_LOSS_ONLY"] is False
+    validate_params(merged_blk)
+    print("  -> OK (validate_params menolak nilai liar, apply_overrides bisa cast)")
 
     print(
         "\n=== SELFTEST backtest.py: apply_overrides, validate_params, dan exit tetap ==="

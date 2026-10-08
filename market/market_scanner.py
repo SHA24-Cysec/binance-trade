@@ -64,6 +64,11 @@ def is_structurally_allowed_symbol(
         return False
     if symbol in set(config.get("EXTRA_EXCLUDE_SYMBOLS", [])):
         return False
+    # Koin yang sedang diblokir oleh aturan SAME_COIN_BLOCK (loss sebelumnya)
+    # dikecualikan dari kandidat. Kunci privat ini hanya diisi oleh run loop bot;
+    # backtest tidak mengisinya sehingga tidak terpengaruh.
+    if symbol in set(config.get("_blocked_symbols") or ()):
+        return False
     if tradable_symbols is not None and symbol not in tradable_symbols:
         return False
     base_asset = symbol[: -len(quote_asset)]

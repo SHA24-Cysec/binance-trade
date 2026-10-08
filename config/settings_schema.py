@@ -726,6 +726,21 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         maximum=525600,
         unit="menit",
     ),
+    "SAME_COIN_BLOCK_HOURS": _field(
+        "Fee dan Filter",
+        "Blokir koin sama (jam)",
+        "Setelah trade di satu koin ditutup, koin itu tidak boleh di-entry lagi selama sekian jam (default 24 jam = 1 hari). 0 = nonaktif. Berlaku mulai trade berikutnya dan bertahan walau bot di-restart.",
+        "float",
+        minimum=0,
+        maximum=8760,
+        unit="jam",
+    ),
+    "SAME_COIN_BLOCK_LOSS_ONLY": _field(
+        "Fee dan Filter",
+        "Blokir koin sama hanya saat loss",
+        "Jika aktif (default), hanya trade yang rugi yang memicu blokir, sehingga koin yang sudah menghasilkan loss tidak di-entry lagi. Jika nonaktif, semua trade yang ditutup (profit maupun loss) memicu blokir.",
+        "bool",
+    ),
     "MAX_CHASE_PCT": _field(
         "Fee dan Filter",
         "Batas chase entry",

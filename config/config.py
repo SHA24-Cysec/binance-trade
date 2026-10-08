@@ -138,9 +138,8 @@ PUMP_CONFIG = {
     "ORDERBOOK_DEPTH_LIMIT": 100,
     "COOLDOWN_MINUTES_AFTER_CLOSE": 5,
     "MIN_SECONDS_BETWEEN_TRADES": 60,
-    # Tampilan IDR (Rupiah). Murni lapisan display di dashboard: tidak
-    # memengaruhi sinyal, sizing, order, maupun backtest. Kurs diambil dari
-    # pair spot Binance USDTIDR lewat endpoint publik tanpa API key.
+    "SAME_COIN_BLOCK_HOURS": 24.0,
+    "SAME_COIN_BLOCK_LOSS_ONLY": True,
     "IDR_DISPLAY_ENABLED": True,
     "IDR_RATE_MODE": "AUTO",
     "IDR_RATE_MANUAL": 0.0,

@@ -85,6 +85,7 @@ class PortfolioResult:
     htf_demand_scans: int = 0
     daily_demand_skips: int = 0
     daily_demand_scans: int = 0
+    same_coin_skips: int = 0
 
 
 def select_universe(
@@ -707,6 +708,10 @@ def run_portfolio_backtest(
     htf_demand_scans = 0
     daily_demand_skips = 0
     daily_demand_scans = 0
+    # Pemetaan SIMBOL -> waktu (ms) sampai kapan entry diblokir karena trade
+    # sebelumnya loss (SAME_COIN_BLOCK_HOURS), paritas dengan bot live.
+    symbol_blocks: dict = {}
+    same_coin_skips = 0
     max_chase_pct = float(config.get("MAX_CHASE_PCT", 0) or 0)
 
     controls = parity.AccountRiskControls(config, initial_equity)
@@ -828,6 +833,20 @@ def run_portfolio_backtest(
                 pos = bisect_left(ot, t_now)
                 if pos >= n_bar or ot[pos] != t_now:
                     continue
+                # Koin yang sedang diblokir karena loss sebelumnya dikecualikan
+                # dari papan, sama seperti scanner bot live (paritas).
+                if parity.same_coin_blocked(sym, t_now, symbol_blocks):
+                    same_coin_skips += 1
+                    if len(skipped) < max_skipped_records:
+                        skipped.append(
+                            SkippedSignal(
+                                time=t_now,
+                                symbol=sym,
+                                reason="SAME_COIN_BLOCK",
+                                holding=None,
+                            )
+                        )
+                    continue
                 if not ready_arr[pos]:
                     continue
                 vol24 = vol_arr[pos]
@@ -914,6 +933,11 @@ def run_portfolio_backtest(
                 )
                 equity = equity_after
                 position_notional = 0.0
+                # Catat blokir entry ulang koin ini (aktif bila trade loss, sesuai
+                # SAME_COIN_BLOCK_LOSS_ONLY), sama seperti bot live.
+                parity.same_coin_block_record(
+                    symbol_blocks, holding, candle.close_time, pnl_quote, config
+                )
                 holding = None
                 position = None
                 next_entry_allowed_at = parity.next_entry_allowed(
@@ -1014,6 +1038,26 @@ def run_portfolio_backtest(
             eligible_count, lolos = cached_entry
             if not lolos:
                 continue
+        # Blokir koin yang sama setelah loss (paritas bot live): koin yang sedang
+        # diblokir tidak boleh dipilih, kandidat lain yang masih lolos dipakai.
+        lolos_tersedia = []
+        for row in lolos:
+            if parity.same_coin_blocked(row[2], t_now, symbol_blocks):
+                same_coin_skips += 1
+                if len(skipped) < max_skipped_records:
+                    skipped.append(
+                        SkippedSignal(
+                            time=t_now,
+                            symbol=row[2],
+                            reason="SAME_COIN_BLOCK",
+                            holding=None,
+                        )
+                    )
+                continue
+            lolos_tersedia.append(row)
+        lolos = lolos_tersedia
+        if not lolos:
+            continue
         rank, pct, sym, i, _vol24, setup_terpilih = lolos[0]
         sizing = strategy.resolve_position_notional(config, equity)
         if sizing["notional"] <= 0 or sizing["notional"] > equity:
@@ -1149,6 +1193,15 @@ def run_portfolio_backtest(
                     if daily_of and daily_demand_skips
                     else []
                 )
+                + (
+                    [
+                        f"{same_coin_skips} sinyal dilewati oleh blokir koin sama setelah "
+                        f"loss (SAME_COIN_BLOCK_HOURS="
+                        f"{parity.same_coin_block_hours(config):g} jam), sama seperti bot live."
+                    ]
+                    if same_coin_skips
+                    else []
+                )
             )
         ),
         initial_equity=initial_equity,
@@ -1161,6 +1214,7 @@ def run_portfolio_backtest(
         htf_demand_scans=htf_demand_scans,
         daily_demand_skips=daily_demand_skips,
         daily_demand_scans=daily_demand_scans,
+        same_coin_skips=same_coin_skips,
     )
 
 
@@ -1273,6 +1327,7 @@ def summarize_portfolio(result: PortfolioResult) -> dict:
         "htf_demand_scans": int(getattr(result, "htf_demand_scans", 0)),
         "daily_demand_skips": int(getattr(result, "daily_demand_skips", 0)),
         "daily_demand_scans": int(getattr(result, "daily_demand_scans", 0)),
+        "same_coin_skips": int(getattr(result, "same_coin_skips", 0)),
         **parity.per_trade_metrics(trades),
     }
 
@@ -1389,6 +1444,121 @@ def selftest() -> bool:
         "cooldown mengurangi jumlah trade",
         len(res_cd.trades) <= len(res.trades),
         f"{len(res_cd.trades)} vs {len(res.trades)}",
+    )
+
+    print("\n=== SELFTEST portfolio: blokir koin sama setelah loss (SAME_COIN_BLOCK) ===")
+    # Jadikan semua entry AUSDT loss berat: low 10% di bawah open pada candle
+    # eksekusi entry (SL_PCT=2 pasti kena di bar itu juga, tanpa TP).
+    # Entry AUSDT diambil dari run single-symbol; pada run dua simbol semua
+    # trade jatuh ke BUSDT (volume kuotasi B lebih tinggi), jadi fixture dua
+    # simbol tidak bisa dipakai untuk mencari waktu entry AUSDT.
+    res_single = _jalankan({"AUSDT": up_a}, cfg)
+    entry_times_a = sorted({t.entry_time for t in res_single.trades})
+    check(
+        "fixture dasar AUSDT punya entry (tes tidak vakum)",
+        len(entry_times_a) > 0,
+        len(entry_times_a),
+    )
+    loss_a = []
+    for k in up_a:
+        if k.open_time in entry_times_a:
+            loss_a.append(
+                Kline(
+                    open_time=k.open_time,
+                    open=k.open,
+                    high=k.open * 1.001,
+                    low=k.open * 0.9,
+                    close=k.close,
+                    close_time=k.close_time,
+                    volume=k.volume,
+                    quote_volume=k.quote_volume,
+                )
+            )
+        else:
+            loss_a.append(k)
+    res_loss = _jalankan({"AUSDT": loss_a}, cfg)
+    trades_loss_a = [t for t in res_loss.trades if t.symbol == "AUSDT"]
+    jumlah_rugi = sum(1 for t in trades_loss_a if t.pnl_quote < 0)
+    check(
+        "trade pertama AUSDT loss (fixture loss valid)",
+        len(trades_loss_a) > 0 and trades_loss_a[0].pnl_quote < 0,
+        f"{len(trades_loss_a)} trade",
+    )
+    check(
+        "cukup banyak trade loss untuk diuji (>= 3)",
+        jumlah_rugi >= 3,
+        f"{jumlah_rugi} loss dari {len(trades_loss_a)} trade",
+    )
+
+    HARI_MS = 24 * 3_600_000
+    cfg_blk = dict(cfg)
+    cfg_blk["SAME_COIN_BLOCK_HOURS"] = 24.0
+    cfg_blk["SAME_COIN_BLOCK_LOSS_ONLY"] = True
+    res_blk = _jalankan({"AUSDT": loss_a, "BUSDT": up_b}, cfg_blk)
+    trades_a_blk = sorted(
+        (t for t in res_blk.trades if t.symbol == "AUSDT"), key=lambda t: t.entry_time
+    )
+    viol_blk = 0
+    for i in range(1, len(trades_a_blk)):
+        prev = trades_a_blk[i - 1]
+        if prev.pnl_quote < 0 and trades_a_blk[i].entry_time < prev.exit_time + HARI_MS:
+            viol_blk += 1
+    check(
+        "blokir 24 jam dipatuhi setelah loss (AUSDT)",
+        viol_blk == 0,
+        f"{viol_blk} pelanggaran dari {len(trades_a_blk)} trade",
+    )
+    check(
+        "ada sinyal yang diblokir (same_coin_skips)",
+        res_blk.same_coin_skips > 0,
+        res_blk.same_coin_skips,
+    )
+    check(
+        "skip SAME_COIN_BLOCK tercatat",
+        any(s.reason == "SAME_COIN_BLOCK" for s in res_blk.skipped),
+        len(res_blk.skipped),
+    )
+    check(
+        "blokir mengurangi trade AUSDT",
+        len(trades_a_blk) <= len(trades_loss_a),
+        f"{len(trades_a_blk)} vs {len(trades_loss_a)}",
+    )
+    trades_b_blk = [t for t in res_blk.trades if t.symbol == "BUSDT"]
+    check(
+        "koin lain (BUSDT) tetap bisa entry saat AUSDT diblokir",
+        len(trades_b_blk) > 0,
+        len(trades_b_blk),
+    )
+
+    res_off = _jalankan(
+        {"AUSDT": loss_a, "BUSDT": up_b}, dict(cfg, SAME_COIN_BLOCK_HOURS=0)
+    )
+    check(
+        "hours=0 -> tidak ada blokir",
+        res_off.same_coin_skips == 0,
+        res_off.same_coin_skips,
+    )
+    check(
+        "hours=0 -> total trade tidak berkurang dibanding versi diblokir",
+        len(res_off.trades) >= len(res_blk.trades),
+        f"{len(res_off.trades)} vs {len(res_blk.trades)}",
+    )
+
+    cfg_all = dict(cfg_blk)
+    cfg_all["SAME_COIN_BLOCK_LOSS_ONLY"] = False
+    res_all = _jalankan({"AUSDT": loss_a, "BUSDT": up_b}, cfg_all)
+    trades_b_all = sorted(
+        (t for t in res_all.trades if t.symbol == "BUSDT"), key=lambda t: t.entry_time
+    )
+    viol_b = 0
+    for i in range(1, len(trades_b_all)):
+        prev = trades_b_all[i - 1]
+        if trades_b_all[i].entry_time < prev.exit_time + HARI_MS:
+            viol_b += 1
+    check(
+        "loss_only=False -> jarak >= 24 jam untuk semua hasil trade (BUSDT)",
+        viol_b == 0,
+        f"{viol_b} pelanggaran dari {len(trades_b_all)} trade",
     )
 
     entry_pertama = res.trades[0].entry_time if res.trades else 0

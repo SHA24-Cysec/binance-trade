@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -177,6 +178,9 @@ DEFAULT_STATE = {
     "trail_step_pct": 0.0,
     "exit_source": "",
     "last_scan_time": 0,
+    # Pemetaan SIMBOL -> timestamp_ms sampai kapan entry koin itu diblokir
+    # (diisi oleh aturan SAME_COIN_BLOCK_HOURS setelah trade loss).
+    "symbol_block_until": {},
     "peak_equity": None,
     "dd_stopped": False,
     "dd_stop_until": 0,
@@ -305,6 +309,40 @@ def load_pump_state(path: str, *, fail_closed: bool = False) -> dict:
             validation_errors.append(f"{key} harus object atau null")
     if not isinstance(merged.get("reconciliation_assets"), list):
         validation_errors.append("reconciliation_assets harus list")
+    # symbol_block_until: object {SIMBOL: timestamp_ms}. Entri tidak valid
+    # dibuang, yang sudah kedaluwarsa dipangkas supaya state tidak membesar.
+    blocks = merged.get("symbol_block_until")
+    if not isinstance(blocks, dict):
+        validation_errors.append("symbol_block_until harus object")
+        merged["symbol_block_until"] = {}
+    else:
+        now = state_mod.now_ms()
+        blocks_bersih: dict[str, float] = {}
+        for sym, until in blocks.items():
+            if (
+                not isinstance(sym, str)
+                or not sym
+                or sym != sym.strip().upper()
+                or not sym.isalnum()
+            ):
+                validation_errors.append(
+                    f"symbol_block_until berisi simbol tidak valid: {sym!r}"
+                )
+                continue
+            try:
+                nilai = float(until or 0)
+            except (TypeError, ValueError):
+                validation_errors.append(f"symbol_block_until[{sym}] bukan angka")
+                continue
+            if not math.isfinite(nilai) or nilai < 0:
+                validation_errors.append(
+                    f"symbol_block_until[{sym}] tidak finite/nonnegatif"
+                )
+                continue
+            if nilai <= now:
+                continue  # blokir sudah kedaluwarsa, tidak perlu disimpan lagi
+            blocks_bersih[sym] = nilai
+        merged["symbol_block_until"] = blocks_bersih
     for key in ("peak_equity",):
         value = merged.get(key)
         if value is None:
@@ -817,6 +855,18 @@ def reconcile_state_with_exchange(
                 qty_state,
                 base_asset,
             )
+            # Hasil trade tidak diketahui (koin sudah tidak ada di akun), secara
+            # konservatif dianggap loss agar blokir koin sama ikut aktif.
+            record_symbol_block(
+                state,
+                config,
+                symbol,
+                -(
+                    float(state.get("entry_price") or 0.0)
+                    * float(state.get("qty") or 0.0)
+                ),
+                catatan="(posisi hantu, hasil tidak diketahui, dianggap loss)",
+            )
             reset_position(state)
         elif total_base <= 0 and pending_unresolved:
             issue("POSITION_BALANCE_ZERO_WITH_PENDING", base_asset)
@@ -959,6 +1009,97 @@ def reset_position(state: dict) -> None:
     state["native_oco"] = None
     state["native_protection_retry_at"] = 0
     state["_native_stop_exit_blocked"] = False
+
+
+def _fmt_utc_ms(ts_ms: float) -> str:
+    """Format timestamp ms menjadi teks UTC yang mudah dibaca di log."""
+    try:
+        return datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc).strftime(
+            "%Y-%m-%d %H:%M:%S UTC"
+        )
+    except (OverflowError, OSError, ValueError):
+        return str(ts_ms)
+
+
+def _symbol_block_until_ts(state: dict, symbol: str) -> float:
+    """Timestamp ms sampai kapan entry koin ini diblokir (0 = tidak diblokir)."""
+    blocks = state.get("symbol_block_until")
+    if not isinstance(blocks, dict) or not symbol:
+        return 0.0
+    try:
+        return max(0.0, float(blocks.get(str(symbol).upper(), 0) or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _safe_block_ts(value) -> float:
+    try:
+        nilai = float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return nilai if math.isfinite(nilai) else 0.0
+
+
+def record_symbol_block(
+    state: dict,
+    config: dict,
+    symbol: str,
+    pnl: float,
+    *,
+    now_ms: int | None = None,
+    catatan: str = "",
+) -> bool:
+    """Catat blokir entry ulang untuk koin yang posisinya baru saja ditutup.
+
+    Aturan:
+    - SAME_COIN_BLOCK_HOURS <= 0: fitur nonaktif, tidak ada blokir.
+    - SAME_COIN_BLOCK_LOSS_ONLY aktif (default): hanya pnl < 0 yang memicu blokir.
+    - SAME_COIN_BLOCK_LOSS_ONLY nonaktif: semua hasil trade memicu blokir.
+
+    Mengembalikan True kalau koin berhasil diblokir. Blokir bertahan di state
+    file sehingga tetap aktif walau bot di-restart.
+    """
+    if not symbol:
+        return False
+    try:
+        hours = float(config.get("SAME_COIN_BLOCK_HOURS", 0) or 0)
+    except (TypeError, ValueError):
+        hours = 0.0
+    if not math.isfinite(hours) or hours <= 0:
+        return False
+    try:
+        hasil = float(pnl)
+    except (TypeError, ValueError):
+        hasil = float("-inf")
+    if not math.isfinite(hasil):
+        hasil = -1.0 if hasil < 0 else 1.0
+    if bool(config.get("SAME_COIN_BLOCK_LOSS_ONLY", True)) and hasil >= 0:
+        return False
+    now = state_mod.now_ms() if now_ms is None else int(now_ms)
+    blocks = state.get("symbol_block_until")
+    if not isinstance(blocks, dict):
+        blocks = {}
+    else:
+        # Salin dict agar tidak mengubah object bersama (mis. DEFAULT_STATE
+        # yang ter-alias oleh shallow copy state).
+        blocks = dict(blocks)
+    # Pangkas blokir kedaluwarsa supaya state tidak terus membesar.
+    for sym in [s for s, until in blocks.items() if _safe_block_ts(until) <= now]:
+        blocks.pop(sym, None)
+    sym = str(symbol).upper()
+    blocks[sym] = now + int(hours * 3600 * 1000)
+    state["symbol_block_until"] = blocks
+    logger.info(
+        "Blokir entry %s sampai %s (%.1f jam) karena trade sebelumnya loss "
+        "(estimasi PnL %+.2f %s)%s.",
+        sym,
+        _fmt_utc_ms(blocks[sym]),
+        hours,
+        hasil,
+        config.get("QUOTE_ASSET", "USDT"),
+        f" {catatan}" if catatan else "",
+    )
+    return True
 
 
 def try_dust_sweep(client: ExchangeClient, config: dict, symbol: "str | None") -> None:
@@ -1671,6 +1812,7 @@ def _settle_native_protective_fill(
     client: ExchangeClient, config: dict, state: dict, symbol: str, reason: str
 ) -> None:
     entry_price = float(state.get("entry_price") or 0.0)
+    qty = float(state.get("qty") or 0.0)
     base = symbol[: -len(config["QUOTE_ASSET"])]
     state["reconciliation_required"] = False
     state["reconciliation_assets"] = []
@@ -1685,6 +1827,22 @@ def _settle_native_protective_fill(
         state_mod.now_ms() + config["COOLDOWN_MINUTES_AFTER_CLOSE"] * 60 * 1000
     )
     state["last_trade_time"] = state_mod.now_ms()
+    # Posisi sudah ditutup oleh order proteksi exchange-side, tetapi harga exit
+    # tidak tercatat di state. Estimasi hasil trade dari bid sekarang; jika
+    # harga tidak bisa diambil, secara konservatif dianggap loss.
+    exit_price = 0.0
+    try:
+        book = client.get_book_ticker(symbol, max_retries=1)
+        exit_price = float(book.get("bidPrice", 0.0) or 0.0)
+    except Exception:
+        exit_price = 0.0
+    if exit_price > 0 and entry_price > 0 and qty > 0:
+        pnl_estimasi = (exit_price - entry_price) * qty
+        catatan = f"(exit native, estimasi dari bid {exit_price:.6f})"
+    else:
+        pnl_estimasi = -(entry_price * qty)
+        catatan = "(exit native, harga tidak diketahui, dianggap loss)"
+    record_symbol_block(state, config, symbol, pnl_estimasi, catatan=catatan)
     state_mod.save_state(config["STATE_FILE"], state)
     logger.info(
         "EXIT NATIVE %s (%s): posisi ditutup oleh order proteksi exchange-side "
@@ -2356,6 +2514,21 @@ def open_position(
     candidate: "scanner.Candidate",
     reference_price: "float | None" = None,
 ) -> None:
+    # Penjagaan defense-in-depth: koin yang sedang diblokir karena trade
+    # sebelumnya loss tidak boleh di-entry (scanner sudah mengecualikannya,
+    # pemeriksaan ini untuk jalur panggilan lain).
+    block_until = _symbol_block_until_ts(state, candidate.symbol)
+    now_ms = state_mod.now_ms()
+    if block_until > now_ms:
+        logger.info(
+            "Entry %s diblokir sampai %s: koin yang sama baru ditutup dengan loss "
+            "(SAME_COIN_BLOCK_HOURS=%g jam, sisa %.1f menit).",
+            candidate.symbol,
+            _fmt_utc_ms(block_until),
+            float(config.get("SAME_COIN_BLOCK_HOURS", 0) or 0),
+            (block_until - now_ms) / 60000.0,
+        )
+        return
     filters = filters_cache.get(candidate.symbol)
     if filters is None:
         logger.warning(
@@ -2786,6 +2959,18 @@ def close_position(
         logger.warning(
             "%s Posisi %s direset sebagai dust terverifikasi.", detail, symbol
         )
+        # Dust yang disapu nilainya hangus, secara konservatif dihitung sebagai
+        # loss penuh agar aturan blokir koin sama ikut mencakup kasus ini.
+        record_symbol_block(
+            state,
+            config,
+            symbol,
+            -(
+                float(state.get("entry_price") or 0.0)
+                * float(state.get("qty") or 0.0)
+            ),
+            catatan="(dust disapu)",
+        )
         reset_position(state)
         state["sell_fail_count"] = 0
         state["cooldown_until"] = (
@@ -2954,6 +3139,9 @@ def close_position(
             state_mod.now_ms() + config["COOLDOWN_MINUTES_AFTER_CLOSE"] * 60 * 1000
         )
         state["last_trade_time"] = state_mod.now_ms()
+        # Catat blokir entry ulang koin ini (aktif bila trade loss, sesuai
+        # SAME_COIN_BLOCK_LOSS_ONLY) sebelum state disimpan.
+        record_symbol_block(state, config, symbol, pnl)
         _clear_reconciliation(state)
         state_mod.save_state(config["STATE_FILE"], state)
         try_dust_sweep(client, config, symbol)
@@ -3199,6 +3387,20 @@ def run(config: dict, lifecycle=None) -> int:
         )
     else:
         logger.warning("MODE LIVE AKTIF: order memakai UANG ASLI di Binance produksi.")
+
+    block_hours = float(config.get("SAME_COIN_BLOCK_HOURS", 0) or 0)
+    if block_hours > 0:
+        aturan = (
+            "hanya trade loss yang memicu blokir"
+            if config.get("SAME_COIN_BLOCK_LOSS_ONLY", True)
+            else "semua trade (profit dan loss) memicu blokir"
+        )
+        logger.info(
+            "Blokir koin sama AKTIF: koin yang posisinya baru ditutup tidak boleh "
+            "di-entry lagi selama %.1f jam; %s.",
+            block_hours,
+            aturan,
+        )
 
     risk_ok, risk_reason = account_risk_gate(config)
     if not risk_ok:
@@ -3574,6 +3776,21 @@ def run(config: dict, lifecycle=None) -> int:
                 )
                 if can_enter:
                     scan_config = dict(config)
+                    # Koin yang sedang diblokir karena trade sebelumnya loss
+                    # dikecualikan dari kandidat agar bot memilih koin lain,
+                    # bukan menganggur sampai blokir habis.
+                    diblokir = set()
+                    blocks = state.get("symbol_block_until")
+                    if isinstance(blocks, dict):
+                        for sym in blocks:
+                            if _symbol_block_until_ts(state, sym) > now:
+                                diblokir.add(str(sym).upper())
+                    if diblokir:
+                        scan_config["_blocked_symbols"] = diblokir
+                        logger.debug(
+                            "Scan: koin diblokir karena trade sebelumnya loss: %s",
+                            ", ".join(sorted(diblokir)),
+                        )
                     if config.get("BTC_FILTER_ENABLED", False):
                         scan_config["_btc_filter_fail_closed"] = True
                         try:
@@ -3868,6 +4085,8 @@ def selftest() -> None:
     assert PUMP_CONFIG.get("DAILY_DEMAND_ZONE_BUFFER_PCT") == 2.0
     assert PUMP_CONFIG.get("DAILY_DEMAND_MAX_DISTANCE_PCT") == 12.0
     assert PUMP_CONFIG.get("DAILY_DEMAND_MIN_CLOSE_POSITION") == 0.4
+    assert PUMP_CONFIG.get("SAME_COIN_BLOCK_HOURS") == 24.0
+    assert PUMP_CONFIG.get("SAME_COIN_BLOCK_LOSS_ONLY") is True
 
     cfg = dict(PUMP_CONFIG)
     cfg["STATE_FILE"] = os.path.join(
@@ -5811,6 +6030,164 @@ def selftest() -> None:
         "               data kurang/error fail closed, cache sekali per hari,"
     )
     print("               nonaktif -> tanpa panggilan tambahan -> OK")
+
+    print("\n=== SELFTEST: blokir koin sama setelah loss (SAME_COIN_BLOCK) ===")
+    from trading.clients.binance_client import SymbolFilters as SF3
+    from decimal import Decimal as D3
+
+    cfg_blk = dict(cfg)
+    cfg_blk.update(
+        {
+            "MODE": "PAPER",
+            "SAME_COIN_BLOCK_HOURS": 24.0,
+            "SAME_COIN_BLOCK_LOSS_ONLY": True,
+            "USE_NATIVE_OCO": False,
+            "USE_NATIVE_STOP_LOSS": False,
+            "USE_DUST_SWEEP": False,
+            "COOLDOWN_MINUTES_AFTER_CLOSE": 0,
+        }
+    )
+    flt_blk = {
+        "LOSSBUSDT": SF3(
+            step_size=D3("0.00000001"),
+            min_qty=D3("0.00000001"),
+            min_notional=D3("1"),
+            tick_size=D3("0.0001"),
+        ),
+        "WINBUSDT": SF3(
+            step_size=D3("0.00000001"),
+            min_qty=D3("0.00000001"),
+            min_notional=D3("1"),
+            tick_size=D3("0.0001"),
+        ),
+    }
+
+    def _state_posisi(simbol, base, entry, qty):
+        st = dict(DEFAULT_STATE)
+        st["symbol_block_until"] = {}
+        st.update(
+            {
+                "current_symbol": simbol,
+                "entry_price": entry,
+                "qty": qty,
+                "entry_time": state_mod.now_ms(),
+            }
+        )
+        return st
+
+    # 1) Close dengan LOSS -> koin diblokir
+    klien_rugi = FakeTradeClient(base_asset="LOSSB", free=10.0, price=90.0)
+    st_rugi = _state_posisi("LOSSBUSDT", "LOSSB", 100.0, 10.0)
+    close_position(klien_rugi, cfg_blk, flt_blk, st_rugi, "STOP_LOSS")
+    assert st_rugi.get("current_symbol") is None, "posisi harus tertutup penuh"
+    until_rugi = _symbol_block_until_ts(st_rugi, "LOSSBUSDT")
+    assert until_rugi > state_mod.now_ms(), "koin yang loss harus diblokir"
+    assert until_rugi <= state_mod.now_ms() + 24 * 3600 * 1000 + 1000
+    print(f"  close LOSSS -> LOSSBUSDT diblokir sampai {_fmt_utc_ms(until_rugi)} -> OK")
+
+    # 2) Close dengan PROFIT -> tidak diblokir saat SAME_COIN_BLOCK_LOSS_ONLY aktif
+    klien_win = FakeTradeClient(base_asset="WINB", free=10.0, price=110.0)
+    st_win = _state_posisi("WINBUSDT", "WINB", 100.0, 10.0)
+    close_position(klien_win, cfg_blk, flt_blk, st_win, "TAKE_PROFIT")
+    assert st_win.get("current_symbol") is None
+    assert (
+        _symbol_block_until_ts(st_win, "WINBUSDT") == 0.0
+    ), "profit tidak boleh diblokir saat loss_only aktif"
+    print("  close PROFIT -> WINBUSDT tidak diblokir (loss_only aktif) -> OK")
+
+    # 3) SAME_COIN_BLOCK_LOSS_ONLY=False -> profit juga diblokir
+    cfg_blk_all = dict(cfg_blk, SAME_COIN_BLOCK_LOSS_ONLY=False)
+    klien_win2 = FakeTradeClient(base_asset="WINB", free=10.0, price=110.0)
+    st_win2 = _state_posisi("WINBUSDT", "WINB", 100.0, 10.0)
+    close_position(klien_win2, cfg_blk_all, flt_blk, st_win2, "TAKE_PROFIT")
+    assert (
+        _symbol_block_until_ts(st_win2, "WINBUSDT") > state_mod.now_ms()
+    ), "profit harus diblokir saat loss_only nonaktif"
+    print("  loss_only nonaktif -> close PROFIT juga diblokir -> OK")
+
+    # 4) SAME_COIN_BLOCK_HOURS=0 -> fitur nonaktif, loss pun tidak diblokir
+    cfg_blk_off = dict(cfg_blk, SAME_COIN_BLOCK_HOURS=0)
+    klien_rugi2 = FakeTradeClient(base_asset="LOSSB", free=10.0, price=90.0)
+    st_rugi2 = _state_posisi("LOSSBUSDT", "LOSSB", 100.0, 10.0)
+    close_position(klien_rugi2, cfg_blk_off, flt_blk, st_rugi2, "STOP_LOSS")
+    assert (
+        _symbol_block_until_ts(st_rugi2, "LOSSBUSDT") == 0.0
+    ), "hours=0 harus menonaktifkan blokir"
+    print("  hours=0 -> fitur nonaktif, loss tidak diblokir -> OK")
+
+    # 5) record_symbol_block: cek lookup case-insensitive dan aturan loss_only
+    st_rec = dict(DEFAULT_STATE)
+    assert record_symbol_block(st_rec, cfg_blk, "abc usdt".replace(" ", ""), -1.5)
+    assert _symbol_block_until_ts(st_rec, "ABCUSDT") > 0, "lookup harus case-insensitive"
+    assert not record_symbol_block(st_rec, cfg_blk, "PROFITUSDT", 2.0)
+    assert _symbol_block_until_ts(st_rec, "PROFITUSDT") == 0.0
+    print("  record_symbol_block: loss diblokir, profit tidak, case-insensitive -> OK")
+
+    # 6) open_position menolak koin yang sedang diblokir, dan membuka lagi
+    #    setelah blokir kedaluwarsa
+    cl_blk = SizingClient(1000.0)
+    st_op = dict(DEFAULT_STATE)
+    st_op["symbol_block_until"] = {"TESTBUSDT": state_mod.now_ms() + 3_600_000}
+    open_position(cl_blk, cfg_size, size_filters, st_op, cand)
+    assert not cl_blk.orders, "entry koin yang diblokir harus ditolak"
+    assert not st_op.get("pending_order"), "penolakan tidak boleh meninggalkan pending"
+    cl_exp = SizingClient(1000.0)
+    st_exp = dict(DEFAULT_STATE)
+    st_exp["symbol_block_until"] = {"TESTBUSDT": state_mod.now_ms() - 1}
+    open_position(cl_exp, cfg_size, size_filters, st_exp, cand)
+    assert cl_exp.orders, "entry harus jalan lagi setelah blokir kedaluwarsa"
+    print("  open_position: koin diblokir ditolak, blokir kedaluwarsa lolos -> OK")
+
+    # 7) Scanner mengecualikan koin yang diblokir dari kandidat
+    cfg_scan_blk = dict(cfg)
+    cfg_scan_blk["_blocked_symbols"] = {"AUSDT"}
+    ranked_blk = scanner.filter_and_rank_candidates(tickers, cfg_scan_blk, tradable)
+    symbols_blk = [c.symbol for c in ranked_blk]
+    assert symbols_blk == ["BUSDT"], f"koin diblokir harus dikecualikan: {symbols_blk}"
+    print("  scanner: AUSDT diblokir -> kandidat tersisa BUSDT -> OK")
+
+    # 8) load_pump_state men-sanitasi dan memangkas symbol_block_until
+    import json as _json
+
+    state_path_blk = os.path.join(
+        tempfile.gettempdir(), "pump_bot_selftest_block_state.json"
+    )
+    now_blk = state_mod.now_ms()
+    with open(state_path_blk, "w", encoding="utf-8") as fh:
+        _json.dump(
+            {
+                "symbol_block_until": {
+                    "AAAUSDT": now_blk + 3_600_000,
+                    "OLDBUSDT": now_blk - 1,
+                    "BADUSDT": "bukan-angka",
+                    "bad key": now_blk + 1000,
+                }
+            },
+            fh,
+        )
+    st_load = load_pump_state(state_path_blk)
+    blocks_load = st_load.get("symbol_block_until")
+    assert isinstance(blocks_load, dict) and set(blocks_load) == {
+        "AAAUSDT"
+    }, f"sanitasi/pruning salah: {blocks_load}"
+    with open(state_path_blk, "w", encoding="utf-8") as fh:
+        _json.dump({"symbol_block_until": [1, 2, 3]}, fh)
+    st_load2 = load_pump_state(state_path_blk)
+    assert st_load2.get("symbol_block_until") == {}, st_load2.get(
+        "symbol_block_until"
+    )
+    os.remove(state_path_blk)
+    print("  load_pump_state: entri invalid dibuang, kedaluwarsa dipangkas -> OK")
+
+    # 9) Config baru lolos validasi schema (default harus valid untuk PAPER/LIVE)
+    from config.settings_schema import validate_candidate
+
+    for mode_blk in ("PAPER", "LIVE"):
+        cand_cfg = dict(PUMP_CONFIG)
+        cand_cfg["MODE"] = mode_blk
+        _cleaned, _errors, _warnings = validate_candidate(cand_cfg, mode_blk)
+        assert not _errors, f"config default tidak valid untuk {mode_blk}: {_errors}"
+    print("  validate_candidate: SAME_COIN_BLOCK_* lolos untuk PAPER dan LIVE -> OK")
 
     print("\nSEMUA SELFTEST LULUS.")
     print("(Selftest ini TIDAK menghubungi Binance sama sekali -- murni logika lokal.)")
