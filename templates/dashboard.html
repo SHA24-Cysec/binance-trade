@@ -1894,7 +1894,7 @@
                 id="btDays"
                 min="2"
                 value="30"
-                title="Hari pertama dipakai sebagai warmup statistik 24 jam, jadi minimal 2 hari. Gerbang timeframe tinggi meminta rentang lebih panjang supaya masih ada bar yang bisa ditradingkan: sekitar 7 hari untuk simulasi 5m saat gerbang trend 1h aktif, dan sekitar 23 hari saat gerbang demand harian (1d, lookback 20) aktif, karena pemanasannya paling lama. Data pemanasan itu otomatis ikut diunduh, dan kalau rentangnya lebih pendek dari lookback harian hasilnya tetap jalan tetapi diberi peringatan bahwa lapisan demand harian belum bisa dinilai."
+                title="Hari pertama dipakai sebagai warmup statistik 24 jam, jadi minimal 2 hari. Gerbang timeframe tinggi meminta rentang lebih panjang supaya masih ada bar yang bisa ditradingkan: sekitar 7 hari untuk simulasi 5m saat gerbang trend 1h aktif, sekitar 23 hari saat gerbang demand harian (1d, lookback 20) aktif, dan sekitar 121 hari saat gerbang EMA + ADX harian (1d, lookback 120) aktif, karena pemanasannya paling lama. Saat gerbang EMA + ADX harian aktif, batas hari minimal ikut naik. Data pemanasan itu otomatis ikut diunduh, dan kalau rentangnya lebih pendek dari lookback harian hasilnya tetap jalan tetapi diberi peringatan bahwa lapisan demand harian belum bisa dinilai."
                 oninput="btUpdateEstimate()"
               />
             </div>
@@ -3904,7 +3904,8 @@
                      END_OF_DATA:'DATA HABIS', RISK_LIMIT_TRIGGERED:'BATAS RISIKO',
                      FILTER_HTF_DEMAND:'GERBANG DEMAND H1',
                      FILTER_DAILY_DEMAND:'GERBANG DEMAND D1',
-                     FILTER_TREND:'GERBANG TREND'};
+                     FILTER_TREND:'GERBANG TREND',
+                     FILTER_DAILY_TREND:'GERBANG EMA+ADX D1'};
         return esc(map[key] || key);
       }
 
@@ -3976,6 +3977,17 @@
             + ', jarak maks ' + fmt(g.max_distance_pct, 1) + '%'
             + ', disaring ' + fmt(g.skips, 0) + ' dari ' + fmt(g.scans, 0) + ' sinyal';
         };
+        const tdInfo = res.daily_trend || null;
+        const trendHarianText = (g) => {
+          if(!g || !g.enabled) return 'nonaktif';
+          return 'aktif ' + esc(g.interval || '1d')
+            + ', EMA ' + fmt(g.ema_fast, 0) + '/' + fmt(g.ema_slow, 0)
+            + ', ADX ' + fmt(g.adx_period, 0) + ' >= ' + fmt(g.adx_min, 1)
+            + ', lookback ' + fmt(g.lookback_bars, 0) + ' candle'
+            + ', disaring ' + fmt(g.skips, 0) + ' dari ' + fmt(g.scans, 0) + ' sinyal';
+        };
+        const trendHarianRow = tdInfo ? `
+          <div class="posrow"><span class="k">Gerbang EMA+ADX D1</span><span class="v mono" style="font-size:11.5px">${trendHarianText(tdInfo)}</span></div>` : '';
         const demandRows = (ddInfo || hdInfo) ? `
           <div class="posrow"><span class="k">Gerbang demand H1</span><span class="v mono" style="font-size:11.5px">${gateText(hdInfo, '1h')}</span></div>
           <div class="posrow"><span class="k">Gerbang demand D1</span><span class="v mono" style="font-size:11.5px">${gateText(ddInfo, '1d')}</span></div>` : '';
@@ -3985,6 +3997,7 @@
           <div class="posrow"><span class="k">Titik waktu diproses</span><span class="v mono">${fmt(res.bars_total,0)} bar ${esc(res.interval)}</span></div>
           ${exitRows}
           ${demandRows}
+          ${trendHarianRow}
           <div style="border-top:1px solid var(--border);margin:4px 0"></div>
           ${reasonRows || '<div class="posrow"><span class="k mut">Tidak ada trade terjadi pada rentang & parameter ini.</span></div>'}
           ${(res.warnings&&res.warnings.length)? '<div style="border-top:1px solid var(--border);margin:4px 0"></div>'+res.warnings.map(w=>`<div class="posrow"><span class="k" style="color:var(--amber)">⚠ ${esc(w)}</span></div>`).join('') : ''}

@@ -778,6 +778,8 @@ def htf_gate_warmup_bars(config: dict, interval: str) -> int:
         butuh = max(butuh, trend_warmup_bars(config, interval))
     if daily_demand_enabled(config):
         butuh = max(butuh, daily_warmup_bars(config, interval))
+    if daily_trend_enabled(config):
+        butuh = max(butuh, daily_trend_warmup_bars(config, interval))
     return butuh
 
 
@@ -964,7 +966,10 @@ def adx_series(klines: list[Kline], period: int = 14) -> list[Optional[float]]:
 
 
 def evaluate_trend_filter(
-    klines: list[Kline], config: dict, signal_close_time_ms: Optional[int] = None
+    klines: list[Kline],
+    config: dict,
+    signal_close_time_ms: Optional[int] = None,
+    nama_kunci_jendela: str = "TREND_LOOKBACK_BARS",
 ) -> dict:
     """Gerbang trend timeframe tinggi (default H1) untuk menyaring entry.
 
@@ -1045,7 +1050,7 @@ def evaluate_trend_filter(
             "ok": False,
             "reason": (
                 f"data candle {interval} kurang: {len(jendela)} dari minimum "
-                f"{minimum} (jendela {jendela_penuh}; naikkan TREND_LOOKBACK_BARS "
+                f"{minimum} (jendela {jendela_penuh}; naikkan {nama_kunci_jendela} "
                 "atau tunggu riwayat bertambah)"
             ),
             **kosong,
@@ -1158,6 +1163,144 @@ def evaluate_trend_filter(
         "reason": f"trend {interval} naik dan kuat ({ringkas})",
         **{**terisi, "checks": checks},
     }
+
+
+# ---------------------------------------------------------------------------
+# Gerbang EMA + ADX timeframe harian (DAILY_TREND_*)
+#
+# Lapisan TAMBAHAN di atas gerbang trend H1 dan gerbang demand. Aturannya
+# identik dengan gerbang trend H1 (close > EMA cepat, EMA cepat > EMA lambat,
+# ADX >= ambang), hanya saja candlenya harian dan parameternya dipisah.
+#
+# Rumus EMA dan ADX TIDAK diduplikasi: kunci DAILY_TREND_* diterjemahkan ke
+# kunci TREND_* lalu memanggil evaluate_trend_filter yang sama persis. Dengan
+# begitu bot live, PAPER, backtest, dan grid search memakai angka yang sama.
+#
+# Default NONAKTIF (DAILY_TREND_FILTER_ENABLED=False).
+# ---------------------------------------------------------------------------
+
+DAILY_TREND_DEFAULTS = {
+    "DAILY_TREND_FILTER_ENABLED": False,
+    "DAILY_TREND_INTERVAL": "1d",
+    "DAILY_TREND_EMA_FAST": 20,
+    "DAILY_TREND_EMA_SLOW": 50,
+    "DAILY_TREND_ADX_PERIOD": 14,
+    "DAILY_TREND_ADX_MIN": 20.0,
+    "DAILY_TREND_LOOKBACK_BARS": 120,
+}
+
+
+def daily_trend_enabled(config: dict) -> bool:
+    return bool(config.get("DAILY_TREND_FILTER_ENABLED", False))
+
+
+def daily_trend_interval(config: dict) -> str:
+    """Interval gerbang EMA+ADX harian (default 1d). Melempar ValueError kalau tidak dikenal."""
+    raw = str(
+        config.get("DAILY_TREND_INTERVAL", DAILY_TREND_DEFAULTS["DAILY_TREND_INTERVAL"])
+        or DAILY_TREND_DEFAULTS["DAILY_TREND_INTERVAL"]
+    ).strip().lower()
+    if raw not in INTERVAL_MINUTES:
+        raise ValueError(
+            f"DAILY_TREND_INTERVAL '{raw}' tidak dikenal. Pilihan: "
+            + ", ".join(sorted(INTERVAL_MINUTES, key=INTERVAL_MINUTES.get))
+        )
+    return raw
+
+
+def daily_trend_interval_minutes(config: dict) -> int:
+    return int(INTERVAL_MINUTES[daily_trend_interval(config)])
+
+
+def daily_trend_gate_config(config: dict) -> dict:
+    """Terjemahkan kunci DAILY_TREND_* ke kunci TREND_* milik evaluate_trend_filter.
+
+    Hanya dipanggil saat gerbang aktif (lihat evaluate_daily_trend), jadi
+    DAILY_TREND_INTERVAL yang salah tidak mengganggu bot saat gerbang mati.
+    """
+    d = DAILY_TREND_DEFAULTS
+    return {
+        "TREND_FILTER_ENABLED": daily_trend_enabled(config),
+        "TREND_INTERVAL": daily_trend_interval(config),
+        "TREND_EMA_FAST": int(config.get("DAILY_TREND_EMA_FAST", d["DAILY_TREND_EMA_FAST"]) or d["DAILY_TREND_EMA_FAST"]),
+        "TREND_EMA_SLOW": int(config.get("DAILY_TREND_EMA_SLOW", d["DAILY_TREND_EMA_SLOW"]) or d["DAILY_TREND_EMA_SLOW"]),
+        "TREND_ADX_PERIOD": int(config.get("DAILY_TREND_ADX_PERIOD", d["DAILY_TREND_ADX_PERIOD"]) or d["DAILY_TREND_ADX_PERIOD"]),
+        "TREND_ADX_MIN": float(config.get("DAILY_TREND_ADX_MIN", d["DAILY_TREND_ADX_MIN"]) or 0.0),
+        "TREND_LOOKBACK_BARS": int(config.get("DAILY_TREND_LOOKBACK_BARS", d["DAILY_TREND_LOOKBACK_BARS"]) or d["DAILY_TREND_LOOKBACK_BARS"]),
+    }
+
+
+def daily_trend_window_bars(config: dict) -> int:
+    """Jumlah candle harian tertutup yang dipakai gerbang EMA+ADX (0 kalau nonaktif)."""
+    if not daily_trend_enabled(config):
+        return 0
+    return trend_window_bars(daily_trend_gate_config(config))
+
+
+def daily_trend_required_bars(config: dict) -> int:
+    """Candle harian minimum agar EMA dan ADX harian terdefinisi (0 kalau nonaktif)."""
+    if not daily_trend_enabled(config):
+        return 0
+    return trend_required_bars(daily_trend_gate_config(config))
+
+
+def daily_trend_warmup_bars(config: dict, interval: str) -> int:
+    """Candle interval simulasi yang wajib ada sebelum bar entry pertama (0 kalau nonaktif).
+
+    Candle harian dirangkai dari candle interval simulasi (mis. 288 candle 5m
+    per hari), jadi warmup menutupi (jendela harian + 1 bucket) x rasio.
+    """
+    if not daily_trend_enabled(config):
+        return 0
+    sim_minutes = int(INTERVAL_MINUTES.get(str(interval), 5))
+    daily_minutes = daily_trend_interval_minutes(config)
+    if daily_minutes % sim_minutes:
+        raise ValueError(
+            f"DAILY_TREND_INTERVAL '{daily_trend_interval(config)}' ({daily_minutes} "
+            f"menit) harus kelipatan bulat dari interval simulasi '{interval}' "
+            f"({sim_minutes} menit) supaya backtest bisa merangkai candle harian dari "
+            "data yang sudah diunduh."
+        )
+    rasio = daily_minutes // sim_minutes
+    return daily_trend_window_bars(config) * rasio + rasio
+
+
+def evaluate_daily_trend(
+    klines: list[Kline], config: dict, signal_close_time_ms: Optional[int] = None
+) -> dict:
+    """Gerbang EMA+ADX timeframe harian sebagai lapisan konfirmasi tambahan.
+
+    Aturan (dari candle harian yang SUDAH TUTUP, tanpa repaint):
+      1. close candle harian terakhir > EMA cepat (default 20),
+      2. EMA cepat > EMA lambat (default 50),
+      3. ADX(14) >= DAILY_TREND_ADX_MIN (default 20; 0 mematikan cek kekuatan).
+
+    Semua logika dan fail-closed-nya dipakai ulang dari evaluate_trend_filter.
+    Saat DAILY_TREND_FILTER_ENABLED dimatikan, fungsi langsung lolos tanpa
+    membaca candle sama sekali.
+    """
+    if not daily_trend_enabled(config):
+        raw = str(config.get("DAILY_TREND_INTERVAL", "1d") or "1d").strip().lower()
+        return {
+            "ok": True,
+            "reason": f"filter trend {raw} nonaktif",
+            "interval": raw,
+            "bars": 0,
+            "required": 0,
+            "window": 0,
+            "close": None,
+            "ema_fast": None,
+            "ema_slow": None,
+            "adx": None,
+            "checks": {},
+            "values": {},
+        }
+    return evaluate_trend_filter(
+        klines,
+        daily_trend_gate_config(config),
+        signal_close_time_ms,
+        nama_kunci_jendela="DAILY_TREND_LOOKBACK_BARS",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1773,6 +1916,164 @@ def selftest() -> int:
             [_k_hari(100.0, 100.2, 99.8, 100.0, i) for i in range(10)], cfg_daily
         )["required"]
         == 4,
+    )
+
+    # --- gerbang EMA + ADX harian (DAILY_TREND_*) ---
+    def _hari_deret(a: float, n: int = 130) -> list[Kline]:
+        out = []
+        p = 100.0
+        for i in range(n):
+            p *= a
+            out.append(
+                Kline(
+                    i * 86_400_000,
+                    p,
+                    p * 1.005,
+                    p * 0.995,
+                    p,
+                    i * 86_400_000 + 86_399_999,
+                    1000.0,
+                    1000.0 * p,
+                )
+            )
+        return out
+
+    cfg_dtrend = dict(
+        DAILY_TREND_FILTER_ENABLED=True,
+        **{k: v for k, v in DAILY_TREND_DEFAULTS.items() if k != "DAILY_TREND_FILTER_ENABLED"},
+    )
+    cfg_dtrend_off = dict(cfg_dtrend, DAILY_TREND_FILTER_ENABLED=False)
+    cek(
+        "default harian: interval 1d, EMA 20/50, ADX 14 min 20, jendela 120",
+        daily_trend_interval(cfg_dtrend) == "1d"
+        and daily_trend_gate_config(cfg_dtrend)["TREND_EMA_FAST"] == 20
+        and daily_trend_gate_config(cfg_dtrend)["TREND_EMA_SLOW"] == 50
+        and daily_trend_gate_config(cfg_dtrend)["TREND_ADX_PERIOD"] == 14
+        and daily_trend_gate_config(cfg_dtrend)["TREND_ADX_MIN"] == 20.0
+        and daily_trend_window_bars(cfg_dtrend) == 120,
+    )
+    lolos_nonaktif = evaluate_daily_trend([], cfg_dtrend_off)
+    cek(
+        "gerbang harian nonaktif lolos tanpa membaca candle",
+        lolos_nonaktif["ok"] and lolos_nonaktif["bars"] == 0,
+        lolos_nonaktif["reason"],
+    )
+    naik_harian = evaluate_daily_trend(_hari_deret(1.01), cfg_dtrend)
+    cek(
+        "trend harian naik dan kuat diloloskan",
+        naik_harian["ok"] and naik_harian["interval"] == "1d",
+        naik_harian["reason"],
+    )
+    turun_harian = evaluate_daily_trend(_hari_deret(0.99), cfg_dtrend)
+    cek(
+        "trend harian turun ditolak",
+        (not turun_harian["ok"]) and "di bawah" in turun_harian["reason"],
+        turun_harian["reason"],
+    )
+    # Deret tren murni menghasilkan ADX tepat 100, jadi deret berombak dipakai
+    # supaya ADX berada di bawah 100 dan ambangnya benar-benar bisa menolak.
+    def _hari_berombak(n: int = 130) -> list[Kline]:
+        out = []
+        p = 100.0
+        for i in range(n):
+            p *= 1.03 if i % 2 == 0 else 0.99
+            out.append(
+                Kline(
+                    i * 86_400_000,
+                    p,
+                    p * 1.01,
+                    p * 0.99,
+                    p,
+                    i * 86_400_000 + 86_399_999,
+                    1000.0,
+                    1000.0 * p,
+                )
+            )
+        return out
+
+    # Ambang 0 sengaja melewati perhitungan ADX, jadi ambang kecil di atas nol dipakai.
+    adx_berombak = evaluate_daily_trend(
+        _hari_berombak(), dict(cfg_dtrend, DAILY_TREND_ADX_MIN=0.0001)
+    )["adx"]
+    lemah_harian = evaluate_daily_trend(
+        _hari_berombak(), dict(cfg_dtrend, DAILY_TREND_ADX_MIN=(adx_berombak or 0.0) + 1.0)
+    )
+    cek(
+        "ADX harian di bawah ambang ditolak",
+        adx_berombak is not None
+        and adx_berombak < 99.0
+        and (not lemah_harian["ok"])
+        and "lemah" in lemah_harian["reason"],
+        f"ADX={adx_berombak} | {lemah_harian['reason']}",
+    )
+    kuat_harian = evaluate_daily_trend(
+        _hari_berombak(), dict(cfg_dtrend, DAILY_TREND_ADX_MIN=(adx_berombak or 0.0) - 1.0)
+    )
+    cek(
+        "ADX harian tepat di atas ambang tidak ditolak oleh cek ADX",
+        "lemah" not in kuat_harian["reason"],
+        kuat_harian["reason"],
+    )
+    cek(
+        "ADX_MIN 0 mematikan cek kekuatan, susunan EMA saja dipakai",
+        evaluate_daily_trend(
+            _hari_deret(1.01), dict(cfg_dtrend, DAILY_TREND_ADX_MIN=0.0)
+        )["ok"],
+    )
+    kurang_harian = evaluate_daily_trend(_hari_deret(1.01, n=30), cfg_dtrend)
+    cek(
+        "riwayat harian kurang dari minimum EMA50 ditolak (fail closed)",
+        (not kurang_harian["ok"]) and "kurang" in kurang_harian["reason"],
+        kurang_harian["reason"],
+    )
+    seri_belum_tutup = _hari_deret(1.01, n=130)
+    tutup_terakhir = seri_belum_tutup[-2].close_time
+    # Candle terakhir sengaja dibuat ekstrem (turun tajam). Kalau ikut terbaca,
+    # close dan EMA akan berubah. Hasilnya harus identik dengan deret tanpa candle itu.
+    seri_belum_tutup[-1] = Kline(
+        seri_belum_tutup[-1].open_time,
+        seri_belum_tutup[-1].open,
+        seri_belum_tutup[-1].high,
+        seri_belum_tutup[-1].low,
+        seri_belum_tutup[-1].low * 0.5,
+        seri_belum_tutup[-1].close_time,
+        1000.0,
+        1000.0,
+    )
+    anti_repaint_tren = evaluate_daily_trend(
+        seri_belum_tutup, cfg_dtrend, signal_close_time_ms=tutup_terakhir
+    )
+    tanpa_candle_berjalan = evaluate_daily_trend(
+        seri_belum_tutup[:-1], cfg_dtrend
+    )
+    cek(
+        "candle harian yang belum tutup diabaikan (anti repaint)",
+        anti_repaint_tren["ok"] == tanpa_candle_berjalan["ok"]
+        and anti_repaint_tren["values"] == tanpa_candle_berjalan["values"]
+        and anti_repaint_tren["values"]["close"] == seri_belum_tutup[-2].close,
+        f"close={anti_repaint_tren['values'].get('close')}",
+    )
+    cek(
+        "hasil harian identik dengan evaluate_trend_filter berparameter terpetakan",
+        naik_harian["ok"]
+        == evaluate_trend_filter(_hari_deret(1.01), daily_trend_gate_config(cfg_dtrend))["ok"]
+        and naik_harian["values"] == evaluate_trend_filter(
+            _hari_deret(1.01), daily_trend_gate_config(cfg_dtrend)
+        )["values"],
+    )
+    gagal_interval = _gagal_tertangkap(
+        lambda: daily_trend_interval(dict(cfg_dtrend, DAILY_TREND_INTERVAL="7d"))
+    )
+    cek("DAILY_TREND_INTERVAL tidak dikenal ditolak saat gerbang aktif", gagal_interval)
+    cek(
+        "warmup harian = (jendela 120 hari + 1) x 288 candle 5m",
+        daily_trend_warmup_bars(cfg_dtrend, "5m") == 121 * 288
+        and daily_trend_warmup_bars(cfg_dtrend_off, "5m") == 0,
+        f"{daily_trend_warmup_bars(cfg_dtrend, '5m')}",
+    )
+    cek(
+        "warmup gabungan memasukkan gerbang EMA+ADX harian (kebutuhan terbesar)",
+        htf_gate_warmup_bars(cfg_dtrend, "5m") >= 121 * 288,
     )
 
     print(

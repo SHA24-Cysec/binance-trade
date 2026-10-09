@@ -85,6 +85,8 @@ class PortfolioResult:
     htf_demand_scans: int = 0
     daily_demand_skips: int = 0
     daily_demand_scans: int = 0
+    daily_trend_skips: int = 0
+    daily_trend_scans: int = 0
     same_coin_skips: int = 0
 
 
@@ -294,6 +296,9 @@ class EntrySignalCache(dict):
         self.daily_demand_scans = 0
         self.daily_demand_skips = 0
         self.daily_demand_events: list = []
+        self.daily_trend_scans = 0
+        self.daily_trend_skips = 0
+        self.daily_trend_events: list = []
 
 
 def build_trend_lookups(
@@ -355,6 +360,30 @@ def build_daily_lookups(
     return lookups
 
 
+def build_daily_trend_lookups(
+    store: KlineStore, symbols: list, config: dict, interval: str
+) -> dict:
+    """Siapkan jendela candle harian per simbol untuk gerbang EMA + ADX harian.
+
+    Candle harian dirangkai dari candle interval simulasi yang sudah diunduh,
+    jadi tidak ada unduhan tambahan dan nilainya sama dengan candle harian asli.
+    """
+    from strategy import indicators as strategy_mod
+
+    if not strategy_mod.daily_trend_enabled(config):
+        return {}
+    lookups: dict = {}
+    for sym in symbols:
+        klines = store.klines(sym)
+        if not klines:
+            continue
+        lookup = parity.make_daily_trend_lookup(klines, config, interval)
+        if lookup is not None:
+            lookups[sym] = lookup
+        del klines
+    return lookups
+
+
 def unpack_prebuilt(prebuilt: Optional[tuple]):
     """Terima prebuilt 2, 3, atau 4 elemen (lama: tanpa lookup apa pun).
 
@@ -388,6 +417,22 @@ def _siapkan_harian(prebuilt, store, series_of, config, interval):
     if not config.get("DAILY_DEMAND_FILTER_ENABLED", False):
         return {}
     return build_daily_lookups(store, list(series_of), config, interval)
+
+
+def _siapkan_tren_harian(prebuilt, store, series_of, config, interval):
+    """Lookup gerbang EMA + ADX harian.
+
+    Elemen ke-5 pada prebuilt dipakai kalau ada (grid search dan dashboard
+    membagikannya antar kombinasi). Prebuilt 2-4 elemen tetap sah dan lookup
+    dihitung di sini, sehingga hasilnya tidak berubah.
+    """
+    from strategy import indicators as strategy_mod
+
+    if prebuilt is not None and len(prebuilt) >= 5 and prebuilt[4] is not None:
+        return prebuilt[4]
+    if not strategy_mod.daily_trend_enabled(config):
+        return {}
+    return build_daily_trend_lookups(store, list(series_of), config, interval)
 
 
 def precompute_entry_signals(
@@ -437,13 +482,14 @@ def precompute_entry_signals(
     gate_cfg = parity.gate_config(config, btc_lookup)
     trend_of = _siapkan_trend(prebuilt, store, series_of, config, interval)
     daily_of = _siapkan_harian(prebuilt, store, series_of, config, interval)
-    if trend_of or daily_of:
+    tren_harian_of = _siapkan_tren_harian(prebuilt, store, series_of, config, interval)
+    if trend_of or daily_of or tren_harian_of:
         butuh_warmup = parity.htf_gate_warmup_ms(config, interval)
         if int(warmup_ms) < butuh_warmup:
             logger.warning(
                 "Warmup %d ms dinaikkan menjadi %d ms karena gerbang timeframe "
-                "tinggi yang aktif (trend + demand H1 + demand harian) butuh paling "
-                "sedikit %d candle %s sebagai pemanasan.",
+                "tinggi yang aktif (trend + demand H1 + demand harian + EMA/ADX harian) "
+                "butuh paling sedikit %d candle %s sebagai pemanasan.",
                 warmup_ms,
                 butuh_warmup,
                 strategy.htf_gate_warmup_bars(config, interval),
@@ -539,6 +585,20 @@ def precompute_entry_signals(
                         if len(signals.daily_demand_events) < max_skipped_records:
                             signals.daily_demand_events.append((int(t_now), sym))
                         continue
+            if setup.ok and bool(config.get("DAILY_TREND_FILTER_ENABLED", False)):
+                # Fail closed: lookup yang tidak ada berarti kandidat ditolak,
+                # sama seperti bot live yang menolak saat candle harian kosong.
+                lock = tren_harian_of.get(sym)
+                signals.daily_trend_scans += 1
+                if (
+                    lock is None
+                    or signal_candle is None
+                    or not lock.verdict_at(signal_candle.close_time)["ok"]
+                ):
+                    signals.daily_trend_skips += 1
+                    if len(signals.daily_trend_events) < max_skipped_records:
+                        signals.daily_trend_events.append((int(t_now), sym))
+                    continue
             if setup.ok:
                 lolos.append((rank, pct24, sym, index, vol24, setup))
 
@@ -643,7 +703,8 @@ def run_portfolio_backtest(
         )
     trend_of = _siapkan_trend(prebuilt, store, series_of, config, interval)
     daily_of = _siapkan_harian(prebuilt, store, series_of, config, interval)
-    if trend_of or daily_of:
+    tren_harian_of = _siapkan_tren_harian(prebuilt, store, series_of, config, interval)
+    if trend_of or daily_of or tren_harian_of:
         _butuh_gerbang = parity.htf_gate_warmup_ms(config, interval)
         if int(warmup_ms) < _butuh_gerbang:
             _bagian = []
@@ -658,6 +719,12 @@ def run_portfolio_backtest(
                     f"gerbang zona demand {strategy.daily_demand_interval(config)} butuh "
                     f"{strategy.daily_demand_window_bars(config)} candle "
                     f"{strategy.daily_demand_interval(config)} tertutup"
+                )
+            if tren_harian_of:
+                _bagian.append(
+                    f"gerbang EMA + ADX {strategy.daily_trend_interval(config)} butuh "
+                    f"{strategy.daily_trend_window_bars(config)} candle "
+                    f"{strategy.daily_trend_interval(config)} tertutup"
                 )
             _pre_warnings.append(
                 f"Warmup {warmup_ms} ms dinaikkan menjadi {_butuh_gerbang} ms karena "
@@ -708,6 +775,8 @@ def run_portfolio_backtest(
     htf_demand_scans = 0
     daily_demand_skips = 0
     daily_demand_scans = 0
+    daily_trend_skips = 0
+    daily_trend_scans = 0
     # Pemetaan SIMBOL -> waktu (ms) sampai kapan entry diblokir karena trade
     # sebelumnya loss (SAME_COIN_BLOCK_HOURS), paritas dengan bot live.
     symbol_blocks: dict = {}
@@ -724,6 +793,17 @@ def run_portfolio_backtest(
 
     first_allowed_time = timeline[0] + warmup_ms
     total_bars = len(timeline)
+    if tren_harian_of:
+        _hari_uji_tren = (int(timeline[-1]) - int(first_allowed_time)) / float(
+            MS_PER_MIN * 1440
+        )
+        _butuh_hari_tren = strategy.daily_trend_required_bars(config)
+        if _hari_uji_tren < float(_butuh_hari_tren):
+            _pre_warnings.append(
+                f"Periode uji hanya sekitar {_hari_uji_tren:.1f} hari, lebih pendek dari "
+                f"riwayat yang dibutuhkan EMA + ADX harian ({_butuh_hari_tren} hari). "
+                "Perpanjang rentang data supaya gerbang harian benar-benar teruji."
+            )
     if daily_of:
         _hari_uji = (int(timeline[-1]) - int(first_allowed_time)) / float(
             MS_PER_MIN * 1440
@@ -752,6 +832,8 @@ def run_portfolio_backtest(
         htf_demand_skips += int(getattr(entry_signal_cache, "htf_demand_skips", 0))
         daily_demand_scans += int(getattr(entry_signal_cache, "daily_demand_scans", 0))
         daily_demand_skips += int(getattr(entry_signal_cache, "daily_demand_skips", 0))
+        daily_trend_scans += int(getattr(entry_signal_cache, "daily_trend_scans", 0))
+        daily_trend_skips += int(getattr(entry_signal_cache, "daily_trend_skips", 0))
         for waktu_event, simbol_event in getattr(
             entry_signal_cache, "trend_events", []
         ):
@@ -788,6 +870,19 @@ def run_portfolio_backtest(
                     time=waktu_event,
                     symbol=simbol_event,
                     reason="FILTER_DAILY_DEMAND",
+                    holding=None,
+                )
+            )
+        for waktu_event, simbol_event in getattr(
+            entry_signal_cache, "daily_trend_events", []
+        ):
+            if len(skipped) >= max_skipped_records:
+                break
+            skipped.append(
+                SkippedSignal(
+                    time=waktu_event,
+                    symbol=simbol_event,
+                    reason="FILTER_DAILY_TREND",
                     holding=None,
                 )
             )
@@ -1017,6 +1112,24 @@ def run_portfolio_backtest(
                                     )
                                 )
                             continue
+                if tren_harian_of and bool(
+                    config.get("DAILY_TREND_FILTER_ENABLED", False)
+                ):
+                    # Fail closed: lookup yang tidak ada berarti kandidat ditolak.
+                    lock = tren_harian_of.get(sym)
+                    daily_trend_scans += 1
+                    if lock is None or not lock.verdict_at(kl[i].close_time)["ok"]:
+                        daily_trend_skips += 1
+                        if len(skipped) < max_skipped_records:
+                            skipped.append(
+                                SkippedSignal(
+                                    time=t_now,
+                                    symbol=sym,
+                                    reason="FILTER_DAILY_TREND",
+                                    holding=None,
+                                )
+                            )
+                        continue
                 lolos.append((rank, pct, sym, i, vol24, setup))
 
             if not lolos:
@@ -1195,6 +1308,15 @@ def run_portfolio_backtest(
                 )
                 + (
                     [
+                        f"{daily_trend_skips} dari {daily_trend_scans} sinyal konfirmasi "
+                        f"dilewati oleh gerbang EMA + ADX "
+                        f"{config.get('DAILY_TREND_INTERVAL', '1d')}, sama seperti bot live."
+                    ]
+                    if tren_harian_of and daily_trend_skips
+                    else []
+                )
+                + (
+                    [
                         f"{same_coin_skips} sinyal dilewati oleh blokir koin sama setelah "
                         f"loss (SAME_COIN_BLOCK_HOURS="
                         f"{parity.same_coin_block_hours(config):g} jam), sama seperti bot live."
@@ -1214,6 +1336,8 @@ def run_portfolio_backtest(
         htf_demand_scans=htf_demand_scans,
         daily_demand_skips=daily_demand_skips,
         daily_demand_scans=daily_demand_scans,
+        daily_trend_skips=daily_trend_skips,
+        daily_trend_scans=daily_trend_scans,
         same_coin_skips=same_coin_skips,
     )
 
@@ -1327,6 +1451,8 @@ def summarize_portfolio(result: PortfolioResult) -> dict:
         "htf_demand_scans": int(getattr(result, "htf_demand_scans", 0)),
         "daily_demand_skips": int(getattr(result, "daily_demand_skips", 0)),
         "daily_demand_scans": int(getattr(result, "daily_demand_scans", 0)),
+        "daily_trend_skips": int(getattr(result, "daily_trend_skips", 0)),
+        "daily_trend_scans": int(getattr(result, "daily_trend_scans", 0)),
         "same_coin_skips": int(getattr(result, "same_coin_skips", 0)),
         **parity.per_trade_metrics(trades),
     }
@@ -1912,6 +2038,98 @@ def selftest() -> bool:
         res_warmup.warnings[:1],
     )
 
+
+    print("\nSelftest gerbang EMA + ADX harian (D1) di portofolio")
+    cfg_tren_p = dict(
+        cfg,
+        DAILY_TREND_FILTER_ENABLED=True,
+        DAILY_TREND_INTERVAL="1d",
+        DAILY_TREND_EMA_FAST=2,
+        DAILY_TREND_EMA_SLOW=3,
+        DAILY_TREND_ADX_PERIOD=2,
+        DAILY_TREND_ADX_MIN=0.0,
+        DAILY_TREND_LOOKBACK_BARS=20,
+    )
+    BAR_HARI_T = 288
+
+    def _prefiks_harian_tren(hari: int, faktor: float) -> tuple:
+        """`hari` hari 5m dengan close harian dikali `faktor` per hari. Mengembalikan (klines, harga_akhir)."""
+        out = []
+        harga = 100.0
+        for h in range(hari):
+            harga_awal = harga
+            for j in range(BAR_HARI_T):
+                harga_baru = harga_awal * (faktor ** ((j + 1) / float(BAR_HARI_T)))
+                out.append(
+                    _mk(
+                        h * BAR_HARI_T + j,
+                        harga,
+                        max(harga, harga_baru) * 1.0005,
+                        min(harga, harga_baru) * 0.9995,
+                        harga_baru,
+                    )
+                )
+                harga = harga_baru
+        return out, harga
+
+    prefiks_naik, harga_naik = _prefiks_harian_tren(25, 1.005)
+    prefiks_turun, harga_turun = _prefiks_harian_tren(25, 0.99)
+    # naik=10 dan turun=20 membuat deret setup netral (tanpa drift), jadi tren
+    # harian tetap naik sepanjang uji. Default (6/20) justru menurun.
+    seri_naik_tren = prefiks_naik + seri_banyak_setup(
+        harga=harga_naik, siklus=10, volume=9_000_000.0,
+        naik=10, turun=20, mulai_index=len(prefiks_naik),
+    )
+    seri_turun_tren = prefiks_turun + seri_banyak_setup(
+        harga=harga_turun, siklus=10, volume=9_000_000.0,
+        mulai_index=len(prefiks_turun),
+    )
+    # Kedua sisi perbandingan memakai warmup yang SAMA. Kalau tidak, versi tanpa
+    # gerbang mulai dari awal data dan ikut mengambil trade dari prefiks, sehingga
+    # selisihnya bukan karena gerbang.
+    warmup_tren = parity.htf_gate_warmup_ms(cfg_tren_p, "5m")
+
+    def _jalankan_tren(data_dict: dict, cfg_uji: dict) -> PortfolioResult:
+        with KlineStore.from_klines(data_dict) as _st:
+            return run_portfolio_backtest(_st, cfg_uji, "5m", warmup_ms=warmup_tren)
+
+    res_tren_turun_on = _jalankan_tren({"AUSDT": seri_turun_tren}, cfg_tren_p)
+    res_tren_turun_off = _jalankan_tren(
+        {"AUSDT": seri_turun_tren}, dict(cfg_tren_p, DAILY_TREND_FILTER_ENABLED=False)
+    )
+    check(
+        "gerbang EMA + ADX harian menolak entry saat harian turun (kontrol punya trade)",
+        len(res_tren_turun_off.trades) >= 1
+        and len(res_tren_turun_on.trades) == 0
+        and res_tren_turun_on.daily_trend_skips >= 1,
+        f"ON {len(res_tren_turun_on.trades)} trade, OFF {len(res_tren_turun_off.trades)}, "
+        f"disaring {res_tren_turun_on.daily_trend_skips}",
+    )
+    check(
+        "catatan FILTER_DAILY_TREND tersedia untuk sinyal yang disaring",
+        any(sk.reason == "FILTER_DAILY_TREND" for sk in res_tren_turun_on.skipped),
+    )
+    res_tren_naik_on = _jalankan_tren({"AUSDT": seri_naik_tren}, cfg_tren_p)
+    res_tren_naik_off = _jalankan_tren(
+        {"AUSDT": seri_naik_tren}, dict(cfg_tren_p, DAILY_TREND_FILTER_ENABLED=False)
+    )
+    check(
+        "harian naik: gerbang EMA + ADX tidak mengurangi trade yang sudah valid",
+        len(res_tren_naik_off.trades) >= 1
+        and len(res_tren_naik_on.trades) == len(res_tren_naik_off.trades)
+        and res_tren_naik_on.daily_trend_skips == 0,
+        f"ON {len(res_tren_naik_on.trades)} vs OFF {len(res_tren_naik_off.trades)}, "
+        f"disaring {res_tren_naik_on.daily_trend_skips}",
+    )
+    check(
+        "gerbang EMA + ADX harian nonaktif tidak mengubah penghitung",
+        res_tren_turun_off.daily_trend_scans == 0 and res_tren_naik_off.daily_trend_scans == 0,
+    )
+    check(
+        "warmup EMA + ADX harian mencakup riwayat 21 hari (21 x 288 candle 5m)",
+        warmup_tren == 21 * 288 * 5 * MS_PER_MIN,
+        f"{warmup_tren} ms",
+    )
 
     print("\nSelftest gerbang zona demand harian (D1) di portofolio")
     cfg_harian_p = dict(

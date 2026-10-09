@@ -47,6 +47,7 @@ class Candidate:
     trend: "Optional[dict]" = None
     htf_demand: "Optional[dict]" = None
     daily_demand: "Optional[dict]" = None
+    daily_trend: "Optional[dict]" = None
 
 
 def _looks_leveraged(base_asset: str) -> bool:
@@ -645,6 +646,60 @@ def daily_demand_verdict(symbol: str, config: dict, daily_provider) -> dict:
     return strategy_mod.evaluate_daily_demand(list(klines), config)
 
 
+def daily_trend_verdict(symbol: str, config: dict, daily_trend_provider) -> dict:
+    """Gerbang EMA + ADX timeframe harian (default 1d) untuk satu kandidat.
+
+    Lapisan tambahan di atas gerbang trend H1 dan gerbang demand. Memakai penyedia
+    candle harian tersendiri (DailyTrendCache di live, DailyTrendLookup di backtest)
+    karena intervalnya bisa berbeda dari TREND_INTERVAL. Fail closed: kalau candle
+    harian tidak bisa diambil, kosong, atau riwayatnya kurang, kandidat DITOLAK.
+    """
+    from strategy import indicators as strategy_mod
+
+    try:
+        interval = strategy_mod.daily_trend_interval(config)
+    except ValueError:
+        interval = str(config.get("DAILY_TREND_INTERVAL", "1d") or "1d")
+    kosong = {
+        "interval": interval,
+        "bars": 0,
+        "required": strategy_mod.daily_trend_required_bars(config),
+        "window": strategy_mod.daily_trend_window_bars(config),
+        "close": None,
+        "ema_fast": None,
+        "ema_slow": None,
+        "adx": None,
+        "checks": {},
+        "values": {},
+    }
+    if not strategy_mod.daily_trend_enabled(config):
+        return {"ok": True, "reason": f"filter trend {interval} nonaktif", **kosong}
+    if daily_trend_provider is None:
+        return {
+            "ok": False,
+            "reason": (
+                f"filter trend {interval} aktif tetapi penyedia candle harian "
+                "tidak tersedia (fail closed)"
+            ),
+            **kosong,
+        }
+    try:
+        klines = daily_trend_provider(symbol)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "reason": f"candle trend {interval} {symbol} gagal diambil: {exc}",
+            **kosong,
+        }
+    if not klines:
+        return {
+            "ok": False,
+            "reason": f"candle trend {interval} {symbol} kosong",
+            **kosong,
+        }
+    return strategy_mod.evaluate_daily_trend(list(klines), config)
+
+
 def find_best_candidate(
     tickers: list,
     klines_fetcher,
@@ -654,6 +709,7 @@ def find_best_candidate(
     prewarm_fn: "Optional[Callable[[list], None]]" = None,
     trend_provider: "Optional[Callable[[str], list]]" = None,
     daily_provider: "Optional[Callable[[str], list]]" = None,
+    daily_trend_provider: "Optional[Callable[[str], list]]" = None,
 ) -> Optional[Candidate]:
     ranked = filter_and_rank_candidates(tickers, config, tradable_symbols)
     top_n = ranked[: int(config.get("TOP_N_CANDIDATES_TO_CONFIRM", 10) or 10)]
@@ -725,6 +781,17 @@ def find_best_candidate(
                 )
                 continue
             cand.confirm_reason = f"{cand.confirm_reason} | {daily_demand['reason']}"
+        if bool(config.get("DAILY_TREND_FILTER_ENABLED", False)):
+            daily_trend = daily_trend_verdict(cand.symbol, config, daily_trend_provider)
+            cand.daily_trend = daily_trend
+            if not daily_trend["ok"]:
+                cand.confirmed = False
+                cand.confirm_reason = (
+                    f"trend {daily_trend.get('interval') or '1d'} ditolak: "
+                    f"{daily_trend['reason']}"
+                )
+                continue
+            cand.confirm_reason = f"{cand.confirm_reason} | {daily_trend['reason']}"
         lolos.append(cand)
 
     if not lolos:

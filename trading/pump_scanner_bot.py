@@ -161,6 +161,26 @@ class DailyDemandCache(HtfKlineCache):
         )
 
 
+class DailyTrendCache(HtfKlineCache):
+    """Candle DAILY_TREND_INTERVAL untuk gerbang EMA + ADX harian.
+
+    Memakai basis HtfKlineCache yang sama dengan gerbang demand harian, jadi
+    candle harian diunduh sekali per simbol per hari dan jendelanya dipotong
+    persis seperti di backtest (DailyTrendLookup).
+    """
+
+    def interval(self) -> str:
+        return strategy.daily_trend_interval(self._config)
+
+    def window_bars(self) -> int:
+        return strategy.daily_trend_window_bars(self._config)
+
+    def verdict(self, symbol: str, now_ms: int) -> dict:
+        return strategy.evaluate_daily_trend(
+            self.window_klines(symbol, now_ms), self._config
+        )
+
+
 DEFAULT_STATE = {
     "current_symbol": None,
     "entry_price": 0.0,
@@ -3468,6 +3488,13 @@ def run(config: dict, lifecycle=None) -> int:
             logger.warning(
                 "%s Backtest akan menolak kombinasi ini sampai diperbaiki.", exc
             )
+    if config.get("DAILY_TREND_FILTER_ENABLED", False):
+        try:
+            strategy.daily_trend_warmup_bars(config, config["CONFIRM_INTERVAL"])
+        except ValueError as exc:
+            logger.warning(
+                "%s Backtest akan menolak kombinasi ini sampai diperbaiki.", exc
+            )
     if config.get("TREND_FILTER_ENABLED", False):
         logger.info(
             "Gerbang trend AKTIF (%s): entry lolos hanya kalau candle %s terakhir yang sudah "
@@ -3638,12 +3665,17 @@ def run(config: dict, lifecycle=None) -> int:
 
     trend_cache = TrendCache(client, config)
     daily_cache = DailyDemandCache(client, config)
+    daily_trend_cache = DailyTrendCache(client, config)
     butuh_candle_htf = bool(config.get("TREND_FILTER_ENABLED", False)) or bool(
         config.get("HTF_DEMAND_FILTER_ENABLED", False)
     )
     butuh_candle_harian = bool(config.get("DAILY_DEMAND_FILTER_ENABLED", False))
     trend_provider = trend_cache.provider if butuh_candle_htf else None
     daily_provider = daily_cache.provider if butuh_candle_harian else None
+    butuh_candle_tren_harian = bool(config.get("DAILY_TREND_FILTER_ENABLED", False))
+    daily_trend_provider = (
+        daily_trend_cache.provider if butuh_candle_tren_harian else None
+    )
     if trend_provider is None:
         logger.warning(
             "Gerbang timeframe tinggi NONAKTIF (TREND_FILTER_ENABLED=False dan "
@@ -3660,6 +3692,23 @@ def run(config: dict, lifecycle=None) -> int:
             int(config.get("TREND_ADX_PERIOD", 14)),
             float(config.get("TREND_ADX_MIN", 20.0) or 0.0),
             strategy.trend_window_bars(config),
+        )
+    if daily_trend_provider is None:
+        logger.info(
+            "Gerbang EMA + ADX %s NONAKTIF: tidak ada permintaan candle harian tambahan.",
+            config.get("DAILY_TREND_INTERVAL", "1d"),
+        )
+    else:
+        logger.info(
+            "Gerbang EMA + ADX %s AKTIF: close > EMA%d > EMA%d dan ADX%d >= %g "
+            "(jendela %d candle tertutup per simbol, di-cache sampai candle harian "
+            "berganti, fail closed bila data gagal diambil).",
+            strategy.daily_trend_interval(config),
+            int(config.get("DAILY_TREND_EMA_FAST", 20)),
+            int(config.get("DAILY_TREND_EMA_SLOW", 50)),
+            int(config.get("DAILY_TREND_ADX_PERIOD", 14)),
+            float(config.get("DAILY_TREND_ADX_MIN", 20.0) or 0.0),
+            strategy.daily_trend_window_bars(config),
         )
     if daily_provider is None:
         logger.info(
@@ -3849,6 +3898,7 @@ def run(config: dict, lifecycle=None) -> int:
                         prewarm_fn=client.prewarm_book_ticker,
                         trend_provider=trend_provider,
                         daily_provider=daily_provider,
+                        daily_trend_provider=daily_trend_provider,
                     )
                     if best:
                         book = client.get_book_ticker(best.symbol)
@@ -3898,6 +3948,12 @@ def run(config: dict, lifecycle=None) -> int:
                                     best.daily_demand.get("interval")
                                     or strategy.daily_demand_interval(config),
                                     best.daily_demand.get("reason"),
+                                )
+                            if best.daily_trend is not None:
+                                trend_info += " | trend %s: %s" % (
+                                    best.daily_trend.get("interval")
+                                    or strategy.daily_trend_interval(config),
+                                    best.daily_trend.get("reason"),
                                 )
                             logger.info(
                                 "Kandidat terpilih: %s (vol24h=%.0f, 24h=%.2f%%, spread=%.3f%%) | %s%s",
@@ -3971,6 +4027,11 @@ def run(config: dict, lifecycle=None) -> int:
                             gerbang_aktif.append(
                                 "gerbang zona demand "
                                 f"{strategy.daily_demand_interval(config)}"
+                            )
+                        if bool(config.get("DAILY_TREND_FILTER_ENABLED", False)):
+                            gerbang_aktif.append(
+                                "gerbang EMA + ADX "
+                                f"{strategy.daily_trend_interval(config)}"
                             )
                         if gerbang_aktif:
                             logger.info(
@@ -6055,6 +6116,137 @@ def selftest() -> None:
         "               data kurang/error fail closed, cache sekali per hari,"
     )
     print("               nonaktif -> tanpa panggilan tambahan -> OK")
+
+    print("\n=== SELFTEST: gerbang EMA + ADX harian (DAILY_TREND_*) ===")
+    cfg_tren_harian = dict(
+        cfg_konfirmasi,
+        DAILY_DEMAND_FILTER_ENABLED=False,
+        TREND_FILTER_ENABLED=False,
+        HTF_DEMAND_FILTER_ENABLED=False,
+        DAILY_TREND_FILTER_ENABLED=True,
+        DAILY_TREND_INTERVAL="1d",
+        DAILY_TREND_EMA_FAST=20,
+        DAILY_TREND_EMA_SLOW=50,
+        DAILY_TREND_ADX_PERIOD=14,
+        DAILY_TREND_ADX_MIN=20.0,
+        DAILY_TREND_LOOKBACK_BARS=120,
+    )
+    NOW_TREN = 300 * MS_HARI
+
+    def _baris_harian_tren(faktor: float, n: int = 130) -> list:
+        """n candle harian tertutup dengan pertumbuhan harian `faktor`."""
+        batas = ((int(NOW_TREN) // MS_HARI) - 1) * MS_HARI
+        rows = []
+        harga = 100.0
+        seri = []
+        for _ in range(n):
+            harga *= faktor
+            seri.append(harga)
+        for idx, close in enumerate(seri):
+            open_time = batas - (n - 1 - idx) * MS_HARI
+            buka = close / faktor
+            rows.append(
+                [
+                    open_time,
+                    str(buka),
+                    str(max(buka, close) * 1.005),
+                    str(min(buka, close) * 0.995),
+                    str(close),
+                    "1000",
+                    open_time + MS_HARI - 1,
+                    str(close * 1000),
+                    10,
+                    "500",
+                    "500000",
+                    "0",
+                ]
+            )
+        return rows
+
+    klien_tren_naik = KlienHarian(_baris_harian_tren(1.01))
+    cache_tren_naik = DailyTrendCache(klien_tren_naik, cfg_tren_harian)
+    klien_tren_turun = KlienHarian(_baris_harian_tren(0.99))
+    cache_tren_turun = DailyTrendCache(klien_tren_turun, cfg_tren_harian)
+
+    jendela_tren = cache_tren_naik.window_klines("NAIKUSDT", NOW_TREN)
+    assert len(jendela_tren) == 120, len(jendela_tren)
+    assert klien_tren_naik.interval_terakhir == "1d", klien_tren_naik.interval_terakhir
+    assert klien_tren_naik.limit_terakhir == 121, klien_tren_naik.limit_terakhir
+    assert all(
+        k.close_time < NOW_TREN for k in jendela_tren
+    ), "hanya candle harian tertutup yang boleh dipakai"
+    cache_tren_naik.window_klines("NAIKUSDT", NOW_TREN)
+    assert klien_tren_naik.calls == 1, "candle harian EMA+ADX harus di-cache"
+
+    v_tren_naik = cache_tren_naik.verdict("NAIKUSDT", NOW_TREN)
+    v_tren_turun = cache_tren_turun.verdict("TURUNUSDT", NOW_TREN)
+    assert v_tren_naik["ok"] and v_tren_naik["interval"] == "1d", v_tren_naik["reason"]
+    assert (
+        not v_tren_turun["ok"] and "di bawah" in v_tren_turun["reason"]
+    ), v_tren_turun["reason"]
+
+    pilih_tren_ok = scanner.find_best_candidate(
+        ticker_konfirmasi,
+        _serial,
+        cfg_tren_harian,
+        None,
+        daily_trend_provider=lambda s: cache_tren_naik.window_klines(s, NOW_TREN),
+    )
+    assert (
+        pilih_tren_ok is not None
+        and pilih_tren_ok.daily_trend is not None
+        and pilih_tren_ok.daily_trend["ok"]
+        and "trend 1d naik" in pilih_tren_ok.confirm_reason
+    ), pilih_tren_ok
+    pilih_tren_turun = scanner.find_best_candidate(
+        ticker_konfirmasi,
+        _serial,
+        cfg_tren_harian,
+        None,
+        daily_trend_provider=lambda s: cache_tren_turun.window_klines(s, NOW_TREN),
+    )
+    assert pilih_tren_turun is None, "trend harian turun harus menolak semua kandidat"
+    pilih_tren_kontrol = scanner.find_best_candidate(
+        ticker_konfirmasi,
+        _serial,
+        dict(cfg_tren_harian, DAILY_TREND_FILTER_ENABLED=False),
+        None,
+        daily_trend_provider=lambda s: cache_tren_turun.window_klines(s, NOW_TREN),
+    )
+    assert (
+        pilih_tren_kontrol is not None
+    ), "kontrol tanpa gerbang EMA+ADX harian harus tetap menghasilkan kandidat"
+
+    panggilan_tren = {"n": 0}
+
+    def _provider_tren_hitung(simbol):
+        panggilan_tren["n"] += 1
+        return cache_tren_naik.window_klines(simbol, NOW_TREN)
+
+    scanner.find_best_candidate(
+        ticker_konfirmasi,
+        _serial,
+        dict(cfg_tren_harian, DAILY_TREND_FILTER_ENABLED=False),
+        None,
+        daily_trend_provider=_provider_tren_hitung,
+    )
+    assert (
+        panggilan_tren["n"] == 0
+    ), "gerbang EMA+ADX harian nonaktif tidak boleh memanggil penyedia candle"
+
+    def _provider_tren_rusak(_simbol):
+        raise RuntimeError("jaringan putus")
+
+    verdict_tren_rusak = scanner.daily_trend_verdict(
+        "XUSDT", cfg_tren_harian, _provider_tren_rusak
+    )
+    verdict_tren_tanpa = scanner.daily_trend_verdict("XUSDT", cfg_tren_harian, None)
+    assert (
+        not verdict_tren_rusak["ok"] and "gagal diambil" in verdict_tren_rusak["reason"]
+    ), verdict_tren_rusak["reason"]
+    assert not verdict_tren_tanpa["ok"], verdict_tren_tanpa["reason"]
+    print("  tren harian: naik lolos, turun ditolak, cache sekali per hari,")
+    print("               nonaktif tanpa panggilan tambahan, gagal ambil fail closed -> OK")
 
     print("\n=== SELFTEST: blokir koin sama setelah loss (SAME_COIN_BLOCK) ===")
     from trading.clients.binance_client import SymbolFilters as SF3

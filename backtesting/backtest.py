@@ -59,6 +59,8 @@ class BacktestResult:
     trend_skips: int = 0
     htf_demand_skips: int = 0
     daily_demand_skips: int = 0
+    daily_trend_skips: int = 0
+    daily_trend_scans: int = 0
     same_coin_skips: int = 0
 
 
@@ -196,6 +198,8 @@ def run_backtest(
     htf_demand_skips = 0
     daily_demand_scans = 0
     daily_demand_skips = 0
+    daily_trend_scans = 0
+    daily_trend_skips = 0
 
     initial_equity = initial_backtest_equity(config)
     symbol = str(config.get("_symbol", "") or "")
@@ -264,7 +268,10 @@ def run_backtest(
         interval,
         sudah_dirangkai=daily_klines is not None,
     )
-    if trend_lookup is not None or daily_lookup is not None:
+    # Gerbang EMA + ADX harian dirangkai dari candle interval simulasi, sama seperti
+    # jalur portofolio, supaya tidak ada unduhan tambahan.
+    daily_trend_lookup = parity.make_daily_trend_lookup(klines, config, interval)
+    if trend_lookup is not None or daily_lookup is not None or daily_trend_lookup is not None:
         butuh_warmup = strategy.htf_gate_warmup_bars(config, interval)
         if int(warmup_bars) < butuh_warmup:
             bagian = []
@@ -278,6 +285,11 @@ def run_backtest(
                     f"gerbang zona demand {daily_lookup.interval} butuh "
                     f"{daily_lookup.window} candle {daily_lookup.interval} tertutup"
                 )
+            if daily_trend_lookup is not None:
+                bagian.append(
+                    f"gerbang EMA + ADX {daily_trend_lookup.interval} butuh "
+                    f"{daily_trend_lookup.window} candle {daily_trend_lookup.interval} tertutup"
+                )
             warnings.append(
                 f"Warmup {warmup_bars} bar {interval} dinaikkan menjadi {butuh_warmup} bar "
                 f"karena {' dan '.join(bagian)}. "
@@ -288,6 +300,15 @@ def run_backtest(
 
     i = max(warmup_bars, window - 1, lookback)
     start_idx = i
+    if daily_trend_lookup is not None:
+        hari_uji_tren = max(0.0, (n - start_idx) / float(bars_per_day(interval)))
+        butuh_hari_tren = strategy.daily_trend_required_bars(config)
+        if hari_uji_tren < float(butuh_hari_tren):
+            warnings.append(
+                f"Periode uji hanya {hari_uji_tren:.1f} hari, lebih pendek dari riwayat "
+                f"yang dibutuhkan EMA + ADX harian ({butuh_hari_tren} hari). Perpanjang "
+                "--days supaya gerbang harian benar-benar teruji."
+            )
     if daily_lookup is not None:
         hari_uji = max(0.0, (n - start_idx) / float(bars_per_day(interval)))
         if hari_uji < float(strategy.daily_demand_lookback_bars(config)):
@@ -362,6 +383,13 @@ def run_backtest(
                     verdict_daily = daily_lookup.daily_demand_at(candle.close_time)
                     if not verdict_daily["ok"]:
                         daily_demand_skips += 1
+                        i += 1
+                        continue
+                if setup.ok and daily_trend_lookup is not None:
+                    # Fail closed: pada jalur ini lookup selalu ada bila gerbang aktif.
+                    daily_trend_scans += 1
+                    if not daily_trend_lookup.verdict_at(candle.close_time)["ok"]:
+                        daily_trend_skips += 1
                         i += 1
                         continue
                 if setup.ok:
@@ -530,6 +558,15 @@ def run_backtest(
             f"{float(config.get('DAILY_DEMAND_MAX_DISTANCE_PCT', 12.0) or 0.0):g}% dari "
             "atap zona), sama seperti bot live."
         )
+    if daily_trend_lookup is not None and daily_trend_skips:
+        warnings.append(
+            f"{daily_trend_skips} dari {daily_trend_scans} sinyal konfirmasi dilewati oleh "
+            f"gerbang EMA{int(config.get('DAILY_TREND_EMA_FAST', 20) or 20)}/"
+            f"EMA{int(config.get('DAILY_TREND_EMA_SLOW', 50) or 50)} dan ADX"
+            f"{int(config.get('DAILY_TREND_ADX_PERIOD', 14) or 14)} >= "
+            f"{float(config.get('DAILY_TREND_ADX_MIN', 20.0) or 0.0):g} pada "
+            f"{daily_trend_lookup.interval}, sama seperti bot live."
+        )
     result = BacktestResult(
         symbol=config.get("_symbol", "?"),
         interval=interval,
@@ -551,6 +588,8 @@ def run_backtest(
         trend_skips=trend_skips,
         htf_demand_skips=htf_demand_skips,
         daily_demand_skips=daily_demand_skips,
+        daily_trend_skips=daily_trend_skips,
+        daily_trend_scans=daily_trend_scans,
         same_coin_skips=same_coin_skips,
     )
     return result
@@ -628,6 +667,8 @@ def summarize(result: BacktestResult) -> dict:
         "trend_skips": int(getattr(result, "trend_skips", 0)),
         "htf_demand_skips": int(getattr(result, "htf_demand_skips", 0)),
         "daily_demand_skips": int(getattr(result, "daily_demand_skips", 0)),
+        "daily_trend_skips": int(getattr(result, "daily_trend_skips", 0)),
+        "daily_trend_scans": int(getattr(result, "daily_trend_scans", 0)),
         "same_coin_skips": int(getattr(result, "same_coin_skips", 0)),
         **parity.per_trade_metrics(trades),
     }
@@ -677,6 +718,13 @@ OVERRIDE_CASTERS = {
         "DAILY_DEMAND_ZONE_BUFFER_PCT": float,
         "DAILY_DEMAND_MAX_DISTANCE_PCT": float,
         "DAILY_DEMAND_MIN_CLOSE_POSITION": float,
+        "DAILY_TREND_FILTER_ENABLED": _as_bool,
+        "DAILY_TREND_INTERVAL": str,
+        "DAILY_TREND_EMA_FAST": int,
+        "DAILY_TREND_EMA_SLOW": int,
+        "DAILY_TREND_ADX_PERIOD": int,
+        "DAILY_TREND_ADX_MIN": float,
+        "DAILY_TREND_LOOKBACK_BARS": int,
         "TREND_FILTER_ENABLED": _as_bool,
         "TREND_INTERVAL": str,
         "TREND_EMA_FAST": int,
@@ -804,6 +852,26 @@ def validate_params(cfg: dict) -> None:
         try:
             strategy.daily_demand_interval(cfg)
             strategy.daily_warmup_bars(cfg, cfg.get("CONFIRM_INTERVAL", "5m"))
+        except ValueError as exc:
+            raise BacktestError(str(exc)) from exc
+
+    if bool(cfg.get("DAILY_TREND_FILTER_ENABLED", False)):
+        daily_trend_checks = [
+            ("DAILY_TREND_EMA_FAST", 2, 500),
+            ("DAILY_TREND_EMA_SLOW", 3, 1000),
+            ("DAILY_TREND_ADX_PERIOD", 2, 200),
+            ("DAILY_TREND_ADX_MIN", 0.0, 100.0),
+            ("DAILY_TREND_LOOKBACK_BARS", 20, strategy.TREND_KLINE_LIMIT - 1),
+        ]
+        for key, lo, hi in daily_trend_checks:
+            val = cfg.get(key)
+            if val is None or not (lo <= float(val) <= hi):
+                raise BacktestError(
+                    f"Parameter '{key}'={val} di luar rentang wajar ({lo:g}..{hi:g})."
+                )
+        try:
+            strategy.daily_trend_interval(cfg)
+            strategy.daily_trend_warmup_bars(cfg, cfg.get("CONFIRM_INTERVAL", "5m"))
         except ValueError as exc:
             raise BacktestError(str(exc)) from exc
 
@@ -2228,6 +2296,123 @@ def selftest():
         "12 kunci demand sama persis dengan skema pengaturan -> OK"
     )
 
+    print(
+        "\n=== SELFTEST backtest.py: gerbang EMA + ADX harian (DAILY_TREND_*) "
+        "di backtest satu simbol ==="
+    )
+    from backtesting.synthetic_data import seri_banyak_setup as _seri_setup_tren
+
+    BAR_HARI_TREN = 288
+
+    def _prefiks_harian_satu(hari: int, faktor: float) -> tuple:
+        """`hari` hari candle 5m dengan close harian dikali `faktor` per hari."""
+        out = []
+        harga = 100.0
+        for h in range(hari):
+            harga_awal = harga
+            for j in range(BAR_HARI_TREN):
+                idx = h * BAR_HARI_TREN + j
+                harga_baru = harga_awal * (faktor ** ((j + 1) / float(BAR_HARI_TREN)))
+                ms = idx * 5 * 60_000
+                out.append(
+                    Kline(
+                        open_time=ms,
+                        open=harga,
+                        high=max(harga, harga_baru) * 1.0005,
+                        low=min(harga, harga_baru) * 0.9995,
+                        close=harga_baru,
+                        close_time=ms + 5 * 60_000 - 1,
+                        volume=1000.0,
+                        quote_volume=5_000_000.0,
+                    )
+                )
+                harga = harga_baru
+        return out, harga
+
+    cfg_tren_satu = dict(
+        PUMP_CONFIG,
+        PUMP_MIN_24H_CHANGE_PCT=-1000.0,
+        PUMP_MAX_24H_CHANGE_PCT=1000.0,
+        MIN_QUOTE_VOLUME_USDT_24H=0,
+        BACKTEST_ENTRY_DELAY_BARS=0,
+        BACKTEST_ENTRY_SPREAD_PCT=0.0,
+        BACKTEST_SLIPPAGE_PCT=0.0,
+        ROLLING_VOLUME_FILTER_ENABLED=False,
+        BTC_FILTER_ENABLED=False,
+        TREND_FILTER_ENABLED=False,
+        HTF_DEMAND_FILTER_ENABLED=False,
+        DAILY_DEMAND_FILTER_ENABLED=False,
+        DEMAND_ZONE_FILTER_ENABLED=False,
+        DAILY_TREND_FILTER_ENABLED=True,
+        DAILY_TREND_INTERVAL="1d",
+        DAILY_TREND_EMA_FAST=2,
+        DAILY_TREND_EMA_SLOW=3,
+        DAILY_TREND_ADX_PERIOD=2,
+        DAILY_TREND_ADX_MIN=0.0,
+        DAILY_TREND_LOOKBACK_BARS=20,
+    )
+    cfg_tren_satu_off = dict(cfg_tren_satu, DAILY_TREND_FILTER_ENABLED=False)
+    # Kedua sisi memakai warmup yang sama, supaya selisihnya murni dari gerbang.
+    warmup_tren_satu = parity.htf_gate_warmup_bars(cfg_tren_satu, "5m")
+
+    prefiks_turun_satu, harga_turun_satu = _prefiks_harian_satu(25, 0.99)
+    seri_turun_satu = prefiks_turun_satu + _seri_setup_tren(
+        harga=harga_turun_satu,
+        siklus=10,
+        volume=9_000_000.0,
+        mulai_index=len(prefiks_turun_satu),
+    )
+    prefiks_naik_satu, harga_naik_satu = _prefiks_harian_satu(25, 1.005)
+    seri_naik_satu = prefiks_naik_satu + _seri_setup_tren(
+        harga=harga_naik_satu,
+        siklus=10,
+        volume=9_000_000.0,
+        naik=10,
+        turun=20,
+        mulai_index=len(prefiks_naik_satu),
+    )
+
+    res_turun_on = run_backtest(
+        seri_turun_satu, cfg_tren_satu, warmup_bars=warmup_tren_satu
+    )
+    res_turun_off = run_backtest(
+        seri_turun_satu, cfg_tren_satu_off, warmup_bars=warmup_tren_satu
+    )
+    assert len(res_turun_off.trades) >= 1, (
+        "kontrol tanpa gerbang harus punya trade, supaya tes ini bermakna"
+    )
+    assert len(res_turun_on.trades) == 0, (
+        f"gerbang EMA + ADX harian seharusnya menolak tren harian turun, "
+        f"tetapi masih ada {len(res_turun_on.trades)} trade"
+    )
+    assert res_turun_on.daily_trend_skips >= 1, "penghitung disaring harus naik"
+    assert res_turun_on.daily_trend_scans >= res_turun_on.daily_trend_skips
+    print(
+        f"  tren harian turun: ON {len(res_turun_on.trades)} trade, OFF "
+        f"{len(res_turun_off.trades)} trade, disaring {res_turun_on.daily_trend_skips} "
+        f"dari {res_turun_on.daily_trend_scans} -> OK"
+    )
+
+    res_naik_on = run_backtest(
+        seri_naik_satu, cfg_tren_satu, warmup_bars=warmup_tren_satu
+    )
+    res_naik_off = run_backtest(
+        seri_naik_satu, cfg_tren_satu_off, warmup_bars=warmup_tren_satu
+    )
+    assert len(res_naik_off.trades) >= 1, "kontrol tren naik harus punya trade"
+    assert len(res_naik_on.trades) == len(res_naik_off.trades), (
+        f"tren harian naik harus lolos gerbang: ON {len(res_naik_on.trades)} vs "
+        f"OFF {len(res_naik_off.trades)}"
+    )
+    assert res_naik_on.daily_trend_skips == 0, (
+        f"tren harian naik tidak boleh disaring, tetapi disaring "
+        f"{res_naik_on.daily_trend_skips}"
+    )
+    print(
+        f"  tren harian naik: ON {len(res_naik_on.trades)} = OFF "
+        f"{len(res_naik_off.trades)} trade, disaring 0 -> OK"
+    )
+
     print("\nSEMUA SELFTEST backtest.py LULUS.")
     print(
         "(Tidak menghubungi Binance sama sekali, murni logika lokal dengan data sintetis.)"
@@ -2262,12 +2447,14 @@ def print_single_result(result: BacktestResult) -> None:
         or summary.get("trend_skips")
         or summary.get("htf_demand_skips")
         or summary.get("daily_demand_skips")
+        or summary.get("daily_trend_skips")
     ):
         print(
             f"Kontrol akun/filter: {risk_info}, chase dilewati {summary.get('chase_skips', 0)}, "
             f"trend dilewati {summary.get('trend_skips', 0)}, "
             f"demand H1 dilewati {summary.get('htf_demand_skips', 0)}, "
-            f"demand harian dilewati {summary.get('daily_demand_skips', 0)}"
+            f"demand harian dilewati {summary.get('daily_demand_skips', 0)}, "
+            f"EMA+ADX harian dilewati {summary.get('daily_trend_skips', 0)}"
         )
     if result.warnings:
         print("Peringatan:")
@@ -2354,6 +2541,19 @@ def main():
         f"({args.days} hari + warmup {warmup} candle = "
         f"{warmup / bar_per_hari:.2f} hari)..."
     )
+    if strategy.daily_trend_enabled(cfg):
+        print(
+            f"  Gerbang EMA + ADX {strategy.daily_trend_interval(cfg)} aktif: "
+            f"jendela {strategy.daily_trend_window_bars(cfg)} candle harian (minimum "
+            f"{strategy.daily_trend_required_bars(cfg)} candle untuk EMA dan ADX). Koin "
+            "dengan riwayat harian lebih pendek ditolak sampai riwayatnya cukup."
+        )
+        if args.days < strategy.daily_trend_required_bars(cfg):
+            print(
+                f"PERINGATAN: --days {args.days} lebih pendek dari riwayat harian yang "
+                f"dibutuhkan EMA + ADX ({strategy.daily_trend_required_bars(cfg)} hari). "
+                "Gerbang harian belum teruji dengan layak."
+            )
     if strategy.daily_demand_enabled(cfg):
         harian_bars = strategy.daily_warmup_bars(cfg, interval)
         print(

@@ -256,6 +256,7 @@ def run_grid_search(
         base_config.get("HTF_DEMAND_FILTER_ENABLED", False)
     )
     butuh_harian = bool(base_config.get("DAILY_DEMAND_FILTER_ENABLED", False))
+    butuh_tren_harian = bool(base_config.get("DAILY_TREND_FILTER_ENABLED", False))
     try:
         butuh_warmup = parity.htf_gate_warmup_bars(base_config, interval_sim)
     except ValueError as exc:
@@ -267,6 +268,12 @@ def run_grid_search(
                 f"gerbang timeframe tinggi {base_config.get('TREND_INTERVAL', '1h')} "
                 f"(trend + zona demand) butuh {parity_trend_window(base_config)} candle "
                 "tertutup"
+            )
+        if butuh_tren_harian:
+            bagian.append(
+                f"gerbang EMA + ADX {base_config.get('DAILY_TREND_INTERVAL', '1d')} "
+                f"butuh {parity.daily_trend_window_bars(base_config)} candle "
+                f"{base_config.get('DAILY_TREND_INTERVAL', '1d')} tertutup"
             )
         if butuh_harian:
             bagian.append(
@@ -484,17 +491,21 @@ def run_portfolio_grid_search(
 
     trend_of = pbt.build_trend_lookups(store, list(series_of), base_config, interval)
     daily_of = pbt.build_daily_lookups(store, list(series_of), base_config, interval)
-    if trend_of or daily_of:
+    tren_harian_of = pbt.build_daily_trend_lookups(
+        store, list(series_of), base_config, interval
+    )
+    if trend_of or daily_of or tren_harian_of:
         butuh_warmup = parity.htf_gate_warmup_ms(base_config, interval)
         if int(warmup_ms) < butuh_warmup:
             hasil_grid.peringatan.append(
                 f"Warmup {warmup_ms} ms dinaikkan menjadi {butuh_warmup} ms karena gerbang "
-                f"timeframe tinggi yang aktif (trend + demand H1 + demand harian) butuh "
-                f"paling sedikit {parity.htf_gate_warmup_bars(base_config, interval)} "
+                f"timeframe tinggi yang aktif (trend + demand H1 + demand harian + EMA/ADX "
+                f"harian) butuh paling sedikit "
+                f"{parity.htf_gate_warmup_bars(base_config, interval)} "
                 f"candle {interval} sebagai pemanasan."
             )
             warmup_ms = butuh_warmup
-    prebuilt = (timeline, series_of, trend_of, daily_of)
+    prebuilt = (timeline, series_of, trend_of, daily_of, tren_harian_of)
     dilewati = 0
     total = len(kombinasi)
 

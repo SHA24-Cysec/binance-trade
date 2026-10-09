@@ -448,6 +448,26 @@ def daily_demand_lookback_bars(config: dict) -> int:
     return strategy_mod.daily_demand_lookback_bars(config)
 
 
+def daily_trend_window_bars(config: dict) -> int:
+    """Jumlah candle harian untuk gerbang EMA + ADX harian (0 kalau nonaktif)."""
+    from strategy import indicators as strategy_mod
+
+    return strategy_mod.daily_trend_window_bars(config)
+
+
+def daily_trend_warmup_ms(config: dict, interval: str) -> int:
+    """Warmup (ms) gerbang EMA + ADX harian saja (0 kalau nonaktif).
+
+    Dipakai pesan dan batas hari minimal di dashboard, supaya angkanya sama
+    dengan yang dipakai strategy.indicators.htf_gate_warmup_bars.
+    """
+    from strategy import indicators as strategy_mod
+
+    return strategy_mod.daily_trend_warmup_bars(
+        config, interval
+    ) * strategy_mod.interval_to_ms(interval)
+
+
 def htf_gate_warmup_bars(config: dict, interval: str) -> int:
     """Warmup gabungan semua gerbang timeframe tinggi yang aktif (0 kalau tidak ada).
 
@@ -549,6 +569,77 @@ def build_daily_klines(
         strategy_mod.daily_demand_interval_minutes(config),
         source_minutes,
     )
+
+
+class DailyTrendLookup:
+    """Jendela candle harian untuk gerbang EMA + ADX harian di backtest.
+
+    Aturannya harus sama persis dengan bot live (DailyTrendCache pada
+    trading/pump_scanner_bot.py): pakai DAILY_TREND_LOOKBACK_BARS candle harian
+    terakhir yang SUDAH TUTUP pada saat candle sinyal ditutup, lalu jalankan
+    evaluate_daily_trend. Candle harian dirangkai dari candle interval simulasi,
+    jadi tidak ada unduhan tambahan ke bursa.
+    """
+
+    def __init__(self, daily_klines: Sequence[Kline], config: dict) -> None:
+        from strategy import indicators as strategy_mod
+
+        self.config = config
+        self.interval = strategy_mod.daily_trend_interval(config)
+        self.window = strategy_mod.daily_trend_window_bars(config)
+        self.klines = list(daily_klines)
+        self.close_times = [int(k.close_time) for k in self.klines]
+
+    def window_at(self, signal_close_time_ms: int) -> list:
+        idx = bisect_right(self.close_times, int(signal_close_time_ms))
+        return self.klines[max(0, idx - self.window) : idx]
+
+    def verdict_at(self, signal_close_time_ms: int) -> dict:
+        """Verdict gerbang EMA + ADX harian pada jendela yang sama dengan live."""
+        from strategy import indicators as strategy_mod
+
+        return strategy_mod.evaluate_daily_trend(
+            self.window_at(signal_close_time_ms), self.config
+        )
+
+
+def build_daily_trend_klines(
+    klines: Sequence[Kline], config: dict, interval: str
+) -> list[Kline]:
+    """Candle harian untuk gerbang EMA + ADX harian, dirangkai dari candle simulasi."""
+    from strategy import indicators as strategy_mod
+
+    source_minutes = strategy_mod.INTERVAL_MINUTES.get(str(interval))
+    if source_minutes is None:
+        raise ValueError(
+            f"Interval simulasi '{interval}' tidak dikenal sehingga candle "
+            f"'{strategy_mod.daily_trend_interval(config)}' tidak bisa dirangkai."
+        )
+    return strategy_mod.aggregate_klines(
+        list(klines),
+        strategy_mod.daily_trend_interval_minutes(config),
+        source_minutes,
+    )
+
+
+def make_daily_trend_lookup(
+    klines: Sequence[Kline],
+    config: dict,
+    interval: str,
+    *,
+    sudah_dirangkai: bool = False,
+) -> Optional[DailyTrendLookup]:
+    """Lookup gerbang EMA + ADX harian untuk backtest (None kalau gerbang mati)."""
+    from strategy import indicators as strategy_mod
+
+    if not strategy_mod.daily_trend_enabled(config):
+        return None
+    bars = (
+        list(klines)
+        if sudah_dirangkai
+        else build_daily_trend_klines(klines, config, interval)
+    )
+    return DailyTrendLookup(bars, config)
 
 
 def per_trade_metrics(trades: Sequence) -> dict:

@@ -1061,6 +1061,64 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         minimum=0.0,
         maximum=1.0,
     ),
+    "DAILY_TREND_FILTER_ENABLED": _field(
+        "Trend Harian",
+        "Filter EMA + ADX harian",
+        "Wajibkan candle harian (DAILY_TREND_INTERVAL, default 1d) terakhir yang sudah tutup berada dalam trend naik dan kuat: close di atas EMA cepat, EMA cepat di atas EMA lambat, dan ADX minimum. Lapisan TAMBAHAN di atas gerbang trend H1 dan gerbang demand. Default nonaktif. Berlaku di LIVE, PAPER, dan backtest; data harian gagal diambil atau riwayatnya kurang berarti kandidat ditolak (fail closed).",
+        "bool",
+    ),
+    "DAILY_TREND_INTERVAL": _field(
+        "Trend Harian",
+        "Interval trend harian",
+        "Timeframe gerbang EMA + ADX harian. Pilihan dibatasi pada 12h atau 1d. Wajib kelipatan bulat dari interval konfirmasi supaya backtest bisa merangkai candle ini dari data yang sama.",
+        "str",
+        editor="select",
+        options=["12h", "1d"],
+    ),
+    "DAILY_TREND_EMA_FAST": _field(
+        "Trend Harian",
+        "Periode EMA cepat harian",
+        "EMA cepat pada candle harian. Default 20. Wajib lebih kecil dari EMA lambat harian.",
+        "int",
+        minimum=2,
+        maximum=500,
+        unit="candle",
+    ),
+    "DAILY_TREND_EMA_SLOW": _field(
+        "Trend Harian",
+        "Periode EMA lambat harian",
+        "EMA lambat pada candle harian. Default 50. Dipakai juga sebagai penentu panjang riwayat minimum; koin yang riwayat hariannya lebih pendek dari ini ditolak.",
+        "int",
+        minimum=3,
+        maximum=1000,
+        unit="candle",
+    ),
+    "DAILY_TREND_ADX_PERIOD": _field(
+        "Trend Harian",
+        "Periode ADX harian",
+        "Periode ADX Wilder pada candle harian. Default 14. Butuh sekitar dua kali periode ini candle agar nilainya terdefinisi.",
+        "int",
+        minimum=2,
+        maximum=200,
+        unit="candle",
+    ),
+    "DAILY_TREND_ADX_MIN": _field(
+        "Trend Harian",
+        "Ambang ADX harian",
+        "ADX minimum agar trend harian dianggap kuat. Default 20. Isi 0 untuk mematikan cek kekuatan trend dan hanya memakai susunan EMA.",
+        "float",
+        minimum=0,
+        maximum=100,
+    ),
+    "DAILY_TREND_LOOKBACK_BARS": _field(
+        "Trend Harian",
+        "Jendela candle trend harian",
+        "Jumlah candle harian tertutup yang dipakai menghitung EMA dan ADX harian. Default 120. Nilai ini dipakai sama persis oleh bot live dan backtest; endpoint klines Binance membatasi 1000 candle per panggilan.",
+        "int",
+        minimum=20,
+        maximum=999,
+        unit="candle",
+    ),
     "TOP_N_CANDIDATES_TO_CONFIRM": _field(
         "Scan",
         "Jumlah kandidat konfirmasi",
@@ -1608,6 +1666,35 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
                 "harus lebih besar atau sama dengan HTF_DEMAND_ZONE_BUFFER_PCT"
             )
 
+    saring_daily_trend = mode_aware is False or _flag_untuk_relasi(
+        cfg, "DAILY_TREND_FILTER_ENABLED", False
+    )
+    if saring_daily_trend:
+        nilai = pasangan("DAILY_TREND_EMA_SLOW", "DAILY_TREND_EMA_FAST")
+        if nilai is not None and nilai[0] <= nilai[1]:
+            keluar["DAILY_TREND_EMA_SLOW"] = (
+                "harus lebih besar dari DAILY_TREND_EMA_FAST agar susunan EMA harian tidak terbalik"
+            )
+        try:
+            from strategy.indicators import INTERVAL_MINUTES as _INTERVAL_MINUTES_TREN_HARIAN
+
+            menit_tren_harian = _INTERVAL_MINUTES_TREN_HARIAN.get(
+                str(cfg.get("DAILY_TREND_INTERVAL", "")).lower()
+            )
+            menit_konfirmasi_tren_harian = _INTERVAL_MINUTES_TREN_HARIAN.get(
+                str(cfg.get("CONFIRM_INTERVAL", "")).lower()
+            )
+        except ImportError:  # strategi belum tersedia saat skema dimuat sendiri
+            menit_tren_harian = menit_konfirmasi_tren_harian = None
+        if menit_tren_harian and menit_konfirmasi_tren_harian:
+            if menit_tren_harian % menit_konfirmasi_tren_harian != 0 or (
+                menit_tren_harian < menit_konfirmasi_tren_harian
+            ):
+                keluar["DAILY_TREND_INTERVAL"] = (
+                    "harus kelipatan bulat dari CONFIRM_INTERVAL dan tidak lebih pendek, "
+                    "supaya backtest bisa merangkai candle harian dari candle konfirmasi"
+                )
+
     saring_daily_demand = mode_aware is False or _flag_untuk_relasi(
         cfg, "DAILY_DEMAND_FILTER_ENABLED", False
     )
@@ -1677,6 +1764,27 @@ def validate_candidate(
                 warnings.append(
                     "TREND_ADX_MIN nol: cek kekuatan trend mati, hanya susunan EMA yang "
                     "menyaring entry sehingga pasar sideways lebih mudah diloloskan."
+                )
+        if cleaned.get("DAILY_TREND_FILTER_ENABLED"):
+            _minimal_harian = max(
+                int(cleaned["DAILY_TREND_EMA_SLOW"]),
+                2 * int(cleaned["DAILY_TREND_ADX_PERIOD"]) + 1,
+            )
+            if int(cleaned["DAILY_TREND_LOOKBACK_BARS"]) < _minimal_harian:
+                warnings.append(
+                    f"DAILY_TREND_LOOKBACK_BARS {cleaned['DAILY_TREND_LOOKBACK_BARS']} lebih "
+                    f"kecil dari {_minimal_harian} candle yang dibutuhkan EMA dan ADX harian. "
+                    "Gerbang akan memakai nilai minimum itu dan menolak entry selama riwayat belum cukup."
+                )
+            warnings.append(
+                f"Filter EMA + ADX harian aktif: koin yang riwayat harian tertutupnya kurang dari "
+                f"{max(int(cleaned['DAILY_TREND_EMA_SLOW']), 2 * int(cleaned['DAILY_TREND_ADX_PERIOD']) + 1)} "
+                "hari (termasuk koin baru listing) akan ditolak sampai riwayatnya cukup."
+            )
+            if cleaned["DAILY_TREND_ADX_MIN"] == 0:
+                warnings.append(
+                    "DAILY_TREND_ADX_MIN nol: cek kekuatan trend harian mati, hanya susunan EMA "
+                    "yang menyaring entry."
                 )
         if cleaned["PUMP_MIN_24H_CHANGE_PCT"] <= 0:
             warnings.append(

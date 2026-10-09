@@ -722,6 +722,13 @@ BT_PARAM_KEYS = (
     "TREND_ADX_PERIOD",
     "TREND_ADX_MIN",
     "TREND_LOOKBACK_BARS",
+    "DAILY_TREND_FILTER_ENABLED",
+    "DAILY_TREND_INTERVAL",
+    "DAILY_TREND_EMA_FAST",
+    "DAILY_TREND_EMA_SLOW",
+    "DAILY_TREND_ADX_PERIOD",
+    "DAILY_TREND_ADX_MIN",
+    "DAILY_TREND_LOOKBACK_BARS",
 )
 
 # Grid parameter SENGAJA hanya berisi parameter exit: sinyal entry (konfirmasi 5m
@@ -730,7 +737,9 @@ BT_PARAM_KEYS = (
 # menyesatkan. Untuk membandingkan setelan trend, jalankan backtest portofolio
 # biasa dengan nilai TREND_* yang berbeda.
 GRID_PARAM_KEYS = tuple(
-    k for k in BT_PARAM_KEYS if k != "USE_ATR_EXIT" and not k.startswith("TREND_")
+    k
+    for k in BT_PARAM_KEYS
+    if k != "USE_ATR_EXIT" and not k.startswith(("TREND_", "DAILY_TREND_"))
 )
 
 _bt_jobs: dict = {}
@@ -820,6 +829,44 @@ def _bt_demand_harian_note(cfg: dict, interval: str) -> str:
     )
 
 
+def _bt_tren_harian_note(cfg: dict, interval: str) -> str:
+    """Kalimat keterangan warmup gerbang EMA + ADX harian (nonaktif kalau gerbang mati)."""
+    if not bool(cfg.get("DAILY_TREND_FILTER_ENABLED", False)):
+        return (
+            "Gerbang EMA + ADX harian sedang NONAKTIF, jadi tidak ada candle harian yang "
+            "dirangkai untuk gerbang ini dan tidak ada sinyal yang disaring olehnya."
+        )
+    try:
+        hari = pbt.parity.daily_trend_warmup_ms(cfg, interval) / float(bt.MS_PER_DAY)
+    except ValueError:
+        return (
+            "Gerbang EMA + ADX harian aktif, tetapi intervalnya tidak sepadan dengan "
+            "interval simulasi sehingga backtest ini akan menolak berjalan."
+        )
+    return (
+        f"Gerbang EMA + ADX harian {cfg.get('DAILY_TREND_INTERVAL', '1d')} aktif dan "
+        f"butuh sekitar {hari:.1f} hari pemanasan (jendela "
+        f"{pbt.parity.daily_trend_window_bars(cfg)} candle harian ditambah satu candle "
+        "penyangga). Rentang itu otomatis ikut diunduh, dan batas hari minimal pada form "
+        "ikut naik. Lihat penghitung sinyal yang disaring gerbang EMA + ADX harian pada hasil."
+    )
+
+
+def _bt_tren_harian_limitations(cfg: dict, interval: str) -> str:
+    """Paragraf batasan untuk gerbang EMA + ADX harian (kosong kalau nonaktif)."""
+    if not bool(cfg.get("DAILY_TREND_FILTER_ENABLED", False)):
+        return ""
+    return (
+        " Gerbang EMA + ADX harian (DAILY_TREND_*) SUDAH disimulasikan dengan aturan yang "
+        "sama seperti bot live: DAILY_TREND_LOOKBACK_BARS candle harian terakhir yang sudah "
+        "tutup pada saat candle sinyal ditutup, lalu close > EMA cepat, EMA cepat > EMA "
+        "lambat, dan ADX >= DAILY_TREND_ADX_MIN. Koin yang candle hariannya belum cukup "
+        "ditolak, sama seperti di live. Candle harian dirangkai dari candle "
+        f"{interval} yang diunduh, jadi tidak ada unduhan tambahan. "
+        + _bt_tren_harian_note(cfg, interval)
+    )
+
+
 def _bt_prepare_universe(
     job_id: str, cfg: dict, days: int, max_symbols: int, set_progress, cancelled
 ) -> dict:
@@ -834,12 +881,13 @@ def _bt_prepare_universe(
     if butuh_gerbang_ms > warmup_ms:
         logger.info(
             "Warmup backtest dinaikkan dari %.1f jam menjadi %.1f jam karena "
-            "gerbang trend/demand pada %s dan gerbang demand harian %s butuh "
-            "paling sedikit %d candle %s sebagai pemanasan.",
+            "gerbang trend/demand pada %s, gerbang demand harian %s, dan gerbang EMA + ADX "
+            "harian %s butuh paling sedikit %d candle %s sebagai pemanasan.",
             warmup_ms / 3_600_000.0,
             butuh_gerbang_ms / 3_600_000.0,
             cfg.get("TREND_INTERVAL", "1h"),
             cfg.get("DAILY_DEMAND_INTERVAL", "1d"),
+            cfg.get("DAILY_TREND_INTERVAL", "1d"),
             pbt.parity.htf_gate_warmup_bars(cfg, interval),
             interval,
         )
@@ -1143,6 +1191,18 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "skips": int(getattr(result, "daily_demand_skips", 0)),
                 "scans": int(getattr(result, "daily_demand_scans", 0)),
             },
+            # Setelan gerbang EMA + ADX harian yang BENAR-BENAR dipakai simulasi ini.
+            "daily_trend": {
+                "enabled": bool(cfg.get("DAILY_TREND_FILTER_ENABLED", False)),
+                "interval": cfg.get("DAILY_TREND_INTERVAL", "1d"),
+                "ema_fast": int(cfg.get("DAILY_TREND_EMA_FAST", 20) or 20),
+                "ema_slow": int(cfg.get("DAILY_TREND_EMA_SLOW", 50) or 50),
+                "adx_period": int(cfg.get("DAILY_TREND_ADX_PERIOD", 14) or 14),
+                "adx_min": float(cfg.get("DAILY_TREND_ADX_MIN", 0.0) or 0.0),
+                "lookback_bars": int(cfg.get("DAILY_TREND_LOOKBACK_BARS", 120) or 120),
+                "skips": int(getattr(result, "daily_trend_skips", 0)),
+                "scans": int(getattr(result, "daily_trend_scans", 0)),
+            },
             "trades": trades_out,
             "skipped": skipped_out,
             "warnings": (
@@ -1202,6 +1262,7 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "backtest dimulai dari awal rentang data yang diunduh, bukan riwayat penuh simbol. "
                 + _bt_trend_warmup_note(cfg, prep["interval"])
                 + _bt_demand_limitations(cfg, prep["interval"])
+                + _bt_tren_harian_limitations(cfg, prep["interval"])
                 + " Filter live yang SUDAH disimulasikan dari candle: filter BTC (BTC_MAX_DROP_PCT, "
                 "memakai candle BTC historis), MAX_CHASE_PCT, MIN_SECONDS_BETWEEN_TRADES, "
                 "COOLDOWN_MINUTES_AFTER_CLOSE, equity stop (drawdown), dan "
@@ -1377,8 +1438,8 @@ def _bt_run_grid_job(
                 "Split latih/uji di sini satu kali berdasarkan urutan waktu (bukan "
                 "walk-forward bergulir). Untuk keyakinan lebih, ulangi dengan beberapa "
                 "rasio dan rentang hari yang berbeda.",
-                "Yang disapu grid hanya parameter EXIT. Gerbang trend (TREND_*) dan "
-                "USE_ATR_EXIT tidak ikut disapu: nilainya diambil dari form backtest karena "
+                "Yang disapu grid hanya parameter EXIT. Gerbang trend (TREND_*), gerbang "
+                "EMA + ADX harian (DAILY_TREND_*), dan USE_ATR_EXIT tidak ikut disapu: nilainya diambil dari form backtest karena "
                 "sinyal entry dihitung sekali lalu dipakai ulang oleh semua kombinasi. Untuk "
                 "membandingkan setelan trend, jalankan backtest portofolio terpisah per setelan.",
                 "Statistik 24 jam DIREKONSTRUKSI dari candle, bukan snapshot "
@@ -1459,28 +1520,48 @@ def _bt_demand_limitations(cfg: dict, interval: str) -> str:
 def _bt_min_days_note(cfg: dict, interval: str) -> tuple[int, str]:
     """Berapa hari minimal supaya backtest masih menyisakan bar yang bisa ditradingkan.
 
-    Statistik 24 jam butuh satu hari, dan setiap gerbang timeframe tinggi yang
-    aktif (trend + demand H1 pada TREND_INTERVAL, serta demand harian pada
-    DAILY_DEMAND_INTERVAL) butuh riwayatnya sendiri sebagai pemanasan. Tanpa
-    rentang tambahan itu, simulasi hanya berisi pemanasan dan hasilnya nol
-    trade tanpa penjelasan. Kebutuhan yang dipakai adalah yang TERBESAR.
+    Statistik 24 jam butuh satu hari. Gerbang timeframe tinggi yang aktif butuh
+    riwayatnya sendiri sebagai pemanasan: trend dan demand H1 pada TREND_INTERVAL,
+    serta EMA + ADX harian pada DAILY_TREND_INTERVAL. Tanpa rentang tambahan itu,
+    simulasi hanya berisi pemanasan dan hasilnya nol trade tanpa penjelasan.
+    Kebutuhan yang dipakai adalah yang TERBESAR. Demand harian sengaja TIDAK ikut
+    menaikkan batas ini (lihat _bt_catatan_harian_min).
     """
     dasar = 2
-    if not bool(cfg.get("TREND_FILTER_ENABLED", False)) and not bool(
+    tren_h1_aktif = bool(cfg.get("TREND_FILTER_ENABLED", False)) or bool(
         cfg.get("HTF_DEMAND_FILTER_ENABLED", False)
-    ):
-        return dasar, _bt_catatan_harian_min(cfg, interval)
-    try:
-        hari_warmup = pbt.parity.trend_warmup_ms(cfg, interval) / float(bt.MS_PER_DAY)
-    except ValueError as exc:
-        return dasar, str(exc)
-    minimal = max(dasar, int(math.ceil(hari_warmup)) + 1)
-    return minimal, (
-        f"Gerbang timeframe tinggi {cfg.get('TREND_INTERVAL', '1h')} butuh sekitar "
-        f"{hari_warmup:.1f} hari riwayat sebelum bar pertama bisa dievaluasi."
-        + _bt_catatan_harian_min(cfg, interval)
     )
+    tren_harian_aktif = bool(cfg.get("DAILY_TREND_FILTER_ENABLED", False))
+    if not tren_h1_aktif and not tren_harian_aktif:
+        return dasar, _bt_catatan_harian_min(cfg, interval)
 
+    minimal = dasar
+    catatan = ""
+    if tren_h1_aktif:
+        try:
+            hari_warmup = pbt.parity.trend_warmup_ms(cfg, interval) / float(
+                bt.MS_PER_DAY
+            )
+        except ValueError as exc:
+            return dasar, str(exc)
+        minimal = max(minimal, int(math.ceil(hari_warmup)) + 1)
+        catatan = (
+            f"Gerbang timeframe tinggi {cfg.get('TREND_INTERVAL', '1h')} butuh sekitar "
+            f"{hari_warmup:.1f} hari riwayat sebelum bar pertama bisa dievaluasi."
+        )
+    if tren_harian_aktif:
+        try:
+            hari_tren_harian = pbt.parity.daily_trend_warmup_ms(
+                cfg, interval
+            ) / float(bt.MS_PER_DAY)
+        except ValueError as exc:
+            return dasar, str(exc)
+        minimal = max(minimal, int(math.ceil(hari_tren_harian)) + 1)
+        catatan += (
+            f" Gerbang EMA + ADX {cfg.get('DAILY_TREND_INTERVAL', '1d')} butuh sekitar "
+            f"{hari_tren_harian:.1f} hari riwayat sebelum bar pertama bisa dievaluasi."
+        )
+    return minimal, catatan.strip() + _bt_catatan_harian_min(cfg, interval)
 
 def _bt_catatan_harian_min(cfg: dict, interval: str) -> str:
     """Catatan tambahan soal kebutuhan hari gerbang demand harian.
@@ -1960,7 +2041,7 @@ def api_backtest_defaults():
     out["grid_params"] = list(GRID_PARAM_KEYS)
     # Info pemanasan gerbang timeframe tinggi supaya perkiraan beban unduhan di
     # layar (dan catatan tanggal minimal) memakai angka yang SAMA dengan yang
-    # benar-benar diunduh job, termasuk lapisan demand harian.
+    # benar-benar diunduh job, termasuk lapisan demand dan EMA + ADX harian.
     try:
         out["warmup_bars"] = int(
             pbt.parity.htf_gate_warmup_bars(
@@ -1979,6 +2060,13 @@ def api_backtest_defaults():
     out["daily_demand_interval"] = PUMP_CONFIG.get("DAILY_DEMAND_INTERVAL", "1d")
     out["daily_demand_lookback_bars"] = int(
         PUMP_CONFIG.get("DAILY_DEMAND_LOOKBACK_BARS", 20) or 20
+    )
+    out["daily_trend_enabled"] = bool(
+        PUMP_CONFIG.get("DAILY_TREND_FILTER_ENABLED", False)
+    )
+    out["daily_trend_interval"] = PUMP_CONFIG.get("DAILY_TREND_INTERVAL", "1d")
+    out["daily_trend_lookback_bars"] = int(
+        PUMP_CONFIG.get("DAILY_TREND_LOOKBACK_BARS", 120) or 120
     )
     return jsonify(out)
 
@@ -2611,6 +2699,97 @@ def selftest() -> int:
         "estimasi request ikut menghitung warmup gerbang demand harian",
         est_dengan_harian > est_tanpa_harian,
         f"{est_tanpa_harian} -> {est_dengan_harian}",
+    )
+
+    # --- gerbang EMA + ADX harian (DAILY_TREND_*) ---
+    cek(
+        "form backtest memuat semua kunci EMA + ADX harian",
+        {
+            "DAILY_TREND_FILTER_ENABLED",
+            "DAILY_TREND_INTERVAL",
+            "DAILY_TREND_EMA_FAST",
+            "DAILY_TREND_EMA_SLOW",
+            "DAILY_TREND_ADX_PERIOD",
+            "DAILY_TREND_ADX_MIN",
+            "DAILY_TREND_LOOKBACK_BARS",
+        }
+        <= set(BT_PARAM_KEYS),
+    )
+    cek(
+        "pencarian grid tidak menyapu EMA + ADX harian",
+        not any(k.startswith("DAILY_TREND_") for k in GRID_PARAM_KEYS),
+    )
+    cfg_tren_harian = dict(
+        PUMP_CONFIG,
+        CONFIRM_INTERVAL="5m",
+        TREND_FILTER_ENABLED=False,
+        HTF_DEMAND_FILTER_ENABLED=False,
+        DAILY_DEMAND_FILTER_ENABLED=False,
+        DAILY_TREND_FILTER_ENABLED=True,
+        DAILY_TREND_INTERVAL="1d",
+    )
+    minimal_th, catatan_th = _bt_min_days_note(cfg_tren_harian, "5m")
+    cek(
+        "batas hari minimal menghitung pemanasan EMA + ADX harian",
+        minimal_th >= pbt.parity.daily_trend_window_bars(cfg_tren_harian) + 2
+        and "1d" in catatan_th,
+        f"minimal {minimal_th} hari | {catatan_th[:70]}",
+    )
+    try:
+        _bt_days_guard(cfg_tren_harian, minimal_th - 1)
+        cek(
+            "rentang di bawah minimal dengan EMA + ADX harian ditolak",
+            False,
+            "tidak melempar apa pun",
+        )
+    except bt.BacktestError as exc:
+        cek(
+            "rentang di bawah minimal dengan EMA + ADX harian ditolak dengan pesan jelas",
+            "minimal" in str(exc) and "1d" in str(exc),
+            str(exc)[:70],
+        )
+    _bt_days_guard(cfg_tren_harian, minimal_th)
+    cek(
+        "rentang sebatas minimal dengan EMA + ADX harian diloloskan",
+        True,
+        f"minimal {minimal_th} hari",
+    )
+    cek(
+        "catatan EMA + ADX harian nonaktif menyebut NONAKTIF",
+        "NONAKTIF"
+        in _bt_tren_harian_note(
+            dict(cfg_tren_harian, DAILY_TREND_FILTER_ENABLED=False), "5m"
+        ),
+    )
+    cek(
+        "catatan EMA + ADX harian aktif menyebut pemanasan",
+        "pemanasan" in _bt_tren_harian_note(cfg_tren_harian, "5m"),
+    )
+    cek(
+        "gerbang EMA + ADX harian nonaktif tidak menambah batas hari",
+        _bt_min_days_note(
+            dict(cfg_tren_harian, DAILY_TREND_FILTER_ENABLED=False), "5m"
+        )[0]
+        == 2,
+    )
+    batasan_th = _bt_tren_harian_limitations(cfg_tren_harian, "5m")
+    cek(
+        "keterangan batasan hasil menyebut DAILY_TREND_ saat aktif dan kosong saat nonaktif",
+        "DAILY_TREND_" in batasan_th
+        and _bt_tren_harian_limitations(
+            dict(cfg_tren_harian, DAILY_TREND_FILTER_ENABLED=False), "5m"
+        )
+        == "",
+        batasan_th[:60],
+    )
+    est_tanpa_th = _bt_estimate_requests(
+        30, 10, dict(cfg_tren_harian, DAILY_TREND_FILTER_ENABLED=False)
+    )
+    est_dengan_th = _bt_estimate_requests(30, 10, cfg_tren_harian)
+    cek(
+        "estimasi request ikut menghitung pemanasan EMA + ADX harian",
+        est_dengan_th > est_tanpa_th,
+        f"{est_tanpa_th} -> {est_dengan_th}",
     )
 
     # --- peta rute dan smoke test HTTP ---
