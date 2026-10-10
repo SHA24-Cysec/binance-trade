@@ -56,10 +56,10 @@ PUMP_CONFIG = {
     "BACKTEST_CACHE_FILE": "data/backtest_cache.sqlite3",
     "BACKTEST_CACHE_FRESH_HOURS": 24,
     "BACKTEST_CACHE_TTL_DAYS": 30,
-    "USE_TP": True,
+    "USE_TP": False,  # dimatikan: hasil validasi 365 hari
     "TP_PCT": 4.0,
     "USE_STOP_LOSS": True,
-    "USE_NATIVE_OCO": True,
+    "USE_NATIVE_OCO": False,  # OCO memerlukan TP aktif; SL tetap lewat USE_NATIVE_STOP_LOSS
     "USE_NATIVE_STOP_LOSS": True,
     "NATIVE_OCO_LIMIT_BUFFER_PCT": 0.10,
     "SL_PCT": 1.8,
