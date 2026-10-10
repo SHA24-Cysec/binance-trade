@@ -593,6 +593,13 @@ def build_status():
     if has_position and state.get("entry_time"):
         hold_minutes = (int(time.time() * 1000) - int(state["entry_time"])) / 60000.0
 
+    # Saklar mekanisme exit. Dibaca sekali supaya nilai level dan flag yang
+    # dikirim ke dashboard tidak mungkin saling bertentangan.
+    use_tp = bool(PUMP_CONFIG.get("USE_TP"))
+    use_stop_loss = bool(PUMP_CONFIG.get("USE_STOP_LOSS"))
+    use_breakeven = bool(PUMP_CONFIG.get("USE_BREAKEVEN"))
+    use_trailing = bool(PUMP_CONFIG.get("USE_TRAILING"))
+
     return {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
         "mode": get_mode(PUMP_CONFIG),
@@ -638,21 +645,49 @@ def build_status():
             "dd_stopped": bool(state.get("dd_stopped")),
         },
         "config": {
+            # Setiap level exit hanya dilaporkan bila mekanismenya memang
+            # aktif. Bot hanya mengeksekusi TP saat USE_TP aktif, breakeven
+            # saat USE_BREAKEVEN aktif, dan trailing saat USE_TRAILING aktif
+            # (lihat check_exit_conditions di trading/pump_scanner_bot.py).
+            # Tanpa pagar ini dashboard menampilkan level yang tidak akan
+            # pernah dipakai, misalnya Take Profit saat USE_TP=False.
             "sl_pct": (
                 (state.get("sl_pct") or PUMP_CONFIG.get("SL_PCT"))
-                if PUMP_CONFIG.get("USE_STOP_LOSS")
+                if use_stop_loss
                 else None
             ),
-            "tp_pct": state.get("tp_pct") or PUMP_CONFIG.get("TP_PCT"),
+            "tp_pct": (
+                (state.get("tp_pct") or PUMP_CONFIG.get("TP_PCT"))
+                if use_tp
+                else None
+            ),
             "exit_source": state.get("exit_source") or "FIXED",
-            "be_trigger_pct": state.get("be_trigger_pct")
-            or PUMP_CONFIG.get("BE_TRIGGER_PCT"),
-            "trail_start_pct": state.get("trail_start_pct")
-            or PUMP_CONFIG.get("TRAILING_START_PCT"),
-            "trail_step_pct": state.get("trail_step_pct")
-            or PUMP_CONFIG.get("TRAILING_STEP_PCT"),
-            "trailing_start_pct": state.get("trail_start_pct")
-            or PUMP_CONFIG.get("TRAILING_START_PCT"),
+            "be_trigger_pct": (
+                (state.get("be_trigger_pct") or PUMP_CONFIG.get("BE_TRIGGER_PCT"))
+                if use_breakeven
+                else None
+            ),
+            "trail_start_pct": (
+                (state.get("trail_start_pct") or PUMP_CONFIG.get("TRAILING_START_PCT"))
+                if use_trailing
+                else None
+            ),
+            "trail_step_pct": (
+                (state.get("trail_step_pct") or PUMP_CONFIG.get("TRAILING_STEP_PCT"))
+                if use_trailing
+                else None
+            ),
+            "trailing_start_pct": (
+                (state.get("trail_start_pct") or PUMP_CONFIG.get("TRAILING_START_PCT"))
+                if use_trailing
+                else None
+            ),
+            # Flag mentah ikut dikirim supaya tampilan bisa membedakan
+            # "level mati" dari "level aktif tetapi nilainya belum ada".
+            "use_tp": use_tp,
+            "use_stop_loss": use_stop_loss,
+            "use_breakeven": use_breakeven,
+            "use_trailing": use_trailing,
             "use_atr_exit": bool(PUMP_CONFIG.get("USE_ATR_EXIT")),
             "atr_mult_sl": PUMP_CONFIG.get("ATR_MULT_SL"),
             "atr_mult_tp": PUMP_CONFIG.get("ATR_MULT_TP"),

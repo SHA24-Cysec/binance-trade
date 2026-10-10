@@ -544,6 +544,465 @@
         color: var(--muted);
         margin-top: 2px;
       }
+
+      /* ------------------------------------------------------------------
+         Panel Parameter Strategi saat posisi terbuka.
+         Blok ETA memberi hitung mundur menuju Take Profit, lalu setiap
+         baris level punya meter sendiri yang terisi mengikuti harga live.
+         Lebar meter digerakkan lewat transition pada elemen yang sama,
+         bukan innerHTML baru tiap detik, supaya animasinya benar benar
+         mulus. Aturan prefers-reduced-motion di bagian bawah berkas ini
+         sudah otomatis meredam seluruh animasi di blok ini.
+         ------------------------------------------------------------------ */
+      .eta-box {
+        position: relative;
+        overflow: hidden;
+        padding: 12px 13px 13px;
+        margin-bottom: 6px;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        background:
+          radial-gradient(
+            120% 140% at 0% 0%,
+            rgba(74, 222, 128, 0.08),
+            transparent 60%
+          ),
+          var(--panel2);
+        transition:
+          border-color 0.4s ease,
+          box-shadow 0.4s ease;
+      }
+      .eta-box.near {
+        border-color: rgba(74, 222, 128, 0.45);
+        animation: etaGlow 2.1s ease-in-out infinite;
+      }
+      @keyframes etaGlow {
+        0%,
+        100% {
+          box-shadow:
+            0 0 0 1px rgba(74, 222, 128, 0.1),
+            0 0 14px rgba(74, 222, 128, 0.1);
+        }
+        50% {
+          box-shadow:
+            0 0 0 1px rgba(74, 222, 128, 0.22),
+            0 0 26px rgba(74, 222, 128, 0.2);
+        }
+      }
+      .eta-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+      }
+      .eta-label {
+        font-size: 10.5px;
+        letter-spacing: 0.6px;
+        text-transform: uppercase;
+        color: var(--muted);
+        font-weight: 700;
+      }
+      .eta-chip {
+        font-size: 10.5px;
+        font-weight: 700;
+        padding: 2px 8px;
+        border-radius: 999px;
+        border: 1px solid var(--border2);
+        color: var(--muted);
+        white-space: nowrap;
+        transition:
+          color 0.3s ease,
+          border-color 0.3s ease,
+          background 0.3s ease;
+      }
+      .eta-chip.run {
+        color: var(--accent);
+        border-color: rgba(74, 222, 128, 0.4);
+        background: rgba(74, 222, 128, 0.08);
+      }
+      .eta-chip.warn {
+        color: var(--amber);
+        border-color: rgba(245, 158, 11, 0.4);
+        background: rgba(245, 158, 11, 0.08);
+      }
+      .eta-chip.done {
+        color: #0b1a10;
+        border-color: transparent;
+        background: var(--accent);
+      }
+      .eta-time {
+        font-family: var(--mono);
+        font-variant-numeric: tabular-nums;
+        font-size: 29px;
+        font-weight: 800;
+        letter-spacing: -1px;
+        line-height: 1.15;
+        margin-top: 6px;
+        transition: color 0.35s ease;
+      }
+      .eta-time.dim {
+        color: var(--muted);
+        font-size: 19px;
+        letter-spacing: -0.3px;
+      }
+      .eta-sub {
+        font-size: 11.5px;
+        color: var(--muted);
+        margin-top: 3px;
+        line-height: 1.45;
+      }
+      .eta-track {
+        position: relative;
+        height: 9px;
+        margin-top: 12px;
+        border-radius: 6px;
+        background: var(--grid);
+        overflow: hidden;
+      }
+      .eta-fill {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 0;
+        width: 0;
+        border-radius: 6px;
+        overflow: hidden;
+        background: linear-gradient(90deg, var(--accent2), var(--accent));
+        transition: width 0.9s cubic-bezier(0.22, 0.61, 0.36, 1);
+      }
+      .eta-fill::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        width: 70px;
+        background: linear-gradient(
+          90deg,
+          transparent,
+          rgba(255, 255, 255, 0.4),
+          transparent
+        );
+        animation: shimmer 1.6s linear infinite;
+      }
+      /* Sapuan indeterminate: dipakai saat laju harga belum cukup sampel,
+         jadi pengguna tahu angka ETA sedang dihitung, bukan macet. */
+      .eta-track.loading::after {
+        content: "";
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 0;
+        width: 38%;
+        border-radius: 6px;
+        background: linear-gradient(
+          90deg,
+          transparent,
+          rgba(56, 189, 248, 0.5),
+          transparent
+        );
+        animation: etaSweep 1.5s ease-in-out infinite;
+      }
+      @keyframes etaSweep {
+        0% {
+          transform: translateX(-110%);
+        }
+        100% {
+          transform: translateX(285%);
+        }
+      }
+      .eta-marks {
+        position: relative;
+        height: 13px;
+        margin-top: 5px;
+      }
+      .eta-mark {
+        position: absolute;
+        top: 0;
+        transform: translateX(-50%);
+        font-size: 10px;
+        font-weight: 700;
+        color: var(--muted);
+        white-space: nowrap;
+        transition: color 0.35s ease;
+      }
+      .eta-mark::before {
+        content: "";
+        position: absolute;
+        left: 50%;
+        top: -14px;
+        width: 2px;
+        height: 9px;
+        transform: translateX(-50%);
+        border-radius: 2px;
+        background: rgba(148, 163, 184, 0.5);
+        transition: background 0.35s ease;
+      }
+      .eta-mark.passed {
+        color: var(--accent);
+      }
+      .eta-mark.passed::before {
+        background: var(--accent);
+      }
+      .eta-mark.edge-l {
+        transform: none;
+      }
+      .eta-mark.edge-l::before {
+        left: 0;
+        transform: none;
+      }
+      .eta-mark.edge-r {
+        transform: translateX(-100%);
+      }
+      .eta-mark.edge-r::before {
+        left: 100%;
+        transform: translateX(-100%);
+      }
+
+      .posbox .posrow.prow-meter {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 7px;
+        background: var(--panel2);
+        border: 1px solid var(--border);
+        /* Kartu level diberi jarak agar tidak terlihat menempel. Gap induk
+           .posbox 2px ditambah margin 3px atas bawah menghasilkan 8px antar
+           kartu, sementara baris biasa di panel tetap rapat seperti semula. */
+        margin: 3px 0;
+      }
+      .prow-top {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      .prow-top .v {
+        text-align: right;
+      }
+      .meter {
+        position: relative;
+        height: 6px;
+        border-radius: 4px;
+        background: var(--grid);
+        overflow: hidden;
+      }
+      .meter > i {
+        position: relative;
+        display: block;
+        height: 100%;
+        width: 0;
+        border-radius: 4px;
+        overflow: hidden;
+        background: linear-gradient(90deg, var(--accent2), var(--accent));
+        transition: width 0.9s cubic-bezier(0.22, 0.61, 0.36, 1);
+      }
+      .meter.sl > i {
+        background: linear-gradient(90deg, rgba(244, 63, 94, 0.5), var(--red));
+      }
+      .meter.be > i {
+        background: linear-gradient(90deg, var(--amber), var(--accent));
+      }
+      .meter.tr > i {
+        background: linear-gradient(90deg, var(--info), var(--accent));
+      }
+      .meter.hot > i::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        width: 55px;
+        background: linear-gradient(
+          90deg,
+          transparent,
+          rgba(255, 255, 255, 0.38),
+          transparent
+        );
+        animation: shimmer 1.35s linear infinite;
+      }
+      .meter-foot {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 10px;
+        font-size: 10.5px;
+        color: var(--muted);
+      }
+      .meter-foot .pctnum {
+        font-family: var(--mono);
+        font-variant-numeric: tabular-nums;
+        font-weight: 700;
+      }
+      .lvl-chip {
+        display: inline-block;
+        margin-left: 6px;
+        padding: 1px 6px;
+        border-radius: 999px;
+        font-size: 9.5px;
+        font-weight: 800;
+        letter-spacing: 0.3px;
+        background: rgba(74, 222, 128, 0.14);
+        color: var(--accent);
+        border: 1px solid rgba(74, 222, 128, 0.35);
+      }
+      .lvl-chip.risk {
+        background: rgba(244, 63, 94, 0.14);
+        color: var(--red);
+        border-color: rgba(244, 63, 94, 0.35);
+      }
+      /* Atribut hidden harus tetap menang atas display:inline-block di atas. */
+      .lvl-chip[hidden] {
+        display: none;
+      }
+
+      /* ------------------------------------------------------------------
+         Panel Posisi Terbuka: rel harga memakai bahasa visual yang sama
+         dengan panel Parameter Strategi. Rel membentang dari harga Stop
+         Loss di kiri sampai Take Profit di kanan, garis putih menandai
+         harga entry, dan titik hidup bergeser mulus mengikuti harga live.
+         Penanda milestone memakai kelas .eta-mark yang sama persis supaya
+         kedua panel benar benar seragam.
+         ------------------------------------------------------------------ */
+      .pos-rail {
+        position: relative;
+        padding: 12px 13px 11px;
+        margin-bottom: 8px;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        background:
+          radial-gradient(
+            120% 140% at 0% 0%,
+            rgba(74, 222, 128, 0.07),
+            transparent 60%
+          ),
+          var(--panel2);
+      }
+      .rail-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin-bottom: 13px;
+      }
+      .rail-chips {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+      .rail-chips .lvl-chip {
+        margin-left: 0;
+      }
+      .rail-track {
+        position: relative;
+        height: 10px;
+        border-radius: 6px;
+        background: var(--grid);
+      }
+      .rail-zones {
+        position: absolute;
+        inset: 0;
+        border-radius: 6px;
+        overflow: hidden;
+        display: block;
+      }
+      .rail-loss {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 0;
+        width: 0;
+        background: linear-gradient(
+          90deg,
+          rgba(244, 63, 94, 0.3),
+          rgba(244, 63, 94, 0.07)
+        );
+        transition: width 0.9s cubic-bezier(0.22, 0.61, 0.36, 1);
+      }
+      .rail-fill {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 0;
+        width: 0;
+        background: linear-gradient(90deg, var(--accent2), var(--accent));
+        transition:
+          left 0.9s cubic-bezier(0.22, 0.61, 0.36, 1),
+          width 0.9s cubic-bezier(0.22, 0.61, 0.36, 1),
+          background 0.4s ease;
+      }
+      .rail-fill.neg {
+        background: linear-gradient(90deg, var(--red), rgba(244, 63, 94, 0.5));
+      }
+      .rail-entry {
+        position: absolute;
+        top: -3px;
+        bottom: -3px;
+        left: 0;
+        width: 2px;
+        margin-left: -1px;
+        border-radius: 2px;
+        background: rgba(223, 229, 236, 0.8);
+        z-index: 2;
+        transition: left 0.9s cubic-bezier(0.22, 0.61, 0.36, 1);
+      }
+      .rail-dot {
+        position: absolute;
+        top: 50%;
+        left: 0;
+        width: 12px;
+        height: 12px;
+        margin: -6px 0 0 -6px;
+        border-radius: 50%;
+        background: var(--solid);
+        border: 2px solid var(--accent);
+        box-shadow: 0 0 0 3px rgba(74, 222, 128, 0.18);
+        z-index: 3;
+        transition:
+          left 0.9s cubic-bezier(0.22, 0.61, 0.36, 1),
+          border-color 0.4s ease,
+          box-shadow 0.4s ease;
+      }
+      .rail-dot::after {
+        content: "";
+        position: absolute;
+        inset: -2px;
+        border-radius: 50%;
+        border: 1px solid rgba(74, 222, 128, 0.55);
+        animation: railPing 2s ease-out infinite;
+      }
+      .rail-dot.neg {
+        border-color: var(--red);
+        box-shadow: 0 0 0 3px rgba(244, 63, 94, 0.18);
+      }
+      .rail-dot.neg::after {
+        border-color: rgba(244, 63, 94, 0.55);
+      }
+      .rail-dot.idle::after {
+        animation: none;
+      }
+      @keyframes railPing {
+        0% {
+          transform: scale(1);
+          opacity: 0.6;
+        }
+        100% {
+          transform: scale(2.2);
+          opacity: 0;
+        }
+      }
+      /* Tinggi rel sedikit berbeda dari track ETA, jadi tiknya digeser. */
+      .pos-rail .eta-mark::before {
+        top: -15px;
+        height: 10px;
+      }
+      .rail-foot {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 10px;
+        margin-top: 2px;
+        font-size: 10.5px;
+        color: var(--muted);
+      }
+      .rail-foot .mono {
+        font-weight: 700;
+      }
       .empty {
         text-align: center;
         padding: 30px 16px;
@@ -2687,30 +3146,13 @@
         if(s.flags.dd_stopped) flags.push('🛑 DD-STOP aktif');
         document.getElementById('footer').innerHTML='Dashboard kontrol lokal · bot dijalankan manual melalui Resume Bot.'+(flags.length?' &nbsp;|&nbsp; '+flags.join(' · '):'');
 
-        const pb=document.getElementById('positionBox');
+        // Panel posisi dirender lewat renderPositionPanel supaya rel harga
+        // dan isinya ditambal, bukan ditulis ulang tiap detik.
+        renderPositionPanel(s);
         if(p.has_position){
-          const pnlColor = (p.pnl_pct!=null)?cls(p.pnl_pct):'mut';
-          let beRow = p.be_active? `<div class="posrow"><span class="k">Breakeven stop</span><span class="v mono">${fmtP(p.be_stop_price)}</span></div>`:'';
-          let trRow = p.trailing_active? `<div class="posrow"><span class="k">Trailing stop</span><span class="v mono">${fmtP(p.trailing_stop_price)}</span></div>`:'';
-          let hold = p.hold_minutes!=null? Math.round(p.hold_minutes)+' mnt':'-';
-          pb.innerHTML=`
-            <div class="bigpnl">
-              <div class="n ${pnlColor}">${p.pnl_pct!=null?sign(p.pnl_pct)+fmt(p.pnl_pct)+'%':'-'}</div>
-              <div class="s">${p.pnl_usdt!=null?sign(p.pnl_usdt)+fmt(p.pnl_usdt)+' '+esc(s.quote):'menunggu harga live'}</div>
-              ${p.pnl_usdt!=null?idrSub(p.pnl_usdt, p.pnl_usdt>0):''}
-            </div>
-            <div class="posrow"><span class="k">Simbol</span><span class="v">${symLabel(p.symbol, 22)}</span></div>
-            <div class="posrow"><span class="k">Harga entry</span><span class="v mono">${fmtP(p.entry_price)}${p.entry_price?idrInline(p.entry_price):''}</span></div>
-            <div class="posrow"><span class="k">Harga live</span><span class="v mono">${p.live_price!=null?fmtP(p.live_price):'-'}${p.live_price!=null?idrInline(p.live_price):''}</span></div>
-            <div class="posrow"><span class="k">Qty</span><span class="v mono">${fmt(p.qty,6)}</span></div>
-            <div class="posrow"><span class="k">Nilai posisi</span><span class="v mono">${p.position_value!=null?fmt(p.position_value)+' '+esc(s.quote):'-'}${p.position_value!=null?idrInline(p.position_value):''}</span></div>
-            <div class="posrow"><span class="k">Volume 24 jam</span><span class="v mono">${p.volume_24h_quote!=null?fmt(p.volume_24h_quote,0)+' '+esc(s.quote):'-'}${p.volume_24h_quote!=null?idrInline(p.volume_24h_quote):''}</span></div>
-            <div class="posrow"><span class="k">Lama hold</span><span class="v">${hold}</span></div>
-            ${beRow}${trRow}`;
           window._currentPositionSymbol = p.symbol;
           document.getElementById('manualCloseBtn').style.display = 'block';
         } else {
-          pb.innerHTML='<div class="empty"><div class="big">💤</div>Tidak ada posisi terbuka.<br>Bot sedang memindai pasar…</div>';
           window._currentPositionSymbol = null;
           document.getElementById('manualCloseBtn').style.display = 'none';
           if(window._manualPollTimer){ clearInterval(window._manualPollTimer); window._manualPollTimer=null; }
@@ -2725,7 +3167,6 @@
         const c=s.config;
         const exitAtr=c.exit_source==='ATR';
         const fb=(!exitAtr && c.use_atr_exit && !p.has_position)?' (fallback)':'';
-        const entryPx=Number(p.entry_price);
         let modeTxt, noteTxt='';
         if(exitAtr){
           modeTxt='ATR';
@@ -2737,15 +3178,746 @@
         }else{
           modeTxt='PERSEN LAMA';
         }
-        const noteHtml=noteTxt?'<div class="posrow"><span class="k">Info</span><span class="v" style="font-size:11.5px;line-height:1.45">'+noteTxt+'</span></div>':'';
-        document.getElementById('configBox').innerHTML=`
-          <div class="posrow"><span class="k">Mode exit</span><span class="v mono">${modeTxt}</span></div>
-          <div class="posrow"><span class="k">Stop Loss</span><span class="v mono">${c.sl_pct!=null? esc(fmtExitVsEntry(c.sl_pct, exitAtr, entryPx, fb)) : 'nonaktif'}</span></div>
-          <div class="posrow"><span class="k">Take Profit</span><span class="v mono">${esc(fmtExitVsEntry(c.tp_pct, exitAtr, entryPx, fb))}</span></div>
-          <div class="posrow"><span class="k">Trigger Breakeven</span><span class="v mono">${esc(fmtExitVsEntry(c.be_trigger_pct, exitAtr, entryPx, fb))}</span></div>
-          <div class="posrow"><span class="k">Mulai Trailing</span><span class="v mono">${esc(fmtExitVsEntry(c.trailing_start_pct, exitAtr, entryPx, fb))}</span></div>
-          ${noteHtml}
-          `;
+        // Isi panel dirender lewat renderConfigPanel supaya elemen meter
+        // dipertahankan antar pembaruan dan animasinya tidak ter-reset.
+        renderConfigPanel(s, exitAtr, fb, modeTxt, noteTxt);
+      }
+
+      /* ------------------------------------------------------------------
+         Panel Parameter Strategi: hitung mundur ETA dan meter per level.
+
+         Sumber angka seluruhnya dari /api/status yang sudah ada, tidak ada
+         endpoint baru. Catatan penting soal satuan: ketika exit_source
+         bernilai ATR, field sl_pct/tp_pct/be_trigger_pct/trail_start_pct
+         berisi JARAK DALAM SATUAN HARGA (lihat _exit_distance di
+         trading/pump_scanner_bot.py), sedangkan pada mode persen tetap
+         isinya persen. cfgLevelPct menyeragamkan keduanya menjadi persen
+         terhadap harga entry supaya satu rumus meter berlaku untuk dua
+         mode exit.
+
+         ETA dihitung di sisi klien dari laju PnL: sampel persen PnL
+         dikumpulkan tiap polling, kemiringannya diambil dengan regresi
+         linier, lalu dihaluskan EMA agar angka tidak meloncat. Estimasi
+         ini perkiraan statistik murni, bukan janji waktu dari bot.
+         ------------------------------------------------------------------ */
+      const ETA_WINDOW_MS = 180000;   // jendela sampel laju harga
+      const ETA_MIN_SAMPLES = 5;      // sampel minimum sebelum berani estimasi
+      const ETA_MIN_SPAN_MS = 10000;  // rentang waktu minimum antar sampel
+      const ETA_GAP_RESET_MS = 20000; // jeda polling lebih lama berarti buang riwayat
+      const ETA_MIN_SLOPE = 1e-5;     // persen per detik, ambang laju berarti
+      const ETA_MAX_SECONDS = 86400;  // di atas ini tidak berguna ditampilkan
+      const ETA_ALPHA = 0.3;          // bobot EMA penghalus laju
+
+      const _eta = {
+        symbol: null,
+        samples: [],
+        slope: null,
+        anchorAt: 0,
+        anchorSec: null,
+        state: 'nopos',
+        target: null
+      };
+
+      const ETA_LABEL = {
+        sl: 'Stop Loss',
+        be: 'Breakeven',
+        tr: 'Mulai Trailing',
+        tp: 'Take Profit'
+      };
+
+      function etaReset(symbol){
+        _eta.symbol = symbol || null;
+        _eta.samples = [];
+        _eta.slope = null;
+        _eta.anchorAt = 0;
+        _eta.anchorSec = null;
+        _eta.state = 'nopos';
+        _eta.target = null;
+      }
+
+      /* Target hitung mundur dipilih adaptif dua arah.
+
+         Harga naik: menuju level naik aktif terdekat yang belum terlewati,
+         urut dari Breakeven, Mulai Trailing, lalu Take Profit.
+         Harga turun: menuju Stop Loss sebagai peringatan dini.
+
+         Level yang saklarnya mati tidak pernah ikut dipilih, jadi panel
+         tidak lagi menghitung mundur ke Take Profit ketika USE_TP mati. */
+      function etaPickTarget(pnl, lv, slope){
+        const falling = slope !== null && slope < -ETA_MIN_SLOPE;
+        if(falling && lv.sl !== null) return {key: 'sl', pct: -lv.sl, dir: -1};
+        const ups = [];
+        if(lv.be !== null && !lv.beOn && lv.be > pnl) ups.push({key: 'be', pct: lv.be, dir: 1});
+        if(lv.tr !== null && !lv.trOn && lv.tr > pnl) ups.push({key: 'tr', pct: lv.tr, dir: 1});
+        if(lv.tp !== null && lv.tp > pnl) ups.push({key: 'tp', pct: lv.tp, dir: 1});
+        if(ups.length){
+          ups.sort((a, b) => a.pct - b.pct);
+          return ups[0];
+        }
+        // Tidak ada target di atas harga sekarang. Bila Take Profit aktif
+        // berarti targetnya sudah terlewati, dan itu tetap dilaporkan
+        // sebagai tercapai alih alih dianggap tidak ada target.
+        if(lv.tp !== null) return {key: 'tp', pct: lv.tp, dir: 1};
+        return null;
+      }
+
+      function etaSlopePctPerSec(){
+        const n = _eta.samples.length;
+        if(n < ETA_MIN_SAMPLES) return null;
+        const t0 = _eta.samples[0].t;
+        if(_eta.samples[n-1].t - t0 < ETA_MIN_SPAN_MS) return null;
+        let sx=0, sy=0, sxx=0, sxy=0;
+        for(let i=0;i<n;i++){
+          const x = (_eta.samples[i].t - t0)/1000;
+          const y = _eta.samples[i].v;
+          sx+=x; sy+=y; sxx+=x*x; sxy+=x*y;
+        }
+        const d = n*sxx - sx*sx;
+        if(!(Math.abs(d) > 1e-9)) return null;
+        const k = (n*sxy - sx*sy)/d;
+        return Number.isFinite(k) ? k : null;
+      }
+
+      function etaTrack(hasPos, symbol, pnlPct, lv){
+        const now = Date.now();
+        if(!hasPos){
+          if(_eta.symbol !== null || _eta.samples.length) etaReset(null);
+          _eta.state = 'nopos';
+          return;
+        }
+        if(symbol !== _eta.symbol) etaReset(symbol);
+        const v = Number(pnlPct);
+        if(pnlPct === null || pnlPct === undefined || !Number.isFinite(v)){
+          _eta.state = 'nodata';
+          _eta.anchorSec = null;
+          _eta.target = null;
+          return;
+        }
+        const last = _eta.samples.length ? _eta.samples[_eta.samples.length-1] : null;
+        // Polling sempat dijeda atau tab lama tidak aktif: riwayat lama tidak
+        // mewakili laju sekarang, jadi dibuang daripada menghasilkan ETA palsu.
+        if(last && now - last.t > ETA_GAP_RESET_MS){
+          _eta.samples.length = 0;
+          _eta.slope = null;
+        }
+        if(!last || now - last.t >= 400) _eta.samples.push({t: now, v: v});
+        while(_eta.samples.length && now - _eta.samples[0].t > ETA_WINDOW_MS) _eta.samples.shift();
+
+        const raw = etaSlopePctPerSec();
+        if(raw !== null){
+          _eta.slope = (_eta.slope === null) ? raw : (_eta.slope + ETA_ALPHA*(raw - _eta.slope));
+        }
+        const target = etaPickTarget(v, lv, _eta.slope);
+        _eta.target = target;
+
+        if(!lv.any){ _eta.state='noexit'; _eta.anchorSec=null; return; }
+        // Habisnya target dan tercapainya target adalah fakta yang tidak
+        // bergantung pada laju, jadi diperiksa lebih dulu supaya tidak
+        // tertutup status "mengukur laju" yang menyesatkan.
+        if(target === null){ _eta.state='done'; _eta.anchorSec=null; return; }
+        const remain = target.dir > 0 ? (target.pct - v) : (v - target.pct);
+        if(remain <= 0){ _eta.state='reached'; _eta.anchorSec=0; _eta.anchorAt=now; return; }
+        if(raw === null){ _eta.state='measuring'; _eta.anchorSec=null; return; }
+        // Laju menuju target: naik memakai kemiringan apa adanya, turun
+        // memakai kebalikannya supaya keduanya positif saat mendekat.
+        const speed = target.dir > 0 ? _eta.slope : -_eta.slope;
+        if(!(speed > ETA_MIN_SLOPE)){
+          _eta.state = (speed < -ETA_MIN_SLOPE) ? 'away' : 'flat';
+          _eta.anchorSec = null;
+          return;
+        }
+        const sec = remain / speed;
+        if(!Number.isFinite(sec) || sec > ETA_MAX_SECONDS){ _eta.state='far'; _eta.anchorSec=null; return; }
+        _eta.state = 'eta';
+        _eta.anchorSec = sec;
+        _eta.anchorAt = now;
+      }
+
+      function etaSeconds(){
+        if(_eta.state !== 'eta' || _eta.anchorSec === null) return null;
+        return Math.max(0, _eta.anchorSec - (Date.now() - _eta.anchorAt)/1000);
+      }
+
+      function fmtEtaClock(sec){
+        if(sec === null || sec === undefined || !Number.isFinite(sec)) return '-';
+        const t = Math.max(0, Math.round(sec));
+        const h = Math.floor(t/3600), m = Math.floor((t%3600)/60), s = t%60;
+        const p = n => String(n).padStart(2,'0');
+        return h > 0 ? (h + ':' + p(m) + ':' + p(s)) : (p(m) + ':' + p(s));
+      }
+
+      /* Satu nilai level menjadi persen terhadap entry, apa pun mode exitnya. */
+      function cfgLevelPct(raw, atr, entry){
+        if(raw === null || raw === undefined || raw === '') return null;
+        const n = Number(raw);
+        if(!Number.isFinite(n) || n <= 0) return null;
+        if(atr){
+          const e = Number(entry);
+          if(!(e > 0)) return null;
+          return (n/e)*100;
+        }
+        return n;
+      }
+
+      const _cfgLabels = {
+        sl: 'Stop Loss',
+        tp: 'Take Profit',
+        be: 'Trigger Breakeven',
+        tr: 'Mulai Trailing'
+      };
+      let _cfgUI = null;
+
+      /* Saklar mekanisme exit dibaca dari flag yang dikirim build_status.
+         Bila backend lama belum mengirim flag, dipakai cara lama yaitu
+         menganggap level aktif selama nilainya ada. */
+      function cfgFlagOn(flag, raw){
+        if(flag === undefined || flag === null){
+          return raw !== null && raw !== undefined && raw !== '';
+        }
+        return !!flag;
+      }
+
+      /* Ringkasan level aktif beserta nilainya dalam persen terhadap entry. */
+      function cfgLevels(c, exitAtr, entry, beOn, trOn){
+        const on = {
+          sl: cfgFlagOn(c.use_stop_loss, c.sl_pct),
+          tp: cfgFlagOn(c.use_tp, c.tp_pct),
+          be: cfgFlagOn(c.use_breakeven, c.be_trigger_pct),
+          tr: cfgFlagOn(c.use_trailing, c.trailing_start_pct)
+        };
+        const lv = {
+          sl: on.sl ? cfgLevelPct(c.sl_pct, exitAtr, entry) : null,
+          tp: on.tp ? cfgLevelPct(c.tp_pct, exitAtr, entry) : null,
+          be: on.be ? cfgLevelPct(c.be_trigger_pct, exitAtr, entry) : null,
+          tr: on.tr ? cfgLevelPct(c.trailing_start_pct, exitAtr, entry) : null,
+          on: on, beOn: !!beOn, trOn: !!trOn
+        };
+        lv.any = on.sl || on.tp || on.be || on.tr;
+        // Puncak jalur milestone: level naik aktif tertinggi.
+        const ups = [lv.tp, lv.tr, lv.be].filter(v => v !== null);
+        lv.maxUp = ups.length ? Math.max.apply(null, ups) : null;
+        return lv;
+      }
+
+      /* Kerangka panel dibangun ulang hanya saat strukturnya berubah. Selama
+         strukturnya sama, pembaruan tiap detik cuma menyentuh teks dan lebar
+         meter, sehingga transition CSS tidak pernah ter-reset di tengah. */
+      function buildConfigPanel(box, sig, meter, noteHtml, keys, track){
+        let html = '';
+        if(meter){
+          html += '<div class="eta-box" id="cfgEtaBox">'
+            + '<div class="eta-head">'
+            + '<span class="eta-label" id="cfgEtaLabel">Estimasi level exit</span>'
+            + '<span class="eta-chip" id="cfgEtaChip">mengukur laju</span>'
+            + '</div>'
+            + '<div class="eta-time dim" id="cfgEtaTime">mengukur…</div>'
+            + '<div class="eta-sub" id="cfgEtaSub">mengumpulkan sampel harga live</div>';
+          // Jalur milestone hanya berguna bila ada level naik yang aktif.
+          if(track){
+            html += '<div class="eta-track" id="cfgEtaTrack"><span class="eta-fill" id="cfgEtaFill"></span></div>'
+              + '<div class="eta-marks" id="cfgEtaMarks"></div>';
+          }
+          html += '</div>';
+        }
+        html += '<div class="posrow"><span class="k">Mode exit</span><span class="v mono" id="cfgMode"></span></div>';
+        for(const key of keys){
+          const label = _cfgLabels[key];
+          if(meter){
+            html += '<div class="posrow prow-meter" data-lvl="'+key+'">'
+              + '<div class="prow-top">'
+              + '<span class="k">'+label+'<span class="lvl-chip" data-chip hidden></span></span>'
+              + '<span class="v mono" data-val></span>'
+              + '</div>'
+              + '<div class="meter '+key+'" data-meter><i data-fill></i></div>'
+              + '<div class="meter-foot"><span data-note></span><span class="pctnum" data-pct></span></div>'
+              + '</div>';
+          } else {
+            html += '<div class="posrow" data-lvl="'+key+'"><span class="k">'+label+'</span>'
+              + '<span class="v mono" data-val></span></div>';
+          }
+        }
+        if(!keys.length){
+          html += '<div class="posrow"><span class="k">Level exit</span>'
+            + '<span class="v" style="font-size:11.5px;line-height:1.45">Semua level exit otomatis nonaktif. '
+            + 'Posisi hanya tertutup lewat penjualan manual atau rem drawdown.</span></div>';
+        }
+        if(noteHtml){
+          html += '<div class="posrow"><span class="k">Info</span>'
+            + '<span class="v" style="font-size:11.5px;line-height:1.45">'+noteHtml+'</span></div>';
+        }
+        box.innerHTML = html;
+
+        const ui = {sig: sig, meter: meter, track: track, keys: keys, rows: {}, markSig: '', markEls: []};
+        ui.mode = box.querySelector('#cfgMode');
+        if(meter){
+          ui.etaBox   = box.querySelector('#cfgEtaBox');
+          ui.etaLabel = box.querySelector('#cfgEtaLabel');
+          ui.etaChip  = box.querySelector('#cfgEtaChip');
+          ui.etaTime  = box.querySelector('#cfgEtaTime');
+          ui.etaSub   = box.querySelector('#cfgEtaSub');
+          ui.etaTrack = box.querySelector('#cfgEtaTrack');
+          ui.etaFill  = box.querySelector('#cfgEtaFill');
+          ui.etaMarks = box.querySelector('#cfgEtaMarks');
+        }
+        box.querySelectorAll('[data-lvl]').forEach(el => {
+          ui.rows[el.getAttribute('data-lvl')] = {
+            root: el,
+            val:  el.querySelector('[data-val]'),
+            fill: el.querySelector('[data-fill]'),
+            note: el.querySelector('[data-note]'),
+            pct:  el.querySelector('[data-pct]'),
+            chip: el.querySelector('[data-chip]'),
+            meter:el.querySelector('[data-meter]')
+          };
+        });
+        return ui;
+      }
+
+      function cfgPaintRow(key, text, prog, note, opt){
+        const r = _cfgUI && _cfgUI.rows[key];
+        if(!r) return;
+        if(r.val) r.val.textContent = text;
+        if(!_cfgUI.meter || !r.fill) return;
+        const o = opt || {};
+        const pct = (prog === null || prog === undefined || !Number.isFinite(prog))
+          ? null : Math.max(0, Math.min(1, prog));
+        r.fill.style.width = (pct === null ? 0 : pct*100).toFixed(1) + '%';
+        r.pct.textContent = pct === null ? '-' : (Math.round(pct*100) + '%');
+        r.note.textContent = note || '';
+        r.meter.classList.toggle('hot', !!o.hot);
+        if(o.chip){
+          r.chip.textContent = o.chip;
+          r.chip.hidden = false;
+          r.chip.classList.toggle('risk', !!o.risk);
+        } else {
+          r.chip.hidden = true;
+          r.chip.textContent = '';
+        }
+      }
+
+      /* Angka hitung mundur diperbarui lokal tiap 250 ms supaya terasa
+         berjalan, tidak menunggu polling berikutnya. */
+      function paintEtaClock(){
+        if(!_cfgUI || !_cfgUI.meter || !_cfgUI.etaTime) return;
+        if(_eta.state !== 'eta') return;
+        const sec = etaSeconds();
+        _cfgUI.etaTime.textContent = '≈ ' + fmtEtaClock(sec);
+        _cfgUI.etaTime.classList.remove('dim');
+        if(_cfgUI.etaBox && sec !== null && sec <= 60) _cfgUI.etaBox.classList.add('near');
+      }
+
+      /* Lama hold ikut berjalan lokal supaya detiknya tidak terlihat macet
+         di antara dua polling. */
+      const _hold = {sec: null, at: 0};
+
+      function paintHold(){
+        if(!_posUI || !_posUI.hold) return;
+        if(_hold.sec === null){ _posUI.hold.textContent = '-'; return; }
+        _posUI.hold.textContent = fmtDuration(_hold.sec + (Date.now() - _hold.at)/1000);
+      }
+
+      function paintLiveBits(){
+        paintEtaClock();
+        paintHold();
+      }
+      setInterval(paintLiveBits, 250);
+
+      /* ------------------------------------------------------------------
+         Panel Posisi Terbuka.
+
+         Dirender dengan pola yang sama seperti panel Parameter Strategi:
+         kerangka dibangun sekali, lalu tiap polling hanya menambal teks,
+         posisi titik, dan lebar zona. Dengan begitu transisi CSS tidak
+         ter-reset dan gambar logo koin tidak dimuat ulang tiap detik.
+
+         Rel harga memakai pembagi yang sama dengan panel strategi lewat
+         cfgLevelPct, jadi mode ATR dan mode persen tetap sama benarnya.
+         ------------------------------------------------------------------ */
+      let _posUI = null;
+
+      function buildPositionPanel(pb, sig, hasPos, rail, beOn, trOn){
+        if(!hasPos){
+          pb.innerHTML = '<div class="empty"><div class="big">💤</div>Tidak ada posisi terbuka.<br>Bot sedang memindai pasar…</div>';
+          return {sig: sig, hasPos: false};
+        }
+        const row = (label, id, cls) =>
+          '<div class="posrow"><span class="k">' + label + '</span>'
+          + '<span class="' + cls + '" id="' + id + '"></span></div>';
+
+        let html = '<div class="bigpnl">'
+          + '<div class="n" id="posPnlN">-</div>'
+          + '<div class="s" id="posPnlS"></div>'
+          + '<span id="posPnlIdr"></span>'
+          + '</div>';
+        if(rail){
+          html += '<div class="pos-rail" id="posRail">'
+            + '<div class="rail-head">'
+            + '<span class="eta-label">Posisi harga terhadap level exit</span>'
+            + '<span class="rail-chips" id="posRailChips"></span>'
+            + '</div>'
+            + '<div class="rail-track">'
+            + '<span class="rail-zones">'
+            + '<i class="rail-loss" id="posRailLoss"></i>'
+            + '<i class="rail-fill" id="posRailFill"></i>'
+            + '</span>'
+            + '<span class="rail-entry" id="posRailEntry"></span>'
+            + '<span class="rail-dot" id="posRailDot"></span>'
+            + '</div>'
+            + '<div class="eta-marks" id="posRailMarks"></div>'
+            + '<div class="rail-foot">'
+            + '<span id="posRailLo" class="mono"></span>'
+            + '<span id="posRailHi" class="mono"></span>'
+            + '</div>'
+            + '</div>';
+        }
+        html += row('Simbol', 'posSym', 'v')
+          + row('Harga entry', 'posEntry', 'v mono')
+          + row('Harga live', 'posLive', 'v mono')
+          + row('Qty', 'posQty', 'v mono')
+          + row('Nilai posisi', 'posValue', 'v mono')
+          + row('Volume 24 jam', 'posVol', 'v mono')
+          + row('Lama hold', 'posHold', 'v');
+        if(beOn) html += row('Breakeven stop', 'posBeStop', 'v mono');
+        if(trOn) html += row('Trailing stop', 'posTrStop', 'v mono');
+        pb.innerHTML = html;
+
+        const q = id => pb.querySelector('#' + id);
+        return {
+          sig: sig, hasPos: true, rail: rail, sym: null,
+          pnlN: q('posPnlN'), pnlS: q('posPnlS'), pnlIdr: q('posPnlIdr'),
+          railChips: q('posRailChips'), railLoss: q('posRailLoss'),
+          railFill: q('posRailFill'), railEntry: q('posRailEntry'),
+          railDot: q('posRailDot'), railMarks: q('posRailMarks'),
+          railLo: q('posRailLo'), railHi: q('posRailHi'), markSig: '', markEls: [],
+          symEl: q('posSym'), entry: q('posEntry'), live: q('posLive'),
+          qty: q('posQty'), value: q('posValue'), vol: q('posVol'),
+          hold: q('posHold'), beStop: q('posBeStop'), trStop: q('posTrStop')
+        };
+      }
+
+      function renderPositionPanel(s){
+        const pb = document.getElementById('positionBox');
+        if(!pb) return;
+        const p = s.position, c = s.config;
+        const hasPos = !!p.has_position;
+        const entry = Number(p.entry_price);
+        const exitAtr = c.exit_source === 'ATR';
+        const beOn = !!p.be_active, trOn = !!p.trailing_active;
+        // Level yang saklarnya mati bernilai null, jadi otomatis tidak
+        // ikut digambar pada rel maupun penanda milestone.
+        const lv = cfgLevels(c, exitAtr, entry, beOn, trOn);
+        const rail = hasPos && entry > 0 && (lv.sl !== null || lv.maxUp !== null);
+
+        const sig = [hasPos ? 'pos' : 'kosong', rail ? 'rail' : 'norail',
+          beOn ? 'be' : '', trOn ? 'tr' : ''].join('|');
+        if(!_posUI || _posUI.sig !== sig) _posUI = buildPositionPanel(pb, sig, hasPos, rail, beOn, trOn);
+        if(!hasPos){ _hold.sec = null; return; }
+
+        const u = _posUI;
+        const live = (p.live_price === null || p.live_price === undefined) ? null : Number(p.live_price);
+
+        // Angka besar PnL.
+        if(p.pnl_pct !== null && p.pnl_pct !== undefined){
+          u.pnlN.textContent = sign(p.pnl_pct) + fmt(p.pnl_pct) + '%';
+          u.pnlN.className = 'n ' + cls(p.pnl_pct);
+        } else {
+          u.pnlN.textContent = '-';
+          u.pnlN.className = 'n mut';
+        }
+        if(p.pnl_usdt !== null && p.pnl_usdt !== undefined){
+          u.pnlS.textContent = sign(p.pnl_usdt) + fmt(p.pnl_usdt) + ' ' + s.quote;
+          u.pnlIdr.innerHTML = idrSub(p.pnl_usdt, p.pnl_usdt > 0);
+        } else {
+          u.pnlS.textContent = 'menunggu harga live';
+          u.pnlIdr.innerHTML = '';
+        }
+
+        // Logo koin hanya ditulis ulang saat simbolnya benar benar berganti.
+        if(u.sym !== p.symbol){
+          u.symEl.innerHTML = symLabel(p.symbol, 22);
+          u.sym = p.symbol;
+        }
+        u.entry.innerHTML = fmtP(p.entry_price) + (p.entry_price ? idrInline(p.entry_price) : '');
+        u.live.innerHTML = (live !== null ? fmtP(live) : '-') + (live !== null ? idrInline(live) : '');
+        u.qty.textContent = fmt(p.qty, 6);
+        u.value.innerHTML = (p.position_value !== null && p.position_value !== undefined)
+          ? (fmt(p.position_value) + ' ' + esc(s.quote) + idrInline(p.position_value)) : '-';
+        u.vol.innerHTML = (p.volume_24h_quote !== null && p.volume_24h_quote !== undefined)
+          ? (fmt(p.volume_24h_quote, 0) + ' ' + esc(s.quote) + idrInline(p.volume_24h_quote)) : '-';
+        if(u.beStop) u.beStop.textContent = fmtP(p.be_stop_price);
+        if(u.trStop) u.trStop.textContent = fmtP(p.trailing_stop_price);
+
+        if(p.hold_minutes !== null && p.hold_minutes !== undefined){
+          _hold.sec = Number(p.hold_minutes)*60;
+          _hold.at = Date.now();
+        } else {
+          _hold.sec = null;
+        }
+        paintHold();
+
+        if(!rail) return;
+
+        // Batas rel: harga SL di kiri dan level naik aktif tertinggi di
+        // kanan. Bila satu sisi mati, batasnya diturunkan dari sisi yang
+        // masih hidup supaya skala rel tetap masuk akal.
+        const lo = lv.sl !== null
+          ? entry*(1 - lv.sl/100)
+          : entry*(1 - (lv.maxUp !== null ? lv.maxUp : 2)/200);
+        const hi = lv.maxUp !== null
+          ? entry*(1 + lv.maxUp/100)
+          : entry*(1 + (lv.sl !== null ? lv.sl : 2)/100);
+        const span = hi - lo;
+        const at = px => (span > 0) ? Math.max(0, Math.min(100, ((px - lo)/span)*100)) : 0;
+        const entryAt = at(entry);
+        const liveAt = live === null ? entryAt : at(live);
+        const up = live === null ? true : live >= entry;
+
+        u.railLoss.style.width = entryAt.toFixed(2) + '%';
+        const a = Math.min(entryAt, liveAt), b = Math.max(entryAt, liveAt);
+        u.railFill.style.left = a.toFixed(2) + '%';
+        u.railFill.style.width = (b - a).toFixed(2) + '%';
+        u.railFill.classList.toggle('neg', !up);
+        u.railEntry.style.left = entryAt.toFixed(2) + '%';
+        u.railDot.style.left = liveAt.toFixed(2) + '%';
+        u.railDot.classList.toggle('neg', !up);
+        u.railDot.classList.toggle('idle', live === null);
+        // Label batas ikut menyebut level naik tertinggi yang benar benar
+        // aktif, jadi tidak lagi menulis TP ketika take profit dimatikan.
+        const topKey = lv.maxUp === null ? null
+          : (lv.tp === lv.maxUp ? 'tp' : (lv.tr === lv.maxUp ? 'tr' : 'be'));
+        const shortOf = {tp: 'TP', tr: 'Trail', be: 'BE'};
+        u.railLo.textContent = (lv.sl !== null ? 'SL ' : 'batas ') + fmtP(lo);
+        u.railHi.textContent = (topKey ? shortOf[topKey] : 'batas') + ' ' + fmtP(hi);
+
+        let chips = '';
+        if(beOn) chips += '<span class="lvl-chip">BE aktif</span>';
+        if(trOn) chips += '<span class="lvl-chip">Trailing aktif</span>';
+        u.railChips.innerHTML = chips;
+
+        const marks = [];
+        if(lv.sl !== null){
+          const px = entry*(1 - lv.sl/100);
+          marks.push({label:'SL', at: at(px), passed: false});
+        }
+        if(lv.be !== null){
+          const px = entry*(1 + lv.be/100);
+          marks.push({label:'BE', at: at(px), passed: beOn || (live !== null && live >= px)});
+        }
+        if(lv.tr !== null){
+          const px = entry*(1 + lv.tr/100);
+          marks.push({label:'Trail', at: at(px), passed: trOn || (live !== null && live >= px)});
+        }
+        if(lv.tp !== null){
+          const px = entry*(1 + lv.tp/100);
+          marks.push({label:'TP', at: at(px), passed: live !== null && live >= px});
+        }
+        marks.sort((a2, b2) => a2.at - b2.at);
+        const msig = marks.map(m => m.label + ':' + m.at.toFixed(4)).join(',');
+        if(u.markSig !== msig){
+          u.railMarks.innerHTML = marks.map(m => {
+            const edge = m.at >= 0.98*100 ? ' edge-r' : (m.at <= 2 ? ' edge-l' : '');
+            return '<span class="eta-mark'+edge+'" style="left:'+m.at.toFixed(2)+'%">'+esc(m.label)+'</span>';
+          }).join('');
+          u.markSig = msig;
+          u.markEls = Array.prototype.slice.call(u.railMarks.querySelectorAll('.eta-mark'));
+        }
+        marks.forEach((m, i) => {
+          const el = u.markEls[i];
+          if(el) el.classList.toggle('passed', !!m.passed);
+        });
+      }
+
+      function renderConfigPanel(s, exitAtr, fb, modeTxt, noteHtml){
+        const box = document.getElementById('configBox');
+        if(!box) return;
+        const c = s.config, p = s.position;
+        const entryPx = Number(p.entry_price);
+        const pnlPct = (p.pnl_pct === null || p.pnl_pct === undefined || !Number.isFinite(Number(p.pnl_pct)))
+          ? null : Number(p.pnl_pct);
+        const beOn = !!p.be_active, trOn = !!p.trailing_active;
+        const lv = cfgLevels(c, exitAtr, entryPx, beOn, trOn);
+
+        // Meter hanya relevan bila ada posisi dan harga entry valid.
+        const meter = !!p.has_position && entryPx > 0;
+        etaTrack(meter, p.symbol, pnlPct, lv);
+
+        // Level yang saklarnya mati tidak ditampilkan sama sekali.
+        const keys = ['sl', 'tp', 'be', 'tr'].filter(k => lv.on[k]);
+        const track = meter && lv.maxUp !== null && lv.maxUp > 0;
+        const sig = [meter ? 'meter' : 'plain', track ? 'track' : 'notrack',
+          keys.join(','), modeTxt, noteHtml || ''].join('|');
+        if(!_cfgUI || _cfgUI.sig !== sig) _cfgUI = buildConfigPanel(box, sig, meter, noteHtml, keys, track);
+        if(_cfgUI.mode) _cfgUI.mode.textContent = modeTxt;
+
+        const raws = {sl: c.sl_pct, tp: c.tp_pct, be: c.be_trigger_pct, tr: c.trailing_start_pct};
+        const txt = key => fmtExitVsEntry(raws[key], exitAtr, entryPx, fb);
+        if(!meter){
+          keys.forEach(k => cfgPaintRow(k, txt(k), null, ''));
+          return;
+        }
+
+        const waiting = pnlPct === null;
+        const gap = target => fmt(Math.max(0, target - pnlPct), 2) + '% lagi';
+
+        // Stop Loss dibaca terbalik: meter penuh berarti harga makin dekat ke SL.
+        if(lv.on.sl){
+          if(lv.sl === null || waiting){
+            cfgPaintRow('sl', txt('sl'), null, waiting ? 'menunggu harga live' : 'nilai belum tersedia');
+          } else {
+            const prog = Math.max(0, Math.min(1, (-pnlPct)/lv.sl));
+            cfgPaintRow('sl', txt('sl'), prog, 'jarak ke SL ' + fmt(Math.max(0, pnlPct + lv.sl), 2) + '%',
+              {hot: prog >= 0.6, chip: prog >= 0.8 ? 'rawan' : '', risk: true});
+          }
+        }
+        if(lv.on.tp){
+          if(lv.tp === null || waiting){
+            cfgPaintRow('tp', txt('tp'), null, waiting ? 'menunggu harga live' : 'nilai belum tersedia');
+          } else {
+            const prog = Math.max(0, Math.min(1, pnlPct/lv.tp));
+            const done = pnlPct >= lv.tp;
+            cfgPaintRow('tp', txt('tp'), prog, done ? 'target tercapai' : ('sisa ' + gap(lv.tp)),
+              {hot: prog >= 0.8, chip: done ? 'tercapai' : ''});
+          }
+        }
+        if(lv.on.be){
+          if(lv.be === null || (waiting && !beOn)){
+            cfgPaintRow('be', txt('be'), beOn ? 1 : null,
+              (waiting && !beOn) ? 'menunggu harga live' : (beOn ? 'breakeven aktif' : 'nilai belum tersedia'),
+              {chip: beOn ? 'aktif' : ''});
+          } else {
+            const prog = beOn ? 1 : Math.max(0, Math.min(1, pnlPct/lv.be));
+            const note = beOn ? ('stop terkunci di ' + fmtP(p.be_stop_price)) : ('sisa ' + gap(lv.be));
+            cfgPaintRow('be', txt('be'), prog, note, {hot: !beOn && prog >= 0.8, chip: beOn ? 'aktif' : ''});
+          }
+        }
+        if(lv.on.tr){
+          if(lv.tr === null || (waiting && !trOn)){
+            cfgPaintRow('tr', txt('tr'), trOn ? 1 : null,
+              (waiting && !trOn) ? 'menunggu harga live' : (trOn ? 'trailing aktif' : 'nilai belum tersedia'),
+              {chip: trOn ? 'aktif' : ''});
+          } else {
+            const prog = trOn ? 1 : Math.max(0, Math.min(1, pnlPct/lv.tr));
+            const note = trOn ? ('trailing stop di ' + fmtP(p.trailing_stop_price)) : ('sisa ' + gap(lv.tr));
+            cfgPaintRow('tr', txt('tr'), prog, note, {hot: !trOn && prog >= 0.8, chip: trOn ? 'aktif' : ''});
+          }
+        }
+
+        // Jalur milestone membentang dari entry sampai level naik aktif
+        // tertinggi, jadi skalanya ikut menyesuaikan ketika TP dimatikan.
+        let prog = 0;
+        if(track){
+          prog = (pnlPct !== null) ? Math.max(0, Math.min(1, pnlPct/lv.maxUp)) : 0;
+          _cfgUI.etaFill.style.width = (prog*100).toFixed(1) + '%';
+          _cfgUI.etaTrack.classList.toggle('loading', _eta.state === 'measuring' || _eta.state === 'nodata');
+
+          const marks = [];
+          const addMark = (key, label) => {
+            if(lv[key] === null) return;
+            const hit = (key === 'be' && beOn) || (key === 'tr' && trOn)
+              || (pnlPct !== null && pnlPct >= lv[key]);
+            marks.push({label: label, at: Math.max(0, Math.min(1, lv[key]/lv.maxUp)), passed: hit});
+          };
+          addMark('be', 'BE');
+          addMark('tr', 'Trail');
+          addMark('tp', 'TP');
+          marks.sort((a, b) => a.at - b.at);
+          const msig = marks.map(m => m.label + ':' + m.at.toFixed(4)).join(',');
+          if(_cfgUI.markSig !== msig){
+            _cfgUI.etaMarks.innerHTML = marks.map(m => {
+              const edge = m.at >= 0.98 ? ' edge-r' : (m.at <= 0.02 ? ' edge-l' : '');
+              return '<span class="eta-mark'+edge+'" style="left:'+(m.at*100).toFixed(2)+'%">'+esc(m.label)+'</span>';
+            }).join('');
+            _cfgUI.markSig = msig;
+            _cfgUI.markEls = Array.prototype.slice.call(_cfgUI.etaMarks.querySelectorAll('.eta-mark'));
+          }
+          marks.forEach((m, i) => {
+            const el = _cfgUI.markEls[i];
+            if(el) el.classList.toggle('passed', !!m.passed);
+          });
+        }
+
+        const tg = _eta.target;
+        const tgShort = {sl: 'SL', be: 'BE', tr: 'Trailing', tp: 'TP'};
+        const tgLabel = tg ? ETA_LABEL[tg.key] : null;
+        const slopeMin = _eta.slope === null ? null : _eta.slope*60;
+        const lajuTxt = slopeMin === null ? '' : ('laju ' + sign(slopeMin) + fmt(slopeMin, 3) + '%/mnt');
+        const sisaTxt = (tg && pnlPct !== null)
+          ? ('sisa ' + fmt(Math.max(0, tg.dir > 0 ? (tg.pct - pnlPct) : (pnlPct - tg.pct)), 2) + '% ke ' + tgShort[tg.key])
+          : '';
+        const join = parts => parts.filter(Boolean).join(' · ');
+        let labelTxt = tgLabel ? ('Estimasi ke ' + tgLabel) : 'Estimasi level exit';
+        let chipTxt = 'mengukur laju', chipCls = '', timeTxt = 'mengukur…', dim = true, subTxt = '';
+
+        switch(_eta.state){
+          case 'eta': {
+            const risk = tg.dir < 0;
+            chipTxt = 'menuju ' + tgShort[tg.key];
+            chipCls = risk ? 'warn' : 'run';
+            timeTxt = '≈ ' + fmtEtaClock(etaSeconds());
+            dim = false;
+            subTxt = join([lajuTxt, sisaTxt]);
+            break;
+          }
+          case 'reached':
+            chipTxt = tg.dir < 0 ? 'SL tersentuh' : (tgShort[tg.key] + ' tercapai');
+            chipCls = tg.dir < 0 ? 'warn' : 'done';
+            timeTxt = '00:00';
+            dim = false;
+            subTxt = 'harga sudah menyentuh level ' + String(tgLabel || '').toLowerCase();
+            break;
+          case 'away':
+            chipTxt = 'harga menjauh'; chipCls = 'warn';
+            timeTxt = 'belum terukur';
+            subTxt = join([lajuTxt, sisaTxt]);
+            break;
+          case 'flat':
+            chipTxt = 'harga mendatar'; chipCls = 'warn';
+            timeTxt = 'belum terukur';
+            subTxt = join(['pergerakan terlalu kecil untuk diestimasi', sisaTxt]);
+            break;
+          case 'far':
+            chipTxt = 'lebih dari 24 jam'; chipCls = 'warn';
+            timeTxt = '> 24 jam';
+            subTxt = join([lajuTxt, sisaTxt]);
+            break;
+          case 'done':
+            labelTxt = 'Semua target naik terlewati';
+            chipTxt = trOn ? 'dikawal trailing' : 'tidak ada target';
+            chipCls = trOn ? 'done' : '';
+            timeTxt = trOn ? 'dikawal trailing' : 'tanpa target';
+            subTxt = trOn
+              ? join(['trailing stop di ' + fmtP(p.trailing_stop_price), lajuTxt])
+              : join(['tidak ada level naik yang tersisa', lajuTxt]);
+            break;
+          case 'noexit':
+            labelTxt = 'Tidak ada level exit aktif';
+            chipTxt = 'exit manual'; chipCls = 'warn';
+            timeTxt = 'tanpa target';
+            subTxt = 'semua saklar exit otomatis mati pada konfigurasi ini';
+            break;
+          case 'nodata':
+            chipTxt = 'menunggu harga'; chipCls = 'warn';
+            timeTxt = 'menunggu harga live';
+            subTxt = 'harga live belum tersedia dari server';
+            break;
+          default:
+            subTxt = join(['mengumpulkan sampel harga live', sisaTxt]);
+        }
+
+        _cfgUI.etaLabel.textContent = labelTxt;
+        _cfgUI.etaChip.textContent = chipTxt;
+        _cfgUI.etaChip.className = 'eta-chip' + (chipCls ? ' ' + chipCls : '');
+        _cfgUI.etaTime.textContent = timeTxt;
+        _cfgUI.etaTime.classList.toggle('dim', dim);
+        _cfgUI.etaSub.textContent = subTxt;
+
+        // Sorotan hijau hanya untuk target naik, bukan saat mendekati SL.
+        const etaSec = etaSeconds();
+        const naik = tg && tg.dir > 0;
+        const near = (_eta.state === 'reached' && naik)
+          || (track && prog >= 0.85)
+          || (_eta.state === 'eta' && naik && etaSec !== null && etaSec <= 60);
+        _cfgUI.etaBox.classList.toggle('near', near);
       }
 
       function showManualStatus(kind, msg){
