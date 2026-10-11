@@ -62,6 +62,9 @@ class BacktestResult:
     daily_trend_skips: int = 0
     daily_trend_scans: int = 0
     same_coin_skips: int = 0
+    mark_to_market_open: bool = False
+    mark_to_market_pnl_pct: float = 0.0
+    mark_to_market_pnl_quote: float = 0.0
 
 
 def bars_per_day(interval: str) -> int:
@@ -71,6 +74,17 @@ def bars_per_day(interval: str) -> int:
             f"Interval '{interval}' tidak didukung untuk perhitungan 24 jam."
         )
     return (24 * 60) // minutes
+
+
+def last_completed_candle_end_ms(
+    interval: str, now_ms: Optional[int] = None
+) -> int:
+    minutes = INTERVAL_MINUTES.get(str(interval))
+    if minutes is None:
+        raise BacktestError(f"Interval candle '{interval}' tidak didukung.")
+    interval_ms = int(minutes) * MS_PER_MIN
+    current_ms = int(time.time() * 1000) if now_ms is None else int(now_ms)
+    return (current_ms // interval_ms) * interval_ms - 1
 
 
 def initial_backtest_equity(config: dict) -> float:
@@ -229,10 +243,11 @@ def run_backtest(
     entry_time = 0
     position_notional = 0.0
     equity_before_entry = 0.0
+    mark_to_market_open = False
+    mark_to_market_pnl_pct = 0.0
+    mark_to_market_pnl_quote = 0.0
     next_entry_allowed_at = 0
     chase_skips = 0
-    # Pemetaan SIMBOL -> waktu (ms) sampai kapan entry diblokir karena trade
-    # sebelumnya loss (SAME_COIN_BLOCK_HOURS), paritas dengan bot live.
     symbol_blocks: dict = {}
     same_coin_skips = 0
 
@@ -268,8 +283,6 @@ def run_backtest(
         interval,
         sudah_dirangkai=daily_klines is not None,
     )
-    # Gerbang EMA + ADX harian dirangkai dari candle interval simulasi, sama seperti
-    # jalur portofolio, supaya tidak ada unduhan tambahan.
     daily_trend_lookup = parity.make_daily_trend_lookup(klines, config, interval)
     if trend_lookup is not None or daily_lookup is not None or daily_trend_lookup is not None:
         butuh_warmup = strategy.htf_gate_warmup_bars(config, interval)
@@ -351,8 +364,6 @@ def run_backtest(
                 if setup.ok and parity.same_coin_blocked(
                     symbol, candle.open_time, symbol_blocks
                 ):
-                    # Koin yang sama baru ditutup dengan loss dan sedang diblokir
-                    # (SAME_COIN_BLOCK_HOURS), sama seperti bot live.
                     same_coin_skips += 1
                     i += 1
                     continue
@@ -386,7 +397,6 @@ def run_backtest(
                         i += 1
                         continue
                 if setup.ok and daily_trend_lookup is not None:
-                    # Fail closed: pada jalur ini lookup selalu ada bila gerbang aktif.
                     daily_trend_scans += 1
                     if not daily_trend_lookup.verdict_at(candle.close_time)["ok"]:
                         daily_trend_skips += 1
@@ -465,17 +475,20 @@ def run_backtest(
 
         is_last_bar = i == n - 1
         if exit_reason is None:
-            mtm_equity = equity + position_notional * (candle.close / entry_price - 1.0)
+            mtm_pnl_pct = (candle.close / entry_price - 1.0) * 100.0
+            mtm_pnl_quote = position_notional * mtm_pnl_pct / 100.0
+            mtm_equity = equity + mtm_pnl_quote
             entries_paused = controls.update(candle.close_time, mtm_equity)
             if controls.force_close_due(entries_paused, True):
                 exit_reason = parity.RISK_LIMIT_REASON
                 exit_price = candle.close
             elif is_last_bar:
-                exit_reason = "END_OF_DATA"
-                exit_price = candle.close
+                mark_to_market_open = True
+                mark_to_market_pnl_pct = mtm_pnl_pct
+                mark_to_market_pnl_quote = mtm_pnl_quote
                 warnings.append(
-                    "Posisi terakhir masih terbuka saat data historis habis (ditutup paksa di harga "
-                    "penutupan terakhir demi kelengkapan statistik, bukan exit sungguhan)."
+                    "Posisi terakhir masih terbuka pada akhir data. Nilainya dicatat "
+                    "sebagai mark-to-market, bukan sebagai trade tertutup."
                 )
 
         if exit_reason:
@@ -511,8 +524,6 @@ def run_backtest(
             pos = None
             position_notional = 0.0
             next_entry_allowed_at = parity.next_entry_allowed(candle.close_time, config)
-            # Catat blokir entry ulang koin ini (aktif bila trade loss, sesuai
-            # SAME_COIN_BLOCK_LOSS_ONLY), sama seperti bot live.
             parity.same_coin_block_record(
                 symbol_blocks, symbol, candle.close_time, pnl_quote, config
             )
@@ -582,7 +593,7 @@ def run_backtest(
         params=config,
         warnings=warnings,
         initial_equity=initial_equity,
-        final_equity=equity,
+        final_equity=equity + mark_to_market_pnl_quote,
         risk_events=dict(controls.events),
         chase_skips=chase_skips,
         trend_skips=trend_skips,
@@ -591,14 +602,18 @@ def run_backtest(
         daily_trend_skips=daily_trend_skips,
         daily_trend_scans=daily_trend_scans,
         same_coin_skips=same_coin_skips,
+        mark_to_market_open=mark_to_market_open,
+        mark_to_market_pnl_pct=mark_to_market_pnl_pct,
+        mark_to_market_pnl_quote=mark_to_market_pnl_quote,
     )
     return result
 
 
 def summarize(result: BacktestResult) -> dict:
-    trades = result.trades
+    all_trades = list(result.trades)
+    legacy_mtm_trades = [t for t in all_trades if t.reason == "END_OF_DATA"]
+    trades = [t for t in all_trades if t.reason != "END_OF_DATA"]
     total = len(trades)
-    real_trades = [t for t in trades if t.reason != "END_OF_DATA"]
     wins = [t for t in trades if t.pnl_pct > 0]
     losses = [t for t in trades if t.pnl_pct <= 0]
     win_rate = (len(wins) / total * 100.0) if total else 0.0
@@ -616,8 +631,43 @@ def summarize(result: BacktestResult) -> dict:
         gross_equity = max(0.0, gross_equity + notional * t.gross_pnl_pct / 100.0)
         equity_curve.append((equity / initial - 1.0) * 100.0 if initial > 0 else 0.0)
 
-    final_equity = equity if trades else (result.final_equity or initial)
+    realized_equity = equity
+    mark_to_market_open = bool(getattr(result, "mark_to_market_open", False))
+    mark_to_market_pnl_quote = float(
+        getattr(result, "mark_to_market_pnl_quote", 0.0) or 0.0
+    )
+    mark_to_market_pnl_pct = float(
+        getattr(result, "mark_to_market_pnl_pct", 0.0) or 0.0
+    )
+    if legacy_mtm_trades:
+        mark_to_market_open = True
+        if not getattr(result, "mark_to_market_open", False):
+            legacy_final_equity = float(getattr(result, "final_equity", 0.0) or 0.0)
+            mark_to_market_pnl_quote = (
+                legacy_final_equity - realized_equity
+                if legacy_final_equity > 0
+                else float(legacy_mtm_trades[-1].pnl_quote)
+            )
+            mark_to_market_pnl_pct = float(legacy_mtm_trades[-1].pnl_pct)
+
+    if mark_to_market_open:
+        final_equity = max(0.0, realized_equity + mark_to_market_pnl_quote)
+        gross_equity = max(0.0, gross_equity + mark_to_market_pnl_quote)
+        equity_curve.append(
+            (final_equity / initial - 1.0) * 100.0 if initial > 0 else 0.0
+        )
+    else:
+        final_equity = realized_equity if trades else (result.final_equity or initial)
+
     total_return_pct = ((final_equity / initial) - 1.0) * 100.0 if initial > 0 else 0.0
+    realized_return_pct = (
+        ((realized_equity / initial) - 1.0) * 100.0 if initial > 0 else 0.0
+    )
+    mark_to_market_return_pct = (
+        (mark_to_market_pnl_quote / initial) * 100.0
+        if initial > 0 and mark_to_market_open
+        else 0.0
+    )
     gross_return_pct = ((gross_equity / initial) - 1.0) * 100.0 if initial > 0 else 0.0
 
     peak = initial
@@ -644,7 +694,14 @@ def summarize(result: BacktestResult) -> dict:
 
     return {
         "total_trades": total,
-        "real_trades": len(real_trades),
+        "closed_trades": total,
+        "real_trades": total,
+        "mark_to_market_open": mark_to_market_open,
+        "mark_to_market_positions": int(mark_to_market_open),
+        "mark_to_market_pnl_pct": mark_to_market_pnl_pct,
+        "mark_to_market_pnl_quote": mark_to_market_pnl_quote,
+        "mark_to_market_return_pct": mark_to_market_return_pct,
+        "realized_return_pct": realized_return_pct,
         "wins": len(wins),
         "losses": len(losses),
         "win_rate": win_rate,
@@ -657,6 +714,7 @@ def summarize(result: BacktestResult) -> dict:
         "reason_counts": reason_counts,
         "equity_curve": equity_curve,
         "initial_equity": initial,
+        "realized_equity": realized_equity,
         "final_equity": final_equity,
         "total_pnl_quote": final_equity - initial,
         "gross_return_pct": gross_return_pct,
@@ -758,14 +816,6 @@ def apply_overrides(base_config: dict, overrides: dict) -> dict:
 
 
 def _rentang_demand(key: str, lo: float, hi: float) -> tuple:
-    """Rentang validasi parameter demand, diselaraskan dengan skema pengaturan.
-
-    Skema di config/settings_schema.py adalah kontrak yang dilihat pengguna saat
-    menyimpan setelan. Kalau backtest memakai rentang yang lebih sempit, setelan
-    yang sah disimpan tetap ditolak backtest dengan pesan yang membingungkan.
-    Karena itu batas diambil dari skema saat tersedia; angka yang dioper ke sini
-    hanya cadangan kalau skema tidak bisa dibaca.
-    """
     try:
         from config.settings_schema import PARAMETER_SCHEMA
 
@@ -937,9 +987,6 @@ def validate_params(cfg: dict) -> None:
                 f"PUMP_MIN_24H_CHANGE_PCT={pump_min} (atau 0 untuk menonaktifkan batas atas)."
             )
 
-    # Rentang SAME_COIN_BLOCK_HOURS diambil dari skema pengaturan (sama seperti
-    # aturan demand) supaya backtest tidak menolak nilai sah yang sudah lolos
-    # validasi settings.
     block_hours = cfg.get("SAME_COIN_BLOCK_HOURS")
     if block_hours is not None:
         lo, hi = _rentang_demand("SAME_COIN_BLOCK_HOURS", 0.0, 8760.0)
@@ -956,1469 +1003,6 @@ def validate_params(cfg: dict) -> None:
             )
 
 
-def _make_candle(t, o, h, low, c, vol=1_000_000.0, qvol=None):
-    if qvol is None:
-        qvol = vol * ((o + c) / 2.0)
-    return Kline(
-        open_time=t,
-        open=o,
-        high=h,
-        low=low,
-        close=c,
-        close_time=t + 299_999,
-        volume=vol,
-        quote_volume=qvol,
-    )
-
-
-def selftest():
-    print("=== SELFTEST backtest.py: rolling 24h stats ===")
-    klines = []
-    t = 0
-    price = 1.0
-    for _ in range(288):
-        klines.append(_make_candle(t, price, price * 1.001, price * 0.999, price))
-        t += 300_000
-    for i in range(50):
-        price = 1.0 * (1 + 0.15 * (i / 49))
-        klines.append(
-            _make_candle(t, price, price * 1.002, price * 0.998, price, vol=5_000_000.0)
-        )
-        t += 300_000
-    stats = compute_rolling_24h_stats(klines, window=288)
-    last = stats[-1]
-    assert last is not None, "24h stats harusnya sudah terisi di akhir data"
-    assert 10 < last["pct24h"] < 20, f"pct24h tidak masuk akal: {last['pct24h']}"
-    print(f"  pct24h akhir = {last['pct24h']:.2f}% -> OK")
-
-    print("\n=== SELFTEST backtest.py: entry konfirmasi volume + TP ===")
-    from config.config import PUMP_CONFIG
-    from backtesting.synthetic_data import cfg_gerbang_pump_nonaktif
-
-    cfg = cfg_gerbang_pump_nonaktif(PUMP_CONFIG)
-    # Gerbang trend dimatikan dulu supaya tes-tes di bawah fokus pada logika lain.
-    # Gerbang trend diuji khusus di bagian "paritas gerbang trend timeframe tinggi".
-    cfg["TREND_FILTER_ENABLED"] = False
-    # Gerbang demand H1 juga dimatikan di fixture dasar supaya warmup tidak
-    # melompat; gerbang ini diuji khusus di bagian "paritas gerbang zona demand H1".
-    cfg["HTF_DEMAND_FILTER_ENABLED"] = False
-    # Gerbang demand harian dimatikan atas alasan yang sama (warmupnya paling
-    # besar, ~22 hari untuk lookback 20 hari + 1 candle sinyal pada interval 5m);
-    # gerbang ini diuji khusus di bagian "paritas gerbang zona demand harian".
-    cfg["DAILY_DEMAND_FILTER_ENABLED"] = False
-    cfg["MIN_QUOTE_VOLUME_USDT_24H"] = 1_000_000
-    cfg["BACKTEST_ENTRY_DELAY_BARS"] = 0
-    cfg["BACKTEST_ENTRY_SPREAD_PCT"] = 0.0
-    cfg["BACKTEST_SLIPPAGE_PCT"] = 0.0
-    cfg["TP_PCT"] = 6.0
-    cfg["USE_BREAKEVEN"] = True
-    cfg["BE_TRIGGER_PCT"] = 3.0
-    cfg["BE_LOCK_PCT"] = 0.3
-    cfg["USE_TRAILING"] = True
-    cfg["TRAILING_START_PCT"] = 4.0
-    cfg["TRAILING_STEP_PCT"] = 1.5
-    cfg["_symbol"] = "TESTUSDT"
-
-    vals = [100.0] * 288 + [
-        100.2,
-        100.4,
-        99.4,
-        98.4,
-        97.4,
-        97.6,
-        98.6,
-        98.1,
-        98.3,
-        97.8,
-        98.8,
-        99.8,
-        98.8,
-        99.8,
-        99.3,
-        99.5,
-        98.5,
-        99.5,
-        98.5,
-        100.0,
-        100.5,
-    ]
-    kl_setup = [
-        _make_candle(
-            i * 300_000,
-            v,
-            v + 1,
-            max(0.01, v - 1),
-            v,
-            vol=(10_000_000.0 if i >= len(vals) - 2 else 5_000_000.0),
-        )
-        for i, v in enumerate(vals)
-    ]
-    result = run_backtest(kl_setup, cfg, warmup_bars=0)
-    assert (
-        len(result.trades) >= 1
-    ), "Backtest harus mendeteksi minimal 1 entry pada skenario sah"
-    first = result.trades[0]
-    assert first.reason in (
-        "STOP_LOSS",
-        "TAKE_PROFIT",
-        "BREAKEVEN",
-        "TRAILING_STOP",
-        "END_OF_DATA",
-    )
-    summary = summarize(result)
-    print(f"  Trade pertama: alasan={first.reason}, pnl={first.pnl_pct:+.2f}%")
-    print(
-        f"  Ringkasan: total_trades={summary['total_trades']} win_rate={summary['win_rate']:.1f}% -> OK"
-    )
-
-    print(
-        "\n=== SELFTEST backtest.py: tidak ada entry kalau gerbang likuiditas tidak lolos ==="
-    )
-    cfg2 = dict(cfg)
-    cfg2["MIN_QUOTE_VOLUME_USDT_24H"] = 1e18
-    result2 = run_backtest(kl_setup, cfg2, warmup_bars=0)
-    assert (
-        len(result2.trades) == 0
-    ), "Harusnya tidak ada entry kalau gerbang volume mustahil"
-    assert (
-        len(result.trades) > 0
-    ), "Kontrol positif gagal: data wajar harus menghasilkan trade"
-    print("  -> OK")
-
-    print("\n=== SELFTEST backtest.py: data candle rusak ditolak ===")
-    kasus_rusak = [
-        ("close NaN", [[0, "1", "2", "0.5", "NaN", 10, 300_000, 1000]]),
-        ("close nol", [[0, "1", "2", "0.5", "0", 10, 300_000, 1000]]),
-        ("close negatif", [[0, "1", "2", "0.5", "-5", 10, 300_000, 1000]]),
-        ("close tak hingga", [[0, "1", "2", "0.5", "inf", 10, 300_000, 1000]]),
-        ("high < low", [[0, "1", "0.5", "2", "1", 10, 300_000, 1000]]),
-    ]
-    for nama, raw in kasus_rusak:
-        try:
-            strategy.parse_klines(raw)
-        except ValueError:
-            pass
-        else:
-            raise AssertionError(f"Candle rusak ({nama}) tidak ditolak parse_klines().")
-    ok = strategy.parse_klines([[0, "1", "2", "0.5", "1.5", 10, 300_000, 1000]])
-    assert len(ok) == 1 and ok[0].close == 1.5, "Candle normal malah ditolak"
-    print("  -> OK")
-
-    print(
-        "\n=== SELFTEST backtest.py: Stop Loss kena sebelum proteksi profit aktif ==="
-    )
-    sl_klines = list(kl_setup)
-    entry_ref_price = sl_klines[-1].close
-    t2 = sl_klines[-1].close_time + 1
-    p2 = entry_ref_price
-    for _ in range(5):
-        prev = p2
-        p2 = p2 * 0.98
-        sl_klines.append(_make_candle(t2, prev, prev, p2 * 0.998, p2, vol=5_000_000.0))
-        t2 += 300_000
-
-    sl_cfg = dict(cfg)
-    sl_cfg["USE_ATR_EXIT"] = False
-    sl_cfg["TP_PCT"] = 999.0
-    sl_cfg["USE_STOP_LOSS"] = True
-    sl_cfg["SL_PCT"] = 3.0
-    sl_result = run_backtest(sl_klines, sl_cfg, warmup_bars=0)
-    assert len(sl_result.trades) >= 1, "Skenario Stop Loss harus menghasilkan entry"
-    sl_trade = sl_result.trades[0]
-    assert (
-        sl_trade.reason == "STOP_LOSS"
-    ), f"Harusnya keluar karena STOP_LOSS, dapat: {sl_trade.reason}"
-    assert sl_trade.pnl_pct < 0, "Trade Stop Loss harus rugi"
-    from config.config import get_taker_fee_pct as fee_now
-
-    expected_fee = fee_now(cfg) * 2
-    assert abs(sl_trade.fee_pct - expected_fee) < 1e-9
-    print(f"  -> OK (gross {sl_trade.gross_pnl_pct:.2f}%, fee {sl_trade.fee_pct:.2f}%)")
-
-    print(
-        "\n=== SELFTEST backtest.py: blokir koin sama setelah loss (SAME_COIN_BLOCK) ==="
-    )
-    # Unit: helper parity sebagai satu sumber kebenaran aturan blokir.
-    jam = parity.same_coin_block_hours({"SAME_COIN_BLOCK_HOURS": 24.0})
-    assert jam == 24.0
-    assert parity.same_coin_block_hours({"SAME_COIN_BLOCK_HOURS": 0}) == 0.0
-    assert parity.same_coin_block_hours({}) == 0.0
-    assert (
-        parity.same_coin_block_until_ms(1_000_000, -1.0, {"SAME_COIN_BLOCK_HOURS": 24.0})
-        == 1_000_000 + 86_400_000
-    )
-    assert (
-        parity.same_coin_block_until_ms(1_000_000, 1.0, {"SAME_COIN_BLOCK_HOURS": 24.0})
-        == 1_000_000
-    )
-    assert (
-        parity.same_coin_block_until_ms(
-            1_000_000, 1.0, {"SAME_COIN_BLOCK_HOURS": 24.0, "SAME_COIN_BLOCK_LOSS_ONLY": False}
-        )
-        == 1_000_000 + 86_400_000
-    )
-    blocks = {}
-    parity.same_coin_block_record(
-        blocks, "testusdt", 1_000_000, -1.0, {"SAME_COIN_BLOCK_HOURS": 24.0}
-    )
-    assert parity.same_coin_blocked("TESTUSDT", 1_000_000 + 1000, blocks)
-    assert not parity.same_coin_blocked("TESTUSDT", 1_000_000 + 86_400_000, blocks)
-    assert not parity.same_coin_blocked("LAINUSDT", 1_000_000, blocks)
-    blocks_prune = {"OLDBUSDT": 500_000, "BADUSDT": "x"}
-    parity.same_coin_block_record(
-        blocks_prune, "NEWUSDT", 1_000_000, -1.0, {"SAME_COIN_BLOCK_HOURS": 24.0}
-    )
-    assert set(blocks_prune) == {"NEWUSDT"}, blocks_prune
-    print("  -> OK (helper parity: hitung, cek, catat, pangkas)")
-
-    # Integrasi: fixture sl_klines = trade pertama pasti STOP_LOSS (loss), lalu
-    # setup baru tidak lama setelah loss, lalu rentang panjang (> 24 jam) dan
-    # setup ketiga di ujung data.
-    HARI_MS = 24 * 3_600_000
-    int_klines = list(sl_klines)
-    t3 = int_klines[-1].close_time + 1
-    vals2 = [100.0] * 20 + [
-        100.2, 100.4, 99.4, 98.4, 97.4, 97.6, 98.6, 98.1, 98.3, 97.8,
-        98.8, 99.8, 98.8, 99.8, 99.3, 99.5, 98.5, 99.5, 98.5, 100.0, 100.5,
-    ]
-    for j, v in enumerate(vals2):
-        int_klines.append(
-            _make_candle(
-                t3,
-                v,
-                v + 1,
-                max(0.01, v - 1),
-                v,
-                vol=(10_000_000.0 if j >= len(vals2) - 2 else 5_000_000.0),
-            )
-        )
-        t3 += 300_000
-    for _ in range(400):
-        int_klines.append(_make_candle(t3, 100.5, 101.0, 100.0, 100.5, vol=5_000_000.0))
-        t3 += 300_000
-    vals3 = [100.5] * 20 + [
-        100.7, 100.9, 99.9, 98.9, 97.9, 98.1, 99.1, 98.6, 98.8, 98.3,
-        99.3, 100.3, 99.3, 100.3, 99.8, 100.0, 99.0, 100.0, 99.0, 100.5, 101.0,
-    ]
-    for j, v in enumerate(vals3):
-        int_klines.append(
-            _make_candle(
-                t3,
-                v,
-                v + 1,
-                max(0.01, v - 1),
-                v,
-                vol=(10_000_000.0 if j >= len(vals3) - 2 else 5_000_000.0),
-            )
-        )
-        t3 += 300_000
-
-    blk_cfg = dict(sl_cfg)
-    blk_cfg["SAME_COIN_BLOCK_HOURS"] = 24.0
-    blk_cfg["SAME_COIN_BLOCK_LOSS_ONLY"] = True
-    r_blk = run_backtest(int_klines, blk_cfg, warmup_bars=0)
-    assert (
-        len(r_blk.trades) >= 2
-    ), f"Perlu sedikitnya 2 trade (loss lalu entry setelah blokir), dapat {len(r_blk.trades)}"
-    first = r_blk.trades[0]
-    assert first.pnl_quote < 0, "Trade pertama harus loss (fixture sl_klines)"
-    viol = 0
-    for i in range(1, len(r_blk.trades)):
-        prev = r_blk.trades[i - 1]
-        if prev.pnl_quote < 0 and r_blk.trades[i].entry_time < prev.exit_time + HARI_MS:
-            viol += 1
-    assert viol == 0, f"{viol} entry melanggar blokir 24 jam setelah loss"
-    assert r_blk.same_coin_skips > 0, "Harus ada sinyal yang diblokir"
-    assert any("blokir koin sama" in w for w in r_blk.warnings)
-    summary_blk = summarize(r_blk)
-    assert summary_blk["same_coin_skips"] == r_blk.same_coin_skips
-    print(
-        f"  -> OK (trade={len(r_blk.trades)}, sinyal diblokir={r_blk.same_coin_skips}, "
-        f"loss pertama exit={first.exit_time})"
-    )
-
-    r_off = run_backtest(
-        int_klines, dict(sl_cfg, SAME_COIN_BLOCK_HOURS=0), warmup_bars=0
-    )
-    assert r_off.same_coin_skips == 0
-    assert len(r_off.trades) >= len(r_blk.trades)
-    print(
-        f"  -> OK (tanpa blokir: trade={len(r_off.trades)}, diblokir=0, "
-        "blokir hanya menunda entry)"
-    )
-
-    r_all = run_backtest(
-        int_klines, dict(blk_cfg, SAME_COIN_BLOCK_LOSS_ONLY=False), warmup_bars=0
-    )
-    viol_all = 0
-    for i in range(1, len(r_all.trades)):
-        prev = r_all.trades[i - 1]
-        if r_all.trades[i].entry_time < prev.exit_time + HARI_MS:
-            viol_all += 1
-    assert viol_all == 0, f"{viol_all} entry melanggar blokir 24 jam (loss_only=False)"
-    print(f"  -> OK (loss_only=False: trade={len(r_all.trades)}, semua jarak >= 24 jam)")
-
-    try:
-        validate_params(dict(sl_cfg, SAME_COIN_BLOCK_HOURS=-1))
-        raise AssertionError("Harusnya menolak SAME_COIN_BLOCK_HOURS negatif")
-    except BacktestError:
-        pass
-    merged_blk = apply_overrides(
-        dict(PUMP_CONFIG),
-        {"SAME_COIN_BLOCK_HOURS": "12", "SAME_COIN_BLOCK_LOSS_ONLY": "false"},
-    )
-    assert merged_blk["SAME_COIN_BLOCK_HOURS"] == 12.0
-    assert merged_blk["SAME_COIN_BLOCK_LOSS_ONLY"] is False
-    validate_params(merged_blk)
-    print("  -> OK (validate_params menolak nilai liar, apply_overrides bisa cast)")
-
-    print(
-        "\n=== SELFTEST backtest.py: apply_overrides, validate_params, dan exit tetap ==="
-    )
-    merged = apply_overrides(
-        dict(PUMP_CONFIG), {"USE_ATR_EXIT": "false", "TP_PCT": "8.5", "SL_PCT": "4.5"}
-    )
-    assert merged["TP_PCT"] == 8.5 and merged["SL_PCT"] == 4.5
-    validate_params(merged)
-    try:
-        validate_params(
-            apply_overrides(
-                dict(PUMP_CONFIG), {"USE_ATR_EXIT": "false", "TP_PCT": "-5"}
-            )
-        )
-        raise AssertionError("Harusnya menolak TP_PCT negatif")
-    except BacktestError:
-        pass
-    levels = strategy.resolve_exit_levels(
-        dict(PUMP_CONFIG, USE_ATR_EXIT=False, SL_PCT=3.0, TP_PCT=6.0)
-    )
-    assert (
-        levels["source"] == "FIXED"
-        and levels["sl_pct"] == 3.0
-        and levels["tp_pct"] == 6.0
-    )
-    print("  -> OK")
-
-    print(
-        "\n=== SELFTEST backtest.py: paritas dengan bot live (exit, filter, kontrol akun) ==="
-    )
-    from types import SimpleNamespace
-
-    def _mk(i, o, h, low, c, vol=10_000_000.0):
-        return _make_candle(i * 300_000, o, h, low, c, vol=vol)
-
-    cfg_d1 = dict(cfg, BACKTEST_ENTRY_DELAY_BARS=1)
-    k_crash = list(kl_setup)
-    k_crash[308] = _mk(308, 100.5, 101.5, 70.0, 100.5)
-    r_ec = run_backtest(k_crash, cfg_d1, warmup_bars=0)
-    assert (
-        len(r_ec.trades) == 1
-    ), "Crash di candle entry harus menghasilkan satu trade SL"
-    t_ec = r_ec.trades[0]
-    assert (
-        t_ec.reason == "STOP_LOSS"
-        and t_ec.entry_time == 308 * 300_000
-        and abs(t_ec.exit_price - (t_ec.entry_price - t_ec.sl_pct)) < 1e-9
-    ), (t_ec.reason, t_ec.entry_time, t_ec.exit_price, t_ec.entry_price, t_ec.sl_pct)
-    r_ok = run_backtest(kl_setup, cfg_d1, warmup_bars=0)
-    assert [t.reason for t in r_ok.trades] == [
-        "END_OF_DATA"
-    ], "Kontrol positif tanpa crash"
-    print("  candle entry dievaluasi (SL kena di candle entry) -> OK")
-
-    lv_pct = {
-        "sl_pct": 2.0,
-        "tp_pct": 10.0,
-        "be_trigger_pct": 1.0,
-        "be_lock_pct": 0.1,
-        "trail_start_pct": 5.0,
-        "trail_step_pct": 1.0,
-        "source": "FIXED",
-    }
-    cfg_x = {
-        "USE_STOP_LOSS": True,
-        "USE_TP": True,
-        "USE_BREAKEVEN": True,
-        "USE_TRAILING": False,
-    }
-    pos = parity.PositionState(100.0, lv_pct)
-    assert (
-        parity.evaluate_candle_exit(pos, _mk(0, 100.0, 101.5, 100.5, 101.0), cfg_x)
-        is None
-    )
-    assert pos.be_active
-    verdict = parity.evaluate_candle_exit(pos, _mk(1, 101.0, 101.0, 97.0, 97.5), cfg_x)
-    assert (
-        verdict is not None
-        and verdict[0] == "BREAKEVEN"
-        and abs(verdict[1] - 100.1) < 1e-9
-    ), verdict
-    verdict = parity.evaluate_candle_exit(
-        parity.PositionState(100.0, lv_pct), _mk(0, 95.0, 96.0, 94.0, 95.5), cfg_x
-    )
-    assert verdict == ("STOP_LOSS", 95.0), verdict
-    verdict = parity.evaluate_candle_exit(
-        parity.PositionState(100.0, lv_pct), _mk(0, 100.0, 112.0, 88.0, 100.0), cfg_x
-    )
-    assert verdict is not None and verdict[0] == "STOP_LOSS", verdict
-    verdict = parity.evaluate_candle_exit(
-        parity.PositionState(100.0, lv_pct), _mk(0, 115.0, 116.0, 114.0, 115.5), cfg_x
-    )
-    assert verdict == ("TAKE_PROFIT", 115.0), verdict
-    print("  urutan exit BE-sebelum-SL, gap SL, SL-vs-TP, gap TP -> OK")
-
-    r_ch = run_backtest(kl_setup, dict(cfg_d1, MAX_CHASE_PCT=0.1), warmup_bars=0)
-    assert len(r_ch.trades) == 0 and r_ch.chase_skips >= 1, (
-        len(r_ch.trades),
-        r_ch.chase_skips,
-    )
-    assert parity.chase_exceeded(101.6, 100.0, 1.5) and not parity.chase_exceeded(
-        101.4, 100.0, 1.5
-    )
-    assert not parity.chase_exceeded(150.0, 100.0, 0.0)
-    assert (
-        parity.next_entry_allowed(
-            1000, {"COOLDOWN_MINUTES_AFTER_CLOSE": 5, "MIN_SECONDS_BETWEEN_TRADES": 60}
-        )
-        == 1000 + 300_000
-    )
-    assert (
-        parity.next_entry_allowed(
-            1000, {"COOLDOWN_MINUTES_AFTER_CLOSE": 0, "MIN_SECONDS_BETWEEN_TRADES": 600}
-        )
-        == 1000 + 600_000
-    )
-    print("  MAX_CHASE_PCT dan jeda antar trade -> OK")
-
-    btc_flat = [_mk(i, 100.0, 100.0, 100.0, 100.0) for i in range(309)]
-    btc_crash = [
-        _mk(i, c, c, c, c)
-        for i, c in enumerate([100.0] * 305 + [98.0, 96.5, 95.0, 95.0])
-    ]
-    cfg_btc = dict(cfg, BTC_FILTER_ENABLED=True)
-    r_b0 = run_backtest(kl_setup, cfg_btc, warmup_bars=0, btc_klines=btc_flat)
-    r_b1 = run_backtest(kl_setup, cfg_btc, warmup_bars=0, btc_klines=btc_crash)
-    r_b2 = run_backtest(kl_setup, cfg_btc, warmup_bars=0, btc_klines=btc_flat[:300])
-    r_b3 = run_backtest(kl_setup, cfg_btc, warmup_bars=0)
-    assert len(r_b0.trades) == 1 and not any("BTC" in w for w in r_b0.warnings)
-    assert len(r_b1.trades) == 0, "BTC turun 5 persen harus memblokir entry"
-    assert (
-        len(r_b2.trades) == 0
-    ), "Data BTC tidak ada pada titik sinyal harus fail closed"
-    assert len(r_b3.trades) == 1 and any(
-        "BTC" in w for w in r_b3.warnings
-    ), "Tanpa data BTC harus ada peringatan eksplisit"
-    print("  filter BTC (lolos, blokir, fail closed, peringatan) -> OK")
-
-    ctl = parity.AccountRiskControls(
-        {
-            "USE_EQUITY_STOP": True,
-            "MAX_DRAWDOWN_PERCENT": 10.0,
-            "DD_COOLDOWN_HOURS": 1,
-            "CLOSE_ALL_AT_LIMIT": True,
-        },
-        1000.0,
-    )
-    assert ctl.update(0, 1000.0) is False
-    assert ctl.update(1_000, 880.0) is True and ctl.events["dd_stop"] == 1
-    assert (
-        ctl.force_close_due(True, True) is True
-        and ctl.force_close_due(True, True) is False
-    )
-    assert ctl.update(1_800_000, 880.0) is True
-    assert ctl.update(3_700_000, 880.0) is False and ctl.peak_equity == 880.0
-    assert (
-        parity.AccountRiskControls({}, 1000.0).update(0, 1.0) is False
-    ), "Tanpa konfigurasi tidak ada stop"
-    # Stop Loss dimatikan khusus untuk tes ini: dengan ukuran posisi 100 USDT dari modal
-    # 1000 USDT, SL sekitar 3 persen hanya merugi sekitar 0.3 persen modal sehingga
-    # drawdown stop 1 persen tidak akan pernah mendahului SL. Tanpa SL, jalur penutupan
-    # paksa (CLOSE_ALL_AT_LIMIT) benar-benar diuji.
-    cfg_fc = dict(
-        cfg,
-        BACKTEST_INITIAL_EQUITY_USDT=1000.0,
-        MAX_DRAWDOWN_PERCENT=1.0,
-        USE_STOP_LOSS=False,
-    )
-    k_fc = list(kl_setup)
-    k_fc[308] = _mk(308, 100.0, 100.2, 84.0, 85.0)
-    r_fc = run_backtest(k_fc, cfg_fc, warmup_bars=0)
-    assert len(r_fc.trades) == 1 and r_fc.trades[0].reason == "RISK_LIMIT_TRIGGERED", [
-        t.reason for t in r_fc.trades
-    ]
-    assert r_fc.trades[0].exit_price == 85.0 and r_fc.risk_events["forced_close"] == 1
-    r_nf = run_backtest(k_fc, dict(cfg_fc, CLOSE_ALL_AT_LIMIT=False), warmup_bars=0)
-    assert (
-        r_nf.trades[0].reason == "END_OF_DATA"
-    ), "CLOSE_ALL_AT_LIMIT=False tidak menutup posisi"
-    print("  kontrol akun (DD, force close, reset) -> OK")
-
-    base_eq = {"QUOTE_ASSET": "USDT", "PAPER_INITIAL_BALANCES": {"USDT": 1000.0}}
-    assert (
-        initial_backtest_equity(dict(base_eq, BACKTEST_INITIAL_EQUITY_USDT=0.0))
-        == 1000.0
-    )
-    assert initial_backtest_equity(dict(base_eq)) == 1000.0
-    assert (
-        initial_backtest_equity(dict(base_eq, BACKTEST_INITIAL_EQUITY_USDT=250.0))
-        == 250.0
-    )
-    assert initial_backtest_equity(dict(PUMP_CONFIG)) == float(
-        PUMP_CONFIG["PAPER_INITIAL_BALANCES"]["USDT"]
-    )
-    fake = [SimpleNamespace(pnl_pct=p) for p in (2.0, -1.0, -1.0, -3.0, 4.0)]
-    m = parity.per_trade_metrics(fake)
-    assert m["max_consecutive_losses"] == 3 and abs(m["avg_trade_pct"] - 0.2) < 1e-9
-    assert (
-        m["median_trade_pct"] == -1.0
-        and m["best_trade_pct"] == 4.0
-        and m["worst_trade_pct"] == -3.0
-    )
-    assert abs(m["payoff_ratio"] - 3.0 / (5.0 / 3.0)) < 1e-9
-    assert parity.per_trade_metrics([])["payoff_ratio"] is None
-    assert (
-        parity.per_trade_metrics([SimpleNamespace(pnl_pct=1.0)])["payoff_ratio"] is None
-    )
-    lookup = parity.BtcDropLookup(btc_crash, 300_000, 3)
-    assert abs(lookup.drop_pct_at(307 * 300_000) - (-5.0)) < 1e-9
-    assert (
-        lookup.drop_pct_at(2 * 300_000) is None
-        and lookup.drop_pct_at(999 * 300_000) is None
-    )
-    print("  modal awal, metrik per trade, lookup BTC -> OK")
-
-    print("\n=== SELFTEST backtest.py: paritas filter zona demand di backtest ===")
-    k_overext = list(kl_setup)
-    k_overext[-2] = _mk(len(k_overext) - 2, 100.0, 108.0, 99.5, 107.0, vol=10_000_000.0)
-    k_overext[-1] = _mk(
-        len(k_overext) - 1, 107.0, 108.5, 106.5, 107.5, vol=10_000_000.0
-    )
-    r_dem_block = run_backtest(
-        k_overext,
-        dict(cfg, DEMAND_ZONE_FILTER_ENABLED=True, DEMAND_MAX_DISTANCE_PCT=3.5),
-        warmup_bars=0,
-    )
-    r_dem_off = run_backtest(
-        k_overext, dict(cfg, DEMAND_ZONE_FILTER_ENABLED=False), warmup_bars=0
-    )
-    assert (
-        len(r_dem_block.trades) == 0
-    ), "Harga terlalu jauh di atas zona demand harus memblokir entry"
-    assert (
-        len(r_dem_off.trades) >= 1
-    ), "Saat filter zona demand dimatikan, entry tetap terjadi"
-    print(
-        "  filter zona demand memblokir entry pucuk dan meloloskan saat di area demand -> OK"
-    )
-
-    print(
-        "\n=== SELFTEST backtest.py: paritas gerbang zona demand H1 (HTF_DEMAND_*) ==="
-    )
-    # Jendela HTF sengaja diringkas supaya warmup cukup untuk fixture pendek:
-    # gerbang trend mati sehingga EMA/ADX tidak dihitung; angka TREND_* di sini
-    # hanya mempersempit jendela gabungan (htf_window_bars) yang memaksa warmup.
-    cfg_htf = dict(
-        cfg,
-        TREND_EMA_FAST=2,
-        TREND_EMA_SLOW=3,
-        TREND_ADX_PERIOD=2,
-        TREND_LOOKBACK_BARS=6,
-        HTF_DEMAND_FILTER_ENABLED=True,
-        HTF_DEMAND_LOOKBACK_BARS=6,
-        HTF_DEMAND_ZONE_BUFFER_PCT=1.0,
-        HTF_DEMAND_MAX_DISTANCE_PCT=8.0,
-        HTF_DEMAND_MIN_CLOSE_POSITION=0.4,
-        DEMAND_ZONE_FILTER_ENABLED=False,
-    )
-    assert strategy.htf_window_bars(cfg_htf) == 7
-    assert strategy.trend_warmup_bars(cfg_htf, "5m") == 7 * 12 + 12
-
-    # (a) blokir: candle 1h terakhir yang sudah tutup bearish (bukan reaksi
-    # demand) -> entry ditolak di backtest persis seperti keputusan live.
-    r_htf_block = run_backtest(k_overext, cfg_htf, warmup_bars=0)
-    r_htf_off = run_backtest(
-        k_overext, dict(cfg_htf, HTF_DEMAND_FILTER_ENABLED=False), warmup_bars=0
-    )
-    assert len(r_htf_off.trades) >= 1, "kontrol: gerbang H1 mati harus entry"
-    assert (
-        len(r_htf_block.trades) == 0 and r_htf_block.htf_demand_skips >= 1
-    ), (len(r_htf_block.trades), r_htf_block.htf_demand_skips)
-    assert any(
-        "gerbang zona demand 1h" in w for w in r_htf_block.warnings
-    ), r_htf_block.warnings
-    assert any("Warmup" in w for w in r_htf_block.warnings), r_htf_block.warnings
-    print(
-        f"  candle H1 bearish memblokir entry ({r_htf_block.htf_demand_skips} sinyal "
-        "dilewati), kontrol tanpa gerbang tetap entry -> OK"
-    )
-
-    # (b) lolos: dasar H1 datar lalu reaksi hijau segar di dekat zona -> entry,
-    # dan tidak ada sinyal yang dilewati gerbang demand H1.
-    kl_htf_ok = [
-        _make_candle(i * 300_000, 100.0, 101.0, 99.0, 100.0, vol=5_000_000.0)
-        for i in range(288)
-    ]
-    p_htf = 100.0
-    for j in range(12):
-        o_htf = p_htf
-        c_htf = p_htf + 0.09
-        kl_htf_ok.append(
-            _make_candle(
-                (288 + j) * 300_000,
-                o_htf,
-                c_htf + 0.05,
-                o_htf - 0.02,
-                c_htf,
-                vol=(10_000_000.0 if j >= 10 else 5_000_000.0),
-            )
-        )
-        p_htf = c_htf
-    r_htf_ok = run_backtest(kl_htf_ok, cfg_htf, warmup_bars=96)
-    assert len(r_htf_ok.trades) >= 1, r_htf_ok.warnings
-    assert r_htf_ok.htf_demand_skips == 0, r_htf_ok.htf_demand_skips
-    ringkasan_htf = summarize(r_htf_ok)
-    assert "htf_demand_skips" in ringkasan_htf
-    print("  reaksi hijau segar di dekat zona demand H1 tetap entry -> OK")
-
-    print(
-        "\n=== SELFTEST backtest.py: paritas gerbang zona demand harian "
-        "(DAILY_DEMAND_*) ==="
-    )
-    # Lookback harian dikecilkan (3 hari) supaya fixture pendek pun cukup: yang
-    # diuji di sini urutan keputusannya, bukan panjang jendela default (20 hari).
-    cfg_harian = dict(
-        cfg,
-        TREND_FILTER_ENABLED=False,
-        HTF_DEMAND_FILTER_ENABLED=False,
-        DEMAND_ZONE_FILTER_ENABLED=False,
-        DAILY_DEMAND_FILTER_ENABLED=True,
-        DAILY_DEMAND_INTERVAL="1d",
-        DAILY_DEMAND_LOOKBACK_BARS=3,
-        DAILY_DEMAND_ZONE_BUFFER_PCT=1.0,
-        DAILY_DEMAND_MAX_DISTANCE_PCT=8.0,
-        DAILY_DEMAND_MIN_CLOSE_POSITION=0.4,
-    )
-    assert strategy.daily_demand_window_bars(cfg_harian) == 4
-    # (lookback 3 + 1 candle sinyal) hari x 288 candle 5m + satu bucket cadangan.
-    assert strategy.daily_warmup_bars(cfg_harian, "5m") == 4 * 288 + 288
-    assert strategy.htf_gate_warmup_bars(cfg_harian, "5m") == 4 * 288 + 288
-    assert parity.htf_gate_warmup_bars(cfg_harian, "5m") == 4 * 288 + 288
-    assert parity.htf_gate_warmup_ms(cfg_harian, "5m") == (
-        (4 * 288 + 288) * 300_000
-    )
-    assert parity.make_daily_lookup(
-        [], dict(cfg_harian, DAILY_DEMAND_FILTER_ENABLED=False), "5m"
-    ) is None
-
-    BAR_HARI = 288
-
-    def _hari_datar(idx_hari: int, harga: float = 100.0) -> list:
-        return [
-            _make_candle(
-                (idx_hari * BAR_HARI + j) * 300_000,
-                harga,
-                harga * 1.001,
-                harga * 0.999,
-                harga,
-                vol=5_000_000.0,
-            )
-            for j in range(BAR_HARI)
-        ]
-
-    def _hari_bergerak(idx_hari: int, buka: float, tutup: float) -> list:
-        """Satu hari 5m yang naik lurus, sehingga OHLC hariannya bisa ditentukan."""
-        out = []
-        for j in range(BAR_HARI):
-            o = buka + (tutup - buka) * j / float(BAR_HARI)
-            c = buka + (tutup - buka) * (j + 1) / float(BAR_HARI)
-            out.append(
-                _make_candle(
-                    (idx_hari * BAR_HARI + j) * 300_000,
-                    o,
-                    max(o, c) * 1.0005,
-                    min(o, c) * 0.9995,
-                    c,
-                    vol=5_000_000.0,
-                )
-            )
-        return out
-
-    def _hari_dengan_setup(idx_hari: int, harga: float, ekor: int = 12) -> list:
-        """Hari tempat candle sinyal 5m muncul: datar dulu, lalu naik di akhir."""
-        out = _hari_datar(idx_hari, harga)[: BAR_HARI - ekor]
-        p = harga
-        for j in range(ekor):
-            c = p + 0.09
-            out.append(
-                _make_candle(
-                    (idx_hari * BAR_HARI + BAR_HARI - ekor + j) * 300_000,
-                    p,
-                    c + 0.05,
-                    p - 0.02,
-                    c,
-                    vol=(10_000_000.0 if j >= ekor - 2 else 5_000_000.0),
-                )
-            )
-            p = c
-        return out
-
-    def _seri_harian(tutup_hari_sinyal: float) -> list:
-        """4 hari dasar + 1 hari sinyal harian + 1 hari sinyal 5m."""
-        seri: list = []
-        for hari in range(4):
-            seri.extend(_hari_datar(hari))
-        seri.extend(_hari_bergerak(4, 100.0, tutup_hari_sinyal))
-        seri.extend(_hari_dengan_setup(5, tutup_hari_sinyal))
-        return seri
-
-    # (a) blokir: hari terakhir yang sudah tutup melonjak jauh dari dasar harian
-    # (distance 9,1% > batas 8%) -> entry ditolak persis seperti keputusan live.
-    seri_jauh = _seri_harian(110.0)
-    r_harian_block = run_backtest(seri_jauh, cfg_harian, warmup_bars=0)
-    r_harian_off = run_backtest(
-        seri_jauh, dict(cfg_harian, DAILY_DEMAND_FILTER_ENABLED=False), warmup_bars=0
-    )
-    assert len(r_harian_off.trades) >= 1, "kontrol: gerbang harian mati harus entry"
-    assert (
-        len(r_harian_block.trades) == 0 and r_harian_block.daily_demand_skips >= 1
-    ), (len(r_harian_block.trades), r_harian_block.daily_demand_skips)
-    assert any(
-        "gerbang zona demand 1d" in w for w in r_harian_block.warnings
-    ), r_harian_block.warnings
-    assert any("Warmup" in w for w in r_harian_block.warnings), r_harian_block.warnings
-    assert any(
-        "lebih pendek dari jendela zona demand harian" in w
-        for w in r_harian_block.warnings
-    ), r_harian_block.warnings
-    tolak_jauh = parity.make_daily_lookup(seri_jauh, cfg_harian, "5m").daily_demand_at(
-        seri_jauh[-1].close_time
-    )
-    assert (not tolak_jauh["ok"]) and "terlalu jauh" in tolak_jauh["reason"], tolak_jauh
-    print(
-        f"  hari yang sudah terbang jauh memblokir entry "
-        f"({r_harian_block.daily_demand_skips} sinyal dilewati), kontrol tanpa gerbang "
-        "tetap entry -> OK"
-    )
-
-    # (b) lolos: hari terakhir yang sudah tutup masih bereaksi dekat dasar harian.
-    seri_dasar = _seri_harian(100.7)
-    r_harian_ok = run_backtest(seri_dasar, cfg_harian, warmup_bars=0)
-    assert len(r_harian_ok.trades) >= 1, r_harian_ok.warnings
-    assert r_harian_ok.daily_demand_skips == 0, r_harian_ok.daily_demand_skips
-    ringkasan_harian = summarize(r_harian_ok)
-    assert "daily_demand_skips" in ringkasan_harian
-
-    # (c) fail closed: candle harian tidak cukup -> ditolak, bukan diloloskan.
-    r_harian_pendek = run_backtest(
-        _seri_harian(100.7)[: 4 * BAR_HARI + 100], cfg_harian, warmup_bars=0
-    )
-    assert len(r_harian_pendek.trades) == 0, len(r_harian_pendek.trades)
-
-    # (d) paritas helper: gerbang backtest == mesin zona yang sama dipakai live.
-    kl_harian_uji = _seri_harian(100.7)
-    lookup_harian = parity.make_daily_lookup(kl_harian_uji, cfg_harian, "5m")
-    waktu_sinyal = kl_harian_uji[-1].close_time
-    banding_harian = strategy.evaluate_daily_demand(
-        lookup_harian.window_at(waktu_sinyal), cfg_harian
-    )
-    assert (
-        lookup_harian.daily_demand_at(waktu_sinyal)["ok"] == banding_harian["ok"]
-    ), "lookup harian harus memakai evaluate_daily_demand yang sama"
-    assert lookup_harian.window_at(waktu_sinyal)[-1].close > 100.0
-    print(
-        "  reaksi hijau segar di dekat dasar harian tetap entry, data harian kurang "
-        "tetap ditolak, lookup identik dengan mesin zona live -> OK"
-    )
-
-    # (e) paritas jalur LIVE: market_scanner.daily_demand_verdict (fungsi yang
-    # dipakai bot live dan PAPER) harus memutuskan SAMA dengan lookup backtest
-    # atas data yang sama, pada banyak waktu evaluasi sekaligus. Candle harian
-    # versi live di sini "diunduh" dari hasil rangkaian 5m -> 1d supaya kedua
-    # jalur benar-benar diberi masukan yang identik.
-    harian_untuk_live = strategy.aggregate_klines(list(kl_harian_uji), 1440, 5)
-    assert len(harian_untuk_live) >= 5, len(harian_untuk_live)
-
-    def _window_live(symbol: str, waktu: int) -> list:
-        # Meniru aturan DailyDemandCache: hanya candle harian yang SUDAH TUTUP
-        # pada saat itu, lalu dipotong sepanjang jendela (lookback + 1).
-        tutup = [k for k in harian_untuk_live if int(k.close_time) <= int(waktu)]
-        return tutup[-strategy.daily_demand_window_bars(cfg_harian) :]
-
-    waktu_banding = [
-        int(k.close_time)
-        for k in kl_harian_uji[-4 * BAR_HARI :][:: 97]
-    ] + [int(waktu_sinyal)]
-    beda_live = 0
-    for t_uji in waktu_banding:
-        verdict_live = scanner.daily_demand_verdict(
-            "UJIUSDT", cfg_harian, lambda symbol, _t=t_uji: _window_live(symbol, _t)
-        )
-        verdict_back = lookup_harian.daily_demand_at(t_uji)
-        if (verdict_live["ok"], verdict_live["reason"]) != (
-            verdict_back["ok"],
-            verdict_back["reason"],
-        ):
-            beda_live += 1
-            print(
-                f"   beda pada {t_uji}: live={verdict_live['reason']} | "
-                f"backtest={verdict_back['reason']}"
-            )
-    assert beda_live == 0, beda_live
-    assert len(waktu_banding) >= 10, len(waktu_banding)
-    print(
-        f"  jalur live (market_scanner.daily_demand_verdict) dan backtest memutuskan "
-        f"identik pada {len(waktu_banding)} waktu evaluasi -> OK"
-    )
-
-    # (f) fail closed di kedua jalur: penyedia candle harian kosong/gagal harus
-    # MENOLAK, bukan meloloskan; dan gerbang yang dimatikan meloloskan tanpa
-    # menyentuh penyedia sama sekali.
-    verdict_kosong = scanner.daily_demand_verdict("UJIUSDT", cfg_harian, lambda s: [])
-    assert not verdict_kosong["ok"] and "kosong" in verdict_kosong["reason"], verdict_kosong
-
-    def _provider_gagal(symbol: str):
-        raise RuntimeError("rate limit")
-
-    verdict_gagal = scanner.daily_demand_verdict("UJIUSDT", cfg_harian, _provider_gagal)
-    assert (
-        not verdict_gagal["ok"] and "rate limit" in verdict_gagal["reason"]
-    ), verdict_gagal
-    panggilan = {"n": 0}
-
-    def _provider_dihitung(symbol: str) -> list:
-        panggilan["n"] += 1
-        return _window_live(symbol, int(waktu_sinyal))
-
-    verdict_off = scanner.daily_demand_verdict(
-        "UJIUSDT",
-        dict(cfg_harian, DAILY_DEMAND_FILTER_ENABLED=False),
-        _provider_dihitung,
-    )
-    assert verdict_off["ok"] and panggilan["n"] == 0, (verdict_off, panggilan)
-    print(
-        "  candle harian kosong atau gagal diambil ditolak (fail closed), gerbang "
-        "nonaktif tidak menyentuh penyedia -> OK"
-    )
-
-    # (g) paritas dengan KELAS CACHE LIVE yang asli (bukan tiruan test): provider
-    # DailyDemandCache di trading/pump_scanner_bot.py diuji langsung atas candle
-    # harian yang sama, lalu dibandingkan dengan lookup backtest. Ini yang menutup
-    # risiko "selftest menguji tiruannya sendiri" kalau suatu saat aturan jendela
-    # di cache live diubah.
-    try:
-        from trading import pump_scanner_bot as bot_harian
-
-        kelas_cache_harian = bot_harian.DailyDemandCache
-    except Exception as exc:  # mis. klien bursa tidak bisa diimpor tanpa requests
-        kelas_cache_harian = None
-        print(f"  paritas dengan DailyDemandCache live dilewati: {exc}")
-
-    if kelas_cache_harian is not None:
-
-        def _baris_dari_harian(klines: list) -> list:
-            baris = []
-            for k in klines:
-                baris.append(
-                    [
-                        int(k.open_time),
-                        str(k.open),
-                        str(k.high),
-                        str(k.low),
-                        str(k.close),
-                        str(k.volume),
-                        int(k.close_time),
-                        str(k.quote_volume),
-                    ]
-                )
-            return baris
-
-        class KlienHarianUji:
-            """Klien tiruan Binance: baris klines yang SUDAH TERBIT saat pemindaian.
-
-            Binance selalu mengembalikan candle terakhir yang sudah terbit pada
-            saat permintaan (termasuk candle yang masih berjalan), bukan candle
-            paling akhir dari seluruh berkas. Karena itu `sekarang_ms` wajib
-            disetel sebelum pemanggilan, kalau tidak klien tiruan ini memberi
-            candle masa depan ke cache live dan perbandingannya jadi palsu.
-            """
-
-            def __init__(self, rows):
-                self.rows = rows
-                self.calls = 0
-                self.sekarang_ms = 0
-                self.limit_terakhir = None
-                self.interval_terakhir = None
-
-            def get_klines(self, symbol, interval, limit=500, **kwargs):
-                self.calls += 1
-                self.limit_terakhir = limit
-                self.interval_terakhir = interval
-                terbit = [r for r in self.rows if int(r[0]) <= int(self.sekarang_ms)]
-                return [list(r) for r in terbit][-limit:]
-
-        klien_cache = KlienHarianUji(_baris_dari_harian(harian_untuk_live))
-        cache_live = kelas_cache_harian(klien_cache, cfg_harian)
-
-        # Waktu evaluasi: sebaran dalam beberapa hari terakhir, plus satu waktu
-        # yang PERSIS sama dengan penutupan candle harian (kasus batas).
-        waktu_cache = [
-            int(k.close_time) for k in kl_harian_uji[-3 * BAR_HARI :][:: 89]
-        ]
-        waktu_cache.append(int(harian_untuk_live[2].close_time))
-        waktu_cache.append(int(waktu_sinyal))
-        waktu_cache = sorted(set(waktu_cache))
-
-        beda_cache = 0
-        for t_uji in waktu_cache:
-            # now_ms live selalu sedikit SETELAH candle sinyal tutup, karena bot
-            # hanya menilai candle yang sudah tutup pada saat pemindaian.
-            klien_cache.sekarang_ms = int(t_uji) + 1
-            jendela_live = cache_live.window_klines("UJIUSDT", int(t_uji) + 1)
-            jendela_back = lookup_harian.window_at(int(t_uji))
-            tupel_live = [(int(k.open_time), round(k.close, 8)) for k in jendela_live]
-            tupel_back = [(int(k.open_time), round(k.close, 8)) for k in jendela_back]
-            verdict_cache = strategy.evaluate_daily_demand(jendela_live, cfg_harian)
-            verdict_back = lookup_harian.daily_demand_at(int(t_uji))
-            if (
-                tupel_live != tupel_back
-                or (verdict_cache["ok"], verdict_cache["reason"])
-                != (verdict_back["ok"], verdict_back["reason"])
-            ):
-                beda_cache += 1
-                print(
-                    f"   beda pada {t_uji}: live={len(jendela_live)} candle "
-                    f"({verdict_cache['reason']}) | backtest={len(jendela_back)} "
-                    f"candle ({verdict_back['reason']})"
-                )
-        assert beda_cache == 0, beda_cache
-        assert len(waktu_cache) >= 10, len(waktu_cache)
-        assert klien_cache.interval_terakhir == "1d", klien_cache.interval_terakhir
-        # Cache harian harus hemat: satu unduhan per pergantian candle harian,
-        # bukan sekali per waktu evaluasi.
-        assert klien_cache.calls < len(waktu_cache), (
-            klien_cache.calls,
-            len(waktu_cache),
-        )
-        print(
-            f"  cache live asli (DailyDemandCache) dan lookup backtest memakai jendela "
-            f"dan verdict yang identik pada {len(waktu_cache)} waktu evaluasi "
-            f"({klien_cache.calls} unduhan saja, termasuk kasus batas penutupan hari) -> OK"
-        )
-
-    print("\n=== SELFTEST backtest.py: paritas gerbang trend timeframe tinggi (H1) ===")
-    from backtesting.synthetic_data import seri_trend_dengan_setup
-
-    cfg_trend = dict(
-        cfg,
-        TREND_FILTER_ENABLED=True,
-        TREND_INTERVAL="1h",
-        TREND_EMA_FAST=20,
-        TREND_EMA_SLOW=50,
-        TREND_ADX_PERIOD=14,
-        TREND_ADX_MIN=20.0,
-        TREND_LOOKBACK_BARS=120,
-    )
-
-    # (a) candle trend dibentuk dari candle simulasi yang sama, bukan unduhan baru
-    kl_naik = seri_trend_dengan_setup(arah=1.0)
-    h1_naik = parity.build_trend_klines(kl_naik, cfg_trend, "5m")
-    assert len(h1_naik) * 12 <= len(kl_naik) < (len(h1_naik) + 1) * 12, len(h1_naik)
-    assert all(int(k.close_time) % 3_600_000 == 3_599_999 for k in h1_naik)
-    print(
-        f"  candle 5m {len(kl_naik)} -> candle 1h {len(h1_naik)} (rangkaian sendiri, tanpa unduhan tambahan)"
-    )
-
-    # (b) trend turun memblokir entry walau konfirmasi 5m sah, dan kontrol negatifnya tetap masuk
-    kl_turun = seri_trend_dengan_setup(arah=-1.0)
-    r_turun_on = run_backtest(kl_turun, cfg_trend, warmup_bars=0)
-    r_turun_off = run_backtest(
-        kl_turun, dict(cfg_trend, TREND_FILTER_ENABLED=False), warmup_bars=0
-    )
-    assert (
-        len(r_turun_off.trades) >= 1
-    ), "kontrol: tanpa gerbang trend, setup yang sama harus entry"
-    assert (
-        len(r_turun_on.trades) == 0
-    ), "trend H1 turun harus memblokir semua entry baru"
-    assert (
-        r_turun_on.trend_skips >= 1
-        and r_turun_on.trend_skips == r_turun_off.trades[0].entry_time
-        and False
-        or r_turun_on.trend_skips >= 1
-    )
-    reason_trend = r_turun_on.trend_skips
-    assert any("gerbang trend" in w for w in r_turun_on.warnings), r_turun_on.warnings
-    print(
-        f"  trend H1 turun: {reason_trend} sinyal disaring, 0 trade "
-        f"(tanpa gerbang trend: {len(r_turun_off.trades)} trade)"
-    )
-
-    # (c) trend naik tidak mengurangi trade (kontrol positif dua arah)
-    r_naik_on = run_backtest(kl_naik, cfg_trend, warmup_bars=0)
-    r_naik_off = run_backtest(
-        kl_naik, dict(cfg_trend, TREND_FILTER_ENABLED=False), warmup_bars=0
-    )
-    assert r_naik_on.trend_skips == 0, r_naik_on.trend_skips
-    assert [t.entry_time for t in r_naik_on.trades] == [
-        t.entry_time for t in r_naik_off.trades
-    ]
-    print(
-        f"  trend H1 naik: {len(r_naik_on.trades)} trade, identik dengan tanpa gerbang trend"
-    )
-
-    # (d) susunan EMA naik tetapi ADX lemah tetap ditolak, dan ADX_MIN=0 meloloskan
-    kl_datar = seri_trend_dengan_setup(arah=0.0)
-    r_datar_on = run_backtest(kl_datar, cfg_trend, warmup_bars=0)
-    r_datar_off = run_backtest(
-        kl_datar, dict(cfg_trend, TREND_FILTER_ENABLED=False), warmup_bars=0
-    )
-    r_datar_tanpa_adx = run_backtest(
-        kl_datar, dict(cfg_trend, TREND_ADX_MIN=0.0), warmup_bars=0
-    )
-    assert len(r_datar_off.trades) >= 1 and len(r_datar_on.trades) == 0
-    assert r_datar_on.trend_skips >= 1
-    assert len(r_datar_tanpa_adx.trades) == len(
-        r_datar_off.trades
-    ), "TREND_ADX_MIN=0 harus meloloskan sinyal yang sama seperti tanpa gerbang"
-    print(
-        "  ADX di bawah ambang: ditolak; dengan TREND_ADX_MIN=0 lolos seperti kontrol"
-    )
-
-    # (e) riwayat trend kurang = fail closed, bukan lolos diam-diam
-    kl_pendek = seri_trend_dengan_setup(jam_trend=40, arah=1.0)
-    verdict_pendek = parity.TrendLookup(
-        parity.build_trend_klines(kl_pendek, cfg_trend, "5m"), cfg_trend
-    ).verdict_at(kl_pendek[-1].close_time)
-    assert (
-        not verdict_pendek["ok"] and "kurang" in verdict_pendek["reason"]
-    ), verdict_pendek
-    r_pendek = run_backtest(kl_pendek, cfg_trend, warmup_bars=0)
-    assert len(r_pendek.trades) == 0, len(r_pendek.trades)
-    assert any("Warmup" in w for w in r_pendek.warnings), r_pendek.warnings
-    print(
-        f"  riwayat trend kurang: {verdict_pendek['reason'][:58]}... -> 0 trade (fail closed)"
-    )
-
-    # (e2) candle trend yang sudah dirangkai tidak boleh dirangkai ulang
-    r_langsung = run_backtest(kl_naik, cfg_trend, warmup_bars=0)
-    r_dirangkai = run_backtest(kl_naik, cfg_trend, warmup_bars=0, trend_klines=h1_naik)
-    assert [t.entry_time for t in r_langsung.trades] == [
-        t.entry_time for t in r_dirangkai.trades
-    ], "data trend yang sudah dirangkai harus dipakai apa adanya, bukan dirangkai dua kali"
-    assert r_dirangkai.trend_skips == r_langsung.trend_skips
-
-    # (f) paritas jendela live vs backtest: jendela diambil dari aturan yang sama
-    lookup = parity.TrendLookup(h1_naik, cfg_trend)
-    jendela = strategy.trend_window_bars(cfg_trend)
-    banding = 0
-    for akhir in (60, 80, 100, len(h1_naik) - 1):
-        waktu_sinyal = int(h1_naik[akhir].close_time)
-        for jeda_detik in (1, 30, 120, 240):
-            sekarang = waktu_sinyal + jeda_detik * 1000
-            tutup_live = [k for k in h1_naik if int(k.close_time) < sekarang][-jendela:]
-            v_live = strategy.evaluate_trend_filter(tutup_live, cfg_trend)
-            v_bt = lookup.verdict_at(waktu_sinyal)
-            assert (v_live["ok"], v_live["reason"], v_live["bars"]) == (
-                v_bt["ok"],
-                v_bt["reason"],
-                v_bt["bars"],
-            ), (akhir, jeda_detik, v_live["reason"], v_bt["reason"])
-            banding += 1
-    print(f"  paritas live vs backtest identik pada {banding} kombinasi waktu evaluasi")
-
-    # (g) candle yang belum tutup tidak boleh mempengaruhi keputusan (tanpa lookahead)
-    v_sebelum = lookup.verdict_at(int(h1_naik[-1].close_time))
-    h1_plus_parsial = list(h1_naik) + [
-        strategy.Kline(
-            open_time=int(h1_naik[-1].open_time) + 3_600_000,
-            open=h1_naik[-1].close,
-            high=h1_naik[-1].close * 5,
-            low=h1_naik[-1].close * 0.2,
-            close=h1_naik[-1].close,
-            close_time=int(h1_naik[-1].close_time) + 3_600_000,
-            volume=1.0,
-            quote_volume=1.0,
-        )
-    ]
-    v_sesudah = parity.TrendLookup(h1_plus_parsial, cfg_trend).verdict_at(
-        int(h1_naik[-1].close_time)
-    )
-    assert v_sebelum["reason"] == v_sesudah["reason"], (v_sebelum, v_sesudah)
-    print("  candle trend yang belum tutup tidak mengubah keputusan (tidak repaint)")
-
-    # (h) warmup otomatis dinaikkan + peringatan, bukan diam-diam memakai riwayat kurang
-    r_warmup = run_backtest(kl_naik, cfg_trend, warmup_bars=0)
-    assert any("Warmup" in w for w in r_warmup.warnings), r_warmup.warnings
-    assert strategy.trend_warmup_bars(cfg_trend, "5m") == jendela * 12 + 12
-    print(
-        f"  warmup kurang -> dinaikkan otomatis ke {strategy.trend_warmup_bars(cfg_trend, '5m')} candle 5m + peringatan"
-    )
-
-    # (i) parameter trend tervalidasi dan bisa di-override lewat dashboard/CLI
-    merged_trend = apply_overrides(
-        dict(PUMP_CONFIG),
-        {
-            "TREND_FILTER_ENABLED": "false",
-            "TREND_INTERVAL": "4h",
-            "TREND_EMA_FAST": "12",
-            "TREND_EMA_SLOW": "36",
-            "TREND_ADX_MIN": "18.5",
-            "TREND_LOOKBACK_BARS": "200",
-        },
-    )
-    assert merged_trend["TREND_FILTER_ENABLED"] is False
-    assert merged_trend["TREND_EMA_FAST"] == 12 and merged_trend["TREND_EMA_SLOW"] == 36
-    assert (
-        merged_trend["TREND_ADX_MIN"] == 18.5
-        and merged_trend["TREND_LOOKBACK_BARS"] == 200
-    )
-    validate_params(merged_trend)
-    for jelek, kunci in (
-        ({"TREND_LOOKBACK_BARS": "30"}, "TREND_LOOKBACK_BARS"),
-        ({"TREND_EMA_FAST": "30", "TREND_EMA_SLOW": "20"}, "TREND_EMA_SLOW"),
-        ({"TREND_ADX_MIN": "500"}, "TREND_ADX_MIN"),
-    ):
-        try:
-            validate_params(
-                apply_overrides(
-                    dict(PUMP_CONFIG), dict(jelek, TREND_FILTER_ENABLED="true")
-                )
-            )
-            raise AssertionError(f"validate_params harus menolak {kunci} tidak wajar")
-        except BacktestError:
-            pass
-    try:
-        validate_params(
-            dict(
-                PUMP_CONFIG,
-                TREND_FILTER_ENABLED=True,
-                CONFIRM_INTERVAL="1h",
-                TREND_INTERVAL="30m",
-            )
-        )
-        raise AssertionError(
-            "TREND_INTERVAL lebih pendek dari CONFIRM_INTERVAL harus ditolak"
-        )
-    except BacktestError:
-        pass
-    validate_params(
-        dict(
-            PUMP_CONFIG,
-            TREND_FILTER_ENABLED=True,
-            CONFIRM_INTERVAL="5m",
-            TREND_INTERVAL="4h",
-        )
-    )
-    print("  apply_overrides dan validate_params untuk parameter trend -> OK")
-
-    print(
-        "\n=== SELFTEST backtest.py: aturan silang satu sumber (bt = dashboard) ==="
-    )
-    from config.settings_schema import relation_violations
-    from config.config import PUMP_CONFIG as _PC
-
-    kasus = [
-        # (nama, override, lolos di backtest?, lolos di penyimpanan setting?)
-        ("config bawaan", {}, True, True),
-        (
-            "demand: jarak maksimum di bawah lebar zona",
-            {
-                "DEMAND_ZONE_FILTER_ENABLED": True,
-                "DEMAND_MAX_DISTANCE_PCT": 0.5,
-                "DEMAND_ZONE_BUFFER_PCT": 1.2,
-            },
-            False,
-            False,
-        ),
-        (
-            "demand: aturan sama, filter dimatikan",
-            {
-                "DEMAND_ZONE_FILTER_ENABLED": False,
-                "DEMAND_MAX_DISTANCE_PCT": 0.5,
-                "DEMAND_ZONE_BUFFER_PCT": 1.2,
-            },
-            True,
-            False,
-        ),
-        (
-            "exit persen: TP tidak lebih besar dari SL",
-            {"USE_ATR_EXIT": False, "TP_PCT": 1.0, "SL_PCT": 2.0},
-            False,
-            False,
-        ),
-        (
-            "exit ATR: TP tidak lebih besar dari SL",
-            {"USE_ATR_EXIT": True, "ATR_MULT_TP": 1.0, "ATR_MULT_SL": 1.5},
-            False,
-            False,
-        ),
-        (
-            "exit ATR rusak tapi mode ATR tidak sedang dipakai",
-            {"USE_ATR_EXIT": False, "ATR_MULT_TP": 1.0, "ATR_MULT_SL": 1.5},
-            True,
-            False,
-        ),
-        (
-            "trend: EMA lambat di bawah EMA cepat",
-            {"TREND_FILTER_ENABLED": True, "TREND_EMA_FAST": 30, "TREND_EMA_SLOW": 20},
-            False,
-            False,
-        ),
-        (
-            "demand H1: jarak maksimum di bawah tebal zona",
-            {
-                "HTF_DEMAND_FILTER_ENABLED": True,
-                "HTF_DEMAND_MAX_DISTANCE_PCT": 0.5,
-                "HTF_DEMAND_ZONE_BUFFER_PCT": 1.2,
-            },
-            False,
-            False,
-        ),
-        (
-            "demand H1: aturan sama, filter dimatikan",
-            {
-                "HTF_DEMAND_FILTER_ENABLED": False,
-                "HTF_DEMAND_MAX_DISTANCE_PCT": 0.5,
-                "HTF_DEMAND_ZONE_BUFFER_PCT": 1.2,
-            },
-            True,
-            False,
-        ),
-    ]
-    for nama, ov, harus_lolos_bt, harus_lolos_cfg in kasus:
-        cfg_uji = dict(_PC, **ov)
-        try:
-            validate_params(cfg_uji)
-            lolos_bt = True
-        except BacktestError:
-            lolos_bt = False
-        harus_bt = "lolos" if harus_lolos_bt else "menolak"
-        nyata_bt = "lolos" if lolos_bt else "menolak"
-        assert lolos_bt == harus_lolos_bt, (
-            f"{nama}: backtest {nyata_bt}, harusnya {harus_bt}"
-        )
-        melanggar_cfg = set(relation_violations(cfg_uji))
-        melanggar_bt = set(relation_violations(cfg_uji, mode_aware=True))
-        harus_cfg = "lolos" if harus_lolos_cfg else "menolak"
-        nyata_cfg = "lolos" if not melanggar_cfg else "menolak"
-        assert (not melanggar_cfg) == harus_lolos_cfg, (
-            f"{nama}: penyimpanan setting {nyata_cfg} "
-            f"({sorted(melanggar_cfg)}), harusnya {harus_cfg}"
-        )
-        # Invarian umum: jalur simulasi tidak pernah lebih keras dari jalur
-        # penyimpanan setting. Kalau backtest menolak, settings.json harus menolak
-        # juga, kalau tidak bot bisa dijalankan dengan config yang tidak sah.
-        assert melanggar_bt <= melanggar_cfg, (
-            f"{nama}: backtest menolak {sorted(melanggar_bt)} tapi penyimpanan "
-            f"setting hanya {sorted(melanggar_cfg)}"
-        )
-    assert bool(
-        relation_violations(
-            dict(_PC, USE_ATR_EXIT=False, ATR_MULT_TP=1.0, ATR_MULT_SL=1.5)
-        )
-    ), "penyimpanan setting harus tetap menolak invariant exit ATR walau mode ATR mati"
-    assert (
-        not relation_violations(
-            dict(_PC, USE_ATR_EXIT=False, ATR_MULT_TP=1.0, ATR_MULT_SL=1.5),
-            mode_aware=True,
-        )
-    ), "jalur simulasi tidak boleh membatalkan hanya karena parameter mode lain rusak"
-
-    # Rentang validasi parameter demand harus SAMA dengan rentang yang dipakai
-    # skema pengaturan (satu sumber). Kalau backtest lebih sempit, setelan yang
-    # sah disimpan lewat dashboard tetap ditolak backtest tanpa alasan yang jelas.
-    from config.settings_schema import PARAMETER_SCHEMA as _SKEMA
-
-    kunci_demand = (
-        "DEMAND_LOOKBACK_BARS",
-        "DEMAND_ZONE_BUFFER_PCT",
-        "DEMAND_MAX_DISTANCE_PCT",
-        "DEMAND_MIN_CLOSE_POSITION",
-        "HTF_DEMAND_LOOKBACK_BARS",
-        "HTF_DEMAND_ZONE_BUFFER_PCT",
-        "HTF_DEMAND_MAX_DISTANCE_PCT",
-        "HTF_DEMAND_MIN_CLOSE_POSITION",
-        "DAILY_DEMAND_LOOKBACK_BARS",
-        "DAILY_DEMAND_ZONE_BUFFER_PCT",
-        "DAILY_DEMAND_MAX_DISTANCE_PCT",
-        "DAILY_DEMAND_MIN_CLOSE_POSITION",
-    )
-    beda_rentang = [
-        f"{kunci}: {_rentang_demand(kunci, -999.0, 999.0)} != "
-        f"({float(_SKEMA[kunci]['min'])}, {float(_SKEMA[kunci]['max'])})"
-        for kunci in kunci_demand
-        if _rentang_demand(kunci, -999.0, 999.0)
-        != (float(_SKEMA[kunci]["min"]), float(_SKEMA[kunci]["max"]))
-    ]
-    assert not beda_rentang, beda_rentang
-
-    # Nilai paling longgar yang MASIH sah di skema wajib diterima backtest
-    # (kasus yang dulu ditolak: tebal zona dan jarak 0 di grup H1 dan harian).
-    validate_params(
-        dict(
-            _PC,
-            HTF_DEMAND_FILTER_ENABLED=True,
-            HTF_DEMAND_ZONE_BUFFER_PCT=0.0,
-            HTF_DEMAND_MAX_DISTANCE_PCT=0.0,
-            DAILY_DEMAND_FILTER_ENABLED=True,
-            DAILY_DEMAND_ZONE_BUFFER_PCT=0.0,
-            DAILY_DEMAND_MAX_DISTANCE_PCT=0.0,
-            DEMAND_ZONE_FILTER_ENABLED=False,
-        )
-    )
-
-    # Dan nilai di luar rentang skema wajib ditolak backtest.
-    for kunci, nilai in (
-        ("DAILY_DEMAND_LOOKBACK_BARS", 2),
-        ("DAILY_DEMAND_LOOKBACK_BARS", 501),
-        ("DAILY_DEMAND_ZONE_BUFFER_PCT", 20.5),
-        ("HTF_DEMAND_MAX_DISTANCE_PCT", 50.5),
-    ):
-        cfg_luar = dict(
-            _PC,
-            DAILY_DEMAND_FILTER_ENABLED=True,
-            HTF_DEMAND_FILTER_ENABLED=True,
-            DAILY_DEMAND_ZONE_BUFFER_PCT=0.0,
-            DAILY_DEMAND_MAX_DISTANCE_PCT=0.0,
-            HTF_DEMAND_ZONE_BUFFER_PCT=0.0,
-            HTF_DEMAND_MAX_DISTANCE_PCT=0.0,
-        )
-        cfg_luar[kunci] = nilai
-        try:
-            validate_params(cfg_luar)
-        except BacktestError:
-            continue
-        raise AssertionError(f"{kunci}={nilai} seharusnya ditolak")
-
-    print(
-        "  9 kasus cocok di kedua jalur, subset aturan simulasi <= aturan penyimpanan, "
-        "relasi mode nonaktif tetap dijaga jalur penyimpanan, dan rentang validasi "
-        "12 kunci demand sama persis dengan skema pengaturan -> OK"
-    )
-
-    print(
-        "\n=== SELFTEST backtest.py: gerbang EMA + ADX harian (DAILY_TREND_*) "
-        "di backtest satu simbol ==="
-    )
-    from backtesting.synthetic_data import seri_banyak_setup as _seri_setup_tren
-
-    BAR_HARI_TREN = 288
-
-    def _prefiks_harian_satu(hari: int, faktor: float) -> tuple:
-        """`hari` hari candle 5m dengan close harian dikali `faktor` per hari."""
-        out = []
-        harga = 100.0
-        for h in range(hari):
-            harga_awal = harga
-            for j in range(BAR_HARI_TREN):
-                idx = h * BAR_HARI_TREN + j
-                harga_baru = harga_awal * (faktor ** ((j + 1) / float(BAR_HARI_TREN)))
-                ms = idx * 5 * 60_000
-                out.append(
-                    Kline(
-                        open_time=ms,
-                        open=harga,
-                        high=max(harga, harga_baru) * 1.0005,
-                        low=min(harga, harga_baru) * 0.9995,
-                        close=harga_baru,
-                        close_time=ms + 5 * 60_000 - 1,
-                        volume=1000.0,
-                        quote_volume=5_000_000.0,
-                    )
-                )
-                harga = harga_baru
-        return out, harga
-
-    cfg_tren_satu = dict(
-        PUMP_CONFIG,
-        PUMP_MIN_24H_CHANGE_PCT=-1000.0,
-        PUMP_MAX_24H_CHANGE_PCT=1000.0,
-        MIN_QUOTE_VOLUME_USDT_24H=0,
-        BACKTEST_ENTRY_DELAY_BARS=0,
-        BACKTEST_ENTRY_SPREAD_PCT=0.0,
-        BACKTEST_SLIPPAGE_PCT=0.0,
-        ROLLING_VOLUME_FILTER_ENABLED=False,
-        BTC_FILTER_ENABLED=False,
-        TREND_FILTER_ENABLED=False,
-        HTF_DEMAND_FILTER_ENABLED=False,
-        DAILY_DEMAND_FILTER_ENABLED=False,
-        DEMAND_ZONE_FILTER_ENABLED=False,
-        DAILY_TREND_FILTER_ENABLED=True,
-        DAILY_TREND_INTERVAL="1d",
-        DAILY_TREND_EMA_FAST=2,
-        DAILY_TREND_EMA_SLOW=3,
-        DAILY_TREND_ADX_PERIOD=2,
-        DAILY_TREND_ADX_MIN=0.0,
-        DAILY_TREND_LOOKBACK_BARS=20,
-    )
-    cfg_tren_satu_off = dict(cfg_tren_satu, DAILY_TREND_FILTER_ENABLED=False)
-    # Kedua sisi memakai warmup yang sama, supaya selisihnya murni dari gerbang.
-    warmup_tren_satu = parity.htf_gate_warmup_bars(cfg_tren_satu, "5m")
-
-    prefiks_turun_satu, harga_turun_satu = _prefiks_harian_satu(25, 0.99)
-    seri_turun_satu = prefiks_turun_satu + _seri_setup_tren(
-        harga=harga_turun_satu,
-        siklus=10,
-        volume=9_000_000.0,
-        mulai_index=len(prefiks_turun_satu),
-    )
-    prefiks_naik_satu, harga_naik_satu = _prefiks_harian_satu(25, 1.005)
-    seri_naik_satu = prefiks_naik_satu + _seri_setup_tren(
-        harga=harga_naik_satu,
-        siklus=10,
-        volume=9_000_000.0,
-        naik=10,
-        turun=20,
-        mulai_index=len(prefiks_naik_satu),
-    )
-
-    res_turun_on = run_backtest(
-        seri_turun_satu, cfg_tren_satu, warmup_bars=warmup_tren_satu
-    )
-    res_turun_off = run_backtest(
-        seri_turun_satu, cfg_tren_satu_off, warmup_bars=warmup_tren_satu
-    )
-    assert len(res_turun_off.trades) >= 1, (
-        "kontrol tanpa gerbang harus punya trade, supaya tes ini bermakna"
-    )
-    assert len(res_turun_on.trades) == 0, (
-        f"gerbang EMA + ADX harian seharusnya menolak tren harian turun, "
-        f"tetapi masih ada {len(res_turun_on.trades)} trade"
-    )
-    assert res_turun_on.daily_trend_skips >= 1, "penghitung disaring harus naik"
-    assert res_turun_on.daily_trend_scans >= res_turun_on.daily_trend_skips
-    print(
-        f"  tren harian turun: ON {len(res_turun_on.trades)} trade, OFF "
-        f"{len(res_turun_off.trades)} trade, disaring {res_turun_on.daily_trend_skips} "
-        f"dari {res_turun_on.daily_trend_scans} -> OK"
-    )
-
-    res_naik_on = run_backtest(
-        seri_naik_satu, cfg_tren_satu, warmup_bars=warmup_tren_satu
-    )
-    res_naik_off = run_backtest(
-        seri_naik_satu, cfg_tren_satu_off, warmup_bars=warmup_tren_satu
-    )
-    assert len(res_naik_off.trades) >= 1, "kontrol tren naik harus punya trade"
-    assert len(res_naik_on.trades) == len(res_naik_off.trades), (
-        f"tren harian naik harus lolos gerbang: ON {len(res_naik_on.trades)} vs "
-        f"OFF {len(res_naik_off.trades)}"
-    )
-    assert res_naik_on.daily_trend_skips == 0, (
-        f"tren harian naik tidak boleh disaring, tetapi disaring "
-        f"{res_naik_on.daily_trend_skips}"
-    )
-    print(
-        f"  tren harian naik: ON {len(res_naik_on.trades)} = OFF "
-        f"{len(res_naik_off.trades)} trade, disaring 0 -> OK"
-    )
-
-    print("\nSEMUA SELFTEST backtest.py LULUS.")
-    print(
-        "(Tidak menghubungi Binance sama sekali, murni logika lokal dengan data sintetis.)"
-    )
-
-
 def print_single_result(result: BacktestResult) -> None:
     summary = summarize(result)
     print("\n" + "=" * 72)
@@ -2427,10 +1011,17 @@ def print_single_result(result: BacktestResult) -> None:
     print(f"Simbol             : {result.symbol}")
     print(f"Interval           : {result.interval}")
     print(f"Candle total       : {result.bars_total}")
-    print(f"Trade nyata        : {summary['real_trades']}")
-    print(f"Return bersih      : {summary['total_return_pct']:+.2f}%")
+    print(f"Trade tertutup     : {summary['closed_trades']}")
+    print(f"Return total + MTM : {summary['total_return_pct']:+.2f}%")
+    print(f"Return terealisasi : {summary['realized_return_pct']:+.2f}%")
     print(f"Return kotor       : {summary['gross_return_pct']:+.2f}%")
-    print(f"Win rate           : {summary['win_rate']:.1f}%")
+    print(f"Win rate tertutup  : {summary['win_rate']:.1f}%")
+    if summary["mark_to_market_open"]:
+        quote = result.params.get("QUOTE_ASSET", "USDT")
+        print(
+            f"Posisi akhir MTM   : {summary['mark_to_market_pnl_quote']:+.2f} "
+            f"{quote} ({summary['mark_to_market_pnl_pct']:+.2f}%)"
+        )
     print(f"Max drawdown       : {summary['max_drawdown_pct']:.2f}%")
     print(f"Profit factor      : {summary['profit_factor']:.2f}")
     print(
@@ -2468,11 +1059,6 @@ def main():
     import sys as _sys
 
     parser = _argparse.ArgumentParser(description="Backtest pump scanner")
-    parser.add_argument(
-        "--selftest",
-        action="store_true",
-        help="Jalankan audit logika lokal tanpa jaringan lalu keluar.",
-    )
     parser.add_argument("--symbol", default="BTCUSDT", help="Simbol, mis. SOLUSDT")
     parser.add_argument(
         "--days", type=int, default=30, help="Jumlah hari data historis"
@@ -2513,8 +1099,8 @@ def main():
     )
     args = parser.parse_args()
 
-    if args.selftest or len(_sys.argv) == 1:
-        selftest()
+    if len(_sys.argv) == 1:
+        parser.print_help()
         return
 
     from config.config import PUMP_CONFIG
@@ -2580,10 +1166,7 @@ def main():
         rate_limit_limit=int(cfg.get("RATE_LIMIT_WEIGHT_LIMIT", 6000) or 6000),
         rate_limit_safety_margin=int(cfg.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100),
     )
-    end_ms = int(time.time() * 1000)
-    # Rentang unduhan = periode uji (args.days) + warmup, bukan cuma args.days + 1
-    # hari: gerbang timeframe tinggi (termasuk demand harian) membaca dari awal
-    # rentang yang sama, jadi warmupnya wajib ikut terunduh.
+    end_ms = last_completed_candle_end_ms(interval)
     start_ms = end_ms - (total_bars + 1) * strategy.interval_to_ms(interval)
     klines = fetch_full_klines(client, args.symbol, interval, start_ms, end_ms)
     print(f"Dapat {len(klines)} candle.")

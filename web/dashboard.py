@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import ipaddress
 import json
 import logging
@@ -7,7 +8,6 @@ import math
 import os
 import re
 import secrets
-import sys
 import threading
 import time
 import uuid
@@ -33,7 +33,9 @@ from config.config import (
     get_control_file,
 )
 from infrastructure.network.file_descriptors import fd_status, raise_fd_limit
+from infrastructure.network.public_ip import get_public_egress_ip_status
 from infrastructure.storage import state as state_mod
+from infrastructure.storage.trade_ledger import load_trade_records
 from market import coin_icons
 from market.fx_rate import IdrRateProvider
 from infrastructure.process.runtime_control import BotControlError, BotProcessManager
@@ -112,14 +114,10 @@ LOG_FILE = PUMP_CONFIG.get("LOG_FILE") or get_log_file()
 CONTROL_FILE = PUMP_CONFIG.get("CONTROL_FILE") or get_control_file()
 QUOTE = PUMP_CONFIG.get("QUOTE_ASSET", "USDT")
 
-# Penyedia kurs rupiah untuk lapisan tampilan. Objek ini tidak pernah
-# melempar exception ke pemanggil: kegagalan bursa dikembalikan sebagai
-# payload berisi error dan dashboard menyembunyikan elemen rupiah.
 _idr_rate_provider = IdrRateProvider(PUMP_CONFIG)
 
 
 def get_idr_rate(force: bool = False) -> dict:
-    """Payload kurs IDR terkini (selalu berbentuk dict, tidak pernah None)."""
     try:
         return _idr_rate_provider.refresh() if force else _idr_rate_provider.get()
     except Exception as exc:  # noqa: BLE001 - jalur tampilan tidak boleh meledak
@@ -208,27 +206,20 @@ def _remote_is_loopback() -> bool:
 
 @app.before_request
 def _security_gate():
+    if not _bind_is_loopback():
+        return (
+            jsonify({"error": "Dashboard hanya boleh diakses melalui bind loopback."}),
+            403,
+        )
+
     host = (request.host or "").lower()
-    if _bind_is_loopback():
-        expected = _expected_hosts()
-        if app.config.get("TESTING"):
-            expected.update({"localhost", "127.0.0.1"})
-        if host not in expected:
-            return jsonify({"error": "Host dashboard tidak diizinkan."}), 400
-    # Saat diikat ke alamat non-loopback, dashboard memang dimaksudkan sebagai
-    # pantauan baca-saja untuk perangkat lain di jaringan: pemeriksaan Host
-    # dilewati, tetapi SEMUA endpoint tulis sudah diblokir terpisah di bawah.
+    expected = _expected_hosts()
+    if app.config.get("TESTING"):
+        expected.update({"localhost", "127.0.0.1"})
+    if host not in expected:
+        return jsonify({"error": "Host dashboard tidak diizinkan."}), 400
 
     if request.method in ("POST", "PUT", "PATCH", "DELETE"):
-        if not _bind_is_loopback():
-            return (
-                jsonify(
-                    {
-                        "error": "Dashboard terikat ke alamat non-loopback. Semua kontrol tulis dinonaktifkan."
-                    }
-                ),
-                403,
-            )
         if not _remote_is_loopback():
             return (
                 jsonify(
@@ -329,7 +320,10 @@ def _update_control_operation(operation_id: str, **updates) -> bool:
 
 
 def _run_control_operation(
-    operation_id: str, action: str, position_policy: str
+    operation_id: str,
+    action: str,
+    position_policy: str,
+    allow_missing_live_state: bool = False,
 ) -> None:
     _update_control_operation(
         operation_id,
@@ -338,7 +332,9 @@ def _run_control_operation(
     )
     try:
         if action == "START":
-            result = _process_manager.start()
+            result = _process_manager.start(
+                allow_missing_live_state=allow_missing_live_state
+            )
         else:
             result = _process_manager.stop(position_policy=position_policy)
     except Exception as exc:
@@ -406,7 +402,6 @@ def load_state() -> dict:
 
 
 def get_volume_24h_quote(symbol: str):
-    """Volume transaksi 24 jam dalam quote asset (USDT), atau None bila tidak tersedia."""
     if not symbol:
         return None
     now = time.time()
@@ -487,12 +482,26 @@ _RE_SELL = re.compile(
 
 def parse_log(max_lines: int = 4000):
     if not os.path.exists(LOG_FILE):
-        return [], [], {}
+        try:
+            return (
+                load_trade_records(PUMP_CONFIG.get("TRADE_LEDGER_FILE"), limit=max_lines),
+                [],
+                {},
+            )
+        except Exception:
+            return [], [], {}
     try:
         with open(LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()[-max_lines:]
     except OSError:
-        return [], [], {}
+        try:
+            return (
+                load_trade_records(PUMP_CONFIG.get("TRADE_LEDGER_FILE"), limit=max_lines),
+                [],
+                {},
+            )
+        except Exception:
+            return [], [], {}
 
     trades = []
     open_pos = None
@@ -557,12 +566,27 @@ def parse_log(max_lines: int = 4000):
                 break
         events.append({"raw": ln, "level": lvl})
 
-    trades.reverse()
+    ledger_path = PUMP_CONFIG.get("TRADE_LEDGER_FILE")
+    try:
+        ledger_trades = load_trade_records(ledger_path, limit=max_lines) if ledger_path else []
+    except Exception as exc:
+        logger.warning("Ledger trade dashboard gagal dibaca: %s", exc)
+        ledger_trades = []
+    if ledger_trades:
+        trades = ledger_trades
+    else:
+        trades.reverse()
+        for trade in trades:
+            trade["accounting_status"] = "LEGACY_UNVERIFIED"
+            trade["net_pnl_quote"] = None
+            trade["estimated_pnl_quote"] = trade.get("pnl")
+            trade["accounting_note"] = "Riwayat log lama, PnL tidak terverifikasi dari fill/komisi."
     events.reverse()
     return trades, events, level_count
 
 
 def build_status():
+
     state = load_state()
     process_status = _process_manager.status(get_mode(PUMP_CONFIG))
     symbol = state.get("current_symbol")
@@ -593,12 +617,14 @@ def build_status():
     if has_position and state.get("entry_time"):
         hold_minutes = (int(time.time() * 1000) - int(state["entry_time"])) / 60000.0
 
-    # Saklar mekanisme exit. Dibaca sekali supaya nilai level dan flag yang
-    # dikirim ke dashboard tidak mungkin saling bertentangan.
     use_tp = bool(PUMP_CONFIG.get("USE_TP"))
     use_stop_loss = bool(PUMP_CONFIG.get("USE_STOP_LOSS"))
     use_breakeven = bool(PUMP_CONFIG.get("USE_BREAKEVEN"))
     use_trailing = bool(PUMP_CONFIG.get("USE_TRAILING"))
+    trade_accounting = state.get("trade_accounting")
+    trade_accounting = trade_accounting if isinstance(trade_accounting, dict) else {}
+    pending_accounting = state.get("accounting_pending_trades")
+    pending_accounting = pending_accounting if isinstance(pending_accounting, list) else []
 
     return {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
@@ -612,8 +638,6 @@ def build_status():
         "read_only": not _bind_is_loopback(),
         "has_api_key": bool(PUMP_CONFIG.get("API_KEY")),
         "quote": QUOTE,
-        # Kurs rupiah untuk sub judul tampilan. Angka konversi dihitung di
-        # sisi klien dari satu kurs ini agar tidak ada dua sumber kebenaran.
         "fx": get_idr_rate(),
         "position": {
             "has_position": has_position,
@@ -631,6 +655,13 @@ def build_status():
             "trailing_active": bool(state.get("trailing_active")),
             "trailing_stop_price": float(state.get("trailing_stop_price", 0) or 0),
         },
+        "accounting": {
+            "blocked": bool(state.get("accounting_blocked")),
+            "block_reason": str(state.get("accounting_block_reason") or ""),
+            "active_status": str(trade_accounting.get("status") or ""),
+            "pending_count": len(pending_accounting),
+            "unpriced_fee_count": len(trade_accounting.get("unpriced_fees") or []),
+        },
         "account": {
             "usdt_free": usdt_free,
             "equity_live": equity_live,
@@ -645,12 +676,6 @@ def build_status():
             "dd_stopped": bool(state.get("dd_stopped")),
         },
         "config": {
-            # Setiap level exit hanya dilaporkan bila mekanismenya memang
-            # aktif. Bot hanya mengeksekusi TP saat USE_TP aktif, breakeven
-            # saat USE_BREAKEVEN aktif, dan trailing saat USE_TRAILING aktif
-            # (lihat check_exit_conditions di trading/pump_scanner_bot.py).
-            # Tanpa pagar ini dashboard menampilkan level yang tidak akan
-            # pernah dipakai, misalnya Take Profit saat USE_TP=False.
             "sl_pct": (
                 (state.get("sl_pct") or PUMP_CONFIG.get("SL_PCT"))
                 if use_stop_loss
@@ -682,8 +707,6 @@ def build_status():
                 if use_trailing
                 else None
             ),
-            # Flag mentah ikut dikirim supaya tampilan bisa membedakan
-            # "level mati" dari "level aktif tetapi nilainya belum ada".
             "use_tp": use_tp,
             "use_stop_loss": use_stop_loss,
             "use_breakeven": use_breakeven,
@@ -696,26 +719,45 @@ def build_status():
 
 
 def build_trade_summary(trades):
-    closed = [t for t in trades if "pnl" in t and t.get("sell_time")]
-    total = len(closed)
-    wins = [t for t in closed if t.get("pnl", 0) > 0]
-    losses = [t for t in closed if t.get("pnl", 0) <= 0]
-    total_pnl = sum(t.get("pnl", 0) for t in closed)
+    all_closed = [t for t in trades if t.get("sell_time")]
+    verified = []
+    for trade in all_closed:
+        if str(trade.get("accounting_status") or "LEGACY_UNVERIFIED").upper() != "VERIFIED":
+            continue
+        try:
+            pnl = float(trade.get("net_pnl_quote", trade.get("pnl")))
+            if not math.isfinite(pnl):
+                continue
+        except (TypeError, ValueError, OverflowError):
+            continue
+        verified.append((trade, pnl))
+    wins = [(trade, pnl) for trade, pnl in verified if pnl > 0]
+    losses = [(trade, pnl) for trade, pnl in verified if pnl <= 0]
+    total = len(verified)
+    total_pnl = sum(pnl for _, pnl in verified)
     win_rate = (len(wins) / total * 100.0) if total else 0.0
-    avg_win = (sum(t["pnl"] for t in wins) / len(wins)) if wins else 0.0
-    avg_loss = (sum(t["pnl"] for t in losses) / len(losses)) if losses else 0.0
-    best = max((t.get("pnl_pct", 0) for t in closed), default=0.0)
-    worst = min((t.get("pnl_pct", 0) for t in closed), default=0.0)
+    avg_win = (sum(pnl for _, pnl in wins) / len(wins)) if wins else 0.0
+    avg_loss = (sum(pnl for _, pnl in losses) / len(losses)) if losses else 0.0
+    verified_pcts = []
+    for trade, _pnl in verified:
+        try:
+            pct = float(trade.get("pnl_pct"))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(pct):
+            verified_pcts.append(pct)
     return {
         "total_trades": total,
+        "unverified_trades": len(all_closed) - total,
+        "total_closed_trades": len(all_closed),
         "wins": len(wins),
         "losses": len(losses),
         "win_rate": win_rate,
         "total_pnl": total_pnl,
         "avg_win": avg_win,
         "avg_loss": avg_loss,
-        "best_pct": best,
-        "worst_pct": worst,
+        "best_pct": max(verified_pcts, default=0.0),
+        "worst_pct": min(verified_pcts, default=0.0),
     }
 
 
@@ -766,11 +808,6 @@ BT_PARAM_KEYS = (
     "DAILY_TREND_LOOKBACK_BARS",
 )
 
-# Grid parameter SENGAJA hanya berisi parameter exit: sinyal entry (konfirmasi 5m
-# dan gerbang trend) dihitung sekali dari candle yang sama, jadi mengubah
-# parameter entry di dalam grid tidak akan mengubah hasil apa pun selain
-# menyesatkan. Untuk membandingkan setelan trend, jalankan backtest portofolio
-# biasa dengan nilai TREND_* yang berbeda.
 GRID_PARAM_KEYS = tuple(
     k
     for k in BT_PARAM_KEYS
@@ -801,10 +838,6 @@ def _bt_simulation_interval(cfg: dict) -> str:
 def _bt_estimate_requests(days: int, max_symbols: int, cfg: dict) -> int:
     interval = _bt_simulation_interval(cfg)
     bars_per_hari = 1440 // bt.INTERVAL_MINUTES.get(interval, 5)
-    # Rentang unduhan = periode uji + warmup gerbang timeframe tinggi, jadi warmup
-    # WAJIB ikut dihitung: gerbang demand harian default menambah sekitar 22 hari
-    # candle 5m (6336 bar) per simbol, dan tanpa itu estimasi request di layar
-    # akan jauh lebih kecil dari kenyataan.
     try:
         warmup_bars = pbt.parity.htf_gate_warmup_bars(cfg, interval)
     except ValueError:
@@ -815,7 +848,6 @@ def _bt_estimate_requests(days: int, max_symbols: int, cfg: dict) -> int:
 
 
 def _bt_trend_warmup_note(cfg: dict, interval: str) -> str:
-    """Kalimat keterangan berapa lama rentang yang habis untuk pemanasan trend."""
     if not bool(cfg.get("TREND_FILTER_ENABLED", False)):
         return (
             "Gerbang trend sedang NONAKTIF, jadi candle trend tidak diambil dan tidak ada "
@@ -838,7 +870,6 @@ def _bt_trend_warmup_note(cfg: dict, interval: str) -> str:
 
 
 def _bt_demand_harian_note(cfg: dict, interval: str) -> str:
-    """Kalimat keterangan warmup gerbang demand harian (kosong kalau nonaktif)."""
     if not bool(cfg.get("DAILY_DEMAND_FILTER_ENABLED", False)):
         return (
             "Gerbang demand harian sedang NONAKTIF, jadi tidak ada candle harian yang "
@@ -865,7 +896,6 @@ def _bt_demand_harian_note(cfg: dict, interval: str) -> str:
 
 
 def _bt_tren_harian_note(cfg: dict, interval: str) -> str:
-    """Kalimat keterangan warmup gerbang EMA + ADX harian (nonaktif kalau gerbang mati)."""
     if not bool(cfg.get("DAILY_TREND_FILTER_ENABLED", False)):
         return (
             "Gerbang EMA + ADX harian sedang NONAKTIF, jadi tidak ada candle harian yang "
@@ -888,7 +918,6 @@ def _bt_tren_harian_note(cfg: dict, interval: str) -> str:
 
 
 def _bt_tren_harian_limitations(cfg: dict, interval: str) -> str:
-    """Paragraf batasan untuk gerbang EMA + ADX harian (kosong kalau nonaktif)."""
     if not bool(cfg.get("DAILY_TREND_FILTER_ENABLED", False)):
         return ""
     return (
@@ -933,9 +962,6 @@ def _bt_prepare_universe(
     fetch_start_ms = start_ms - warmup_ms
 
     def klien_pembuat(cfg: dict) -> BinanceSpotClient:
-        # Satu klien untuk satu pekerjaan backtest. Kalau tidak ditutup, setiap
-        # pekerjaan meninggalkan sesi HTTP beserta soket dan file descriptor-nya;
-        # tumpukan inilah yang dahulu menghabiskan fd proses.
         return BinanceSpotClient(
             "",
             "",
@@ -1081,11 +1107,6 @@ def _json_safe(value):
 
 
 def _bt_days_guard(cfg: dict, days: int) -> None:
-    """Tolak rentang hari yang seluruhnya habis untuk pemanasan.
-
-    Tanpa ini, pengguna memilih 2 hari dengan gerbang trend 1h aktif dan hasilnya
-    selalu nol trade tanpa penjelasan.
-    """
     interval = _bt_simulation_interval(cfg)
     minimal, catatan = _bt_min_days_note(cfg, interval)
     if int(days) < minimal:
@@ -1191,8 +1212,6 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
             ),
             "params_used": {k: cfg.get(k) for k in BT_PARAM_KEYS},
             "summary": summary,
-            # Setelan gerbang trend yang BENAR-BENAR dipakai simulasi ini, supaya
-            # angka di layar bisa diverifikasi tanpa menebak dari config.py.
             "trend": {
                 "enabled": bool(cfg.get("TREND_FILTER_ENABLED", False)),
                 "interval": cfg.get("TREND_INTERVAL", "1h"),
@@ -1204,8 +1223,6 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "skips": int(getattr(result, "trend_skips", 0)),
                 "scans": int(getattr(result, "trend_scans", 0)),
             },
-            # Setelan gerbang demanda yang BENAR-BENAR dipakai simulasi ini, supaya
-            # angka penyaring di layar bisa diverifikasi tanpa menebak dari config.py.
             "htf_demand": {
                 "enabled": bool(cfg.get("HTF_DEMAND_FILTER_ENABLED", False)),
                 "interval": cfg.get("TREND_INTERVAL", "1h"),
@@ -1226,7 +1243,6 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "skips": int(getattr(result, "daily_demand_skips", 0)),
                 "scans": int(getattr(result, "daily_demand_scans", 0)),
             },
-            # Setelan gerbang EMA + ADX harian yang BENAR-BENAR dipakai simulasi ini.
             "daily_trend": {
                 "enabled": bool(cfg.get("DAILY_TREND_FILTER_ENABLED", False)),
                 "interval": cfg.get("DAILY_TREND_INTERVAL", "1d"),
@@ -1383,9 +1399,6 @@ def _bt_run_grid_job(
     klien = None
 
     try:
-        # Nilai di luar kunci yang disapu grid (termasuk gerbang trend dan interval
-        # konfirmasi) mengikuti form backtest supaya gate entry di grid sama dengan
-        # yang dijalankan form itu, bukan diam-diam memakai nilai default config.py.
         cfg = bt.apply_overrides(PUMP_CONFIG, overrides or {})
         bt.validate_params(cfg)
         _bt_days_guard(cfg, days)
@@ -1530,11 +1543,6 @@ def _bt_run_grid_job(
 
 
 def _bt_demand_limitations(cfg: dict, interval: str) -> str:
-    """Paragraf batasan untuk kedua gerbang zona demand timeframe tinggi.
-
-    Dipisah sebagai fungsi supaya teks yang benar-benar dikirim ke layar bisa
-    diuji selftest, bukan disalin ulang di dua tempat.
-    """
     return (
         "Gerbang zona demand timeframe tinggi juga SUDAH disimulasikan dengan aturan "
         "yang sama seperti bot live: lapisan H1 (HTF_DEMAND_*, memakai candle "
@@ -1553,15 +1561,6 @@ def _bt_demand_limitations(cfg: dict, interval: str) -> str:
 
 
 def _bt_min_days_note(cfg: dict, interval: str) -> tuple[int, str]:
-    """Berapa hari minimal supaya backtest masih menyisakan bar yang bisa ditradingkan.
-
-    Statistik 24 jam butuh satu hari. Gerbang timeframe tinggi yang aktif butuh
-    riwayatnya sendiri sebagai pemanasan: trend dan demand H1 pada TREND_INTERVAL,
-    serta EMA + ADX harian pada DAILY_TREND_INTERVAL. Tanpa rentang tambahan itu,
-    simulasi hanya berisi pemanasan dan hasilnya nol trade tanpa penjelasan.
-    Kebutuhan yang dipakai adalah yang TERBESAR. Demand harian sengaja TIDAK ikut
-    menaikkan batas ini (lihat _bt_catatan_harian_min).
-    """
     dasar = 2
     tren_h1_aktif = bool(cfg.get("TREND_FILTER_ENABLED", False)) or bool(
         cfg.get("HTF_DEMAND_FILTER_ENABLED", False)
@@ -1599,13 +1598,6 @@ def _bt_min_days_note(cfg: dict, interval: str) -> tuple[int, str]:
     return minimal, catatan.strip() + _bt_catatan_harian_min(cfg, interval)
 
 def _bt_catatan_harian_min(cfg: dict, interval: str) -> str:
-    """Catatan tambahan soal kebutuhan hari gerbang demand harian.
-
-    Gerbang demand harian TIDAK menaikkan jumlah hari minimum yang ditolak
-    (agar rentang pendek tetap bisa diuji), tetapi angkanya dilaporkan supaya
-    pengguna tahu berapa lama pemanasannya dan kapan rentang uji terlalu pendek
-    untuk menilai lapisan ini. Peringatannya sendiri menempel di hasil job.
-    """
     if not bool(cfg.get("DAILY_DEMAND_FILTER_ENABLED", False)):
         return ""
     try:
@@ -1622,7 +1614,6 @@ def _bt_catatan_harian_min(cfg: dict, interval: str) -> str:
 
 
 def _bt_peringatan_harian(cfg: dict, days: int) -> list:
-    """Peringatan rentang uji terlalu pendek untuk gerbang demand harian."""
     if not bool(cfg.get("DAILY_DEMAND_FILTER_ENABLED", False)):
         return []
     lookback = pbt.parity.daily_demand_lookback_bars(cfg)
@@ -1659,16 +1650,13 @@ def api_backtest_start():
             400,
         )
 
-    # Rentang bisa perlu lebih panjang kalau gerbang trend aktif: tanpa pemeriksaan ini
-    # pengguna memilih 2 hari dan hasilnya nol trade karena seluruh rentang habis
-    # untuk pemanasan.
     try:
         cfg_hari = bt.apply_overrides(
             PUMP_CONFIG, {k: data.get(k) for k in BT_PARAM_KEYS if k in data}
         )
     except bt.BacktestError:
         cfg_hari = (
-            PUMP_CONFIG  # galat nilainya dilaporkan di pemeriksaan parameter di bawah
+            PUMP_CONFIG
         )
     minimal_hari, catatan_hari = _bt_min_days_note(
         cfg_hari, _bt_simulation_interval(cfg_hari)
@@ -2074,9 +2062,6 @@ def api_backtest_defaults():
     out["grid_max_kombinasi"] = gs.MAX_KOMBINASI_PORTFOLIO
     out["grid_metrik"] = list(gs.METRIK_TERSEDIA)
     out["grid_params"] = list(GRID_PARAM_KEYS)
-    # Info pemanasan gerbang timeframe tinggi supaya perkiraan beban unduhan di
-    # layar (dan catatan tanggal minimal) memakai angka yang SAMA dengan yang
-    # benar-benar diunduh job, termasuk lapisan demand dan EMA + ADX harian.
     try:
         out["warmup_bars"] = int(
             pbt.parity.htf_gate_warmup_bars(
@@ -2108,7 +2093,6 @@ def api_backtest_defaults():
 
 @app.route("/favicon.ico")
 def favicon():
-    # Browser meminta /favicon.ico di akar situs; arahkan ke aset statis.
     return redirect("/static/favicon.ico", code=302)
 
 
@@ -2124,8 +2108,6 @@ def api_status():
 
 @app.route("/api/coin-icon/<symbol>")
 def api_coin_icon(symbol):
-    # Mengalihkan ke gambar ikon koin. 404 bila tidak ada, sehingga klien
-    # bisa lanjut ke sumber cadangan (CDN) atau huruf inisial.
     url = coin_icons.resolve_icon_url(symbol)
     if not url:
         abort(404)
@@ -2134,12 +2116,6 @@ def api_coin_icon(symbol):
 
 @app.route("/api/fx")
 def api_fx():
-    """Kurs rupiah untuk tampilan.
-
-    Parameter opsional ``refresh=1`` memaksa pengambilan kurs baru dari
-    bursa. Penyedia kurs sendiri memberi jeda minimum antar permintaan
-    paksa supaya endpoint ini tidak bisa dipakai menghajar bursa.
-    """
     forced = str(request.args.get("refresh", "")).strip().lower() in (
         "1",
         "true",
@@ -2302,17 +2278,22 @@ def api_control_status():
         {
             "process": process,
             "position": _process_manager.position(),
+            "public_egress_ip": get_public_egress_ip_status(),
             "operation": _control_operation_snapshot(),
             "mode": mode,
             "mode_source": get_mode_source(),
             "mode_guard": guard,
+            "live_state_missing": (
+                mode == "LIVE"
+                and not os.path.exists(
+                    PUMP_CONFIG.get("STATE_FILE") or get_state_file()
+                )
+            ),
             "read_only": not _bind_is_loopback(),
             "config_errors": list(CONFIG_LOAD_ERRORS),
             "platform": {
                 "os_name": os.name,
                 "windows": os.name == "nt",
-                # Gauge pemakaian file descriptor. Angka inilah yang dulu jebol
-                # sampai OSError(24) dan membuat dashboard menjawab 500.
                 "file_descriptors": fd_status(),
             },
         }
@@ -2325,6 +2306,28 @@ def api_control_prepare():
     action = str(data.get("action", "")).strip().upper()
     if action not in ("START", "STOP"):
         return jsonify({"error": "Aksi hanya boleh START atau STOP."}), 400
+    mode = get_mode(PUMP_CONFIG)
+    live_state_missing = (
+        action == "START"
+        and mode == "LIVE"
+        and not os.path.exists(PUMP_CONFIG.get("STATE_FILE") or get_state_file())
+    )
+    acknowledge_missing_live_state = (
+        data.get("acknowledge_missing_live_state") is True
+    )
+    if live_state_missing and not acknowledge_missing_live_state:
+        return (
+            jsonify(
+                {
+                    "error": (
+                        "File state LIVE tidak ditemukan. Periksa posisi dan order "
+                        "akun, lalu centang konfirmasi inisialisasi state baru."
+                    ),
+                    "requires_live_state_acknowledgement": True,
+                }
+            ),
+            409,
+        )
     active_operation = _active_control_operation()
     if active_operation:
         return (
@@ -2396,9 +2399,12 @@ def api_control_prepare():
         {
             "action": action,
             "position_policy": policy,
-            "mode": get_mode(PUMP_CONFIG),
+            "mode": mode,
             "pid": status.get("pid"),
             "status": status.get("status"),
+            "allow_missing_live_state": (
+                live_state_missing and acknowledge_missing_live_state
+            ),
         },
         ttl=120,
     )
@@ -2426,6 +2432,22 @@ def api_control_execute():
         return jsonify({"error": "Konfirmasi kedaluwarsa atau tidak valid."}), 409
     if payload.get("mode") != get_mode(PUMP_CONFIG):
         return jsonify({"error": "Mode berubah sejak konfirmasi. Ulangi aksi."}), 409
+    if (
+        payload.get("action") == "START"
+        and get_mode(PUMP_CONFIG) == "LIVE"
+        and not os.path.exists(PUMP_CONFIG.get("STATE_FILE") or get_state_file())
+        and payload.get("allow_missing_live_state") is not True
+    ):
+        return (
+            jsonify(
+                {
+                    "error": "File state LIVE hilang setelah konfirmasi. Tinjau ulang "
+                    "peringatan dan mulai proses konfirmasi lagi.",
+                    "requires_live_state_acknowledgement": True,
+                }
+            ),
+            409,
+        )
 
     with _control_operation_lock:
         if (
@@ -2483,6 +2505,11 @@ def api_control_execute():
             "id": operation_id,
             "action": action,
             "position_policy": payload.get("position_policy", "REQUIRE_EMPTY"),
+            "allow_missing_live_state": (
+                action == "START"
+                and get_mode(PUMP_CONFIG) == "LIVE"
+                and payload.get("allow_missing_live_state") is True
+            ),
             "status": "PENDING",
             "requested_at": now,
             "updated_at": now,
@@ -2495,7 +2522,12 @@ def api_control_execute():
 
     worker = threading.Thread(
         target=_run_control_operation,
-        args=(operation_id, action, operation["position_policy"]),
+        args=(
+            operation_id,
+            action,
+            operation["position_policy"],
+            operation["allow_missing_live_state"],
+        ),
         name=f"bot-control-{action.lower()}-{operation_id[:6]}",
         daemon=True,
     )
@@ -2522,533 +2554,17 @@ def api_control_execute():
     )
 
 
-def selftest() -> int:
-    """Uji lokal dashboard: kunci parameter backtest dan warmup.
-
-    Tidak menghubungi Binance sama sekali. Klien bursa diganti klien palsu.
-    """
-    print(
-        "=== SELFTEST web/dashboard.py: kunci parameter backtest dan gerbang trend ==="
-    )
-    gagal = 0
-
-    def cek(nama: str, syarat: bool, info: str = "") -> None:
-        nonlocal gagal
-        if not syarat:
-            gagal += 1
-        print(
-            ("  LULUS " if syarat else "  GAGAL ")
-            + nama
-            + (f"  -> {info}" if info else "")
-        )
-
-    cek(
-        "form backtest memuat semua kunci trend",
-        {
-            "TREND_FILTER_ENABLED",
-            "TREND_INTERVAL",
-            "TREND_EMA_FAST",
-            "TREND_EMA_SLOW",
-            "TREND_ADX_PERIOD",
-            "TREND_ADX_MIN",
-            "TREND_LOOKBACK_BARS",
-        }
-        <= set(BT_PARAM_KEYS),
-    )
-    cek(
-        "pencarian grid tidak menyapu parameter trend (sinyal entry dihitung sekali)",
-        not any("TREND" in k for k in GRID_PARAM_KEYS)
-        and "USE_ATR_EXIT" not in GRID_PARAM_KEYS,
-    )
-
-    # warmup backtest: dinaikkan sebelum jaringan disentuh, dan galat interval dibungkus rapi
-    import logging as _logging
-
-    kelas_log = []
-
-    class Perekam(_logging.Handler):
-        def emit(self, record):
-            kelas_log.append(record.getMessage())
-
-    perekam = Perekam()
-    logger.addHandler(perekam)
-    level_asli = logger.level
-    logger.setLevel(_logging.INFO)
-    asli_klien, asli_ada = globals().get("BinanceSpotClient"), _HAS_CLIENT
-    try:
-        globals()["_HAS_CLIENT"] = True
-
-        class KlienGagal:
-            def __init__(self, *a, **k):
-                pass
-
-            def get_ticker_24hr_all(self):
-                raise RuntimeError("jaringan uji putus")
-
-        globals()["BinanceSpotClient"] = KlienGagal
-        cfg_uji = dict(PUMP_CONFIG, CONFIRM_INTERVAL="5m")
-        try:
-            _bt_prepare_universe("uji", cfg_uji, 30, 5, lambda *a: None, lambda: False)
-            cek(
-                "warmup trend memblokir sebelum jaringan?",
-                False,
-                "tidak melempar apa pun",
-            )
-        except bt.BacktestError as exc:
-            cek(
-                "warmup trend dinaikkan sebelum jaringan dan pesannya jelas",
-                any(
-                    "Warmup backtest dinaikkan" in m and "gerbang trend" in m
-                    for m in kelas_log
-                )
-                and "jaringan uji putus" in str(exc),
-                f"{len(kelas_log)} catatan log",
-            )
-
-        try:
-            _bt_prepare_universe(
-                "uji",
-                dict(PUMP_CONFIG, CONFIRM_INTERVAL="5m", TREND_INTERVAL="3m"),
-                30,
-                5,
-                lambda *a: None,
-                lambda: False,
-            )
-            cek("interval trend tidak sepadan ditolak", False, "tidak melempar apa pun")
-        except bt.BacktestError as exc:
-            cek(
-                "interval trend tidak sepadan ditolak dengan pesan yang bisa dibaca",
-                "TREND_INTERVAL" in str(exc) or "kelipatan" in str(exc),
-                str(exc)[:70],
-            )
-    finally:
-        logger.removeHandler(perekam)
-        logger.setLevel(level_asli)
-        globals()["_HAS_CLIENT"] = asli_ada
-        if asli_klien is not None:
-            globals()["BinanceSpotClient"] = asli_klien
-
-
-    # tanggal minimum: rentang hari tidak boleh habis untuk pemanasan saja.
-    # Gerbang demand harian dimatikan dulu supaya uji ini murni mengukur kebutuhan
-    # gerbang trend; kebutuhan gerbang harian diuji terpisah di bawah.
-    cfg_hari = dict(
-        PUMP_CONFIG,
-        TREND_FILTER_ENABLED=True,
-        TREND_INTERVAL="1h",
-        TREND_LOOKBACK_BARS=120,
-        CONFIRM_INTERVAL="5m",
-        HTF_DEMAND_FILTER_ENABLED=False,
-        DAILY_DEMAND_FILTER_ENABLED=False,
-    )
-    minimal, catatan = _bt_min_days_note(cfg_hari, "5m")
-    cek(
-        "rentang hari minimum dihitung dari kebutuhan pemanasan gerbang trend",
-        minimal >= 6 and "hari" in catatan,
-        f"minimal {minimal} hari | {catatan[:60]}",
-    )
-    try:
-        _bt_days_guard(cfg_hari, 2)
-        cek(
-            "rentang 2 hari dengan gerbang trend ditolak",
-            False,
-            "tidak melempar apa pun",
-        )
-    except bt.BacktestError as exc:
-        cek(
-            "rentang 2 hari dengan gerbang trend ditolak dengan pesan jelas",
-            "minimal" in str(exc) and "hari" in str(exc),
-            str(exc)[:70],
-        )
-    _bt_days_guard(cfg_hari, minimal)
-    _bt_days_guard(dict(cfg_hari, TREND_FILTER_ENABLED=False), 2)
-    cek("rentang cukup dan filter nonaktif tetap diloloskan", True)
-
-    # Gerbang demand harian punya jendela terpanjang (default lookback 20 hari
-    # pada candle 1d berarti pemanasan sekitar 22 hari simulasi 5m). Pilihan
-    # produknya: rentang pendek TIDAK ditolak (biar tetap bisa diuji), tetapi
-    # kebutuhannya dilaporkan di catatan dan hasil job memberi peringatan keras.
-    cfg_harian_hari = dict(
-        cfg_hari, HTF_DEMAND_FILTER_ENABLED=True, DAILY_DEMAND_FILTER_ENABLED=True
-    )
-    minimal_harian, catatan_harian = _bt_min_days_note(cfg_harian_hari, "5m")
-    cek(
-        "catatan rentang hari menyebut kebutuhan pemanasan gerbang demand harian",
-        "1d" in catatan_harian and "22" in catatan_harian,
-        f"minimal {minimal_harian} hari | {catatan_harian[:70]}",
-    )
-    _bt_days_guard(cfg_harian_hari, 14)
-    cek(
-        "rentang 14 hari dengan gerbang demand harian tetap boleh dijalankan",
-        True,
-        f"minimal tetap {minimal_harian} hari",
-    )
-    peringatan_pendek = _bt_peringatan_harian(cfg_harian_hari, 14)
-    peringatan_panjang = _bt_peringatan_harian(cfg_harian_hari, 30)
-    cek(
-        "rentang uji lebih pendek dari lookback harian memunculkan peringatan",
-        len(peringatan_pendek) == 1
-        and "lookback 20 hari" in peringatan_pendek[0]
-        and not peringatan_panjang,
-        (peringatan_pendek[0][:70] if peringatan_pendek else "kosong"),
-    )
-    cek(
-        "tanpa gerbang demand harian tidak ada peringatan apa pun",
-        not _bt_peringatan_harian(dict(cfg_harian_hari, DAILY_DEMAND_FILTER_ENABLED=False), 2),
-    )
-    cek(
-        "catatan gerbang demand harian nonaktif menyebut nonaktif",
-        "NONAKTIF"
-        in _bt_demand_harian_note(
-            dict(cfg_hari, DAILY_DEMAND_FILTER_ENABLED=False), "5m"
-        ),
-    )
-    note_limitations = _bt_demand_limitations(
-        dict(
-            PUMP_CONFIG,
-            TREND_FILTER_ENABLED=True,
-            TREND_INTERVAL="1h",
-            DAILY_DEMAND_FILTER_ENABLED=True,
-        ),
-        "5m",
-    )
-    cek(
-        "keterangan batasan hasil menyebut kedua lapisan gerbang demand",
-        "HTF_DEMAND_" in note_limitations
-        and "DAILY_DEMAND_" in note_limitations
-        and "1d" in note_limitations
-        and _bt_demand_limitations(
-            dict(PUMP_CONFIG, DAILY_DEMAND_FILTER_ENABLED=False), "5m"
-        ).endswith("olehnya."),
-        note_limitations[:60],
-    )
-
-    # Estimasi request harus ikut menghitung warmup, bukan hanya periode uji.
-    est_tanpa_harian = _bt_estimate_requests(
-        30, 10, dict(PUMP_CONFIG, CONFIRM_INTERVAL="5m", DAILY_DEMAND_FILTER_ENABLED=False)
-    )
-    est_dengan_harian = _bt_estimate_requests(
-        30, 10, dict(PUMP_CONFIG, CONFIRM_INTERVAL="5m", DAILY_DEMAND_FILTER_ENABLED=True)
-    )
-    cek(
-        "estimasi request ikut menghitung warmup gerbang demand harian",
-        est_dengan_harian > est_tanpa_harian,
-        f"{est_tanpa_harian} -> {est_dengan_harian}",
-    )
-
-    # --- gerbang EMA + ADX harian (DAILY_TREND_*) ---
-    cek(
-        "form backtest memuat semua kunci EMA + ADX harian",
-        {
-            "DAILY_TREND_FILTER_ENABLED",
-            "DAILY_TREND_INTERVAL",
-            "DAILY_TREND_EMA_FAST",
-            "DAILY_TREND_EMA_SLOW",
-            "DAILY_TREND_ADX_PERIOD",
-            "DAILY_TREND_ADX_MIN",
-            "DAILY_TREND_LOOKBACK_BARS",
-        }
-        <= set(BT_PARAM_KEYS),
-    )
-    cek(
-        "pencarian grid tidak menyapu EMA + ADX harian",
-        not any(k.startswith("DAILY_TREND_") for k in GRID_PARAM_KEYS),
-    )
-    cfg_tren_harian = dict(
-        PUMP_CONFIG,
-        CONFIRM_INTERVAL="5m",
-        TREND_FILTER_ENABLED=False,
-        HTF_DEMAND_FILTER_ENABLED=False,
-        DAILY_DEMAND_FILTER_ENABLED=False,
-        DAILY_TREND_FILTER_ENABLED=True,
-        DAILY_TREND_INTERVAL="1d",
-    )
-    minimal_th, catatan_th = _bt_min_days_note(cfg_tren_harian, "5m")
-    cek(
-        "batas hari minimal menghitung pemanasan EMA + ADX harian",
-        minimal_th >= pbt.parity.daily_trend_window_bars(cfg_tren_harian) + 2
-        and "1d" in catatan_th,
-        f"minimal {minimal_th} hari | {catatan_th[:70]}",
-    )
-    try:
-        _bt_days_guard(cfg_tren_harian, minimal_th - 1)
-        cek(
-            "rentang di bawah minimal dengan EMA + ADX harian ditolak",
-            False,
-            "tidak melempar apa pun",
-        )
-    except bt.BacktestError as exc:
-        cek(
-            "rentang di bawah minimal dengan EMA + ADX harian ditolak dengan pesan jelas",
-            "minimal" in str(exc) and "1d" in str(exc),
-            str(exc)[:70],
-        )
-    _bt_days_guard(cfg_tren_harian, minimal_th)
-    cek(
-        "rentang sebatas minimal dengan EMA + ADX harian diloloskan",
-        True,
-        f"minimal {minimal_th} hari",
-    )
-    cek(
-        "catatan EMA + ADX harian nonaktif menyebut NONAKTIF",
-        "NONAKTIF"
-        in _bt_tren_harian_note(
-            dict(cfg_tren_harian, DAILY_TREND_FILTER_ENABLED=False), "5m"
-        ),
-    )
-    cek(
-        "catatan EMA + ADX harian aktif menyebut pemanasan",
-        "pemanasan" in _bt_tren_harian_note(cfg_tren_harian, "5m"),
-    )
-    cek(
-        "gerbang EMA + ADX harian nonaktif tidak menambah batas hari",
-        _bt_min_days_note(
-            dict(cfg_tren_harian, DAILY_TREND_FILTER_ENABLED=False), "5m"
-        )[0]
-        == 2,
-    )
-    batasan_th = _bt_tren_harian_limitations(cfg_tren_harian, "5m")
-    cek(
-        "keterangan batasan hasil menyebut DAILY_TREND_ saat aktif dan kosong saat nonaktif",
-        "DAILY_TREND_" in batasan_th
-        and _bt_tren_harian_limitations(
-            dict(cfg_tren_harian, DAILY_TREND_FILTER_ENABLED=False), "5m"
-        )
-        == "",
-        batasan_th[:60],
-    )
-    est_tanpa_th = _bt_estimate_requests(
-        30, 10, dict(cfg_tren_harian, DAILY_TREND_FILTER_ENABLED=False)
-    )
-    est_dengan_th = _bt_estimate_requests(30, 10, cfg_tren_harian)
-    cek(
-        "estimasi request ikut menghitung pemanasan EMA + ADX harian",
-        est_dengan_th > est_tanpa_th,
-        f"{est_tanpa_th} -> {est_dengan_th}",
-    )
-
-    # --- peta rute dan smoke test HTTP ---
-    # Penjaga kelas bug yang pernah lolos ke pengguna: fungsi bantu disisipkan tepat
-    # di antara decorator @app.route dan fungsi view, sehingga rute menunjuk ke
-    # fungsi yang salah dan browser menerima halaman HTML 500 ("Unexpected token '<'")
-    # alih-alih JSON.
-    import inspect as _inspect
-
-    def _view(aturan_akhir: str):
-        for aturan in app.url_map.iter_rules():
-            if str(aturan) == aturan_akhir:
-                return app.view_functions[aturan.endpoint], aturan.endpoint
-        return None, None
-
-    for jalur, diharapkan in (
-        ("/api/backtest/start", "api_backtest_start"),
-        ("/api/backtest/grid/start", "api_backtest_grid_start"),
-        ("/api/backtest/cancel/<job_id>", "api_backtest_cancel"),
-        ("/api/backtest/status/<job_id>", "api_backtest_status"),
-        ("/api/backtest/defaults", "api_backtest_defaults"),
-    ):
-        view, endpoint = _view(jalur)
-        cek(
-            f"rute {jalur} menunjuk fungsi view yang benar",
-            view is not None and endpoint == diharapkan,
-            f"endpoint={endpoint}",
-        )
-
-    salah = [
-        aturan.endpoint
-        for aturan in app.url_map.iter_rules()
-        if aturan.endpoint.startswith("_")
-    ]
-    cek(
-        "tidak ada view yang terpasang pada fungsi bantu (nama diawali garis bawah)",
-        not salah,
-        salah,
-    )
-
-    viewsalah = []
-    for aturan in app.url_map.iter_rules():
-        view = app.view_functions[aturan.endpoint]
-        try:
-            wajib = [
-                p
-                for p in _inspect.signature(view).parameters.values()
-                if p.default is _inspect.Parameter.empty
-                and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
-            ]
-        except (TypeError, ValueError):
-            continue
-        # Flask mengisi sendiri argumen yang namanya ada di pola URL (mis. <job_id>),
-        # jadi yang dicari adalah argumen wajib DI LUAR pola itu.
-        wajib = [p for p in wajib if p.name not in (aturan.arguments or set())]
-        if wajib:
-            viewsalah.append(f"{aturan.endpoint}({', '.join(p.name for p in wajib)})")
-    cek(
-        "semua view bisa dipanggil Flask tanpa argumen posisi tambahan",
-        not viewsalah,
-        viewsalah,
-    )
-
-    # Diambil lewat globals() supaya penetapan di bawah tidak membuat nama lokal
-    # yang menutupi fungsi aslinya.
-    asli_run = globals().get("_bt_run_job")
-    asli_grid = globals().get("_bt_run_grid_job")
-    globals()["_bt_run_job"] = lambda *a, **k: None
-    globals()["_bt_run_grid_job"] = lambda *a, **k: None
-    app.config["TESTING"] = True
-    klien = app.test_client()
-    kepala = {"X-Admin-Token": _ADMIN_TOKEN, "Origin": "http://localhost"}
-    try:
-        with _bt_jobs_lock:
-            _bt_jobs.clear()
-        resp = klien.post(
-            "/api/backtest/start", json={"days": 30, "max_symbols": 150}, headers=kepala
-        )
-        tipe = str(resp.headers.get("Content-Type", ""))
-        isi = resp.get_data(as_text=True)
-        cek(
-            "POST /api/backtest/start menjawab JSON, bukan HTML",
-            resp.status_code == 200
-            and tipe.startswith("application/json")
-            and '"job_id"' in isi,
-            f"{resp.status_code} {tipe[:30]} {isi[:40]}",
-        )
-        if resp.status_code != 200:
-            print("    pesan server:", isi[:160])
-
-        with _bt_jobs_lock:
-            _bt_jobs.clear()
-        resp2 = klien.post(
-            "/api/backtest/start", json={"days": 2, "max_symbols": 150}, headers=kepala
-        )
-        isi2 = resp2.get_data(as_text=True)
-        cek(
-            "rentang hari terlalu pendek dijawab JSON 400 yang jelas",
-            resp2.status_code == 400
-            and str(resp2.headers.get("Content-Type", "")).startswith(
-                "application/json"
-            )
-            and "minimal" in isi2
-            and "hari" in isi2,
-            f"{resp2.status_code} {isi2[:60]}",
-        )
-
-        # Layar backtest memakai info pemanasan dari server supaya perkiraan beban
-        # unduhan dan catatan "minimal N hari" memakai angka yang sama dengan job.
-        resp_def = klien.get("/api/backtest/defaults", headers=kepala)
-        data_def = resp_def.get_json() or {}
-        cek(
-            "GET /api/backtest/defaults membawa info pemanasan gerbang demand",
-            resp_def.status_code == 200
-            and int(data_def.get("warmup_bars", 0)) >= 1440
-            and float(data_def.get("warmup_days", 0)) >= 5.0
-            and "daily_demand_interval" in data_def
-            and int(data_def.get("daily_demand_lookback_bars", 0)) == 20,
-            f"warmup_bars={data_def.get('warmup_bars')} "
-            f"warmup_days={data_def.get('warmup_days')} "
-            f"daily={data_def.get('daily_demand_enabled')}",
-        )
-
-        with _bt_jobs_lock:
-            _bt_jobs.clear()
-        resp3 = klien.post(
-            "/api/backtest/grid/start",
-            json={
-                "days": 30,
-                "max_symbols": 10,
-                "spec": {"TP_PCT": [2.0, 3.0]},
-                "USE_ATR_EXIT": False,
-            },
-            headers=kepala,
-        )
-        isi3 = resp3.get_data(as_text=True)
-        cek(
-            "POST /api/backtest/grid/start menjawab JSON, bukan HTML",
-            resp3.status_code == 200
-            and str(resp3.headers.get("Content-Type", "")).startswith(
-                "application/json"
-            )
-            and '"job_id"' in isi3,
-            f"{resp3.status_code} {isi3[:60]}",
-        )
-
-        with _bt_jobs_lock:
-            _bt_jobs.clear()
-        resp3b = klien.post(
-            "/api/backtest/grid/start",
-            json={
-                "days": 2,
-                "max_symbols": 10,
-                "spec": {"TP_PCT": [2.0]},
-                "USE_ATR_EXIT": False,
-                "TREND_FILTER_ENABLED": True,
-            },
-            headers=kepala,
-        )
-        isi3b = resp3b.get_data(as_text=True)
-        cek(
-            "grid dengan rentang terlalu pendek dijawab JSON 400 yang jelas",
-            resp3b.status_code == 400
-            and str(resp3b.headers.get("Content-Type", "")).startswith(
-                "application/json"
-            )
-            and "minimal" in isi3b,
-            f"{resp3b.status_code} {isi3b[:70]}",
-        )
-
-        with _bt_jobs_lock:
-            _bt_jobs.clear()
-            _bt_jobs["uji"] = {
-                "status": "running",
-                "cancel": False,
-                "progress": 0.0,
-                "stage": "",
-                "updated_at": time.time(),
-                "created_at": time.time(),
-            }
-        resp4 = klien.post("/api/backtest/cancel/uji", headers=kepala)
-        cek(
-            "POST /api/backtest/cancel menjawab JSON",
-            str(resp4.headers.get("Content-Type", "")).startswith("application/json"),
-            f"{resp4.status_code} {str(resp4.headers.get('Content-Type'))[:30]}",
-        )
-    finally:
-        with _bt_jobs_lock:
-            _bt_jobs.clear()
-        if asli_run is not None:
-            globals()["_bt_run_job"] = asli_run
-        if asli_grid is not None:
-            globals()["_bt_run_grid_job"] = asli_grid
-        app.config["TESTING"] = False
-
-    print(
-        "HASIL SELFTEST dashboard: "
-        + ("SEMUA LULUS" if not gagal else f"{gagal} GAGAL")
-    )
-    return 0 if not gagal else 1
-
-
 def main(*, auto_start_bot: bool = False) -> int:
-    # Batas fd bawaan (1024 di banyak distro Linux) terlalu sempit untuk
-    # dashboard bertread banyak + bot + lock file. Naikkan dulu, dan hanya
-    # berhenti di bawah batas keras sistem; kegagalan di sini tidak fatal.
+    if not _bind_is_loopback():
+        print(
+            "ERROR: DASHBOARD_HOST harus loopback (misalnya 127.0.0.1). "
+            "Bind non-loopback ditolak demi melindungi data dashboard."
+        )
+        return 2
+
     soft, hard, berubah = raise_fd_limit()
     if berubah:
         print(f"Batas file descriptor dinaikkan menjadi {soft} (hard {hard}).")
-
-    if not _bind_is_loopback():
-        if _DASHBOARD_HOST in ("0.0.0.0", "::"):
-            # Mode baca-saja di semua antarmuka: Host apa pun boleh membuka
-            # halaman (lapisan Werkzeug), kontrol tulis tetap diblokir total.
-            app.config["TRUSTED_HOSTS"] = None
-        else:
-            trusted = list(app.config.get("TRUSTED_HOSTS") or [])
-            trusted.append(_DASHBOARD_HOST)
-            app.config["TRUSTED_HOSTS"] = trusted
-        print("=" * 68)
-        print("PERINGATAN: DASHBOARD_HOST bukan loopback.")
-        print("Semua endpoint tulis dinonaktifkan. Dashboard hanya read-only.")
-        print("=" * 68)
-        auto_start_bot = False
 
     if auto_start_bot:
         try:
@@ -3062,8 +2578,6 @@ def main(*, auto_start_bot: bool = False) -> int:
     )
     from infrastructure.process import runtime_cleanup
 
-    # Registri PID dashboard: dipakai gerbang keamanan pembersihan runtime
-    # supaya proses lain tidak menghapus file yang masih dashboard pakai.
     runtime_cleanup.register_dashboard()
     try:
         app.run(
@@ -3092,6 +2606,5 @@ def main(*, auto_start_bot: bool = False) -> int:
 
 
 if __name__ == "__main__":
-    if "--selftest" in sys.argv:
-        raise SystemExit(selftest())
+    argparse.ArgumentParser(description="Dashboard bot").parse_args()
     raise SystemExit(main(auto_start_bot=False))

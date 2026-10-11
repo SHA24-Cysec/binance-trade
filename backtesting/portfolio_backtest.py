@@ -88,6 +88,11 @@ class PortfolioResult:
     daily_trend_skips: int = 0
     daily_trend_scans: int = 0
     same_coin_skips: int = 0
+    mark_to_market_open: bool = False
+    mark_to_market_symbol: Optional[str] = None
+    mark_to_market_pnl_pct: float = 0.0
+    mark_to_market_pnl_quote: float = 0.0
+    mark_to_market_hold_minutes: float = 0.0
 
 
 def select_universe(
@@ -167,9 +172,6 @@ def fetch_universe_klines(
     def _download(sym: str) -> list[Kline]:
         return _klines_untuk_simbol(client, sym, interval, start_ms, end_ms, cache)
 
-    # Fetch in small ordered batches: network I/O can overlap, while storage
-    # insertion remains in the original universe order. The latter preserves
-    # deterministic tie-breaking in portfolio simulations.
     if workers == 1 or len(symbols) <= 1:
         batches = [symbols]
         executor = None
@@ -276,14 +278,6 @@ EntrySignal = tuple[int, float, str, int, float, scanner.SetupResult]
 
 
 class EntrySignalCache(dict):
-    """Peta waktu candle -> (jumlah kandidat, daftar sinyal lolos).
-
-    Turunan dict supaya pemanggil lama tetap bisa memakai operasi dict apa
-    adanya (len, iterasi, .get). Penghitung gerbang trend, gerbang demand H1,
-    dan gerbang demand harian dibawa ikut supaya laporan hasil tetap jujur
-    ketika sinyal dihitung sekali lalu dipakai ulang oleh banyak kombinasi
-    parameter exit (dashboard dan grid).
-    """
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -304,12 +298,6 @@ class EntrySignalCache(dict):
 def build_trend_lookups(
     store: KlineStore, symbols: list, config: dict, interval: str
 ) -> dict:
-    """Siapkan jendela candle trend per simbol untuk gerbang entry.
-
-    Candle trend dirangkai dari candle interval simulasi yang sudah diunduh,
-    jadi tidak ada unduhan tambahan ke Binance dan nilainya identik dengan
-    candle timeframe tinggi asli untuk rentang yang sama.
-    """
     from strategy import indicators as strategy_mod
 
     if not config.get("TREND_FILTER_ENABLED", False) and not config.get(
@@ -338,12 +326,6 @@ def build_trend_lookups(
 def build_daily_lookups(
     store: KlineStore, symbols: list, config: dict, interval: str
 ) -> dict:
-    """Siapkan jendela candle harian per simbol untuk gerbang demand harian.
-
-    Candle harian dirangkai dari candle interval simulasi yang sudah diunduh
-    (288 candle 5m per hari), jadi tidak ada unduhan tambahan ke Binance dan
-    nilainya identik dengan candle harian asli untuk rentang yang sama.
-    """
     from strategy import indicators as strategy_mod
 
     if not strategy_mod.daily_demand_enabled(config):
@@ -363,11 +345,6 @@ def build_daily_lookups(
 def build_daily_trend_lookups(
     store: KlineStore, symbols: list, config: dict, interval: str
 ) -> dict:
-    """Siapkan jendela candle harian per simbol untuk gerbang EMA + ADX harian.
-
-    Candle harian dirangkai dari candle interval simulasi yang sudah diunduh,
-    jadi tidak ada unduhan tambahan dan nilainya sama dengan candle harian asli.
-    """
     from strategy import indicators as strategy_mod
 
     if not strategy_mod.daily_trend_enabled(config):
@@ -385,11 +362,6 @@ def build_daily_trend_lookups(
 
 
 def unpack_prebuilt(prebuilt: Optional[tuple]):
-    """Terima prebuilt 2, 3, atau 4 elemen (lama: tanpa lookup apa pun).
-
-    Urutannya: (timeline, series_of, lookup_gerbang_H1?, lookup_gerbang_harian?).
-    Bentuk lama tetap sah supaya pemanggil yang belum diperbarui tidak rusak.
-    """
     if prebuilt is None:
         return None, None, None, None
     if len(prebuilt) >= 4:
@@ -420,12 +392,6 @@ def _siapkan_harian(prebuilt, store, series_of, config, interval):
 
 
 def _siapkan_tren_harian(prebuilt, store, series_of, config, interval):
-    """Lookup gerbang EMA + ADX harian.
-
-    Elemen ke-5 pada prebuilt dipakai kalau ada (grid search dan dashboard
-    membagikannya antar kombinasi). Prebuilt 2-4 elemen tetap sah dan lookup
-    dihitung di sini, sehingga hasilnya tidak berubah.
-    """
     from strategy import indicators as strategy_mod
 
     if prebuilt is not None and len(prebuilt) >= 5 and prebuilt[4] is not None:
@@ -447,12 +413,6 @@ def precompute_entry_signals(
     btc_klines: Optional[list[Kline]] = None,
     max_skipped_records: int = 400,
 ) -> EntrySignalCache:
-    """Precompute entry candidates when only exit multipliers will vary.
-
-    Entry qualification depends on market data, scanner filters, and ATR_PERIOD,
-    not on ATR exit multipliers. Reusing these signals makes multi-parameter
-    exit searches much faster without changing the portfolio simulator's fills.
-    """
     all_symbols = store.symbols()
     if not all_symbols:
         raise BacktestError("Tidak ada data candle untuk memproses sinyal.")
@@ -548,8 +508,11 @@ def precompute_entry_signals(
                     window_klines = klines[max(0, index - lookback + 1) : index + 1]
                     signal_candle = window_klines[-1]
                 setup = scanner.detect_entry_setup(window_klines, config)
-            except Exception:
-                continue
+            except Exception as exc:
+                raise BacktestError(
+                    f"Evaluasi sinyal {sym} pada waktu {int(t_now)} "
+                    f"(bar {index}) gagal: {type(exc).__name__}: {str(exc)[:160]}"
+                ) from exc
             if setup.ok and trend_of:
                 lock = trend_of.get(sym)
                 if lock is not None and signal_candle is not None:
@@ -586,8 +549,6 @@ def precompute_entry_signals(
                             signals.daily_demand_events.append((int(t_now), sym))
                         continue
             if setup.ok and bool(config.get("DAILY_TREND_FILTER_ENABLED", False)):
-                # Fail closed: lookup yang tidak ada berarti kandidat ditolak,
-                # sama seperti bot live yang menolak saat candle harian kosong.
                 lock = tren_harian_of.get(sym)
                 signals.daily_trend_scans += 1
                 if (
@@ -757,6 +718,11 @@ def run_portfolio_backtest(
     warnings: list = list(_pre_warnings)
     initial_equity = initial_backtest_equity(config)
     equity = initial_equity
+    mark_to_market_open = False
+    mark_to_market_symbol: Optional[str] = None
+    mark_to_market_pnl_pct = 0.0
+    mark_to_market_pnl_quote = 0.0
+    mark_to_market_hold_minutes = 0.0
 
     holding: Optional[str] = None
     position: Optional[parity.PositionState] = None
@@ -777,8 +743,6 @@ def run_portfolio_backtest(
     daily_demand_scans = 0
     daily_trend_skips = 0
     daily_trend_scans = 0
-    # Pemetaan SIMBOL -> waktu (ms) sampai kapan entry diblokir karena trade
-    # sebelumnya loss (SAME_COIN_BLOCK_HOURS), paritas dengan bot live.
     symbol_blocks: dict = {}
     same_coin_skips = 0
     max_chase_pct = float(config.get("MAX_CHASE_PCT", 0) or 0)
@@ -823,9 +787,6 @@ def run_portfolio_backtest(
         papan_input.append((sym, ot, ct, pct_arr, vol_arr, ready_arr, len(ot)))
 
     if entry_signal_cache is not None:
-        # Sinyal dihitung sekali di precompute_entry_signals, jadi penghitung
-        # gerbang trend dan demand H1 dibawa dari cache supaya laporan tidak
-        # menampilkan nol.
         trend_scans += int(getattr(entry_signal_cache, "trend_scans", 0))
         trend_skips += int(getattr(entry_signal_cache, "trend_skips", 0))
         htf_demand_scans += int(getattr(entry_signal_cache, "htf_demand_scans", 0))
@@ -928,8 +889,6 @@ def run_portfolio_backtest(
                 pos = bisect_left(ot, t_now)
                 if pos >= n_bar or ot[pos] != t_now:
                     continue
-                # Koin yang sedang diblokir karena loss sebelumnya dikecualikan
-                # dari papan, sama seperti scanner bot live (paritas).
                 if parity.same_coin_blocked(sym, t_now, symbol_blocks):
                     same_coin_skips += 1
                     if len(skipped) < max_skipped_records:
@@ -979,19 +938,24 @@ def run_portfolio_backtest(
 
             is_last = current_bi == total_bars - 1
             if exit_reason is None:
-                mtm_equity = equity + position_notional * (
-                    candle.close / entry_price - 1.0
-                )
+                mtm_pnl_pct = (candle.close / entry_price - 1.0) * 100.0
+                mtm_pnl_quote = position_notional * mtm_pnl_pct / 100.0
+                mtm_equity = equity + mtm_pnl_quote
                 entries_paused = controls.update(candle.close_time, mtm_equity)
                 if controls.force_close_due(entries_paused, True):
                     exit_reason = parity.RISK_LIMIT_REASON
                     exit_price = candle.close
                 elif is_last:
-                    exit_reason = "END_OF_DATA"
-                    exit_price = candle.close
+                    mark_to_market_open = True
+                    mark_to_market_symbol = holding
+                    mark_to_market_pnl_pct = mtm_pnl_pct
+                    mark_to_market_pnl_quote = mtm_pnl_quote
+                    mark_to_market_hold_minutes = max(
+                        0.0, (candle.close_time - entry_time) / 60000.0
+                    )
                     warnings.append(
-                        "Posisi terakhir masih terbuka saat data habis (ditutup paksa di harga "
-                        "penutupan terakhir demi kelengkapan statistik, bukan exit sungguhan)."
+                        "Posisi terakhir masih terbuka pada akhir data. Nilainya dicatat "
+                        "sebagai mark-to-market, bukan sebagai trade tertutup."
                     )
 
             if exit_reason:
@@ -1028,8 +992,6 @@ def run_portfolio_backtest(
                 )
                 equity = equity_after
                 position_notional = 0.0
-                # Catat blokir entry ulang koin ini (aktif bila trade loss, sesuai
-                # SAME_COIN_BLOCK_LOSS_ONLY), sama seperti bot live.
                 parity.same_coin_block_record(
                     symbol_blocks, holding, candle.close_time, pnl_quote, config
                 )
@@ -1060,8 +1022,11 @@ def run_portfolio_backtest(
                 window_kl = kl[max(0, i - lookback + 1) : i + 1]
                 try:
                     setup = scanner.detect_entry_setup(window_kl, config)
-                except Exception:
-                    continue
+                except Exception as exc:
+                    raise BacktestError(
+                        f"Evaluasi sinyal {sym} pada waktu {int(t_now)} "
+                        f"(bar {i}) gagal: {type(exc).__name__}: {str(exc)[:160]}"
+                    ) from exc
                 if not setup.ok:
                     continue
                 if trend_of:
@@ -1115,7 +1080,6 @@ def run_portfolio_backtest(
                 if tren_harian_of and bool(
                     config.get("DAILY_TREND_FILTER_ENABLED", False)
                 ):
-                    # Fail closed: lookup yang tidak ada berarti kandidat ditolak.
                     lock = tren_harian_of.get(sym)
                     daily_trend_scans += 1
                     if lock is None or not lock.verdict_at(kl[i].close_time)["ok"]:
@@ -1151,8 +1115,6 @@ def run_portfolio_backtest(
             eligible_count, lolos = cached_entry
             if not lolos:
                 continue
-        # Blokir koin yang sama setelah loss (paritas bot live): koin yang sedang
-        # diblokir tidak boleh dipilih, kandidat lain yang masih lolos dipakai.
         lolos_tersedia = []
         for row in lolos:
             if parity.same_coin_blocked(row[2], t_now, symbol_blocks):
@@ -1327,7 +1289,7 @@ def run_portfolio_backtest(
             )
         ),
         initial_equity=initial_equity,
-        final_equity=equity,
+        final_equity=equity + mark_to_market_pnl_quote,
         risk_events=dict(controls.events),
         chase_skips=chase_skips,
         trend_skips=trend_skips,
@@ -1339,11 +1301,18 @@ def run_portfolio_backtest(
         daily_trend_skips=daily_trend_skips,
         daily_trend_scans=daily_trend_scans,
         same_coin_skips=same_coin_skips,
+        mark_to_market_open=mark_to_market_open,
+        mark_to_market_symbol=mark_to_market_symbol,
+        mark_to_market_pnl_pct=mark_to_market_pnl_pct,
+        mark_to_market_pnl_quote=mark_to_market_pnl_quote,
+        mark_to_market_hold_minutes=mark_to_market_hold_minutes,
     )
 
 
 def summarize_portfolio(result: PortfolioResult) -> dict:
-    trades = result.trades
+    all_trades = list(result.trades)
+    legacy_mtm_trades = [t for t in all_trades if t.reason == "END_OF_DATA"]
+    trades = [t for t in all_trades if t.reason != "END_OF_DATA"]
     total = len(trades)
     wins = [t for t in trades if t.pnl_pct > 0]
     losses = [t for t in trades if t.pnl_pct <= 0]
@@ -1361,8 +1330,49 @@ def summarize_portfolio(result: PortfolioResult) -> dict:
         gross_equity = max(0.0, gross_equity + notional * t.gross_pnl_pct / 100.0)
         equity_curve.append((equity / initial - 1.0) * 100.0 if initial > 0 else 0.0)
 
-    final_equity = equity if trades else (result.final_equity or initial)
+    realized_equity = equity
+    mark_to_market_open = bool(getattr(result, "mark_to_market_open", False))
+    mark_to_market_symbol = getattr(result, "mark_to_market_symbol", None)
+    mark_to_market_pnl_quote = float(
+        getattr(result, "mark_to_market_pnl_quote", 0.0) or 0.0
+    )
+    mark_to_market_pnl_pct = float(
+        getattr(result, "mark_to_market_pnl_pct", 0.0) or 0.0
+    )
+    mark_to_market_hold_minutes = float(
+        getattr(result, "mark_to_market_hold_minutes", 0.0) or 0.0
+    )
+    if legacy_mtm_trades:
+        mark_to_market_open = True
+        mark_to_market_symbol = mark_to_market_symbol or legacy_mtm_trades[-1].symbol
+        if not getattr(result, "mark_to_market_open", False):
+            legacy_final_equity = float(getattr(result, "final_equity", 0.0) or 0.0)
+            mark_to_market_pnl_quote = (
+                legacy_final_equity - realized_equity
+                if legacy_final_equity > 0
+                else float(legacy_mtm_trades[-1].pnl_quote)
+            )
+            mark_to_market_pnl_pct = float(legacy_mtm_trades[-1].pnl_pct)
+            mark_to_market_hold_minutes = float(legacy_mtm_trades[-1].hold_minutes)
+
+    if mark_to_market_open:
+        final_equity = max(0.0, realized_equity + mark_to_market_pnl_quote)
+        gross_equity = max(0.0, gross_equity + mark_to_market_pnl_quote)
+        equity_curve.append(
+            (final_equity / initial - 1.0) * 100.0 if initial > 0 else 0.0
+        )
+    else:
+        final_equity = realized_equity if trades else (result.final_equity or initial)
+
     total_return = ((final_equity / initial) - 1.0) * 100.0 if initial > 0 else 0.0
+    realized_return = (
+        ((realized_equity / initial) - 1.0) * 100.0 if initial > 0 else 0.0
+    )
+    mark_to_market_return = (
+        (mark_to_market_pnl_quote / initial) * 100.0
+        if initial > 0 and mark_to_market_open
+        else 0.0
+    )
     gross_return = ((gross_equity / initial) - 1.0) * 100.0 if initial > 0 else 0.0
     peak = initial
     max_dd = 0.0
@@ -1391,11 +1401,22 @@ def summarize_portfolio(result: PortfolioResult) -> dict:
 
     span_ms = max(1, result.end_time - result.start_time)
     span_days = span_ms / (24 * 60 * 60 * 1000)
-    total_hold = sum(t.hold_minutes for t in trades)
+    closed_hold_minutes = sum(t.hold_minutes for t in trades)
+    total_hold = closed_hold_minutes + (
+        mark_to_market_hold_minutes if mark_to_market_open else 0.0
+    )
     exposure = (total_hold / (span_days * 24 * 60) * 100.0) if span_days > 0 else 0.0
 
     return {
         "total_trades": total,
+        "closed_trades": total,
+        "mark_to_market_open": mark_to_market_open,
+        "mark_to_market_positions": int(mark_to_market_open),
+        "mark_to_market_symbol": mark_to_market_symbol,
+        "mark_to_market_pnl_pct": mark_to_market_pnl_pct,
+        "mark_to_market_pnl_quote": mark_to_market_pnl_quote,
+        "mark_to_market_return_pct": mark_to_market_return,
+        "realized_return_pct": realized_return,
         "wins": len(wins),
         "losses": len(losses),
         "win_rate": (len(wins) / total * 100.0) if total else 0.0,
@@ -1409,10 +1430,11 @@ def summarize_portfolio(result: PortfolioResult) -> dict:
             (sum(t.pnl_pct for t in losses) / len(losses)) if losses else 0.0
         ),
         "profit_factor": profit_factor,
-        "avg_hold_minutes": (total_hold / total) if total else 0.0,
+        "avg_hold_minutes": (closed_hold_minutes / total) if total else 0.0,
         "reason_counts": reason_counts,
         "equity_curve": equity_curve,
         "initial_equity": initial,
+        "realized_equity": realized_equity,
         "final_equity": final_equity,
         "total_pnl_quote": final_equity - initial,
         "unique_symbols": len(symbol_counts),
@@ -1470,828 +1492,3 @@ def _mk(t, o, h, low, c, qv=5_000_000.0):
         volume=1000.0,
         quote_volume=qv,
     )
-
-
-def selftest() -> bool:
-    ok_all = True
-
-    def check(name, cond, extra=""):
-        nonlocal ok_all
-        if not cond:
-            ok_all = False
-        print(
-            ("  LULUS " if cond else "  GAGAL ")
-            + name
-            + (("  -> " + str(extra)) if extra else "")
-        )
-
-    print("Selftest portfolio_backtest")
-
-    a = [_mk(i, 100, 101, 99, 100) for i in range(5)]
-    b = [_mk(i, 50, 51, 49, 50) for i in range(3, 9)]
-    with KlineStore.from_klines({"AUSDT": a, "BUSDT": b}) as _store_tl:
-        tl, seri = build_timeline(_store_tl, "5m")
-        check(
-            "timeline gabungan unik & terurut",
-            tl == sorted(set(tl)) and len(tl) == 9,
-            len(tl),
-        )
-        check(
-            "SymbolSeries memetakan waktu ke posisi",
-            seri["BUSDT"].index_at(b[0].open_time) == 0,
-        )
-        check(
-            "SymbolSeries menolak waktu yang tidak ada",
-            seri["BUSDT"].index_at(b[0].open_time - 1) is None,
-        )
-
-    cfg = {
-        "CONFIRM_LOOKBACK_BARS": 48,
-        "MIN_QUOTE_VOLUME_USDT_24H": 0,
-        "TOP_N_CANDIDATES_TO_CONFIRM": 10,
-        "COOLDOWN_MINUTES_AFTER_CLOSE": 0,
-        "USE_STOP_LOSS": True,
-        "USE_TP": True,
-        "USE_BREAKEVEN": False,
-        "USE_TRAILING": False,
-        "SL_PCT": 2.0,
-        "TP_PCT": 3.0,
-        "BE_TRIGGER_PCT": 1.0,
-        "BE_LOCK_PCT": 0.1,
-        "TRAILING_START_PCT": 1.5,
-        "TRAILING_STEP_PCT": 0.6,
-        "TAKER_FEE_PCT": 0.1,
-        "QUOTE_ASSET": "USDT",
-        "PUMP_MIN_24H_CHANGE_PCT": -1000.0,
-        "ROLLING_VOLUME_FILTER_ENABLED": False,
-    }
-
-    from backtesting.synthetic_data import seri_banyak_setup
-
-    def _jalankan(data_dict: dict, cfg_uji: dict) -> PortfolioResult:
-        with KlineStore.from_klines(data_dict) as _st:
-            return run_portfolio_backtest(_st, cfg_uji, "5m")
-
-    up_a = seri_banyak_setup(harga=100.0, siklus=10, volume=9_000_000.0)
-    up_b = seri_banyak_setup(harga=200.0, siklus=10, volume=5_000_000.0)
-
-    res = _jalankan({"AUSDT": up_a, "BUSDT": up_b}, cfg)
-    overlaps = 0
-    for i in range(len(res.trades)):
-        for j in range(i + 1, len(res.trades)):
-            t1, t2 = res.trades[i], res.trades[j]
-            if t1.entry_time < t2.exit_time and t2.entry_time < t1.exit_time:
-                overlaps += 1
-    check(
-        "tidak pernah dua posisi bersamaan", overlaps == 0, f"{overlaps} tumpang tindih"
-    )
-    check("menghasilkan trade", len(res.trades) > 0, len(res.trades))
-
-    if res.trades:
-        t = res.trades[0]
-        check(
-            "fee pulang-pergi dipotong",
-            abs((t.gross_pnl_pct - t.pnl_pct) - 0.2) < 1e-9,
-            f"selisih {t.gross_pnl_pct - t.pnl_pct:.4f}",
-        )
-
-    cfg_cd = dict(cfg)
-    cfg_cd["COOLDOWN_MINUTES_AFTER_CLOSE"] = 60
-    res_cd = _jalankan({"AUSDT": up_a, "BUSDT": up_b}, cfg_cd)
-    viol = 0
-    for i in range(1, len(res_cd.trades)):
-        gap_min = (
-            res_cd.trades[i].entry_time - res_cd.trades[i - 1].exit_time
-        ) / 60000.0
-        if gap_min < 59.9:
-            viol += 1
-    check("cooldown dihormati", viol == 0, f"{viol} pelanggaran")
-    check(
-        "cooldown mengurangi jumlah trade",
-        len(res_cd.trades) <= len(res.trades),
-        f"{len(res_cd.trades)} vs {len(res.trades)}",
-    )
-
-    print("\n=== SELFTEST portfolio: blokir koin sama setelah loss (SAME_COIN_BLOCK) ===")
-    # Jadikan semua entry AUSDT loss berat: low 10% di bawah open pada candle
-    # eksekusi entry (SL_PCT=2 pasti kena di bar itu juga, tanpa TP).
-    # Entry AUSDT diambil dari run single-symbol; pada run dua simbol semua
-    # trade jatuh ke BUSDT (volume kuotasi B lebih tinggi), jadi fixture dua
-    # simbol tidak bisa dipakai untuk mencari waktu entry AUSDT.
-    res_single = _jalankan({"AUSDT": up_a}, cfg)
-    entry_times_a = sorted({t.entry_time for t in res_single.trades})
-    check(
-        "fixture dasar AUSDT punya entry (tes tidak vakum)",
-        len(entry_times_a) > 0,
-        len(entry_times_a),
-    )
-    loss_a = []
-    for k in up_a:
-        if k.open_time in entry_times_a:
-            loss_a.append(
-                Kline(
-                    open_time=k.open_time,
-                    open=k.open,
-                    high=k.open * 1.001,
-                    low=k.open * 0.9,
-                    close=k.close,
-                    close_time=k.close_time,
-                    volume=k.volume,
-                    quote_volume=k.quote_volume,
-                )
-            )
-        else:
-            loss_a.append(k)
-    res_loss = _jalankan({"AUSDT": loss_a}, cfg)
-    trades_loss_a = [t for t in res_loss.trades if t.symbol == "AUSDT"]
-    jumlah_rugi = sum(1 for t in trades_loss_a if t.pnl_quote < 0)
-    check(
-        "trade pertama AUSDT loss (fixture loss valid)",
-        len(trades_loss_a) > 0 and trades_loss_a[0].pnl_quote < 0,
-        f"{len(trades_loss_a)} trade",
-    )
-    check(
-        "cukup banyak trade loss untuk diuji (>= 3)",
-        jumlah_rugi >= 3,
-        f"{jumlah_rugi} loss dari {len(trades_loss_a)} trade",
-    )
-
-    HARI_MS = 24 * 3_600_000
-    cfg_blk = dict(cfg)
-    cfg_blk["SAME_COIN_BLOCK_HOURS"] = 24.0
-    cfg_blk["SAME_COIN_BLOCK_LOSS_ONLY"] = True
-    res_blk = _jalankan({"AUSDT": loss_a, "BUSDT": up_b}, cfg_blk)
-    trades_a_blk = sorted(
-        (t for t in res_blk.trades if t.symbol == "AUSDT"), key=lambda t: t.entry_time
-    )
-    viol_blk = 0
-    for i in range(1, len(trades_a_blk)):
-        prev = trades_a_blk[i - 1]
-        if prev.pnl_quote < 0 and trades_a_blk[i].entry_time < prev.exit_time + HARI_MS:
-            viol_blk += 1
-    check(
-        "blokir 24 jam dipatuhi setelah loss (AUSDT)",
-        viol_blk == 0,
-        f"{viol_blk} pelanggaran dari {len(trades_a_blk)} trade",
-    )
-    check(
-        "ada sinyal yang diblokir (same_coin_skips)",
-        res_blk.same_coin_skips > 0,
-        res_blk.same_coin_skips,
-    )
-    check(
-        "skip SAME_COIN_BLOCK tercatat",
-        any(s.reason == "SAME_COIN_BLOCK" for s in res_blk.skipped),
-        len(res_blk.skipped),
-    )
-    check(
-        "blokir mengurangi trade AUSDT",
-        len(trades_a_blk) <= len(trades_loss_a),
-        f"{len(trades_a_blk)} vs {len(trades_loss_a)}",
-    )
-    trades_b_blk = [t for t in res_blk.trades if t.symbol == "BUSDT"]
-    check(
-        "koin lain (BUSDT) tetap bisa entry saat AUSDT diblokir",
-        len(trades_b_blk) > 0,
-        len(trades_b_blk),
-    )
-
-    res_off = _jalankan(
-        {"AUSDT": loss_a, "BUSDT": up_b}, dict(cfg, SAME_COIN_BLOCK_HOURS=0)
-    )
-    check(
-        "hours=0 -> tidak ada blokir",
-        res_off.same_coin_skips == 0,
-        res_off.same_coin_skips,
-    )
-    check(
-        "hours=0 -> total trade tidak berkurang dibanding versi diblokir",
-        len(res_off.trades) >= len(res_blk.trades),
-        f"{len(res_off.trades)} vs {len(res_blk.trades)}",
-    )
-
-    cfg_all = dict(cfg_blk)
-    cfg_all["SAME_COIN_BLOCK_LOSS_ONLY"] = False
-    res_all = _jalankan({"AUSDT": loss_a, "BUSDT": up_b}, cfg_all)
-    trades_b_all = sorted(
-        (t for t in res_all.trades if t.symbol == "BUSDT"), key=lambda t: t.entry_time
-    )
-    viol_b = 0
-    for i in range(1, len(trades_b_all)):
-        prev = trades_b_all[i - 1]
-        if trades_b_all[i].entry_time < prev.exit_time + HARI_MS:
-            viol_b += 1
-    check(
-        "loss_only=False -> jarak >= 24 jam untuk semua hasil trade (BUSDT)",
-        viol_b == 0,
-        f"{viol_b} pelanggaran dari {len(trades_b_all)} trade",
-    )
-
-    entry_pertama = res.trades[0].entry_time if res.trades else 0
-    seq_sl = []
-    for k in up_a:
-        if k.open_time == entry_pertama:
-            seq_sl.append(
-                Kline(
-                    open_time=k.open_time,
-                    open=k.open,
-                    high=k.open * 1.12,
-                    low=k.open * 0.88,
-                    close=k.open,
-                    close_time=k.close_time,
-                    volume=k.volume,
-                    quote_volume=k.quote_volume,
-                )
-            )
-        else:
-            seq_sl.append(k)
-
-    res_sl = _jalankan({"AUSDT": seq_sl}, cfg)
-    check(
-        "skenario SL-vs-TP benar-benar menghasilkan trade (tes tidak vakum)",
-        len(res_sl.trades) > 0,
-        len(res_sl.trades),
-    )
-    spanning = [t for t in res_sl.trades if t.entry_time == entry_pertama]
-    if spanning:
-        check(
-            "SL diprioritaskan saat SL & TP kena di satu candle",
-            all(t.reason == "STOP_LOSS" for t in spanning),
-            [t.reason for t in spanning][:4],
-        )
-    else:
-        check(
-            "SL diprioritaskan saat SL & TP kena di satu candle",
-            False,
-            "tidak ada trade yang melewati candle ekstrem",
-        )
-
-    from backtesting import backtest as _bt
-    from backtesting.synthetic_data import seri_dengan_setup
-
-    cfg_par = dict(cfg)
-    par_kl = seri_dengan_setup(harga=100.0, ekor="naik", panjang_ekor=20)
-    res_p1 = _bt.run_backtest(par_kl, dict(cfg_par, _symbol="AUSDT"), warmup_bars=0)
-    res_p2 = _jalankan({"AUSDT": par_kl}, cfg_par)
-    check(
-        "paritas entry satu simbol vs portofolio",
-        [t.entry_time for t in res_p1.trades] == [t.entry_time for t in res_p2.trades],
-        f"{[t.entry_time for t in res_p1.trades]} vs {[t.entry_time for t in res_p2.trades]}",
-    )
-    check(
-        "paritas alasan exit satu simbol vs portofolio",
-        [t.reason for t in res_p1.trades] == [t.reason for t in res_p2.trades],
-        f"{[t.reason for t in res_p1.trades]} vs {[t.reason for t in res_p2.trades]}",
-    )
-
-    res_ec_p = _bt.run_backtest(seq_sl, dict(cfg, _symbol="AUSDT"), warmup_bars=0)
-    ec_single = [
-        (t.entry_time, t.reason, round(t.exit_price, 9)) for t in res_ec_p.trades[:3]
-    ]
-    ec_port = [
-        (t.entry_time, t.reason, round(t.exit_price, 9)) for t in res_sl.trades[:3]
-    ]
-    check(
-        "paritas candle entry ekstrem satu simbol vs portofolio",
-        bool(ec_single) and ec_single == ec_port,
-        f"{ec_single} vs {ec_port}",
-    )
-
-    btc_cfg = dict(
-        cfg, BTC_FILTER_ENABLED=True, BTC_MAX_DROP_PCT=1.0, BTC_LOOKBACK_BARS=3
-    )
-
-    def _btc(closes):
-        return [_mk(i, c, c, c, c) for i, c in enumerate(closes)]
-
-    def _jalankan_btc(cfg_uji, btc_kl):
-        with KlineStore.from_klines({"AUSDT": up_a}) as _st:
-            return run_portfolio_backtest(_st, cfg_uji, "5m", btc_klines=btc_kl)
-
-    turun = [100.0 * 0.99**i for i in range(len(up_a))]
-    r_btc_turun = _jalankan_btc(btc_cfg, _btc(turun))
-    r_btc_datar = _jalankan_btc(btc_cfg, _btc([100.0] * len(up_a)))
-    r_btc_none = _jalankan_btc(btc_cfg, None)
-    check(
-        "filter BTC turun memblokir semua entry",
-        len(r_btc_turun.trades) == 0,
-        len(r_btc_turun.trades),
-    )
-    check(
-        "filter BTC datar tidak mengubah hasil",
-        len(r_btc_datar.trades) == len(res.trades),
-        f"{len(r_btc_datar.trades)} trade",
-    )
-    check(
-        "tanpa data BTC ada peringatan eksplisit",
-        any("BTC" in w for w in r_btc_none.warnings) and len(r_btc_none.trades) > 0,
-    )
-    r_chase = _jalankan({"AUSDT": up_a}, dict(cfg, MAX_CHASE_PCT=0.0001))
-    check(
-        "MAX_CHASE_PCT melewati sinyal yang mengejar harga",
-        r_chase.chase_skips > 0
-        and len(r_chase.trades) < len(res.trades)
-        and any(sk.reason == "FILTER_CHASE" for sk in r_chase.skipped),
-        f"{r_chase.chase_skips} dilewati, {len(r_chase.trades)} trade",
-    )
-    cfg_risk = dict(
-        cfg,
-        USE_EQUITY_STOP=True,
-        MAX_DRAWDOWN_PERCENT=0.01,
-        DD_COOLDOWN_HOURS=24,
-        CLOSE_ALL_AT_LIMIT=True,
-        BACKTEST_INITIAL_EQUITY_USDT=1000.0,
-        MAX_POSITION_USDT=100.0,
-    )
-    r_risk = _jalankan({"AUSDT": up_a}, cfg_risk)
-    check(
-        "stop drawdown menjeda entry dan tercatat",
-        r_risk.risk_events.get("dd_stop", 0) > 0
-        and len(r_risk.trades) < len(res.trades),
-        r_risk.risk_events,
-    )
-    check(
-        "ringkasan memuat metrik per trade dan peristiwa risiko",
-        {"avg_trade_pct", "max_consecutive_losses", "risk_events", "chase_skips"}
-        <= set(summarize_portfolio(r_risk)),
-    )
-
-    cfg_vol = dict(cfg)
-    cfg_vol["MIN_QUOTE_VOLUME_USDT_24H"] = 1e15
-    res_vol = _jalankan({"AUSDT": up_a}, cfg_vol)
-    check(
-        "filter volume menyaring semua", len(res_vol.trades) == 0, len(res_vol.trades)
-    )
-    check(
-        "kontrol positif: data sama tanpa ambang volume tetap menghasilkan trade",
-        len(_jalankan({"AUSDT": up_a}, cfg).trades) > 0,
-    )
-
-    cfg_demand = dict(
-        cfg,
-        DEMAND_ZONE_FILTER_ENABLED=True,
-        DEMAND_LOOKBACK_BARS=20,
-        DEMAND_ZONE_BUFFER_PCT=0.8,
-        DEMAND_MAX_DISTANCE_PCT=3.5,
-        DEMAND_MIN_CLOSE_POSITION=0.45,
-    )
-    res_demand = _jalankan({"AUSDT": up_a, "BUSDT": up_b}, cfg_demand)
-    check(
-        "filter zona demand menyaring entry fase turun dan menjaga kualitas",
-        0 < len(res_demand.trades) < len(res.trades),
-        f"{len(res_demand.trades)} vs {len(res.trades)} trade",
-    )
-
-    s = summarize_portfolio(res)
-    check("total = menang + kalah", s["total_trades"] == s["wins"] + s["losses"])
-    check(
-        "kurva equity panjangnya benar", len(s["equity_curve"]) == s["total_trades"] + 1
-    )
-    check("drawdown tidak negatif", s["max_drawdown_pct"] >= 0, s["max_drawdown_pct"])
-    check(
-        "return kotor >= bersih",
-        s["gross_return_pct"] >= s["total_return_pct"] - 1e-9,
-        f'{s["gross_return_pct"]:.3f} vs {s["total_return_pct"]:.3f}',
-    )
-    check(
-        "eksposur masuk akal (0-100%)", 0 <= s["exposure_pct"] <= 100, s["exposure_pct"]
-    )
-
-    tickers = [
-        {
-            "symbol": "BTCUSDT",
-            "priceChangePercent": "1.0",
-            "quoteVolume": "9e9",
-            "lastPrice": "60000",
-        },
-        {
-            "symbol": "USDCUSDT",
-            "priceChangePercent": "0.0",
-            "quoteVolume": "9e9",
-            "lastPrice": "1",
-        },
-        {
-            "symbol": "BTCUPUSDT",
-            "priceChangePercent": "5.0",
-            "quoteVolume": "9e9",
-            "lastPrice": "10",
-        },
-        {
-            "symbol": "ETHBTC",
-            "priceChangePercent": "1.0",
-            "quoteVolume": "9e9",
-            "lastPrice": "0.05",
-        },
-        {
-            "symbol": "SOLUSDT",
-            "priceChangePercent": "-3.0",
-            "quoteVolume": "5e8",
-            "lastPrice": "200",
-        },
-    ]
-    uni = select_universe(
-        tickers,
-        {
-            "QUOTE_ASSET": "USDT",
-            "MIN_QUOTE_VOLUME_USDT_24H": 0,
-            "EXTRA_EXCLUDE_SYMBOLS": [],
-        },
-    )
-    check(
-        "semesta buang stablecoin/leveraged/non-USDT",
-        set(uni) == {"BTCUSDT", "SOLUSDT"},
-        uni,
-    )
-    check(
-        "select_universe tidak memakai ticker hari ini sebagai gerbang pump "
-        "(SOL yang turun hari ini tetap ikut diunduh)",
-        "SOLUSDT" in uni,
-    )
-
-    print("\nSelftest gerbang trend timeframe tinggi (H1) di portofolio")
-    from backtesting.synthetic_data import seri_trend_dengan_setup
-
-    cfg_trend = dict(
-        cfg,
-        TREND_FILTER_ENABLED=True,
-        TREND_INTERVAL="1h",
-        TREND_EMA_FAST=20,
-        TREND_EMA_SLOW=50,
-        TREND_ADX_PERIOD=14,
-        TREND_ADX_MIN=20.0,
-        TREND_LOOKBACK_BARS=120,
-    )
-
-    naik_t = seri_trend_dengan_setup(harga=100.0, arah=1.0)
-    turun_t = seri_trend_dengan_setup(harga=100.0, arah=-1.0)
-
-    res_trend_naik = _jalankan({"AUSDT": naik_t}, cfg_trend)
-    res_trend_turun = _jalankan({"AUSDT": turun_t}, cfg_trend)
-    res_tanpa_gerbang = _jalankan(
-        {"AUSDT": turun_t}, dict(cfg_trend, TREND_FILTER_ENABLED=False)
-    )
-    check(
-        "trend H1 turun memblokir entry portofolio",
-        len(res_trend_turun.trades) == 0 and res_trend_turun.trend_skips >= 1,
-        f"{len(res_trend_turun.trades)} trade, {res_trend_turun.trend_skips} disaring",
-    )
-    check(
-        "sinyal yang disaring tercatat sebagai FILTER_TREND",
-        any(sk.reason == "FILTER_TREND" for sk in res_trend_turun.skipped),
-        [sk.reason for sk in res_trend_turun.skipped][:3],
-    )
-    check(
-        "kontrol negatif: tanpa gerbang trend data yang sama tetap entry",
-        len(res_tanpa_gerbang.trades) >= 1,
-        len(res_tanpa_gerbang.trades),
-    )
-    check(
-        "trend H1 naik tidak mengurangi trade",
-        len(res_trend_naik.trades) > 0 and res_trend_naik.trend_skips == 0,
-        f"{len(res_trend_naik.trades)} trade",
-    )
-    check(
-        "ringkasan memuat penghitung trend",
-        {"trend_skips", "trend_scans"} <= set(summarize_portfolio(res_trend_turun)),
-    )
-
-    res_par_single = _bt.run_backtest(
-        naik_t, dict(cfg_trend, _symbol="AUSDT"), warmup_bars=0
-    )
-    check(
-        "paritas entry satu simbol vs portofolio saat gerbang trend aktif",
-        [t.entry_time for t in res_par_single.trades]
-        == [t.entry_time for t in res_trend_naik.trades],
-        f"{[t.entry_time for t in res_par_single.trades][:3]} vs "
-        f"{[t.entry_time for t in res_trend_naik.trades][:3]}",
-    )
-    check(
-        "paritas alasan exit satu simbol vs portofolio saat gerbang trend aktif",
-        [t.reason for t in res_par_single.trades]
-        == [t.reason for t in res_trend_naik.trades],
-    )
-
-    with KlineStore.from_klines({"AUSDT": naik_t}) as _st_t:
-        cache_trend = precompute_entry_signals(_st_t, cfg_trend, "5m", 0)
-        res_cache = run_portfolio_backtest(
-            _st_t, cfg_trend, "5m", warmup_ms=0, entry_signal_cache=cache_trend
-        )
-    check(
-        "jalur sinyal yang di-cache memakai gerbang trend yang sama",
-        [t.entry_time for t in res_cache.trades]
-        == [t.entry_time for t in res_trend_naik.trades]
-        and [t.reason for t in res_cache.trades]
-        == [t.reason for t in res_trend_naik.trades],
-        f"{len(res_cache.trades)} vs {len(res_trend_naik.trades)} trade",
-    )
-
-    with KlineStore.from_klines({"AUSDT": turun_t}) as _st_t3:
-        cache_turun = precompute_entry_signals(_st_t3, cfg_trend, "5m", 0)
-        res_cache_turun = run_portfolio_backtest(
-            _st_t3, cfg_trend, "5m", warmup_ms=0, entry_signal_cache=cache_turun
-        )
-    check(
-        "penghitung gerbang trend ikut terbawa saat sinyal di-cache",
-        res_cache_turun.trend_skips == len(res_trend_turun.skipped)
-        and res_cache_turun.trend_skips >= 1
-        and res_cache_turun.trend_scans >= res_cache_turun.trend_skips,
-        f"{res_cache_turun.trend_skips} disaring dari "
-        f"{res_cache_turun.trend_scans} penilaian",
-    )
-    check(
-        "laporan jalur cache sama dengan jalur langsung",
-        len(res_cache_turun.trades) == len(res_trend_turun.trades) == 0
-        and any("gerbang trend" in w for w in res_cache_turun.warnings),
-        res_cache_turun.trend_skips,
-    )
-    check(
-        "catatan FILTER_TREND tersedia di jalur cache",
-        any(sk.reason == "FILTER_TREND" for sk in res_cache_turun.skipped),
-    )
-
-    with KlineStore.from_klines({"AUSDT": naik_t}) as _st_t2:
-        tl_t2, seri_t2 = build_timeline(_st_t2, "5m")
-        look_t2 = build_trend_lookups(_st_t2, list(seri_t2), cfg_trend, "5m")
-        res_prebuilt2 = run_portfolio_backtest(
-            _st_t2, cfg_trend, "5m", warmup_ms=0, prebuilt=(tl_t2, seri_t2)
-        )
-        res_prebuilt3 = run_portfolio_backtest(
-            _st_t2, cfg_trend, "5m", warmup_ms=0, prebuilt=(tl_t2, seri_t2, look_t2)
-        )
-    check(
-        "prebuilt 2 elemen dan 3 elemen (dengan lookup trend) memberi hasil sama",
-        [t.entry_time for t in res_prebuilt2.trades]
-        == [t.entry_time for t in res_prebuilt3.trades]
-        and len(res_prebuilt3.trades) == len(res_trend_naik.trades),
-        f"{len(res_prebuilt2.trades)} vs {len(res_prebuilt3.trades)}",
-    )
-    check(
-        "lookup trend dibangun untuk setiap simbol yang punya data",
-        set(look_t2) == {"AUSDT"},
-        sorted(look_t2),
-    )
-
-    res_warmup = _jalankan({"AUSDT": naik_t}, cfg_trend)
-    check(
-        "warmup trend otomatis dinaikkan dan dilaporkan",
-        any("Warmup" in w for w in res_warmup.warnings),
-        res_warmup.warnings[:1],
-    )
-
-
-    print("\nSelftest gerbang EMA + ADX harian (D1) di portofolio")
-    cfg_tren_p = dict(
-        cfg,
-        DAILY_TREND_FILTER_ENABLED=True,
-        DAILY_TREND_INTERVAL="1d",
-        DAILY_TREND_EMA_FAST=2,
-        DAILY_TREND_EMA_SLOW=3,
-        DAILY_TREND_ADX_PERIOD=2,
-        DAILY_TREND_ADX_MIN=0.0,
-        DAILY_TREND_LOOKBACK_BARS=20,
-    )
-    BAR_HARI_T = 288
-
-    def _prefiks_harian_tren(hari: int, faktor: float) -> tuple:
-        """`hari` hari 5m dengan close harian dikali `faktor` per hari. Mengembalikan (klines, harga_akhir)."""
-        out = []
-        harga = 100.0
-        for h in range(hari):
-            harga_awal = harga
-            for j in range(BAR_HARI_T):
-                harga_baru = harga_awal * (faktor ** ((j + 1) / float(BAR_HARI_T)))
-                out.append(
-                    _mk(
-                        h * BAR_HARI_T + j,
-                        harga,
-                        max(harga, harga_baru) * 1.0005,
-                        min(harga, harga_baru) * 0.9995,
-                        harga_baru,
-                    )
-                )
-                harga = harga_baru
-        return out, harga
-
-    prefiks_naik, harga_naik = _prefiks_harian_tren(25, 1.005)
-    prefiks_turun, harga_turun = _prefiks_harian_tren(25, 0.99)
-    # naik=10 dan turun=20 membuat deret setup netral (tanpa drift), jadi tren
-    # harian tetap naik sepanjang uji. Default (6/20) justru menurun.
-    seri_naik_tren = prefiks_naik + seri_banyak_setup(
-        harga=harga_naik, siklus=10, volume=9_000_000.0,
-        naik=10, turun=20, mulai_index=len(prefiks_naik),
-    )
-    seri_turun_tren = prefiks_turun + seri_banyak_setup(
-        harga=harga_turun, siklus=10, volume=9_000_000.0,
-        mulai_index=len(prefiks_turun),
-    )
-    # Kedua sisi perbandingan memakai warmup yang SAMA. Kalau tidak, versi tanpa
-    # gerbang mulai dari awal data dan ikut mengambil trade dari prefiks, sehingga
-    # selisihnya bukan karena gerbang.
-    warmup_tren = parity.htf_gate_warmup_ms(cfg_tren_p, "5m")
-
-    def _jalankan_tren(data_dict: dict, cfg_uji: dict) -> PortfolioResult:
-        with KlineStore.from_klines(data_dict) as _st:
-            return run_portfolio_backtest(_st, cfg_uji, "5m", warmup_ms=warmup_tren)
-
-    res_tren_turun_on = _jalankan_tren({"AUSDT": seri_turun_tren}, cfg_tren_p)
-    res_tren_turun_off = _jalankan_tren(
-        {"AUSDT": seri_turun_tren}, dict(cfg_tren_p, DAILY_TREND_FILTER_ENABLED=False)
-    )
-    check(
-        "gerbang EMA + ADX harian menolak entry saat harian turun (kontrol punya trade)",
-        len(res_tren_turun_off.trades) >= 1
-        and len(res_tren_turun_on.trades) == 0
-        and res_tren_turun_on.daily_trend_skips >= 1,
-        f"ON {len(res_tren_turun_on.trades)} trade, OFF {len(res_tren_turun_off.trades)}, "
-        f"disaring {res_tren_turun_on.daily_trend_skips}",
-    )
-    check(
-        "catatan FILTER_DAILY_TREND tersedia untuk sinyal yang disaring",
-        any(sk.reason == "FILTER_DAILY_TREND" for sk in res_tren_turun_on.skipped),
-    )
-    res_tren_naik_on = _jalankan_tren({"AUSDT": seri_naik_tren}, cfg_tren_p)
-    res_tren_naik_off = _jalankan_tren(
-        {"AUSDT": seri_naik_tren}, dict(cfg_tren_p, DAILY_TREND_FILTER_ENABLED=False)
-    )
-    check(
-        "harian naik: gerbang EMA + ADX tidak mengurangi trade yang sudah valid",
-        len(res_tren_naik_off.trades) >= 1
-        and len(res_tren_naik_on.trades) == len(res_tren_naik_off.trades)
-        and res_tren_naik_on.daily_trend_skips == 0,
-        f"ON {len(res_tren_naik_on.trades)} vs OFF {len(res_tren_naik_off.trades)}, "
-        f"disaring {res_tren_naik_on.daily_trend_skips}",
-    )
-    check(
-        "gerbang EMA + ADX harian nonaktif tidak mengubah penghitung",
-        res_tren_turun_off.daily_trend_scans == 0 and res_tren_naik_off.daily_trend_scans == 0,
-    )
-    check(
-        "warmup EMA + ADX harian mencakup riwayat 21 hari (21 x 288 candle 5m)",
-        warmup_tren == 21 * 288 * 5 * MS_PER_MIN,
-        f"{warmup_tren} ms",
-    )
-
-    print("\nSelftest gerbang zona demand harian (D1) di portofolio")
-    cfg_harian_p = dict(
-        cfg,
-        DAILY_DEMAND_FILTER_ENABLED=True,
-        DAILY_DEMAND_INTERVAL="1d",
-        DAILY_DEMAND_LOOKBACK_BARS=3,
-        DAILY_DEMAND_ZONE_BUFFER_PCT=1.0,
-        DAILY_DEMAND_MAX_DISTANCE_PCT=8.0,
-        DAILY_DEMAND_MIN_CLOSE_POSITION=0.4,
-    )
-    BAR_HARI_P = 288
-
-    def _hari_datar_p(idx_hari: int, harga: float = 100.0) -> list:
-        return [
-            _mk(idx_hari * BAR_HARI_P + j, harga, harga * 1.001, harga * 0.999, harga)
-            for j in range(BAR_HARI_P)
-        ]
-
-    def _hari_naik_p(idx_hari: int, buka: float, tutup: float) -> list:
-        out = []
-        for j in range(BAR_HARI_P):
-            o = buka + (tutup - buka) * j / float(BAR_HARI_P)
-            c = buka + (tutup - buka) * (j + 1) / float(BAR_HARI_P)
-            out.append(
-                _mk(
-                    idx_hari * BAR_HARI_P + j,
-                    o,
-                    max(o, c) * 1.0005,
-                    min(o, c) * 0.9995,
-                    c,
-                )
-            )
-        return out
-
-    def _seri_harian_p(tutup_hari_sinyal: float) -> list:
-        """4 hari dasar + 1 hari sinyal harian + 1 hari penuh sinyal 5m."""
-        seri: list = []
-        for hari in range(4):
-            seri.extend(_hari_datar_p(hari))
-        seri.extend(_hari_naik_p(4, 100.0, tutup_hari_sinyal))
-        seri.extend(_hari_datar_p(5, tutup_hari_sinyal))
-        return seri
-
-    seri_jauh_p = _seri_harian_p(110.0)
-    seri_dasar_p = _seri_harian_p(100.7)
-
-    with KlineStore.from_klines({"AUSDT": seri_dasar_p}) as _st_p:
-        look_p = build_daily_lookups(_st_p, ["AUSDT"], cfg_harian_p, "5m")
-        look_mati = build_daily_lookups(
-            _st_p,
-            ["AUSDT"],
-            dict(cfg_harian_p, DAILY_DEMAND_FILTER_ENABLED=False),
-            "5m",
-        )
-        tl_p, seri_p = build_timeline(_st_p, "5m")
-        res_p_prebuilt4 = run_portfolio_backtest(
-            _st_p,
-            cfg_harian_p,
-            "5m",
-            warmup_ms=0,
-            prebuilt=(tl_p, seri_p, {}, look_p),
-        )
-    check(
-        "lookup harian dibangun hanya saat gerbang aktif",
-        set(look_p) == {"AUSDT"} and look_mati == {},
-        sorted(look_p),
-    )
-
-    res_p_jauh = _jalankan({"AUSDT": seri_jauh_p}, cfg_harian_p)
-    res_p_jauh_off = _jalankan(
-        {"AUSDT": seri_jauh_p}, dict(cfg_harian_p, DAILY_DEMAND_FILTER_ENABLED=False)
-    )
-    res_p_dasar = _jalankan({"AUSDT": seri_dasar_p}, cfg_harian_p)
-    check(
-        "gerbang demand harian memblokir entry portofolio saat harga jauh dari dasar harian",
-        len(res_p_jauh.trades) == 0 and res_p_jauh.daily_demand_skips >= 1,
-        f"{len(res_p_jauh.trades)} trade, {res_p_jauh.daily_demand_skips} disaring",
-    )
-    check(
-        "catatan FILTER_DAILY_DEMAND tersedia di daftar sinyal yang dilewati",
-        any(sk.reason == "FILTER_DAILY_DEMAND" for sk in res_p_jauh.skipped),
-        [sk.reason for sk in res_p_jauh.skipped][:3],
-    )
-    check(
-        "kontrol negatif: tanpa gerbang harian data yang sama tetap entry",
-        len(res_p_jauh_off.trades) >= 1,
-        len(res_p_jauh_off.trades),
-    )
-    # Pembanding kontrol harus memakai warmup yang sama: tanpa gerbang harian,
-    # warmup 0 membuat simulasi boleh entry sejak hari pertama, sehingga
-    # perbandingan entry time-nya bukan perbandingan keputusan gerbang.
-    _warmup_harian_p = parity.htf_gate_warmup_ms(cfg_harian_p, "5m")
-    with KlineStore.from_klines({"AUSDT": seri_dasar_p}) as _st_pb:
-        res_p_dasar_off = run_portfolio_backtest(
-            _st_pb,
-            dict(cfg_harian_p, DAILY_DEMAND_FILTER_ENABLED=False),
-            "5m",
-            warmup_ms=_warmup_harian_p,
-        )
-    check(
-        "reaksi dekat dasar harian tidak mengurangi trade sama sekali",
-        len(res_p_dasar.trades) >= 1
-        and res_p_dasar.daily_demand_skips == 0
-        and [t.entry_time for t in res_p_dasar.trades]
-        == [t.entry_time for t in res_p_dasar_off.trades],
-        f"{len(res_p_dasar.trades)} trade vs {len(res_p_dasar_off.trades)} tanpa gerbang, "
-        f"{res_p_dasar.daily_demand_skips} disaring",
-    )
-    check(
-        "ringkasan memuat penghitung demand harian",
-        {"daily_demand_skips", "daily_demand_scans"}
-        <= set(summarize_portfolio(res_p_jauh)),
-    )
-    check(
-        "warmup gerbang harian otomatis dinaikkan dan dilaporkan",
-        any("demand 1d" in w for w in res_p_jauh.warnings),
-        res_p_jauh.warnings[:1],
-    )
-    check(
-        "prebuilt 4 elemen (dengan lookup harian) sama dengan dihitung ulang",
-        len(res_p_prebuilt4.trades) == len(res_p_dasar.trades)
-        and res_p_prebuilt4.daily_demand_skips == res_p_dasar.daily_demand_skips,
-        f"{len(res_p_prebuilt4.trades)} vs {len(res_p_dasar.trades)} trade",
-    )
-
-    with KlineStore.from_klines({"AUSDT": seri_dasar_p}) as _st_pc:
-        cache_harian = precompute_entry_signals(_st_pc, cfg_harian_p, "5m", 0)
-        res_p_cache = run_portfolio_backtest(
-            _st_pc, cfg_harian_p, "5m", warmup_ms=0, entry_signal_cache=cache_harian
-        )
-    check(
-        "jalur sinyal yang di-cache memakai gerbang harian yang sama",
-        [t.entry_time for t in res_p_cache.trades]
-        == [t.entry_time for t in res_p_dasar.trades]
-        and res_p_cache.daily_demand_scans >= res_p_cache.daily_demand_skips,
-        f"{len(res_p_cache.trades)} vs {len(res_p_dasar.trades)} trade",
-    )
-
-    with KlineStore.from_klines({"AUSDT": seri_jauh_p}) as _st_pc2:
-        cache_jauh = precompute_entry_signals(_st_pc2, cfg_harian_p, "5m", 0)
-        res_p_cache_jauh = run_portfolio_backtest(
-            _st_pc2, cfg_harian_p, "5m", warmup_ms=0, entry_signal_cache=cache_jauh
-        )
-    check(
-        "penghitung gerbang harian ikut terbawa saat sinyal di-cache",
-        res_p_cache_jauh.daily_demand_skips >= 1
-        and res_p_cache_jauh.daily_demand_scans >= res_p_cache_jauh.daily_demand_skips
-        and any("gerbang zona demand" in w for w in res_p_cache_jauh.warnings),
-        f"{res_p_cache_jauh.daily_demand_skips} disaring dari "
-        f"{res_p_cache_jauh.daily_demand_scans} penilaian",
-    )
-    check(
-        "catatan FILTER_DAILY_DEMAND tersedia di jalur cache",
-        any(sk.reason == "FILTER_DAILY_DEMAND" for sk in res_p_cache_jauh.skipped),
-    )
-
-    print("\nHASIL: " + ("SEMUA LULUS" if ok_all else "ADA YANG GAGAL"))
-    return ok_all
-
-
-if __name__ == "__main__":
-    import sys
-
-    sys.exit(0 if selftest() else 1)

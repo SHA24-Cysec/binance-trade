@@ -143,8 +143,6 @@ class PaperClient(ExchangeClient):
         new_client_order_id: Optional[str] = None,
         quote_precision: Optional[int] = None,
     ) -> dict:
-        # quote_precision hanya relevan untuk bursa nyata; mesin paper memakai
-        # nominal apa adanya supaya perilakunya tetap sama dengan sebelumnya.
         order = self.engine.place_order(
             symbol=symbol,
             side=side,
@@ -170,6 +168,33 @@ class PaperClient(ExchangeClient):
 
             raise BinanceAPIError(400, -2013, "Order does not exist.")
         return self._public_order(o)
+
+    def get_my_trades(self, symbol: str, order_id: int) -> list:
+        order = self.get_order(symbol, order_id=int(order_id))
+        fills = order.get("fills", []) if isinstance(order, dict) else []
+        if not isinstance(fills, list):
+            return []
+        try:
+            fallback_time = int(
+                order.get("transactTime")
+                or order.get("updateTime")
+                or order.get("time")
+                or 0
+            )
+        except (TypeError, ValueError, OverflowError):
+            fallback_time = 0
+        return [
+            {
+                **fill,
+                "id": fill.get("id", fill.get("tradeId")),
+                "symbol": order.get("symbol", symbol),
+                "orderId": order.get("orderId", order_id),
+                "side": order.get("side"),
+                "time": fill.get("time", fallback_time),
+            }
+            for fill in fills
+            if isinstance(fill, dict)
+        ]
 
     def cancel_order(
         self,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import logging.handlers
 import math
@@ -10,6 +11,7 @@ import sys
 import threading
 import time
 import uuid
+from copy import deepcopy
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -38,6 +40,13 @@ from config.config import (
 )
 from market import market_scanner as scanner
 from infrastructure.storage import state as state_mod
+from infrastructure.storage.trade_ledger import append_trade_record
+from trading.accounting import (
+    TradeAccountingError,
+    normalize_fills,
+    recompute_trade_accounting,
+    validate_fill_totals,
+)
 from strategy import indicators as strategy
 
 logger = logging.getLogger("pump_bot")
@@ -46,27 +55,6 @@ _shutdown_event = threading.Event()
 
 
 class HtfKlineCache:
-    """Penyedia candle timeframe tinggi yang SUDAH TUTUP untuk gerbang entry.
-
-    Dua gerbang memakai basis yang sama, jadi logikanya tidak diduplikasi:
-
-      * TrendCache       -> candle TREND_INTERVAL (default 1h) untuk gerbang
-                            trend dan gerbang demand H1,
-      * DailyDemandCache -> candle DAILY_DEMAND_INTERVAL (default 1d) untuk
-                            gerbang demand harian.
-
-    Perilaku yang dijaga (identik untuk keduanya):
-      * hanya candle yang SUDAH TUTUP yang dikembalikan (tanpa repaint),
-      * hasil disimpan selama candle terakhir belum berganti, jadi satu simbol
-        tidak diunduh berulang tiap scan; untuk candle harian artinya cukup
-        sekali sehari per simbol,
-      * jendela yang dikembalikan sudah dipotong ke ukuran yang sama dengan
-        potongan jendela di backtest (TrendLookup/DailyDemandLookup), sehingga
-        keputusan live dan backtest tidak bisa berbeda,
-      * kegagalan pengambilan tidak pernah menghilangkan riwayat lama lalu
-        diam-diam meloloskan entry: pemanggil menerima daftar kosong atau
-        pengecualian, dan scanner menolak kandidat (fail closed).
-    """
 
     def __init__(self, client, config: dict) -> None:
         self._client = client
@@ -75,15 +63,12 @@ class HtfKlineCache:
         self._cache: dict[str, tuple[int, list]] = {}
 
     def interval(self) -> str:
-        """Interval candle gerbang ini. Wajib diisi kelas turunan."""
         raise NotImplementedError
 
     def window_bars(self) -> int:
-        """Jumlah candle tertutup yang dipakai gerbang ini. Wajib diisi kelas turunan."""
         raise NotImplementedError
 
     def verdict(self, symbol: str, now_ms: int) -> dict:
-        """Verdict gerbang untuk satu simbol. Wajib diisi kelas turunan."""
         raise NotImplementedError
 
     def _interval_ms(self) -> int:
@@ -96,12 +81,6 @@ class HtfKlineCache:
     def window_klines(self, symbol: str, now_ms: int) -> list:
         jendela = self.window_bars()
         if jendela <= 0:
-            # Gerbang nonaktif: jangan mengembalikan apa pun. Penjaga ini penting
-            # karena potongan Python `closed[-0:]` sama dengan `closed[0:]`, yaitu
-            # SELURUH riwayat, bukan nol candle. Dengan penjaga ini, kesalahan
-            # pemanggilan yang tidak seharusnya (mis. provider dipakai saat
-            # gerbang mati) berakhir sebagai penolakan biasa, bukan keputusan
-            # yang memakai seluruh riwayat.
             return []
         terakhir_tutup = self._last_closed_open_time(now_ms)
         with self._lock:
@@ -127,12 +106,10 @@ class HtfKlineCache:
         return list(siap)
 
     def provider(self, symbol: str) -> list:
-        """Callable yang dipakai scanner.find_best_candidate()."""
         return self.window_klines(symbol, state_mod.now_ms())
 
 
 class TrendCache(HtfKlineCache):
-    """Candle TREND_INTERVAL untuk gerbang trend dan gerbang demand H1."""
 
     def interval(self) -> str:
         return strategy.trend_interval(self._config)
@@ -147,7 +124,6 @@ class TrendCache(HtfKlineCache):
 
 
 class DailyDemandCache(HtfKlineCache):
-    """Candle DAILY_DEMAND_INTERVAL untuk gerbang demand harian."""
 
     def interval(self) -> str:
         return strategy.daily_demand_interval(self._config)
@@ -162,12 +138,6 @@ class DailyDemandCache(HtfKlineCache):
 
 
 class DailyTrendCache(HtfKlineCache):
-    """Candle DAILY_TREND_INTERVAL untuk gerbang EMA + ADX harian.
-
-    Memakai basis HtfKlineCache yang sama dengan gerbang demand harian, jadi
-    candle harian diunduh sekali per simbol per hari dan jendelanya dipotong
-    persis seperti di backtest (DailyTrendLookup).
-    """
 
     def interval(self) -> str:
         return strategy.daily_trend_interval(self._config)
@@ -198,17 +168,19 @@ DEFAULT_STATE = {
     "trail_step_pct": 0.0,
     "exit_source": "",
     "last_scan_time": 0,
-    # Pemetaan SIMBOL -> timestamp_ms sampai kapan entry koin itu diblokir
-    # (diisi oleh aturan SAME_COIN_BLOCK_HOURS setelah trade loss).
     "symbol_block_until": {},
     "peak_equity": None,
-    # Max drawdown (%) terbesar sejak reset terakhir. Di-reset ke 0 setiap kali
-    # ambang MAX_DRAWDOWN_PERCENT tercapai (bersamaan dengan jeda entry).
     "max_dd_pct": 0.0,
-    # Berapa kali ambang drawdown tercapai dan angka max DD di-reset.
     "dd_reset_count": 0,
     "dd_stopped": False,
     "dd_stop_until": 0,
+    "trade_accounting": None,
+    "accounting_blocked": False,
+    "accounting_block_reason": "",
+    "accounting_retry_after_ms": 0,
+    "accounting_pending_trades": [],
+    "last_closed_trade": None,
+    "pending_native_settlement": None,
     "_limit_close_done": False,
     "sell_fail_count": 0,
     "pending_order": None,
@@ -264,9 +236,18 @@ def _handle_signal(signum, frame):
     _shutdown_event.set()
 
 
-def load_pump_state(path: str, *, fail_closed: bool = False) -> dict:
+def load_pump_state(
+    path: str,
+    *,
+    fail_closed: bool = False,
+    allow_missing_state: bool = False,
+) -> dict:
     raw, valid, load_error = state_mod.load_state_checked(path)
-    merged = dict(DEFAULT_STATE)
+    state_missing = load_error == state_mod.STATE_FILE_MISSING
+    missing_state_acknowledged = (
+        fail_closed and allow_missing_state and state_missing and not valid
+    )
+    merged = deepcopy(DEFAULT_STATE)
     merged.update(raw)
 
     validation_errors: list[str] = []
@@ -328,14 +309,69 @@ def load_pump_state(path: str, *, fail_closed: bool = False) -> dict:
     ):
         if not isinstance(merged.get(key), bool):
             validation_errors.append(f"{key} harus boolean")
-    for key in ("pending_order", "native_stop", "native_oco"):
+    for key in (
+        "pending_order",
+        "native_stop",
+        "native_oco",
+        "trade_accounting",
+        "last_closed_trade",
+        "pending_native_settlement",
+    ):
         value = merged.get(key)
         if value is not None and not isinstance(value, dict):
             validation_errors.append(f"{key} harus object atau null")
+    if not isinstance(merged.get("accounting_blocked"), bool):
+        validation_errors.append("accounting_blocked harus boolean")
+        merged["accounting_blocked"] = True
+    if not isinstance(merged.get("accounting_block_reason"), str):
+        validation_errors.append("accounting_block_reason harus string")
+        merged["accounting_block_reason"] = "state accounting tidak valid"
+    try:
+        retry_ms = int(merged.get("accounting_retry_after_ms", 0) or 0)
+        if retry_ms < 0:
+            raise ValueError
+        merged["accounting_retry_after_ms"] = retry_ms
+    except (TypeError, ValueError, OverflowError):
+        validation_errors.append("accounting_retry_after_ms tidak valid")
+        merged["accounting_retry_after_ms"] = state_mod.now_ms() + 60_000
+        merged["accounting_blocked"] = True
+    pending_accounting = merged.get("accounting_pending_trades")
+    if not isinstance(pending_accounting, list):
+        validation_errors.append("accounting_pending_trades harus list")
+        merged["accounting_pending_trades"] = []
+        merged["accounting_blocked"] = True
+    else:
+        if pending_accounting:
+            merged["accounting_blocked"] = True
+        for index, item in enumerate(pending_accounting):
+            if (
+                not isinstance(item, dict)
+                or not item.get("trade_id")
+                or not isinstance(item.get("accounting"), dict)
+            ):
+                validation_errors.append(
+                    f"accounting_pending_trades[{index}] tidak valid"
+                )
+                merged["accounting_blocked"] = True
+                break
+    active_accounting = merged.get("trade_accounting")
+    if isinstance(active_accounting, dict):
+        if not isinstance(active_accounting.get("orders", []), list):
+            validation_errors.append("trade_accounting.orders harus list")
+            merged["accounting_blocked"] = True
+        accounting_status = str(active_accounting.get("status") or "").upper()
+        if accounting_status not in ("VERIFIED", "UNVERIFIED", "LEGACY_UNVERIFIED"):
+            validation_errors.append("trade_accounting.status tidak dikenal")
+            merged["accounting_blocked"] = True
+        elif accounting_status == "UNVERIFIED" or (
+            active_accounting.get("fee_conversion_pending")
+            or active_accounting.get("retryable_fill_details_pending")
+        ):
+            merged["accounting_blocked"] = True
+            if not merged.get("accounting_retry_after_ms"):
+                merged["accounting_retry_after_ms"] = state_mod.now_ms()
     if not isinstance(merged.get("reconciliation_assets"), list):
         validation_errors.append("reconciliation_assets harus list")
-    # symbol_block_until: object {SIMBOL: timestamp_ms}. Entri tidak valid
-    # dibuang, yang sudah kedaluwarsa dipangkas supaya state tidak membesar.
     blocks = merged.get("symbol_block_until")
     if not isinstance(blocks, dict):
         validation_errors.append("symbol_block_until harus object")
@@ -365,7 +401,7 @@ def load_pump_state(path: str, *, fail_closed: bool = False) -> dict:
                 )
                 continue
             if nilai <= now:
-                continue  # blokir sudah kedaluwarsa, tidak perlu disimpan lagi
+                continue
             blocks_bersih[sym] = nilai
         merged["symbol_block_until"] = blocks_bersih
     for key in ("peak_equity", "max_dd_pct"):
@@ -387,8 +423,6 @@ def load_pump_state(path: str, *, fail_closed: bool = False) -> dict:
             raise ValueError
         merged["dd_reset_count"] = dd_reset_count
     except (TypeError, ValueError):
-        # Hanya penghitung statistik: nilai rusak cukup direset ke 0 tanpa
-        # menghentikan bot (fail_closed hanya untuk state yang berisiko).
         merged["dd_reset_count"] = 0
     try:
         sell_fail_count = int(merged.get("sell_fail_count", 0) or 0)
@@ -404,7 +438,7 @@ def load_pump_state(path: str, *, fail_closed: bool = False) -> dict:
     if symbol is not None and (qty <= 0 or entry <= 0):
         validation_errors.append("current_symbol ada tanpa qty/entry_price positif")
 
-    if not valid:
+    if not valid and not missing_state_acknowledged:
         validation_errors.append(load_error or "state tidak dapat dibaca")
     if fail_closed and validation_errors:
         reason = "; ".join(dict.fromkeys(validation_errors))
@@ -414,6 +448,11 @@ def load_pump_state(path: str, *, fail_closed: bool = False) -> dict:
         logger.critical(
             "Integritas state LIVE tidak dapat diverifikasi: %s. Entry baru diblokir ",
             reason,
+        )
+    elif missing_state_acknowledged:
+        logger.warning(
+            "Operator mengonfirmasi inisialisasi state LIVE baru; peak equity dan "
+            "posisi sebelumnya tidak dipulihkan. Rekonsiliasi tetap diwajibkan."
         )
     return merged
 
@@ -562,26 +601,147 @@ def get_equity(
     state: dict,
     position_price: float | None = None,
 ) -> "float | None":
-    account = client.get_account()
-    if str(config.get("MODE", "PAPER")).upper() == "LIVE":
-        _validate_live_account_snapshot(account, config["QUOTE_ASSET"])
-    usdt_free = get_balance(account, config["QUOTE_ASSET"])
-    if state["current_symbol"] and state["qty"] > 0:
-        if position_price is not None and float(position_price) > 0:
-            price = float(position_price)
+    quote_asset = str(config.get("QUOTE_ASSET") or "").strip().upper()
+    if not quote_asset:
+        logger.warning("Ekuitas akun tidak dapat dihitung: aset kuotasi kosong.")
+        return None
+
+    def unverified(reason: str) -> None:
+        logger.warning(
+            "Ekuitas seluruh akun tidak dapat diverifikasi (%s). "
+            "Evaluasi batas risiko dilewati satu iterasi.",
+            reason,
+        )
+        return None
+
+    try:
+        account = client.get_account()
+        if str(config.get("MODE", "PAPER")).upper() == "LIVE":
+            _validate_live_account_snapshot(account, quote_asset)
+    except Exception as exc:
+        return unverified(
+            f"snapshot account tidak tersedia/valid: {type(exc).__name__}"
+        )
+
+    if not isinstance(account, dict):
+        return unverified("respons account bukan object")
+    raw_balances = account.get("balances")
+    if not isinstance(raw_balances, list):
+        return unverified("daftar balances tidak tersedia")
+
+    balances: dict[str, float] = {}
+    for item in raw_balances:
+        if not isinstance(item, dict):
+            return unverified("entri balance bukan object")
+        asset = str(item.get("asset") or "").strip().upper()
+        if not asset or asset in balances:
+            return unverified(f"aset kosong atau duplikat: {asset or '<kosong>'}")
+        try:
+            free = float(item.get("free"))
+            locked = float(item.get("locked"))
+        except (TypeError, ValueError, OverflowError):
+            return unverified(f"saldo {asset} bukan angka")
+        if (
+            not math.isfinite(free)
+            or not math.isfinite(locked)
+            or free < 0
+            or locked < 0
+        ):
+            return unverified(f"saldo {asset} tidak valid")
+        total = free + locked
+        if not math.isfinite(total):
+            return unverified(f"saldo total {asset} tidak finite")
+        balances[asset] = total
+
+    equity_parts = [balances.get(quote_asset, 0.0)]
+    active_symbol = str(state.get("current_symbol") or "").strip().upper()
+    active_price = None
+    if position_price is not None:
+        try:
+            candidate = float(position_price)
+        except (TypeError, ValueError, OverflowError):
+            candidate = 0.0
+        if math.isfinite(candidate) and candidate > 0:
+            active_price = candidate
+
+    assets_to_price = []
+    for asset, total in balances.items():
+        if asset == quote_asset or total <= 0:
+            continue
+        symbol = f"{asset}{quote_asset}"
+        if symbol == active_symbol and active_price is not None:
+            equity_parts.append(total * active_price)
         else:
+            assets_to_price.append((asset, symbol, total))
+
+    if assets_to_price:
+        try:
+            tickers = client.get_ticker_24hr_all()
+        except Exception as exc:
+            return unverified(f"snapshot ticker tidak tersedia: {type(exc).__name__}")
+        if not isinstance(tickers, list):
+            return unverified("snapshot ticker bukan list")
+
+        ticker_by_symbol = {}
+        duplicate_symbols = set()
+        for ticker in tickers:
+            if not isinstance(ticker, dict):
+                continue
+            symbol = str(ticker.get("symbol") or "").strip().upper()
+            if not symbol:
+                continue
+            if symbol in ticker_by_symbol:
+                duplicate_symbols.add(symbol)
+            else:
+                ticker_by_symbol[symbol] = ticker
+
+        try:
+            ticker_ttl = float(config.get("TICKER_SNAPSHOT_TTL_SECONDS", 30.0) or 0.0)
+            max_market_age = float(
+                config.get("MAX_MARKET_DATA_AGE_SECONDS", 10.0) or 0.0
+            )
+        except (TypeError, ValueError, OverflowError):
+            return unverified("batas umur snapshot ticker bukan angka")
+        if (
+            not math.isfinite(ticker_ttl)
+            or not math.isfinite(max_market_age)
+            or ticker_ttl < 0
+            or max_market_age < 0
+        ):
+            return unverified("batas umur snapshot ticker tidak valid")
+        max_age_seconds = min(
+            ticker_ttl + max_market_age, max(60.0, max_market_age)
+        )
+        max_age_ms = int(max_age_seconds * 1000.0)
+        now_ms = int(time.time() * 1000.0)
+
+        for asset, symbol, amount in assets_to_price:
+            if symbol in duplicate_symbols:
+                return unverified(f"ticker {symbol} duplikat")
+            ticker = ticker_by_symbol.get(symbol)
+            if ticker is None:
+                return unverified(f"harga bid {symbol} tidak tersedia")
             try:
-                price = client.get_price(state["current_symbol"])
-            except BinanceAPIError as exc:
-                logger.warning(
-                    "Harga %s tidak bisa diambil untuk hitung equity (%s). "
-                    "Evaluasi batas risiko dilewati satu iterasi.",
-                    state["current_symbol"],
-                    exc,
-                )
-                return None
-        usdt_free += state["qty"] * price
-    return usdt_free
+                bid = float(ticker.get("bidPrice"))
+                close_time_ms = int(ticker.get("closeTime"))
+            except (TypeError, ValueError, OverflowError):
+                return unverified(f"bid/timestamp {symbol} bukan angka")
+            if not math.isfinite(bid) or bid <= 0 or close_time_ms <= 0:
+                return unverified(f"bid/timestamp {symbol} tidak valid")
+            if abs(now_ms - close_time_ms) > max_age_ms:
+                return unverified(f"snapshot {symbol} kedaluwarsa")
+            value = amount * bid
+            if not math.isfinite(value):
+                return unverified(f"nilai saldo {asset} tidak finite")
+            equity_parts.append(value)
+
+    try:
+        equity = math.fsum(equity_parts)
+    except OverflowError:
+        return unverified("total ekuitas overflow")
+    if not math.isfinite(equity) or equity < 0:
+        return unverified("total ekuitas tidak valid")
+    return equity
 
 
 def account_risk_gate(config: dict) -> "tuple[bool, str]":
@@ -652,8 +812,6 @@ def update_equity_controls(state: dict, equity: float, config: dict) -> bool:
                 state_mod.now_ms() + config["DD_COOLDOWN_HOURS"] * 3600 * 1000
             )
             state["dd_reset_count"] = int(state.get("dd_reset_count") or 0) + 1
-            # Ambang tercapai: angka max drawdown kembali ke 0 dan puncak equity
-            # dimulai ulang dari equity sekarang.
             logger.critical(
                 "STOP DRAWDOWN: turun %.2f%% dari puncak equity (max DD di-reset ke 0). "
                 "Entry baru dijeda %d jam.",
@@ -697,6 +855,9 @@ def maybe_force_close_at_risk_limit(
     entries_paused: bool,
     current_price,
 ) -> None:
+    if state.get("_limit_close_done") and state.get("current_symbol"):
+        state["_limit_close_done"] = False
+
     limit_now = bool(state.get("dd_stopped"))
     if (
         config.get("CLOSE_ALL_AT_LIMIT")
@@ -718,7 +879,9 @@ def maybe_force_close_at_risk_limit(
             "RISK_LIMIT_TRIGGERED",
             reference_price=current_price,
         )
-        state["_limit_close_done"] = True
+        state["_limit_close_done"] = (
+            not state.get("current_symbol") and state.get("qty", 0.0) <= 0.0
+        )
 
     if not entries_paused and state.get("_limit_close_done"):
         state["_limit_close_done"] = False
@@ -756,6 +919,23 @@ def reconcile_state_with_exchange(
         return False
 
     held_symbol = str(state.get("current_symbol") or "").upper()
+    if held_symbol and float(state.get("qty") or 0.0) > 0:
+        accounting = _ensure_trade_accounting(state, config, held_symbol)
+        retry_after = int(state.get("accounting_retry_after_ms", 0) or 0)
+        if (
+            isinstance(accounting, dict)
+            and (
+                accounting.get("status") == "UNVERIFIED"
+                or accounting.get("fee_conversion_pending")
+                or accounting.get("retryable_fill_details_pending")
+            )
+            and state_mod.now_ms() >= retry_after
+        ):
+            _retry_order_fills(client, accounting)
+            _refresh_accounting_state(
+                client, config, state, actual_remaining_qty=float(state.get("qty") or 0.0)
+            )
+    _retry_pending_accounting(client, config, state)
     if live and held_symbol:
         held_filters = (filters_cache or {}).get(held_symbol)
         if held_filters is None:
@@ -833,7 +1013,7 @@ def reconcile_state_with_exchange(
                         )
                     else:
                         account = refreshed_account
-                        if _restore_pending_buy(config, state, pending, order, account):
+                        if _restore_pending_buy(client, config, state, pending, order, account):
                             logger.critical(
                                 "BUY %s dipulihkan dari intent/order setelah respons hilang.",
                                 symbol_pending,
@@ -859,19 +1039,50 @@ def reconcile_state_with_exchange(
                             )
                         else:
                             account = refreshed_account
-                            qty_state_sell = float(state.get("qty") or 0.0)
-                            if (
-                                qty_state_sell > 0
-                                and executed_qty >= qty_state_sell - 1e-12
-                            ):
-                                minutes = int(
-                                    config.get("COOLDOWN_MINUTES_AFTER_CLOSE", 0) or 0
+                            if str(state.get("current_symbol") or "").upper() != symbol_pending.upper():
+                                issue("FILLED_SELL_POSITION_IDENTITY_MISMATCH", symbol_pending)
+                            else:
+                                qty_before = max(0.0, float(state.get("qty") or 0.0))
+                                base_pending = symbol_pending[: -len(quote)]
+                                total_after = get_total_balance(account, base_pending)
+                                remaining = min(
+                                    max(0.0, qty_before - executed_qty), total_after
                                 )
-                                state["cooldown_until"] = (
-                                    state_mod.now_ms() + minutes * 60 * 1000
+                                accounting = _ensure_trade_accounting(
+                                    state, config, symbol_pending
                                 )
-                                state["last_trade_time"] = state_mod.now_ms()
-                            state["pending_order"] = None
+                                if isinstance(accounting, dict):
+                                    _attach_accounting_order(
+                                        accounting,
+                                        _accounting_order_record(
+                                            client, order, symbol_pending, "SELL", quote
+                                        ),
+                                    )
+                                state["qty"] = remaining
+                                state["pending_order"] = None
+                                _refresh_accounting_state(
+                                    client,
+                                    config,
+                                    state,
+                                    actual_remaining_qty=remaining,
+                                )
+                                if remaining <= 0:
+                                    _finalize_trade_accounting(
+                                        client,
+                                        config,
+                                        state,
+                                        symbol_pending,
+                                        str(pending.get("reason") or "RECOVERED_SELL"),
+                                        remaining_qty=remaining,
+                                    )
+                                    reset_position(state)
+                                    minutes = int(
+                                        config.get("COOLDOWN_MINUTES_AFTER_CLOSE", 0) or 0
+                                    )
+                                    state["cooldown_until"] = (
+                                        state_mod.now_ms() + minutes * 60 * 1000
+                                    )
+                                    state["last_trade_time"] = state_mod.now_ms()
                     else:
                         state["pending_order"] = None
                 elif status in _NONTERMINAL_ORDER_STATUSES:
@@ -892,7 +1103,10 @@ def reconcile_state_with_exchange(
         base_asset = str(symbol)[: -len(quote)]
         total_base = get_total_balance(account, base_asset)
         free_base = get_balance(account, base_asset)
-        if total_base <= 0 and not pending_unresolved:
+        native_unresolved = isinstance(state.get("native_oco"), dict) or isinstance(
+            state.get("native_stop"), dict
+        )
+        if total_base <= 0 and not pending_unresolved and not native_unresolved:
             logger.warning(
                 "REKONSILIASI: state memegang %s qty=%.8f tetapi saldo total %s nol. "
                 "Posisi hantu direset berdasarkan saldo terverifikasi.",
@@ -900,20 +1114,17 @@ def reconcile_state_with_exchange(
                 qty_state,
                 base_asset,
             )
-            # Hasil trade tidak diketahui (koin sudah tidak ada di akun), secara
-            # konservatif dianggap loss agar blokir koin sama ikut aktif.
-            record_symbol_block(
-                state,
+            _ensure_trade_accounting(state, config, str(symbol))
+            _finalize_trade_accounting(
+                client,
                 config,
-                symbol,
-                -(
-                    float(state.get("entry_price") or 0.0)
-                    * float(state.get("qty") or 0.0)
-                ),
-                catatan="(posisi hantu, hasil tidak diketahui, dianggap loss)",
+                state,
+                str(symbol),
+                "BALANCE_ZERO_UNTRACKED_EXIT",
+                remaining_qty=0.0,
             )
             reset_position(state)
-        elif total_base <= 0 and pending_unresolved:
+        elif total_base <= 0 and (pending_unresolved or native_unresolved):
             issue("POSITION_BALANCE_ZERO_WITH_PENDING", base_asset)
         elif total_base < qty_state:
             logger.warning(
@@ -925,6 +1136,9 @@ def reconcile_state_with_exchange(
             )
             state["qty"] = total_base
             qty_state = total_base
+            _refresh_accounting_state(
+                client, config, state, actual_remaining_qty=total_base
+            )
 
         expected_native_lock = not pending_unresolved and (
             isinstance(state.get("native_oco"), dict)
@@ -1054,10 +1268,708 @@ def reset_position(state: dict) -> None:
     state["native_oco"] = None
     state["native_protection_retry_at"] = 0
     state["_native_stop_exit_blocked"] = False
+    state["trade_accounting"] = None
+
+
+def _safe_accounting_number(value, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return number if math.isfinite(number) else default
+
+
+def _accounting_order_record(
+    client: ExchangeClient,
+    response: dict,
+    symbol: str,
+    side: str,
+    quote_asset: str,
+) -> dict:
+    side = str(side).upper()
+    symbol = str(symbol).upper()
+    order_id = response.get("orderId") if isinstance(response, dict) else None
+    client_order_id = (
+        str(response.get("clientOrderId") or "") if isinstance(response, dict) else ""
+    )
+    expected_qty = (
+        max(0.0, _safe_accounting_number(response.get("executedQty"), 0.0))
+        if isinstance(response, dict)
+        else 0.0
+    )
+    expected_quote = (
+        max(0.0, _safe_accounting_number(response.get("cummulativeQuoteQty"), 0.0))
+        if isinstance(response, dict)
+        else 0.0
+    )
+    time_value = (
+        response.get("transactTime") or response.get("time")
+        if isinstance(response, dict)
+        else None
+    )
+    try:
+        order_time_ms = int(time_value or state_mod.now_ms())
+    except (TypeError, ValueError, OverflowError):
+        order_time_ms = state_mod.now_ms()
+    if order_id is not None and expected_qty > 0 and expected_quote <= 0:
+        try:
+            detailed = client.get_order(symbol, order_id=int(order_id))
+        except Exception:
+            detailed = None
+        if (
+            isinstance(detailed, dict)
+            and str(detailed.get("symbol") or "").upper() == symbol
+            and str(detailed.get("side") or "").upper() == side
+            and str(detailed.get("orderId")) == str(order_id)
+        ):
+            expected_qty = max(
+                0.0, _safe_accounting_number(detailed.get("executedQty"), expected_qty)
+            )
+            expected_quote = max(
+                0.0,
+                _safe_accounting_number(detailed.get("cummulativeQuoteQty"), 0.0),
+            )
+            if not isinstance(response.get("fills"), list) or not response.get("fills"):
+                response = dict(response)
+                response["fills"] = detailed.get("fills", [])
+            if not response.get("transactTime") and not response.get("time"):
+                order_time_ms = int(
+                    _safe_accounting_number(
+                        detailed.get("time") or detailed.get("transactTime"),
+                        float(order_time_ms),
+                    )
+                )
+    record = {
+        "order_id": str(order_id or ""),
+        "client_order_id": client_order_id,
+        "side": side,
+        "time_ms": order_time_ms,
+        "expected_qty": expected_qty,
+        "expected_quote": expected_quote,
+        "fills": [],
+        "fill_status": "UNVERIFIED",
+        "accounting_error": "detail fill belum diverifikasi",
+    }
+    if expected_qty <= 0:
+        record["fill_status"] = "VERIFIED"
+        record["accounting_error"] = ""
+        return record
+    response_fills = response.get("fills") if isinstance(response, dict) else None
+    candidates = [response_fills] if isinstance(response_fills, list) and response_fills else []
+    last_error = record["accounting_error"]
+
+    def _try_fills(raw_fills) -> bool:
+        nonlocal last_error
+        try:
+            fills = normalize_fills(
+                raw_fills,
+                symbol=symbol,
+                side=side,
+                order_id=order_id,
+                fallback_time_ms=order_time_ms,
+            )
+            if any(fill["symbol"] != symbol for fill in fills):
+                raise TradeAccountingError("symbol fill tidak cocok dengan order")
+            if any(fill["side"] != side for fill in fills):
+                raise TradeAccountingError("side fill tidak cocok dengan order")
+            if order_id is not None and any(
+                fill["order_id"] and fill["order_id"] != str(order_id)
+                for fill in fills
+            ):
+                raise TradeAccountingError("order ID fill tidak cocok")
+            validate_fill_totals(fills, expected_qty, expected_quote)
+        except (TradeAccountingError, TypeError, ValueError, ArithmeticError) as exc:
+            last_error = str(exc)[:160]
+            return False
+        record["fills"] = fills
+        record["fill_status"] = "VERIFIED"
+        record["accounting_error"] = ""
+        return True
+
+    verified = any(_try_fills(raw_fills) for raw_fills in candidates)
+    if not verified and order_id is not None:
+        try:
+            api_fills = client.get_my_trades(symbol, int(order_id))
+        except Exception as exc:
+            last_error = f"myTrades gagal: {str(exc)[:120]}"
+        else:
+            if isinstance(api_fills, list) and api_fills:
+                _try_fills(api_fills)
+    if record["fill_status"] != "VERIFIED":
+        record["accounting_error"] = last_error or "detail fill tidak cocok dengan order"
+    return record
+
+
+def _new_trade_accounting(
+    client: ExchangeClient,
+    config: dict,
+    response: dict,
+    symbol: str,
+    qty: float,
+    entry_price: float,
+    entry_time_ms: int,
+) -> dict:
+    order = _accounting_order_record(
+        client, response, symbol, "BUY", str(config["QUOTE_ASSET"])
+    )
+    identity = "|".join(
+        (
+            str(symbol).upper(),
+            order.get("order_id", ""),
+            order.get("client_order_id", ""),
+            str(int(entry_time_ms or 0)),
+        )
+    )
+    trade_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+    accounting = {
+        "schema_version": 1,
+        "trade_id": trade_id,
+        "symbol": str(symbol).upper(),
+        "quote_asset": str(config["QUOTE_ASSET"]).upper(),
+        "mode": str(config.get("MODE", "PAPER")).upper(),
+        "status": "VERIFIED" if order["fill_status"] == "VERIFIED" else "UNVERIFIED",
+        "legacy": False,
+        "opened_at_ms": int(entry_time_ms or state_mod.now_ms()),
+        "entry_price": float(entry_price),
+        "entry_client_order_id": order.get("client_order_id", ""),
+        "entry_order_id": order.get("order_id", ""),
+        "legacy_qty": 0.0,
+        "legacy_cost_quote": 0.0,
+        "orders": [order],
+    }
+    try:
+        recompute_trade_accounting(
+            accounting, client=client, actual_remaining_qty=float(qty)
+        )
+    except Exception as exc:
+        accounting["status"] = "UNVERIFIED"
+        accounting["accounting_error"] = str(exc)[:160] or type(exc).__name__
+    return accounting
+
+
+def _ensure_trade_accounting(
+    state: dict, config: dict, symbol: str | None = None
+) -> dict | None:
+    active_symbol = str(symbol or state.get("current_symbol") or "").upper()
+    qty = max(0.0, _safe_accounting_number(state.get("qty"), 0.0))
+    if not active_symbol or qty <= 0:
+        return None
+    current = state.get("trade_accounting")
+    if isinstance(current, dict) and str(current.get("symbol") or "").upper() == active_symbol:
+        return current
+    entry_price = max(0.0, _safe_accounting_number(state.get("entry_price"), 0.0))
+    try:
+        entry_time_ms = max(0, int(state.get("entry_time") or 0))
+    except (TypeError, ValueError, OverflowError):
+        entry_time_ms = 0
+    identity = f"legacy|{active_symbol}|{entry_time_ms}|{entry_price:.16g}|{qty:.16g}"
+    trade_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+    accounting = {
+        "schema_version": 1,
+        "trade_id": trade_id,
+        "symbol": active_symbol,
+        "quote_asset": str(config["QUOTE_ASSET"]).upper(),
+        "status": "LEGACY_UNVERIFIED",
+        "legacy": True,
+        "legacy_reason": "state lama tidak menyimpan entry order ID dan fill/komisi",
+        "opened_at_ms": entry_time_ms,
+        "entry_price": entry_price,
+        "entry_client_order_id": "",
+        "entry_order_id": "",
+        "legacy_qty": qty,
+        "legacy_cost_quote": entry_price * qty,
+        "orders": [],
+    }
+    state["trade_accounting"] = accounting
+    logger.warning(
+        "Accounting posisi lama %s ditandai LEGACY_UNVERIFIED. Tidak ada pencocokan fuzzy dengan trade akun.",
+        active_symbol,
+    )
+    return accounting
+
+
+def _attach_accounting_order(accounting: dict, order_record: dict) -> None:
+    orders = accounting.get("orders")
+    if not isinstance(orders, list):
+        orders = []
+        accounting["orders"] = orders
+    order_id = str(order_record.get("order_id") or "")
+    client_order_id = str(order_record.get("client_order_id") or "")
+    for index, old in enumerate(orders):
+        if not isinstance(old, dict):
+            continue
+        same_id = order_id and str(old.get("order_id") or "") == order_id
+        same_client_id = client_order_id and str(old.get("client_order_id") or "") == client_order_id
+        if same_id or same_client_id:
+            if old.get("fill_status") != "VERIFIED" or order_record.get("fill_status") == "VERIFIED":
+                orders[index] = order_record
+            return
+    orders.append(order_record)
+
+
+def _refresh_accounting_state(
+    client: ExchangeClient,
+    config: dict,
+    state: dict,
+    *,
+    actual_remaining_qty: float | None = None,
+) -> dict | None:
+    accounting = state.get("trade_accounting")
+    if not isinstance(accounting, dict):
+        return None
+    try:
+        recompute_trade_accounting(
+            accounting,
+            client=client,
+            actual_remaining_qty=actual_remaining_qty,
+        )
+    except Exception as exc:
+        accounting["status"] = "LEGACY_UNVERIFIED" if accounting.get("legacy") else "UNVERIFIED"
+        accounting["accounting_error"] = str(exc)[:160] or type(exc).__name__
+    pending = state.get("accounting_pending_trades")
+    pending = pending if isinstance(pending, list) else []
+    settlement_pending = bool(
+        accounting.get("fee_conversion_pending")
+        or accounting.get("retryable_fill_details_pending")
+    )
+    if accounting.get("status") == "UNVERIFIED" or settlement_pending:
+        state["accounting_blocked"] = True
+        unpriced = accounting.get("unpriced_fees") or []
+        unverified_orders = accounting.get("unverified_orders") or []
+        detail = (
+            unpriced[0].get("error")
+            if unpriced and isinstance(unpriced[0], dict)
+            else None
+        ) or (
+            unverified_orders[0].get("error")
+            if unverified_orders and isinstance(unverified_orders[0], dict)
+            else None
+        )
+        state["accounting_block_reason"] = str(
+            accounting.get("accounting_error")
+            or detail
+            or "fill/komisi belum terverifikasi"
+        )[:160]
+        state["accounting_retry_after_ms"] = state_mod.now_ms() + 60_000
+    elif pending:
+        state["accounting_blocked"] = True
+        state["accounting_block_reason"] = "ledger trade tertunda untuk verifikasi"
+    else:
+        state["accounting_blocked"] = False
+        state["accounting_block_reason"] = ""
+        state["accounting_retry_after_ms"] = 0
+    return accounting
+
+
+def _accounting_totals(accounting: dict) -> tuple[float, float, float, float, dict]:
+    gross_buy_qty = gross_buy_quote = gross_sell_qty = gross_sell_quote = 0.0
+    fees_by_asset: dict[str, float] = {}
+    for order in accounting.get("orders", []):
+        if not isinstance(order, dict):
+            continue
+        side = str(order.get("side") or "").upper()
+        fills = order.get("fills") if isinstance(order.get("fills"), list) else []
+        qty = sum(
+            max(0.0, _safe_accounting_number(fill.get("qty"), 0.0))
+            for fill in fills
+            if isinstance(fill, dict)
+        )
+        quote = sum(
+            max(0.0, _safe_accounting_number(fill.get("quote_qty"), 0.0))
+            for fill in fills
+            if isinstance(fill, dict)
+        )
+        if side == "BUY":
+            gross_buy_qty += qty
+            gross_buy_quote += quote
+        elif side == "SELL":
+            gross_sell_qty += qty
+            gross_sell_quote += quote
+        for fill in fills:
+            if not isinstance(fill, dict):
+                continue
+            asset = str(fill.get("commission_asset") or "").upper()
+            amount = max(0.0, _safe_accounting_number(fill.get("commission"), 0.0))
+            if asset and amount > 0:
+                fees_by_asset[asset] = fees_by_asset.get(asset, 0.0) + amount
+    if accounting.get("legacy"):
+        gross_buy_qty = max(0.0, _safe_accounting_number(accounting.get("legacy_qty"), 0.0))
+        gross_buy_quote = max(0.0, _safe_accounting_number(accounting.get("legacy_cost_quote"), 0.0))
+    return gross_buy_qty, gross_buy_quote, gross_sell_qty, gross_sell_quote, fees_by_asset
+
+
+def _accounting_datetime(timestamp_ms: int) -> str | None:
+    if timestamp_ms <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _build_trade_ledger_record(
+    accounting: dict,
+    *,
+    closed_at_ms: int,
+    reason: str,
+    remaining_qty: float = 0.0,
+    revision: int = 1,
+) -> dict:
+    status = str(accounting.get("status") or "UNVERIFIED").upper()
+    net_pnl = (
+        _safe_accounting_number(accounting.get("realized_pnl_quote"), 0.0)
+        - _safe_accounting_number(accounting.get("remaining_cost_quote"), 0.0)
+    )
+    estimated = (
+        _safe_accounting_number(accounting.get("gross_estimated_pnl_quote"), 0.0)
+        - _safe_accounting_number(accounting.get("gross_remaining_cost_quote"), 0.0)
+    )
+    verified = status == "VERIFIED"
+    pnl_value = net_pnl if verified else (estimated if status == "LEGACY_UNVERIFIED" else None)
+    gross_buy_qty, gross_buy_quote, gross_sell_qty, gross_sell_quote, fees_by_asset = _accounting_totals(accounting)
+    buy_price = (
+        gross_buy_quote / gross_buy_qty
+        if gross_buy_qty > 0
+        else _safe_accounting_number(accounting.get("entry_price"), 0.0)
+    )
+    sell_price = gross_sell_quote / gross_sell_qty if gross_sell_qty > 0 else 0.0
+    denominator = (
+        _safe_accounting_number(accounting.get("entry_cost_quote"), 0.0)
+        if verified
+        else gross_buy_quote
+    )
+    pnl_pct = (float(pnl_value) / denominator * 100.0) if pnl_value is not None and denominator > 0 else None
+    trade_id = str(accounting.get("trade_id") or "")
+    note_parts = []
+    unpriced_items = accounting.get("unpriced_fees")
+    unpriced_items = unpriced_items if isinstance(unpriced_items, list) else []
+    order_issues = accounting.get("unverified_orders")
+    order_issues = order_issues if isinstance(order_issues, list) else []
+    unpriced_note = (
+        unpriced_items[0].get("error")
+        if unpriced_items and isinstance(unpriced_items[0], dict)
+        else ""
+    )
+    order_note = (
+        order_issues[0].get("error")
+        if order_issues and isinstance(order_issues[0], dict)
+        else ""
+    )
+    for value in (
+        accounting.get("legacy_reason"),
+        accounting.get("accounting_error"),
+        unpriced_note,
+        order_note,
+    ):
+        text = str(value or "").strip()
+        if text and text not in note_parts:
+            note_parts.append(text)
+    return {
+        "trade_id": trade_id,
+        "revision": int(revision),
+        "symbol": str(accounting.get("symbol") or "").upper(),
+        "quote_asset": str(accounting.get("quote_asset") or "").upper(),
+        "opened_at_ms": int(accounting.get("opened_at_ms") or 0),
+        "closed_at_ms": int(closed_at_ms),
+        "buy_time": _accounting_datetime(int(accounting.get("opened_at_ms") or 0)),
+        "sell_time": _accounting_datetime(int(closed_at_ms)),
+        "buy_price": buy_price,
+        "sell_price": sell_price,
+        "entry": _safe_accounting_number(accounting.get("entry_price"), buy_price),
+        "qty": gross_buy_qty,
+        "pnl": pnl_value,
+        "net_pnl_quote": net_pnl if verified else None,
+        "estimated_pnl_quote": estimated,
+        "pnl_pct": pnl_pct,
+        "accounting_status": status,
+        "accounting_note": "; ".join(note_parts),
+        "reason": str(reason or ""),
+        "paper": str(accounting.get("mode") or "PAPER").upper() == "PAPER",
+        "fees_by_asset": fees_by_asset,
+        "fee_quote_value": _safe_accounting_number(accounting.get("fee_quote_value_total"), 0.0),
+        "fee_conversion_pending": bool(accounting.get("fee_conversion_pending")),
+        "fill_details_pending": bool(accounting.get("fill_details_pending")),
+        "unpriced_fees": deepcopy(accounting.get("unpriced_fees", [])),
+        "orders": deepcopy(accounting.get("orders", [])),
+        "remaining_qty_at_close": max(0.0, _safe_accounting_number(remaining_qty, 0.0)),
+    }
+
+
+def _finalize_trade_accounting(
+    client: ExchangeClient,
+    config: dict,
+    state: dict,
+    symbol: str,
+    reason: str,
+    *,
+    remaining_qty: float = 0.0,
+) -> dict | None:
+    accounting = state.get("trade_accounting")
+    if (
+        not isinstance(accounting, dict)
+        or str(accounting.get("symbol") or "").upper() != str(symbol).upper()
+    ):
+        accounting = _ensure_trade_accounting(state, config, symbol)
+    if not isinstance(accounting, dict):
+        return None
+    accounting["mode"] = str(config.get("MODE", "PAPER")).upper()
+    _refresh_accounting_state(
+        client,
+        config,
+        state,
+        actual_remaining_qty=max(0.0, _safe_accounting_number(remaining_qty, 0.0))
+    )
+    status = str(accounting.get("status") or "UNVERIFIED").upper()
+    revision = 1
+    pending_items = state.get("accounting_pending_trades")
+    pending_items = pending_items if isinstance(pending_items, list) else []
+    for item in pending_items:
+        if isinstance(item, dict) and item.get("trade_id") == accounting.get("trade_id"):
+            revision = int(item.get("revision", 1) or 1) + 1
+            break
+    record = _build_trade_ledger_record(
+        accounting,
+        closed_at_ms=state_mod.now_ms(),
+        reason=reason,
+        remaining_qty=remaining_qty,
+        revision=revision,
+    )
+    write_ok = True
+    try:
+        append_trade_record(
+            config.get("TRADE_LEDGER_FILE")
+            or f"{config.get('STATE_FILE', 'data/pump_bot_state.json')}.trades.jsonl",
+            record,
+        )
+    except Exception as exc:
+        write_ok = False
+        state["accounting_block_reason"] = f"ledger trade gagal disimpan: {str(exc)[:120]}"
+        logger.critical("Ledger trade %s gagal disimpan: %s", symbol, exc)
+    if status == "VERIFIED":
+        pnl_for_block = float(record["net_pnl_quote"])
+        note = "(PnL bersih dari fill terverifikasi)"
+    else:
+        fallback_basis = max(
+            0.0,
+            _safe_accounting_number(
+                accounting.get("legacy_cost_quote")
+                or accounting.get("entry_cost_quote"),
+                0.0,
+            ),
+        )
+        pnl_for_block = -max(fallback_basis, 1e-9)
+        note = "(PnL tidak terverifikasi, diblokir konservatif sebagai loss)"
+    record_symbol_block(state, config, symbol, pnl_for_block, catatan=note)
+    state["last_closed_trade"] = {
+        key: record.get(key)
+        for key in (
+            "trade_id",
+            "symbol",
+            "closed_at_ms",
+            "pnl",
+            "net_pnl_quote",
+            "accounting_status",
+        )
+    }
+    settlement_pending = bool(
+        accounting.get("fee_conversion_pending")
+        or accounting.get("retryable_fill_details_pending")
+    )
+    if status == "UNVERIFIED" or settlement_pending or not write_ok:
+        pending_items.append(
+            {
+                "trade_id": str(accounting.get("trade_id") or record.get("trade_id")),
+                "revision": revision,
+                "record": record,
+                "accounting": deepcopy(accounting),
+                "reason": reason,
+                "closed_at_ms": int(record["closed_at_ms"]),
+                "remaining_qty": max(0.0, _safe_accounting_number(remaining_qty, 0.0)),
+                "persistence_pending": not write_ok,
+                "retry_after_ms": state_mod.now_ms() + 60_000,
+            }
+        )
+        state["accounting_pending_trades"] = pending_items
+        state["accounting_blocked"] = True
+        state["accounting_block_reason"] = str(
+            accounting.get("accounting_error")
+            or state.get("accounting_block_reason")
+            or "fill/komisi/ledger belum terverifikasi"
+        )[:160]
+        state["accounting_retry_after_ms"] = state_mod.now_ms() + 60_000
+    else:
+        state["accounting_pending_trades"] = pending_items
+        state["accounting_blocked"] = bool(pending_items)
+        if not pending_items:
+            state["accounting_block_reason"] = ""
+            state["accounting_retry_after_ms"] = 0
+    state["trade_accounting"] = None
+    return record
+
+
+def _retry_order_fills(client: ExchangeClient, accounting: dict) -> bool:
+    changed = False
+    orders = accounting.get("orders")
+    if not isinstance(orders, list):
+        return False
+    for index, old in enumerate(orders):
+        if not isinstance(old, dict) or old.get("fill_status") == "VERIFIED":
+            continue
+        if not old.get("order_id") or _safe_accounting_number(old.get("expected_qty"), 0.0) <= 0:
+            continue
+        if old.get("fills"):
+            try:
+                existing_fills = normalize_fills(
+                    old.get("fills"),
+                    symbol=str(accounting.get("symbol") or ""),
+                    side=str(old.get("side") or ""),
+                    order_id=old.get("order_id"),
+                    fallback_time_ms=old.get("time_ms"),
+                )
+                validate_fill_totals(
+                    existing_fills,
+                    old.get("expected_qty"),
+                    old.get("expected_quote"),
+                )
+                continue
+            except Exception:
+                pass
+        try:
+            response = client.get_order(
+                str(accounting.get("symbol") or ""), order_id=int(old["order_id"])
+            )
+        except Exception:
+            continue
+        if (
+            not isinstance(response, dict)
+            or str(response.get("symbol") or "").upper()
+            != str(accounting.get("symbol") or "").upper()
+            or str(response.get("side") or "").upper()
+            != str(old.get("side") or "").upper()
+            or str(response.get("orderId")) != str(old.get("order_id"))
+        ):
+            continue
+        replacement = _accounting_order_record(
+            client,
+            response,
+            str(accounting.get("symbol") or ""),
+            str(old.get("side") or ""),
+            str(accounting.get("quote_asset") or ""),
+        )
+        if replacement.get("fill_status") == "VERIFIED":
+            orders[index] = replacement
+            changed = True
+    return changed
+
+
+def _retry_pending_accounting(client: ExchangeClient, config: dict, state: dict) -> None:
+    pending = state.get("accounting_pending_trades")
+    if not isinstance(pending, list) or not pending:
+        return
+    now = state_mod.now_ms()
+    retry_after = int(state.get("accounting_retry_after_ms", 0) or 0)
+    if now < retry_after:
+        return
+    remaining_pending = []
+    for item in pending:
+        if not isinstance(item, dict):
+            continue
+        accounting = item.get("accounting")
+        if not isinstance(accounting, dict):
+            remaining_pending.append(item)
+            continue
+        _retry_order_fills(client, accounting)
+        try:
+            recompute_trade_accounting(
+                accounting,
+                client=client,
+                actual_remaining_qty=max(0.0, _safe_accounting_number(item.get("remaining_qty"), 0.0)),
+            )
+        except Exception as exc:
+            accounting["status"] = "UNVERIFIED"
+            accounting["accounting_error"] = str(exc)[:160] or type(exc).__name__
+        resolved_legacy = (
+            accounting.get("status") == "LEGACY_UNVERIFIED"
+            and not accounting.get("fee_conversion_pending")
+            and not accounting.get("retryable_fill_details_pending")
+        )
+        if accounting.get("status") == "VERIFIED" or resolved_legacy:
+            revision = int(item.get("revision", 1) or 1) + 1
+            record = _build_trade_ledger_record(
+                accounting,
+                closed_at_ms=int(item.get("closed_at_ms") or now),
+                reason=str(item.get("reason") or ""),
+                remaining_qty=max(0.0, _safe_accounting_number(item.get("remaining_qty"), 0.0)),
+                revision=revision,
+            )
+            try:
+                append_trade_record(
+                    config.get("TRADE_LEDGER_FILE")
+                    or f"{config.get('STATE_FILE', 'data/pump_bot_state.json')}.trades.jsonl",
+                    record,
+                )
+            except Exception as exc:
+                item["retry_after_ms"] = now + 60_000
+                item["accounting"] = accounting
+                item["record"] = record
+                item["revision"] = revision
+                item["accounting_error"] = f"ledger gagal disimpan: {str(exc)[:120]}"
+                remaining_pending.append(item)
+                continue
+            state["last_closed_trade"] = {
+                key: record.get(key)
+                for key in (
+                    "trade_id",
+                    "symbol",
+                    "closed_at_ms",
+                    "pnl",
+                    "net_pnl_quote",
+                    "accounting_status",
+                )
+            }
+        else:
+            item["retry_after_ms"] = now + 60_000
+            item["accounting"] = accounting
+            unpriced_items = accounting.get("unpriced_fees")
+            unpriced_items = unpriced_items if isinstance(unpriced_items, list) else []
+            unverified_orders = accounting.get("unverified_orders")
+            unverified_orders = unverified_orders if isinstance(unverified_orders, list) else []
+            detail = (
+                unpriced_items[0].get("error")
+                if unpriced_items and isinstance(unpriced_items[0], dict)
+                else None
+            ) or (
+                unverified_orders[0].get("error")
+                if unverified_orders and isinstance(unverified_orders[0], dict)
+                else None
+            )
+            item["accounting_error"] = str(
+                accounting.get("accounting_error")
+                or detail
+                or "fill/komisi belum terverifikasi"
+            )[:160]
+            remaining_pending.append(item)
+    state["accounting_pending_trades"] = remaining_pending
+    active = state.get("trade_accounting")
+    active_unverified = isinstance(active, dict) and (
+        active.get("status") == "UNVERIFIED"
+        or active.get("fee_conversion_pending")
+        or active.get("retryable_fill_details_pending")
+    )
+    state["accounting_blocked"] = bool(remaining_pending or active_unverified)
+    if remaining_pending:
+        state["accounting_block_reason"] = str(
+            remaining_pending[0].get("accounting_error") or "ledger trade tertunda"
+        )[:160]
+        state["accounting_retry_after_ms"] = now + 60_000
+    elif not active_unverified:
+        state["accounting_block_reason"] = ""
+        state["accounting_retry_after_ms"] = 0
 
 
 def _fmt_utc_ms(ts_ms: float) -> str:
-    """Format timestamp ms menjadi teks UTC yang mudah dibaca di log."""
     try:
         return datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc).strftime(
             "%Y-%m-%d %H:%M:%S UTC"
@@ -1067,7 +1979,6 @@ def _fmt_utc_ms(ts_ms: float) -> str:
 
 
 def _symbol_block_until_ts(state: dict, symbol: str) -> float:
-    """Timestamp ms sampai kapan entry koin ini diblokir (0 = tidak diblokir)."""
     blocks = state.get("symbol_block_until")
     if not isinstance(blocks, dict) or not symbol:
         return 0.0
@@ -1094,16 +2005,6 @@ def record_symbol_block(
     now_ms: int | None = None,
     catatan: str = "",
 ) -> bool:
-    """Catat blokir entry ulang untuk koin yang posisinya baru saja ditutup.
-
-    Aturan:
-    - SAME_COIN_BLOCK_HOURS <= 0: fitur nonaktif, tidak ada blokir.
-    - SAME_COIN_BLOCK_LOSS_ONLY aktif (default): hanya pnl < 0 yang memicu blokir.
-    - SAME_COIN_BLOCK_LOSS_ONLY nonaktif: semua hasil trade memicu blokir.
-
-    Mengembalikan True kalau koin berhasil diblokir. Blokir bertahan di state
-    file sehingga tetap aktif walau bot di-restart.
-    """
     if not symbol:
         return False
     try:
@@ -1125,18 +2026,15 @@ def record_symbol_block(
     if not isinstance(blocks, dict):
         blocks = {}
     else:
-        # Salin dict agar tidak mengubah object bersama (mis. DEFAULT_STATE
-        # yang ter-alias oleh shallow copy state).
         blocks = dict(blocks)
-    # Pangkas blokir kedaluwarsa supaya state tidak terus membesar.
     for sym in [s for s, until in blocks.items() if _safe_block_ts(until) <= now]:
         blocks.pop(sym, None)
     sym = str(symbol).upper()
     blocks[sym] = now + int(hours * 3600 * 1000)
     state["symbol_block_until"] = blocks
     logger.info(
-        "Blokir entry %s sampai %s (%.1f jam) karena trade sebelumnya loss "
-        "(estimasi PnL %+.2f %s)%s.",
+        "Blokir entry %s sampai %s (%.1f jam) karena hasil accounting trade sebelumnya loss "
+        "(PnL %+.2f %s)%s.",
         sym,
         _fmt_utc_ms(blocks[sym]),
         hours,
@@ -1853,18 +2751,109 @@ def _oco_response_has_fill(response: dict) -> bool:
     return False
 
 
+def _filled_oco_order_reports(response: dict) -> list[dict]:
+    if not isinstance(response, dict):
+        return []
+    reports = []
+    for key in ("orderReports", "orders"):
+        raw_reports = response.get(key, [])
+        if not isinstance(raw_reports, list):
+            continue
+        for report in raw_reports:
+            if not isinstance(report, dict):
+                continue
+            try:
+                filled = (
+                    str(report.get("status") or "").upper() == "FILLED"
+                    or float(report.get("executedQty", 0.0) or 0.0) > 0
+                )
+            except (TypeError, ValueError, OverflowError):
+                filled = True
+            if filled and report not in reports:
+                reports.append(report)
+    return reports
+
+
 def _settle_native_protective_fill(
-    client: ExchangeClient, config: dict, state: dict, symbol: str, reason: str
+    client: ExchangeClient,
+    config: dict,
+    state: dict,
+    symbol: str,
+    reason: str,
+    native_orders: list[dict] | None = None,
 ) -> None:
-    entry_price = float(state.get("entry_price") or 0.0)
-    qty = float(state.get("qty") or 0.0)
     base = symbol[: -len(config["QUOTE_ASSET"])]
+    accounting = _ensure_trade_accounting(state, config, symbol)
+    if isinstance(accounting, dict):
+        accounting["mode"] = str(config.get("MODE", "PAPER")).upper()
+        for native_order in native_orders or []:
+            if not isinstance(native_order, dict):
+                continue
+            order_detail = native_order
+            try:
+                executed = float(order_detail.get("executedQty", 0.0) or 0.0)
+                quote_total = float(
+                    order_detail.get("cummulativeQuoteQty", 0.0) or 0.0
+                )
+            except (TypeError, ValueError, OverflowError):
+                executed = quote_total = 0.0
+            order_id = order_detail.get("orderId")
+            if order_id is not None and (executed <= 0 or quote_total <= 0):
+                try:
+                    detailed = client.get_order(symbol, order_id=int(order_id))
+                except Exception:
+                    detailed = None
+                if (
+                    isinstance(detailed, dict)
+                    and str(detailed.get("symbol") or "").upper() == str(symbol).upper()
+                    and str(detailed.get("orderId")) == str(order_id)
+                    and str(detailed.get("side") or "").upper() == "SELL"
+                    and (
+                        not order_detail.get("clientOrderId")
+                        or str(detailed.get("clientOrderId") or "")
+                        == str(order_detail.get("clientOrderId"))
+                    )
+                ):
+                    order_detail = detailed
+                    try:
+                        executed = float(order_detail.get("executedQty", 0.0) or 0.0)
+                        quote_total = float(
+                            order_detail.get("cummulativeQuoteQty", 0.0) or 0.0
+                        )
+                    except (TypeError, ValueError, OverflowError):
+                        executed = quote_total = 0.0
+            if executed <= 0:
+                continue
+            _attach_accounting_order(
+                accounting,
+                _accounting_order_record(
+                    client,
+                    order_detail,
+                    symbol,
+                    "SELL",
+                    str(config["QUOTE_ASSET"]),
+                ),
+            )
     state["reconciliation_required"] = False
     state["reconciliation_assets"] = []
     reconcile_state_with_exchange(client, config, state)
     if state.get("current_symbol") or state.get("pending_order"):
-        state["reconciliation_required"] = True
-        state["reconciliation_assets"] = [base]
+        if state.get("current_symbol") and float(state.get("qty") or 0.0) > 0:
+            if not isinstance(state.get("native_oco"), dict) and not isinstance(
+                state.get("native_stop"), dict
+            ):
+                state["_native_stop_exit_blocked"] = False
+                state["native_protection_retry_at"] = state_mod.now_ms() + 60_000
+            else:
+                state["_native_stop_exit_blocked"] = True
+            logger.warning(
+                "Exit native %s terisi sebagian; sisa posisi %.12g tetap dikelola.",
+                symbol,
+                float(state.get("qty") or 0.0),
+            )
+        else:
+            state["reconciliation_required"] = True
+            state["reconciliation_assets"] = [base]
         state_mod.save_state(config["STATE_FILE"], state)
         return
     state["sell_fail_count"] = 0
@@ -1872,31 +2861,96 @@ def _settle_native_protective_fill(
         state_mod.now_ms() + config["COOLDOWN_MINUTES_AFTER_CLOSE"] * 60 * 1000
     )
     state["last_trade_time"] = state_mod.now_ms()
-    # Posisi sudah ditutup oleh order proteksi exchange-side, tetapi harga exit
-    # tidak tercatat di state. Estimasi hasil trade dari bid sekarang; jika
-    # harga tidak bisa diambil, secara konservatif dianggap loss.
-    exit_price = 0.0
-    try:
-        book = client.get_book_ticker(symbol, max_retries=1)
-        exit_price = float(book.get("bidPrice", 0.0) or 0.0)
-    except Exception:
-        exit_price = 0.0
-    if exit_price > 0 and entry_price > 0 and qty > 0:
-        pnl_estimasi = (exit_price - entry_price) * qty
-        catatan = f"(exit native, estimasi dari bid {exit_price:.6f})"
-    else:
-        pnl_estimasi = -(entry_price * qty)
-        catatan = "(exit native, harga tidak diketahui, dianggap loss)"
-    record_symbol_block(state, config, symbol, pnl_estimasi, catatan=catatan)
     state_mod.save_state(config["STATE_FILE"], state)
     logger.info(
-        "EXIT NATIVE %s (%s): posisi ditutup oleh order proteksi exchange-side "
-        "(entry=%.6f). Rekonsiliasi bersih; bot lanjut scan setelah cooldown.",
+        "EXIT NATIVE %s (%s): posisi proteksi exchange-side telah direkonsiliasi. "
+        "Klasifikasi memakai accounting fill/komisi, bukan bid perkiraan.",
         symbol,
         reason,
-        entry_price,
     )
     try_dust_sweep(client, config, symbol)
+
+
+def _record_native_partial_fills(
+    client: ExchangeClient,
+    config: dict,
+    state: dict,
+    symbol: str,
+    reason: str,
+    native_orders: list[dict],
+) -> None:
+    accounting = _ensure_trade_accounting(state, config, symbol)
+    if isinstance(accounting, dict):
+        accounting["mode"] = str(config.get("MODE", "PAPER")).upper()
+        for native_order in native_orders:
+            if not isinstance(native_order, dict):
+                continue
+            order_detail = native_order
+            order_id = order_detail.get("orderId")
+            try:
+                executed = float(order_detail.get("executedQty", 0.0) or 0.0)
+                quote_total = float(order_detail.get("cummulativeQuoteQty", 0.0) or 0.0)
+            except (TypeError, ValueError, OverflowError):
+                executed = quote_total = 0.0
+            if order_id is not None and (executed <= 0 or quote_total <= 0):
+                try:
+                    detailed = client.get_order(symbol, order_id=int(order_id))
+                except Exception:
+                    detailed = None
+                if (
+                    isinstance(detailed, dict)
+                    and str(detailed.get("symbol") or "").upper() == str(symbol).upper()
+                    and str(detailed.get("orderId")) == str(order_id)
+                    and str(detailed.get("side") or "").upper() == "SELL"
+                    and (
+                        not order_detail.get("clientOrderId")
+                        or str(detailed.get("clientOrderId") or "")
+                        == str(order_detail.get("clientOrderId"))
+                    )
+                ):
+                    order_detail = detailed
+                    try:
+                        executed = float(order_detail.get("executedQty", 0.0) or 0.0)
+                        quote_total = float(
+                            order_detail.get("cummulativeQuoteQty", 0.0) or 0.0
+                        )
+                    except (TypeError, ValueError, OverflowError):
+                        executed = quote_total = 0.0
+            if executed <= 0:
+                continue
+            _attach_accounting_order(
+                accounting,
+                _accounting_order_record(
+                    client, order_detail, symbol, "SELL", str(config["QUOTE_ASSET"])
+                ),
+            )
+    try:
+        account = client.get_account()
+        if str(config.get("MODE", "PAPER")).upper() == "LIVE":
+            _validate_live_account_snapshot(account, str(config["QUOTE_ASSET"]))
+        total_base = get_total_balance(
+            account, symbol[: -len(str(config["QUOTE_ASSET"]))]
+        )
+    except Exception as exc:
+        _mark_reconciliation(state, "NATIVE_PARTIAL_BALANCE_UNVERIFIED", [symbol])
+        logger.critical("Sisa saldo setelah fill native %s tidak terverifikasi: %s", symbol, exc)
+    else:
+        if total_base > 0:
+            state["qty"] = min(float(state.get("qty") or 0.0), total_base)
+            _refresh_accounting_state(
+                client, config, state, actual_remaining_qty=total_base
+            )
+            state["reconciliation_required"] = False
+            state["reconciliation_assets"] = []
+        else:
+            _refresh_accounting_state(client, config, state)
+            _mark_reconciliation(state, "NATIVE_PARTIAL_ZERO_BALANCE_PENDING", [symbol])
+    state_mod.save_state(config["STATE_FILE"], state)
+    logger.warning(
+        "Fill proteksi native %s direkam (%s); sisa posisi tetap dilindungi/dikelola.",
+        symbol,
+        reason,
+    )
 
 
 def _reconcile_native_oco(client: ExchangeClient, config: dict, state: dict) -> bool:
@@ -2022,6 +3076,7 @@ def _reconcile_native_oco(client: ExchangeClient, config: dict, state: dict) -> 
             leg["executed_qty"] = float(report.get("executedQty", 0.0) or 0.0)
 
     filled = _oco_response_has_fill(response)
+    native_fill_orders: list[dict] = []
     if not filled and status == "ALL_DONE":
         for leg_name in ("above", "below"):
             leg = intent.get(leg_name)
@@ -2062,8 +3117,89 @@ def _reconcile_native_oco(client: ExchangeClient, config: dict, state: dict) -> 
                 return False
             leg["status"] = str(child.get("status") or "UNKNOWN").upper()
             leg["executed_qty"] = float(child.get("executedQty", 0.0) or 0.0)
-            filled = filled or leg["status"] == "FILLED" or leg["executed_qty"] > 0
+            if leg["status"] == "FILLED" or leg["executed_qty"] > 0:
+                native_fill_orders.append(child)
+                filled = True
 
+    if filled:
+        for leg_name in ("above", "below"):
+            leg = intent.get(leg_name)
+            if not isinstance(leg, dict):
+                continue
+            try:
+                leg_filled = (
+                    str(leg.get("status") or "").upper() == "FILLED"
+                    or float(leg.get("executed_qty", 0.0) or 0.0) > 0
+                )
+            except (TypeError, ValueError, OverflowError):
+                leg_filled = True
+            if not leg_filled:
+                continue
+            report = next(
+                (
+                    item
+                    for item in (
+                        list(response.get("orders", []))
+                        + list(response.get("orderReports", []))
+                    )
+                    if isinstance(item, dict)
+                    and str(item.get("clientOrderId") or "")
+                    == str(leg.get("client_order_id") or "")
+                ),
+                None,
+            )
+            if leg.get("order_id") is None and isinstance(report, dict):
+                leg["order_id"] = report.get("orderId")
+            if leg.get("order_id") is None:
+                continue
+            if any(
+                str(existing.get("orderId")) == str(leg.get("order_id"))
+                for existing in native_fill_orders
+            ):
+                continue
+            try:
+                child = client.get_order(symbol, order_id=int(leg["order_id"]))
+            except BinanceAPIError:
+                if isinstance(report, dict):
+                    native_fill_orders.append(report)
+                continue
+            child_valid = (
+                isinstance(child, dict)
+                and str(child.get("symbol") or "").upper() == str(symbol).upper()
+                and str(child.get("orderId")) == str(leg.get("order_id"))
+                and str(child.get("clientOrderId") or "")
+                == str(leg.get("client_order_id") or "")
+                and str(child.get("side") or "").upper() == "SELL"
+                and str(child.get("type") or "").upper()
+                == str(leg.get("type") or "").upper()
+            )
+            if child_valid:
+                native_fill_orders.append(child)
+            elif isinstance(report, dict):
+                native_fill_orders.append(report)
+
+    if filled and status == "EXECUTING":
+        _record_native_partial_fills(
+            client,
+            config,
+            state,
+            symbol,
+            "NATIVE_OCO_PARTIAL_FILL",
+            native_fill_orders,
+        )
+        return True
+    if filled and status not in ("ALL_DONE", "REJECT"):
+        _record_native_partial_fills(
+            client,
+            config,
+            state,
+            symbol,
+            "NATIVE_OCO_STATUS_UNCERTAIN_AFTER_FILL",
+            native_fill_orders,
+        )
+        _mark_reconciliation(state, "NATIVE_OCO_FILLED_STATUS_UNCERTAIN", [symbol])
+        state_mod.save_state(config["STATE_FILE"], state)
+        return False
     if filled:
         base = symbol[: -len(config["QUOTE_ASSET"])]
         state["native_oco"] = None
@@ -2072,11 +3208,16 @@ def _reconcile_native_oco(client: ExchangeClient, config: dict, state: dict) -> 
         state["reconciliation_assets"] = [base]
         state_mod.save_state(config["STATE_FILE"], state)
         logger.critical(
-            "OCO %s salah satu leg FILLED; tidak mengirim SELL kedua. Rekonsiliasi saldo dijalankan.",
+            "OCO %s salah satu leg terminal FILLED; tidak mengirim SELL kedua. Rekonsiliasi saldo dijalankan.",
             symbol,
         )
         _settle_native_protective_fill(
-            client, config, state, symbol, "NATIVE_OCO_FILLED"
+            client,
+            config,
+            state,
+            symbol,
+            "NATIVE_OCO_FILLED",
+            native_orders=native_fill_orders,
         )
         return False
     if status in ("ALL_DONE", "REJECT"):
@@ -2204,15 +3345,47 @@ def _reconcile_native_stop(client: ExchangeClient, config: dict, state: dict) ->
             symbol,
         )
         _settle_native_protective_fill(
-            client, config, state, symbol, "NATIVE_STOP_FILLED"
+            client,
+            config,
+            state,
+            symbol,
+            "NATIVE_STOP_FILLED",
+            native_orders=[order],
         )
         return False
+    if status == "PARTIALLY_FILLED" and float(order.get("executedQty", 0.0) or 0.0) > 0:
+        _record_native_partial_fills(
+            client,
+            config,
+            state,
+            symbol,
+            "NATIVE_STOP_PARTIAL_FILL",
+            [order],
+        )
+        return True
     if status in ("CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "REJECTED"):
+        try:
+            canceled_executed = float(order.get("executedQty", 0.0) or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            canceled_executed = 0.0
         state["native_stop"] = None
-        state["_native_stop_exit_blocked"] = False
-        state["reconciliation_required"] = True
-        state["reconciliation_assets"] = [symbol]
-        state_mod.save_state(config["STATE_FILE"], state)
+        if canceled_executed > 0:
+            state["_native_stop_exit_blocked"] = True
+            _mark_reconciliation(state, "NATIVE_STOP_PARTIAL_FILLED_TERMINAL", [symbol])
+            state_mod.save_state(config["STATE_FILE"], state)
+            _settle_native_protective_fill(
+                client,
+                config,
+                state,
+                symbol,
+                "NATIVE_STOP_PARTIAL_FILL_TERMINAL",
+                native_orders=[order],
+            )
+        else:
+            state["_native_stop_exit_blocked"] = False
+            state["reconciliation_required"] = True
+            state["reconciliation_assets"] = [symbol]
+            state_mod.save_state(config["STATE_FILE"], state)
         return False
     if status not in ("NEW", "PARTIALLY_FILLED"):
         state["_native_stop_exit_blocked"] = True
@@ -2280,20 +3453,46 @@ def _cancel_native_oco_before_exit(
         _mark_reconciliation(state, "NATIVE_OCO_CANCEL_IDENTITY_MISMATCH", [symbol])
         state_mod.save_state(config["STATE_FILE"], state)
         return False
-    if _oco_response_has_fill(response):
-        state["native_oco"] = None
-        state["_native_stop_exit_blocked"] = True
-        state["reconciliation_required"] = True
-        state["reconciliation_assets"] = [symbol]
-        state_mod.save_state(config["STATE_FILE"], state)
-        logger.critical(
-            "OCO %s terisi saat cancel. SELL manual ditahan untuk rekonsiliasi.", symbol
-        )
-        _settle_native_protective_fill(
-            client, config, state, symbol, "NATIVE_OCO_FILLED_ON_CANCEL"
-        )
-        return False
     final_status = str(response.get("listOrderStatus") or "").upper()
+    if _oco_response_has_fill(response):
+        fill_orders = _filled_oco_order_reports(response)
+        if final_status == "ALL_DONE":
+            state["native_oco"] = None
+            state["_native_stop_exit_blocked"] = True
+            state["reconciliation_required"] = True
+            state["reconciliation_assets"] = [symbol]
+            state_mod.save_state(config["STATE_FILE"], state)
+            logger.critical(
+                "OCO %s terisi saat cancel. SELL manual ditahan sampai settlement fill selesai.",
+                symbol,
+            )
+            _settle_native_protective_fill(
+                client,
+                config,
+                state,
+                symbol,
+                "NATIVE_OCO_FILLED_ON_CANCEL",
+                native_orders=fill_orders,
+            )
+        else:
+            intent["status"] = final_status or "UNKNOWN"
+            state["_native_stop_exit_blocked"] = True
+            _record_native_partial_fills(
+                client,
+                config,
+                state,
+                symbol,
+                "NATIVE_OCO_CANCEL_PARTIAL_FILL",
+                fill_orders,
+            )
+            _mark_reconciliation(state, "NATIVE_OCO_CANCEL_STATUS_UNCERTAIN", [symbol])
+            state_mod.save_state(config["STATE_FILE"], state)
+            logger.critical(
+                "OCO %s menunjukkan fill tetapi cancel belum terminal (%s). SELL manual ditahan.",
+                symbol,
+                final_status or "UNKNOWN",
+            )
+        return False
     if final_status != "ALL_DONE":
         state["_native_stop_exit_blocked"] = True
         state["reconciliation_required"] = True
@@ -2376,13 +3575,46 @@ def _cancel_native_stop_before_exit(
         state_mod.save_state(config["STATE_FILE"], state)
         return False
     final_status = str(response.get("status") or "").upper()
-    if final_status == "FILLED" or float(response.get("executedQty", 0.0) or 0.0) > 0:
+    try:
+        cancel_executed_qty = float(response.get("executedQty", 0.0) or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        cancel_executed_qty = 0.0
+    cancel_terminal = final_status in (
+        "FILLED",
+        "CANCELED",
+        "EXPIRED",
+        "EXPIRED_IN_MATCH",
+        "REJECTED",
+    )
+    if cancel_executed_qty > 0 and not cancel_terminal:
+        intent["status"] = final_status or "UNKNOWN"
+        state["_native_stop_exit_blocked"] = True
+        _record_native_partial_fills(
+            client,
+            config,
+            state,
+            symbol,
+            "NATIVE_STOP_CANCEL_PARTIAL_FILL",
+            [response],
+        )
+        _mark_reconciliation(state, "NATIVE_STOP_CANCEL_STATUS_UNCERTAIN", [symbol])
+        state_mod.save_state(config["STATE_FILE"], state)
+        return False
+    if final_status == "FILLED" or (
+        cancel_executed_qty > 0
+        and final_status in ("CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "REJECTED")
+    ):
         state["native_stop"] = None
         state["_native_stop_exit_blocked"] = True
         _mark_reconciliation(state, "NATIVE_STOP_FILLED_ON_CANCEL", [symbol])
         state_mod.save_state(config["STATE_FILE"], state)
         _settle_native_protective_fill(
-            client, config, state, symbol, "NATIVE_STOP_FILLED_ON_CANCEL"
+            client,
+            config,
+            state,
+            symbol,
+            "NATIVE_STOP_FILLED_ON_CANCEL",
+            native_orders=[response],
         )
         return False
     if final_status not in ("CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "REJECTED"):
@@ -2440,7 +3672,12 @@ def listing_age_days(client: ExchangeClient, symbol: str, now_ms: int) -> float:
 
 
 def _restore_pending_buy(
-    config: dict, state: dict, pending: dict, order: dict, account: dict
+    client: ExchangeClient,
+    config: dict,
+    state: dict,
+    pending: dict,
+    order: dict,
+    account: dict,
 ) -> bool:
     executed = float(order.get("executedQty", 0.0) or 0.0)
     quoted = float(order.get("cummulativeQuoteQty", 0.0) or 0.0)
@@ -2458,7 +3695,19 @@ def _restore_pending_buy(
     state["current_symbol"] = symbol
     state["entry_price"] = quoted / executed
     state["qty"] = qty
-    state["entry_time"] = int(order.get("transactTime") or state_mod.now_ms())
+    state["entry_time"] = int(order.get("transactTime") or order.get("time") or state_mod.now_ms())
+    state["trade_accounting"] = _new_trade_accounting(
+        client,
+        config,
+        order,
+        symbol,
+        qty,
+        quoted / executed,
+        state["entry_time"],
+    )
+    _refresh_accounting_state(
+        client, config, state, actual_remaining_qty=qty
+    )
     state["be_active"] = False
     state["be_stop_price"] = 0.0
     state["trailing_active"] = False
@@ -2559,9 +3808,16 @@ def open_position(
     candidate: "scanner.Candidate",
     reference_price: "float | None" = None,
 ) -> None:
-    # Penjagaan defense-in-depth: koin yang sedang diblokir karena trade
-    # sebelumnya loss tidak boleh di-entry (scanner sudah mengecualikannya,
-    # pemeriksaan ini untuk jalur panggilan lain).
+    if (
+        str(config.get("MODE", "PAPER")).upper() == "LIVE"
+        and state.get("accounting_blocked")
+    ):
+        logger.critical(
+            "Entry LIVE %s ditahan: accounting fee/fill belum terverifikasi (%s).",
+            candidate.symbol,
+            str(state.get("accounting_block_reason") or "alasan tidak tersedia")[:120],
+        )
+        return
     block_until = _symbol_block_until_ts(state, candidate.symbol)
     now_ms = state_mod.now_ms()
     if block_until > now_ms:
@@ -2657,11 +3913,6 @@ def open_position(
     if filters.max_qty > 0 and qty > float(filters.max_qty):
         qty = filters.round_qty(float(filters.max_qty))
         order_quote_qty = min(order_quote_qty, qty * price_ref)
-    # quoteOrderQty wajib mengikuti presisi quote asset bursa (quoteAssetPrecision).
-    # Nilai hasil pembagian/multiplikasi float bisa berdesimal panjang, misalnya
-    # 7.58 * 0.995 = 7.5421000000000005, dan ditolak dengan kode -1111
-    # "Parameter 'quoteOrderQty' has too much precision". Pembulatan dilakukan
-    # ke bawah supaya nominal tidak pernah melebihi saldo yang tersedia.
     if bool(filters.quote_order_qty_market_allowed):
         order_quote_qty = filters.round_quote_amount(order_quote_qty)
     notional = qty * price_ref
@@ -2747,10 +3998,6 @@ def open_position(
         )
     except BinanceAPIError as exc:
         if _is_definitive_reject(exc):
-            # Penolakan definitif (mis. -1111 presisi, -1013 filter, -1100
-            # parameter) terjadi SEBELUM order masuk ke matching engine, jadi
-            # tidak ada order yang terbentuk. Intent dibatalkan tanpa
-            # rekonsiliasi supaya bot tidak memblokir entry berikutnya.
             state["pending_order"] = None
             _clear_reconciliation(state)
             state_mod.save_state(config["STATE_FILE"], state)
@@ -2839,6 +4086,18 @@ def open_position(
     state["entry_price"] = fill_price
     state["qty"] = estimated_qty or executed_qty
     state["entry_time"] = int(resp.get("transactTime") or state_mod.now_ms())
+    state["trade_accounting"] = _new_trade_accounting(
+        client,
+        config,
+        resp,
+        candidate.symbol,
+        state["qty"],
+        fill_price,
+        state["entry_time"],
+    )
+    _refresh_accounting_state(
+        client, config, state, actual_remaining_qty=state["qty"]
+    )
     state["last_trade_time"] = state_mod.now_ms()
     state["be_active"] = False
     state["be_stop_price"] = 0.0
@@ -2876,6 +4135,7 @@ def open_position(
         state["current_symbol"] = None
         state["entry_price"] = 0.0
         state["qty"] = 0.0
+        state["trade_accounting"] = None
         _mark_reconciliation(state, "FILLED_BUY_BASE_BALANCE_ZERO", [base_asset])
         state_mod.save_state(config["STATE_FILE"], state)
         logger.critical(
@@ -2885,6 +4145,9 @@ def open_position(
         return
 
     state["qty"] = managed_qty
+    _refresh_accounting_state(
+        client, config, state, actual_remaining_qty=managed_qty
+    )
     _clear_reconciliation(state)
     state_mod.save_state(config["STATE_FILE"], state)
     logger.info(
@@ -3004,17 +4267,14 @@ def close_position(
         logger.warning(
             "%s Posisi %s direset sebagai dust terverifikasi.", detail, symbol
         )
-        # Dust yang disapu nilainya hangus, secara konservatif dihitung sebagai
-        # loss penuh agar aturan blokir koin sama ikut mencakup kasus ini.
-        record_symbol_block(
-            state,
+        _ensure_trade_accounting(state, config, str(symbol))
+        _finalize_trade_accounting(
+            client,
             config,
-            symbol,
-            -(
-                float(state.get("entry_price") or 0.0)
-                * float(state.get("qty") or 0.0)
-            ),
-            catatan="(dust disapu)",
+            state,
+            str(symbol),
+            f"DUST: {detail[:100]}",
+            remaining_qty=free_base,
         )
         reset_position(state)
         state["sell_fail_count"] = 0
@@ -3153,7 +4413,17 @@ def close_position(
         max(0.0, float(state.get("qty") or 0.0) - executed_qty),
         post_total,
     )
+    accounting = _ensure_trade_accounting(state, config, str(symbol))
+    if isinstance(accounting, dict):
+        _attach_accounting_order(
+            accounting,
+            _accounting_order_record(client, resp, symbol, "SELL", config["QUOTE_ASSET"]),
+        )
+    state["qty"] = remaining
     state["pending_order"] = None
+    _refresh_accounting_state(
+        client, config, state, actual_remaining_qty=remaining
+    )
     sell_price = (cumm_quote / executed_qty) if cumm_quote > 0 else 0.0
     pnl = (
         (sell_price - entry_price) * executed_qty
@@ -3162,8 +4432,7 @@ def close_position(
     )
     min_qty = float(filters.min_qty)
     fully_closed = (
-        status == "FILLED"
-        and executed_qty >= qty_to_sell - 1e-12
+        status in _TERMINAL_ORDER_STATUSES
         and (remaining <= 0 or remaining < min_qty)
         and post_locked <= 0
     )
@@ -3178,15 +4447,20 @@ def close_position(
             pnl,
             config["QUOTE_ASSET"],
         )
+        _finalize_trade_accounting(
+            client,
+            config,
+            state,
+            str(symbol),
+            reason,
+            remaining_qty=remaining,
+        )
         reset_position(state)
         state["sell_fail_count"] = 0
         state["cooldown_until"] = (
             state_mod.now_ms() + config["COOLDOWN_MINUTES_AFTER_CLOSE"] * 60 * 1000
         )
         state["last_trade_time"] = state_mod.now_ms()
-        # Catat blokir entry ulang koin ini (aktif bila trade loss, sesuai
-        # SAME_COIN_BLOCK_LOSS_ONLY) sebelum state disimpan.
-        record_symbol_block(state, config, symbol, pnl)
         _clear_reconciliation(state)
         state_mod.save_state(config["STATE_FILE"], state)
         try_dust_sweep(client, config, symbol)
@@ -3377,7 +4651,12 @@ def manage_exit(
         )
 
 
-def run(config: dict, lifecycle=None) -> int:
+def run(
+    config: dict,
+    lifecycle=None,
+    *,
+    allow_missing_live_state: bool = False,
+) -> int:
     global _shutdown_requested
     _shutdown_requested = False
     _shutdown_event.clear()
@@ -3413,6 +4692,16 @@ def run(config: dict, lifecycle=None) -> int:
             "(Mode PAPER tidak memerlukan API key.)"
         )
         return 1
+    if (
+        mode == "LIVE"
+        and not allow_missing_live_state
+        and not os.path.exists(config["STATE_FILE"])
+    ):
+        logger.critical(
+            "File state LIVE tidak ditemukan. Startup dihentikan sebelum koneksi bursa. "
+            "Konfirmasi eksplisit melalui dashboard diperlukan untuk inisialisasi baru."
+        )
+        return 2
 
     logger.info("=" * 70)
     logger.info(
@@ -3593,7 +4882,20 @@ def run(config: dict, lifecycle=None) -> int:
             len(tradable_symbols),
         )
 
-        state = load_pump_state(config["STATE_FILE"], fail_closed=(mode == "LIVE"))
+        state = load_pump_state(
+            config["STATE_FILE"],
+            fail_closed=(mode == "LIVE"),
+            allow_missing_state=(mode == "LIVE" and allow_missing_live_state),
+        )
+        if (
+            mode == "LIVE"
+            and not allow_missing_live_state
+            and state.get("state_integrity_error") == state_mod.STATE_FILE_MISSING
+        ):
+            raise RuntimeError(
+                "File state LIVE hilang saat startup; tidak menulis state default "
+                "tanpa konfirmasi operator."
+            )
         held_symbol = state.get("current_symbol")
         if held_symbol and held_symbol not in filters_cache:
             _mark_reconciliation(state, "HELD_SYMBOL_FILTERS_UNVERIFIED", [held_symbol])
@@ -3783,9 +5085,18 @@ def run(config: dict, lifecycle=None) -> int:
                         held,
                     )
 
-            if state.get("pending_order") or (
-                state.get("reconciliation_required")
-                and time.time() - last_reconciliation >= RECONCILIATION_INTERVAL_SECONDS
+            accounting_retry_due = (
+                bool(state.get("accounting_blocked"))
+                and state_mod.now_ms()
+                >= int(state.get("accounting_retry_after_ms", 0) or 0)
+            )
+            if (
+                state.get("pending_order")
+                or accounting_retry_due
+                or (
+                    state.get("reconciliation_required")
+                    and time.time() - last_reconciliation >= RECONCILIATION_INTERVAL_SECONDS
+                )
             ):
                 pending_state = state.get("pending_order") or {}
                 logger.warning(
@@ -3822,7 +5133,15 @@ def run(config: dict, lifecycle=None) -> int:
             equity = get_equity(client, config, state, position_price=equity_price)
             if equity is None:
                 entries_paused = True
-                _mark_reconciliation(state, "EQUITY_UNVERIFIED")
+                reconciliation_reason = (
+                    "STATE_INTEGRITY_UNVERIFIED"
+                    if state.get("state_integrity_error")
+                    else "EQUITY_UNVERIFIED"
+                )
+                _mark_reconciliation(state, reconciliation_reason)
+            elif state.get("state_integrity_error"):
+                entries_paused = True
+                _mark_reconciliation(state, "STATE_INTEGRITY_UNVERIFIED")
             else:
                 entries_paused = update_equity_controls(state, equity, config)
 
@@ -3843,6 +5162,7 @@ def run(config: dict, lifecycle=None) -> int:
                     not state["current_symbol"]
                     and not state.get("pending_order")
                     and not state.get("reconciliation_required")
+                    and not (mode == "LIVE" and state.get("accounting_blocked"))
                     and now >= state.get("cooldown_until", 0)
                     and not entries_paused
                     and now - state.get("last_trade_time", 0)
@@ -3850,9 +5170,6 @@ def run(config: dict, lifecycle=None) -> int:
                 )
                 if can_enter:
                     scan_config = dict(config)
-                    # Koin yang sedang diblokir karena trade sebelumnya loss
-                    # dikecualikan dari kandidat agar bot memilih koin lain,
-                    # bukan menganggur sampai blokir habis.
                     diblokir = set()
                     blocks = state.get("symbol_block_until")
                     if isinstance(blocks, dict):
@@ -4009,10 +5326,6 @@ def run(config: dict, lifecycle=None) -> int:
                                 config["MAX_SPREAD_PCT"],
                             )
                     else:
-                        # Pesan ini menyebut SEMUA gerbang yang aktif saat scan, bukan
-                        # hanya gerbang trend: kandidat juga bisa ditolak lapisan demand
-                        # H1 atau demand harian, dan tanpa itu penyebabnya tidak terbaca
-                        # dari log (pengguna hanya melihat "tidak ada kandidat").
                         gerbang_aktif = []
                         if bool(config.get("TREND_FILTER_ENABLED", False)):
                             gerbang_aktif.append(
@@ -4133,2299 +5446,17 @@ def run(config: dict, lifecycle=None) -> int:
     return exit_code
 
 
-def selftest() -> None:
-    import tempfile
-
-    # Nilai default di bawah ini disinkronkan dengan config/config.py. Sebelum
-    # disinkronkan, selftest ini berhenti di baris pertama (AssertionError) karena
-    # commit "Optimasi min max kenaikan 24h" mengubah default 5/10 -> 2/20 tanpa
-    # memperbarui assertion, sehingga seluruh selftest bot tidak pernah berjalan.
-    assert PUMP_CONFIG.get("PUMP_MIN_24H_CHANGE_PCT") == 2.0
-    assert PUMP_CONFIG.get("PUMP_MAX_24H_CHANGE_PCT") == 20.0
-    assert PUMP_CONFIG.get("BTC_FILTER_ENABLED") is False
-    assert PUMP_CONFIG.get("TOP_N_CANDIDATES_TO_CONFIRM") == 30
-    assert PUMP_CONFIG.get("ROLLING_VOLUME_SURGE_MULT") == 1.3
-    assert PUMP_CONFIG.get("MAX_CHASE_PCT") == 3.0
-    assert PUMP_CONFIG.get("DEPTH_FILTER_ENABLED") is True
-    assert PUMP_CONFIG.get("ORDERBOOK_FILTER_ENABLED") is True
-    assert PUMP_CONFIG.get("DEMAND_ZONE_FILTER_ENABLED") is True
-    assert PUMP_CONFIG.get("TREND_FILTER_ENABLED") is True
-    assert PUMP_CONFIG.get("TREND_INTERVAL") == "1h"
-    assert (
-        PUMP_CONFIG.get("TREND_EMA_FAST") == 20
-        and PUMP_CONFIG.get("TREND_EMA_SLOW") == 50
-    )
-    assert (
-        PUMP_CONFIG.get("TREND_ADX_PERIOD") == 14
-        and PUMP_CONFIG.get("TREND_ADX_MIN") == 20.0
-    )
-    assert PUMP_CONFIG.get("TREND_LOOKBACK_BARS") == 120
-    assert PUMP_CONFIG.get("HTF_DEMAND_FILTER_ENABLED") is True
-    assert PUMP_CONFIG.get("HTF_DEMAND_LOOKBACK_BARS") == 72
-    assert PUMP_CONFIG.get("HTF_DEMAND_ZONE_BUFFER_PCT") == 1.5
-    assert PUMP_CONFIG.get("HTF_DEMAND_MAX_DISTANCE_PCT") == 20.0
-    assert PUMP_CONFIG.get("HTF_DEMAND_MIN_CLOSE_POSITION") == 0.4
-    assert PUMP_CONFIG.get("DAILY_DEMAND_FILTER_ENABLED") is True
-    assert PUMP_CONFIG.get("DAILY_DEMAND_INTERVAL") == "1d"
-    assert PUMP_CONFIG.get("DAILY_DEMAND_LOOKBACK_BARS") == 20
-    assert PUMP_CONFIG.get("DAILY_DEMAND_ZONE_BUFFER_PCT") == 2.0
-    assert PUMP_CONFIG.get("DAILY_DEMAND_MAX_DISTANCE_PCT") == 12.0
-    assert PUMP_CONFIG.get("DAILY_DEMAND_MIN_CLOSE_POSITION") == 0.4
-    assert PUMP_CONFIG.get("SAME_COIN_BLOCK_HOURS") == 24.0
-    assert PUMP_CONFIG.get("SAME_COIN_BLOCK_LOSS_ONLY") is True
-
-    cfg = dict(PUMP_CONFIG)
-    cfg["STATE_FILE"] = os.path.join(
-        tempfile.gettempdir(), "pump_bot_selftest_state.json"
-    )
-    cfg["MIN_QUOTE_VOLUME_USDT_24H"] = 1_000_000
-    cfg["PUMP_MIN_24H_CHANGE_PCT"] = 5.0
-    cfg["PUMP_MAX_24H_CHANGE_PCT"] = 10.0
-    cfg["ROLLING_VOLUME_SURGE_MULT"] = 2.0
-    cfg["DEPTH_FILTER_ENABLED"] = True
-    cfg["ORDERBOOK_FILTER_ENABLED"] = True
-
-    print("=== SELFTEST: saringan semesta, gerbang pump, dan urutan volume ===")
-    tickers = [
-        {
-            "symbol": "AUSDT",
-            "priceChangePercent": "8.0",
-            "quoteVolume": "6000000",
-            "lastPrice": "1.0",
-        },
-        {
-            "symbol": "BUSDT",
-            "priceChangePercent": "10.0",
-            "quoteVolume": "4000000",
-            "lastPrice": "2.0",
-        },
-        {
-            "symbol": "CUSDT",
-            "priceChangePercent": "-3.0",
-            "quoteVolume": "9000000",
-            "lastPrice": "0.5",
-        },
-        {
-            "symbol": "DUSDT",
-            "priceChangePercent": "8.0",
-            "quoteVolume": "10000",
-            "lastPrice": "0.1",
-        },
-        {
-            "symbol": "EUSDT",
-            "priceChangePercent": "3.0",
-            "quoteVolume": "8000000",
-            "lastPrice": "1.0",
-        },
-        {
-            "symbol": "BTCUPUSDT",
-            "priceChangePercent": "8.0",
-            "quoteVolume": "9000000",
-            "lastPrice": "3.0",
-        },
-        {
-            "symbol": "USDCUSDT",
-            "priceChangePercent": "8.0",
-            "quoteVolume": "9000000",
-            "lastPrice": "1.0",
-        },
-        {
-            "symbol": "HALTUSDT",
-            "priceChangePercent": "10.0",
-            "quoteVolume": "8000000",
-            "lastPrice": "1.0",
-        },
-        {
-            "symbol": "HIGHUSDT",
-            "priceChangePercent": "10.01",
-            "quoteVolume": "7000000",
-            "lastPrice": "1.0",
-        },
-    ]
-    tradable = {
-        "AUSDT",
-        "BUSDT",
-        "CUSDT",
-        "DUSDT",
-        "EUSDT",
-        "BTCUPUSDT",
-        "USDCUSDT",
-        "HIGHUSDT",
-    }
-    ranked = scanner.filter_and_rank_candidates(tickers, cfg, tradable)
-    symbols = [c.symbol for c in ranked]
-    print("  Lolos saringan + gerbang pump, urut volume kuotasi:", symbols)
-    assert symbols == ["AUSDT", "BUSDT"], f"Hasil saringan/urutan salah: {symbols}"
-    print("  -> OK (leveraged token, stablecoin, volume rendah, simbol non-TRADING,")
-    print(
-        "      koin yang TURUN 24 jam, dan koin di luar rentang kenaikan ter-exclude)"
-    )
-    print(
-        "  -> OK (batas atas 24 jam: 10.00% lolos, 10.01% ditolak walau volumenya terbesar)"
-    )
-    assert cfg.get("PUMP_MAX_24H_CHANGE_PCT") == 10.0
-    ok_hi, why_hi = scanner.evaluate_pump_gate(12.0, 6_000_000.0, cfg)
-    assert not ok_hi and "batas atas" in why_hi, why_hi
-    ok_lo, _ = scanner.evaluate_pump_gate(6.0, 6_000_000.0, cfg)
-    assert ok_lo, "batas bawah 6.0% harus lolos (inklusif)"
-    cfg_nocap = dict(cfg, PUMP_MAX_24H_CHANGE_PCT=0.0)
-    assert scanner.evaluate_pump_gate(40.0, 6_000_000.0, cfg_nocap)[0]
-    print("  -> OK (rentang 6.0% sampai 10.0% inklusif, 0 = batas atas nonaktif)")
-
-    print("=== SELFTEST: kedalaman dan order book sebelum entry ===")
-
-    def _book(ask_levels, bid_levels):
-        return {
-            "asks": [[str(p), str(q)] for p, q in ask_levels],
-            "bids": [[str(p), str(q)] for p, q in bid_levels],
-        }
-
-    flat_asks = [(1.0 + i * 0.0001, 400.0 / (1.0 + i * 0.0001)) for i in range(1, 60)]
-    flat_bids = [(1.0 - i * 0.0001, 400.0 / (1.0 - i * 0.0001)) for i in range(1, 60)]
-    book_ok = _book(flat_asks, flat_bids)
-    ok, why, m = scanner.evaluate_orderbook(book_ok, 1000.0, cfg)
-    assert ok, why
-    ok, why, m = scanner.evaluate_orderbook(book_ok, 3000.0, cfg)
-    assert not ok and "kedalaman" in why, why
-    thin_bids = [(1.0 - i * 0.0001, 100.0 / (1.0 - i * 0.0001)) for i in range(1, 60)]
-    ok, why, m = scanner.evaluate_orderbook(_book(flat_asks, thin_bids), 1000.0, cfg)
-    assert not ok and "tekanan jual" in why, why
-    wall_asks = list(flat_asks)
-    wall_asks[20] = (wall_asks[20][0], 12_000.0 / wall_asks[20][0])
-    ok, why, m = scanner.evaluate_orderbook(_book(wall_asks, flat_bids), 1000.0, cfg)
-    assert not ok and "sell wall" in why, why
-    for bad in (
-        None,
-        {},
-        {"asks": [], "bids": []},
-        {"asks": [["x", "y"]], "bids": [["1", "1"]]},
-        _book([(1.0, 5.0)], [(1.1, 5.0)]),
-    ):
-        assert not scanner.evaluate_orderbook(bad, 1000.0, cfg)[0], bad
-    off = dict(cfg, DEPTH_FILTER_ENABLED=False, ORDERBOOK_FILTER_ENABLED=False)
-    assert scanner.evaluate_orderbook(None, 1000.0, off)[0]
-    only_depth = dict(cfg, ORDERBOOK_FILTER_ENABLED=False)
-    assert scanner.evaluate_orderbook(_book(flat_asks, thin_bids), 1000.0, only_depth)[
-        0
-    ]
-    assert (
-        scanner.normalize_depth_limit(50) == 100
-        and scanner.normalize_depth_limit(101) == 500
-        and scanner.normalize_depth_limit(2000) == 1000
-        and scanner.normalize_depth_limit("abc") == 500
-    )
-    print("  -> OK (depth, ketimpangan bid/ask, sell wall, data rusak = fail closed)")
-
-    print("\n=== SELFTEST: konfirmasi entry (volume rolling, tanpa indikator) ===")
-
-    def _seri_volume(volume_akhir: float):
-        out = []
-        for i in range(30):
-            v = 100.0 + (i % 3) * 0.1
-            vol = volume_akhir if i == 29 else 1000.0
-            out.append(
-                strategy.Kline(
-                    i * 300_000, v, v + 1, v - 1, v, i * 300_000 + 299_999, vol, v * vol
-                )
-            )
-        return out
-
-    hasil = scanner.detect_entry_setup(_seri_volume(3000.0), cfg)
-    print(f"  Lonjakan volume 3x -> ok={hasil.ok} ({hasil.reason})")
-    assert hasil.ok, "Lonjakan volume 3x harusnya lolos konfirmasi"
-    assert hasil.atr_value is not None, "ATR harus ikut tersedia pada setup"
-    assert (
-        hasil.signal_close is not None and hasil.signal_close > 0
-    ), "close candle sinyal harus tersedia untuk filter MAX_CHASE_PCT"
-    hasil_tolak = scanner.detect_entry_setup(_seri_volume(1500.0), cfg)
-    assert not hasil_tolak.ok, "Volume hanya 1,5x harus ditolak (minimum 2x)"
-    hasil_pendek = scanner.detect_entry_setup(_seri_volume(3000.0)[:10], cfg)
-    assert not hasil_pendek.ok, "Data candle kurang harus ditolak"
-    assert (
-        hasil.demand_zone_low is not None and hasil.demand_zone_high is not None
-    ), "batas zona demand harus terisi saat DEMAND_ZONE_FILTER_ENABLED aktif"
-    seri_bearish = _seri_volume(3000.0)
-    seri_bearish[-1] = strategy.Kline(
-        29 * 300_000,
-        100.5,
-        101.0,
-        99.0,
-        99.5,
-        29 * 300_000 + 299_999,
-        3000.0,
-        3000.0 * 99.5,
-    )
-    assert not scanner.detect_entry_setup(
-        seri_bearish, cfg
-    ).ok, "Candle sinyal bearish harus ditolak oleh filter zona demand"
-    seri_ekor_atas = _seri_volume(3000.0)
-    seri_ekor_atas[-1] = strategy.Kline(
-        29 * 300_000,
-        100.1,
-        104.0,
-        100.0,
-        100.3,
-        29 * 300_000 + 299_999,
-        3000.0,
-        3000.0 * 100.3,
-    )
-    assert not scanner.detect_entry_setup(
-        seri_ekor_atas, cfg
-    ).ok, (
-        "Candle dengan ekor atas panjang (close_pos rendah) harus ditolak filter demand"
-    )
-    seri_pucuk = _seri_volume(3000.0)
-    seri_pucuk[-1] = strategy.Kline(
-        29 * 300_000,
-        105.0,
-        106.5,
-        104.8,
-        106.2,
-        29 * 300_000 + 299_999,
-        3000.0,
-        3000.0 * 106.2,
-    )
-    assert not scanner.detect_entry_setup(
-        seri_pucuk, cfg
-    ).ok, "Harga yang sudah terbang terlalu jauh di atas zona demand harus ditolak"
-    assert scanner.detect_entry_setup(
-        seri_pucuk, dict(cfg, DEMAND_ZONE_FILTER_ENABLED=False)
-    ).ok, "Jika DEMAND_ZONE_FILTER_ENABLED=False, hanya volume rolling yang dicek"
-    print(
-        "  -> OK (volume 3x + zona demand lolos, bearish/ekor atas/pucuk ditolak, data kurang ditolak)"
-    )
-
-    print("\n=== SELFTEST: simulasi exit (TP/Breakeven/Trailing) ===")
-    from decimal import Decimal as D
-    from trading.clients.binance_client import SymbolFilters
-
-    class FakeTradeClient:
-
-        def __init__(self, base_asset="TEST", free=1.0, price=100.0):
-            self.base_asset = base_asset
-            self.free = free
-            self.price = price
-            self.orders = []
-
-        def get_account(self):
-            return {
-                "balances": [
-                    {"asset": self.base_asset, "free": str(self.free), "locked": "0"},
-                    {"asset": "USDT", "free": "1000", "locked": "0"},
-                ]
-            }
-
-        def get_book_ticker(self, symbol, max_retries=3):
-            return {
-                "symbol": symbol,
-                "bidPrice": str(self.price),
-                "askPrice": str(self.price),
-            }
-
-        depth_mode = "deep"
-
-        def get_depth(self, symbol, limit=100):
-            if self.depth_mode == "error":
-                raise BinanceAPIError(500, None, "depth simulasi gagal")
-            px = float(self.price)
-            asks, bids = [], []
-            for i in range(1, 41):
-                ask_px = px * (1.0 + i * 0.0002)
-                bid_px = px * (1.0 - i * 0.0002)
-                ask_val = 1_000_000.0
-                if self.depth_mode == "thin_ask":
-                    ask_val = 100.0
-                elif self.depth_mode == "wall" and i == 10:
-                    ask_val = 30_000_000.0
-                asks.append([str(ask_px), str(ask_val / ask_px)])
-                bids.append([str(bid_px), str(1_000_000.0 / bid_px)])
-            return {"asks": asks, "bids": bids}
-
-        def new_market_order(
-            self,
-            symbol,
-            side,
-            quantity=None,
-            quote_order_qty=None,
-            new_client_order_id=None,
-            quote_precision=None,
-        ):
-            qty = float(quantity or 0.0)
-            if qty <= 0 and quote_order_qty is not None and self.price > 0:
-                qty = float(quote_order_qty) / self.price
-            self.orders.append((symbol, side, qty))
-            return {
-                "status": "FILLED",
-                "executedQty": str(qty),
-                "cummulativeQuoteQty": str(qty * self.price),
-            }
-
-        def get_dust_convertible(self, account_type="SPOT"):
-            return {"details": []}
-
-        def convert_dust(self, assets, account_type="SPOT"):
-            return {"totalTransfered": "0"}
-
-    filters_cache = {
-        "TESTUSDT": SymbolFilters(
-            step_size=D("0.01"),
-            min_qty=D("0.01"),
-            min_notional=D("5"),
-            tick_size=D("0.0001"),
-        )
-    }
-    cfg_exit = dict(cfg)
-    cfg_exit.update(
-        {
-            "USE_TP": True,
-            "TP_PCT": 6.0,
-            "USE_STOP_LOSS": True,
-            "SL_PCT": 3.0,
-            "USE_BREAKEVEN": True,
-            "BE_TRIGGER_PCT": 3.0,
-            "BE_LOCK_PCT": 0.15,
-            "USE_TRAILING": True,
-            "TRAILING_START_PCT": 4.0,
-            "TRAILING_STEP_PCT": 1.0,
-        }
-    )
-
-    state = dict(DEFAULT_STATE)
-    state["current_symbol"] = "TESTUSDT"
-    state["entry_price"] = 100.0
-    state["qty"] = 1.0
-    state["entry_time"] = state_mod.now_ms()
-
-    manage_exit(FakeTradeClient(), cfg_exit, filters_cache, state, 103.5)
-    assert state["be_active"], "Breakeven harusnya sudah aktif di profit 3.5%"
-    assert (
-        state["current_symbol"] == "TESTUSDT"
-    ), "Belum boleh close, baru breakeven aktif"
-    print(
-        f"  Setelah profit +3.5%: be_active={state['be_active']}, be_stop={state['be_stop_price']:.4f} -> OK"
-    )
-
-    manage_exit(FakeTradeClient(), cfg_exit, filters_cache, state, 106.5)
-    assert (
-        state["current_symbol"] is None
-    ), "Posisi harusnya sudah tertutup kena TAKE_PROFIT"
-    print("  Setelah profit +6.5%: posisi tertutup (TAKE_PROFIT) -> OK")
-
-    print(
-        "\n=== SELFTEST: Stop Loss (harga langsung turun sejak entry, TIDAK sempat untung) ==="
-    )
-    assert cfg_exit["USE_STOP_LOSS"], "USE_STOP_LOSS harus aktif di skenario ini"
-    state2 = dict(DEFAULT_STATE)
-    state2["current_symbol"] = "TESTUSDT"
-    state2["entry_price"] = 100.0
-    state2["qty"] = 1.0
-    state2["entry_time"] = state_mod.now_ms()
-
-    manage_exit(FakeTradeClient(), cfg_exit, filters_cache, state2, 98.0)
-    assert (
-        state2["current_symbol"] == "TESTUSDT"
-    ), "Rugi -2% belum boleh kena Stop Loss (ambang 3.0%)"
-    assert not state2["be_active"], "Breakeven tidak boleh aktif kalau posisi rugi"
-    print("  Rugi -2%: posisi masih terbuka, BE/Trailing tidak aktif -> OK")
-
-    manage_exit(FakeTradeClient(), cfg_exit, filters_cache, state2, 96.5)
-    assert (
-        state2["current_symbol"] is None
-    ), "Posisi harusnya sudah tertutup kena STOP_LOSS di rugi -3.5%"
-    print("  Rugi -3.5%: posisi tertutup (STOP_LOSS) -> OK")
-
-    print("\n=== SELFTEST: ukuran posisi (RISK_PERCENT, plafon, bantalan saldo) ===")
-
-    class SizingClient(FakeTradeClient):
-
-        def __init__(self, usdt_free):
-            super().__init__(base_asset="TESTB", free=0.0, price=1.0)
-            self.usdt_free = usdt_free
-
-        def get_account(self):
-            return {
-                "balances": [
-                    {"asset": "USDT", "free": str(self.usdt_free), "locked": "0"},
-                    {"asset": "TESTB", "free": str(self.free), "locked": "0"},
-                ]
-            }
-
-        def new_market_order(
-            self,
-            symbol,
-            side,
-            quantity=None,
-            quote_order_qty=None,
-            new_client_order_id=None,
-            quote_precision=None,
-        ):
-            resp = super().new_market_order(
-                symbol,
-                side,
-                quantity,
-                quote_order_qty,
-                new_client_order_id,
-                quote_precision,
-            )
-            if side == "BUY":
-                bought = float(quantity or 0.0)
-                if bought <= 0 and quote_order_qty is not None and self.price > 0:
-                    bought = float(quote_order_qty) / self.price
-                self.free += bought
-            return resp
-
-    from decimal import Decimal as D2
-    from trading.clients.binance_client import SymbolFilters as SF2
-
-    size_filters = {
-        "TESTBUSDT": SF2(
-            step_size=D2("0.00000001"),
-            min_qty=D2("0.00000001"),
-            min_notional=D2("1"),
-            tick_size=D2("0.0001"),
-        )
-    }
-    cand = scanner.Candidate(
-        symbol="TESTBUSDT",
-        base_asset="TESTB",
-        price_change_pct=20.0,
-        quote_volume=9e6,
-        last_price=1.0,
-        confirmed=True,
-        confirm_reason="selftest",
-    )
-
-    def nominal_dipakai(cfg_size, saldo):
-        cl = SizingClient(saldo)
-        st = dict(DEFAULT_STATE)
-        open_position(cl, cfg_size, size_filters, st, cand)
-        assert cl.orders, "Order BUY seharusnya terkirim"
-        return float(cl.orders[-1][2])
-
-    cfg_size = dict(cfg)
-    cfg_size.update(
-        {
-            "USE_RISK_PERCENT": True,
-            "RISK_PERCENT": 95.0,
-            "BALANCE_BUFFER_PCT": 0.5,
-            "MAX_POSITION_USDT": 0,
-            "USE_ATR_EXIT": False,
-        }
-    )
-
-    for saldo, harap in (
-        (100.0, 100 * 0.995 * 0.95),
-        (1000.0, 1000 * 0.995 * 0.95),
-        (5000.0, 5000 * 0.995 * 0.95),
-    ):
-        got = nominal_dipakai(cfg_size, saldo)
-        assert (
-            abs(got - harap) < 0.01
-        ), f"saldo {saldo}: harap {harap:.2f}, dapat {got:.2f}"
-        print(
-            f"  Saldo {saldo:>7.0f} -> pakai {got:>8.2f} USDT ({got / saldo * 100:.2f}% saldo) -> OK"
-        )
-
-    print("=== SELFTEST: open_position menolak entry bila order book buruk ===")
-    for mode_depth, harus_order in (
-        ("deep", True),
-        ("thin_ask", False),
-        ("wall", False),
-        ("error", False),
-    ):
-        cl = SizingClient(1000.0)
-        cl.depth_mode = mode_depth
-        st = dict(DEFAULT_STATE)
-        open_position(cl, cfg_size, size_filters, st, cand)
-        assert (
-            bool(cl.orders) == harus_order
-        ), f"depth_mode={mode_depth}: orders={cl.orders}"
-        if not harus_order:
-            assert not st.get(
-                "pending_order"
-            ), "penolakan tidak boleh meninggalkan pending_order"
-        print(f"  depth_mode={mode_depth:<9} -> order terkirim={bool(cl.orders)} -> OK")
-    cfg_off = dict(cfg_size, DEPTH_FILTER_ENABLED=False, ORDERBOOK_FILTER_ENABLED=False)
-    cl = SizingClient(1000.0)
-    cl.depth_mode = "error"
-    open_position(cl, cfg_off, size_filters, dict(DEFAULT_STATE), cand)
-    assert cl.orders, "filter nonaktif tidak boleh menyentuh depth"
-    print("  filter nonaktif -> depth tidak dipanggil, order terkirim -> OK")
-
-    cfg_cap = dict(cfg_size)
-    cfg_cap["MAX_POSITION_USDT"] = 10.0
-    got_cap = nominal_dipakai(cfg_cap, 1000.0)
-    assert abs(got_cap - 10.0) < 1e-6, f"Plafon 10 USDT harus mengikat, dapat {got_cap}"
-    print(
-        f"  Plafon 10 USDT aktif, saldo 1000 -> pakai {got_cap:.2f} USDT "
-        f"({got_cap / 1000 * 100:.2f}% saldo) -> OK (inilah bug lama)"
-    )
-
-    cfg_allin = dict(cfg_size)
-    cfg_allin["RISK_PERCENT"] = 100.0
-    got_allin = nominal_dipakai(cfg_allin, 1000.0)
-    assert (
-        got_allin < 1000.0
-    ), "All-in tidak boleh membelanjakan 100% saldo persis (butuh ruang fee)"
-    assert got_allin >= 1000.0 * 0.98, f"Bantalan terlalu besar: {got_allin}"
-    print(
-        f"  RISK_PERCENT=100, saldo 1000 -> pakai {got_allin:.2f} USDT "
-        f"(sisa {1000 - got_allin:.2f} untuk fee) -> OK"
-    )
-
-    cfg_fixed_size = dict(cfg_size)
-    cfg_fixed_size.update({"USE_RISK_PERCENT": False, "POSITION_SIZE_USDT": 25.0})
-    got_fixed = nominal_dipakai(cfg_fixed_size, 1000.0)
-    assert (
-        abs(got_fixed - 25.0) < 1e-6
-    ), f"Mode nominal tetap harus pakai 25 USDT, dapat {got_fixed}"
-    print(
-        f"  Mode nominal tetap (USE_RISK_PERCENT=False) -> {got_fixed:.2f} USDT -> OK"
-    )
-
-    print("\n=== SELFTEST: level exit yang dikunci di state dipakai manage_exit ===")
-    cfg_locked = dict(cfg_exit)
-    cfg_locked["SL_PCT"] = 3.0
-    state_locked = dict(DEFAULT_STATE)
-    state_locked["current_symbol"] = "TESTUSDT"
-    state_locked["entry_price"] = 100.0
-    state_locked["qty"] = 1.0
-    state_locked["entry_time"] = state_mod.now_ms()
-    state_locked["sl_pct"] = 1.0
-    state_locked["tp_pct"] = 2.0
-
-    manage_exit(FakeTradeClient(), cfg_locked, filters_cache, state_locked, 98.5)
-    assert (
-        state_locked["current_symbol"] is None
-    ), "manage_exit harus memakai sl_pct dari state (1%), bukan SL_PCT config (3%)"
-    print("  SL terkunci di state (1%) dipakai, bukan SL_PCT config (3%) -> OK")
-
-    state_tp = dict(DEFAULT_STATE)
-    state_tp["current_symbol"] = "TESTUSDT"
-    state_tp["entry_price"] = 100.0
-    state_tp["qty"] = 1.0
-    state_tp["entry_time"] = state_mod.now_ms()
-    state_tp["sl_pct"] = 1.0
-    state_tp["tp_pct"] = 2.0
-    cfg_tp = dict(cfg_locked)
-    cfg_tp["USE_BREAKEVEN"] = False
-    cfg_tp["USE_TRAILING"] = False
-    manage_exit(FakeTradeClient(), cfg_tp, filters_cache, state_tp, 102.5)
-    assert (
-        state_tp["current_symbol"] is None
-    ), "manage_exit harus memakai tp_pct dari state (2%), bukan TP_PCT config (6%)"
-    print("  TP terkunci di state (2%) dipakai, bukan TP_PCT config (6%) -> OK")
-
-    state_old = dict(DEFAULT_STATE)
-    del state_old["sl_pct"]
-    del state_old["tp_pct"]
-    state_old["current_symbol"] = "TESTUSDT"
-    state_old["entry_price"] = 100.0
-    state_old["qty"] = 1.0
-    state_old["entry_time"] = state_mod.now_ms()
-    manage_exit(FakeTradeClient(), cfg_locked, filters_cache, state_old, 96.0)
-    assert (
-        state_old["current_symbol"] is None
-    ), "State versi lama tanpa sl_pct harus tetap terlindungi oleh SL_PCT config"
-    print("  State versi lama tanpa sl_pct tetap terlindungi SL_PCT config -> OK")
-
-    print("\n=== SELFTEST: invariant Breakeven & Trailing tetap ===")
-    cfg_full = dict(cfg)
-    cfg_full.update(
-        {
-            "SL_PCT": 2.5,
-            "TP_PCT": 5.0,
-            "BE_TRIGGER_PCT": 9.0,
-            "BE_LOCK_PCT": 12.0,
-            "TRAILING_START_PCT": 4.0,
-            "TRAILING_STEP_PCT": 9.0,
-        }
-    )
-    lv_full = strategy.resolve_exit_levels(cfg_full)
-    assert lv_full["trail_step_pct"] <= lv_full["sl_pct"] + 1e-9
-    assert lv_full["be_trigger_pct"] <= lv_full["trail_start_pct"] + 1e-9
-    assert lv_full["be_lock_pct"] <= lv_full["be_trigger_pct"] + 1e-9
-    print("  Invariant exit tetap diterapkan -> OK")
-
-    st_be = dict(DEFAULT_STATE)
-    st_be["current_symbol"] = "TESTUSDT"
-    st_be["entry_price"] = 100.0
-    st_be["qty"] = 1.0
-    st_be["entry_time"] = state_mod.now_ms()
-    st_be["sl_pct"] = 10.0
-    st_be["tp_pct"] = 20.0
-    st_be["be_trigger_pct"] = 5.0
-    st_be["be_lock_pct"] = 1.0
-    st_be["trail_start_pct"] = 8.0
-    st_be["trail_step_pct"] = 3.0
-    cfg_be_cfg = dict(cfg_exit)
-    cfg_be_cfg["BE_TRIGGER_PCT"] = 1.0
-    manage_exit(FakeTradeClient(), cfg_be_cfg, filters_cache, st_be, 102.0)
-    assert not st_be[
-        "be_active"
-    ], "Breakeven memakai BE_TRIGGER_PCT config, seharusnya memakai be_trigger_pct dari state"
-    manage_exit(FakeTradeClient(), cfg_be_cfg, filters_cache, st_be, 106.0)
-    assert st_be[
-        "be_active"
-    ], "Breakeven harus aktif setelah melewati trigger dari state"
-    assert abs(st_be["be_stop_price"] - 101.0) < 1e-6
-    print("  BE/Trailing memakai level state saat tersedia -> OK")
-
-    print(
-        "\n=== SELFTEST: perintah manual 'Jual Sekarang' dari dashboard (control file) ==="
-    )
-    import tempfile
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        control_path = f"{tmpdir}/pump_bot_control.json"
-        cfg_ctrl = dict(cfg_exit)
-        cfg_ctrl["CONTROL_FILE"] = control_path
-
-        state3 = dict(DEFAULT_STATE)
-        state3["current_symbol"] = "TESTUSDT"
-        state3["entry_price"] = 100.0
-        state3["qty"] = 1.0
-        state3["entry_time"] = state_mod.now_ms()
-        state_mod.save_control(
-            control_path,
-            {
-                "action": "CLOSE_POSITION",
-                "symbol": "TESTUSDT",
-                "requested_at": state_mod.now_ms(),
-            },
-        )
-        check_manual_control(FakeTradeClient(), cfg_ctrl, filters_cache, state3)
-        assert (
-            state3["current_symbol"] is None
-        ), "Posisi harusnya tertutup oleh perintah manual yang valid"
-        assert not state_mod.load_control(
-            control_path
-        ), "Control file harus terhapus setelah diproses"
-        print(
-            "  Perintah valid untuk simbol yang sesuai -> posisi ditutup, control file dibersihkan -> OK"
-        )
-
-        state4 = dict(DEFAULT_STATE)
-        state4["current_symbol"] = "TESTUSDT"
-        state4["entry_price"] = 100.0
-        state4["qty"] = 1.0
-        state4["entry_time"] = state_mod.now_ms()
-        state_mod.save_control(
-            control_path,
-            {
-                "action": "CLOSE_POSITION",
-                "symbol": "TESTUSDT",
-                "requested_at": state_mod.now_ms() - 10 * 60 * 1000,
-            },
-        )
-        check_manual_control(FakeTradeClient(), cfg_ctrl, filters_cache, state4)
-        assert (
-            state4["current_symbol"] == "TESTUSDT"
-        ), "Perintah kadaluarsa (>2 menit) harus DIABAIKAN"
-        print(
-            "  Perintah kadaluarsa (10 menit lalu) -> diabaikan, posisi tetap terbuka -> OK"
-        )
-
-        state5 = dict(DEFAULT_STATE)
-        state5["current_symbol"] = "LAINUSDT"
-        state5["entry_price"] = 50.0
-        state5["qty"] = 2.0
-        state5["entry_time"] = state_mod.now_ms()
-        state_mod.save_control(
-            control_path,
-            {
-                "action": "CLOSE_POSITION",
-                "symbol": "TESTUSDT",
-                "requested_at": state_mod.now_ms(),
-            },
-        )
-        check_manual_control(FakeTradeClient(), cfg_ctrl, filters_cache, state5)
-        assert (
-            state5["current_symbol"] == "LAINUSDT"
-        ), "Perintah untuk simbol berbeda dari posisi aktif harus DIABAIKAN"
-        print(
-            "  Perintah untuk simbol yang sudah tidak dipegang -> diabaikan, posisi lain tetap aman -> OK"
-        )
-
-        state6 = dict(DEFAULT_STATE)
-        state_mod.save_control(
-            control_path,
-            {
-                "action": "CLOSE_POSITION",
-                "symbol": "TESTUSDT",
-                "requested_at": state_mod.now_ms(),
-            },
-        )
-        check_manual_control(FakeTradeClient(), cfg_ctrl, filters_cache, state6)
-        assert (
-            state6["current_symbol"] is None
-        ), "Tanpa posisi terbuka, perintah manual harus diabaikan dengan aman"
-        print(
-            "  Tidak ada posisi terbuka saat perintah diproses -> diabaikan dengan aman, tidak error -> OK"
-        )
-
-    print("\n=== SELFTEST: dust sweep ke BNB setelah posisi ditutup ===")
-
-    class FakeDustClient:
-
-        def __init__(self, convertible_assets):
-            self.convertible_assets = convertible_assets
-            self.convert_calls = []
-            self.fail_convert = False
-
-        def get_dust_convertible(self, account_type="SPOT"):
-            return {
-                "details": [
-                    {"asset": a, "amountFree": "1.0", "toBNB": "0.0001"}
-                    for a in self.convertible_assets
-                ]
-            }
-
-        def convert_dust(self, assets, account_type="SPOT"):
-            self.convert_calls.append(list(assets))
-            if self.fail_convert:
-                raise BinanceAPIError(400, -5001, "Asset not supported (simulasi)")
-            return {
-                "totalTransfered": "0.0001",
-                "totalServiceCharge": "0.000002",
-                "transferResult": [],
-            }
-
-    assert cfg["USE_DUST_SWEEP"], "USE_DUST_SWEEP harusnya True di config default"
-    cfg = dict(cfg)
-    cfg["MODE"] = "LIVE"
-
-    fake_a = FakeDustClient(convertible_assets=["PEPE"])
-    try_dust_sweep(fake_a, cfg, "PEPEUSDT")
-    assert fake_a.convert_calls == [
-        ["PEPE"]
-    ], f"Harusnya convert PEPE saja, dapat: {fake_a.convert_calls}"
-    print(
-        "  Sisa PEPE terdaftar dust convertible -> convert_dust(['PEPE']) dipanggil -> OK"
-    )
-
-    fake_b = FakeDustClient(convertible_assets=[])
-    try_dust_sweep(fake_b, cfg, "PEPEUSDT")
-    assert (
-        fake_b.convert_calls == []
-    ), "Tidak boleh convert kalau asset tidak terdaftar sebagai dust"
-    print(
-        "  Sisa PEPE TIDAK terdaftar dust convertible -> convert_dust tidak dipanggil -> OK"
-    )
-
-    fake_c = FakeDustClient(convertible_assets=["USDT", "BNB"])
-    try_dust_sweep(fake_c, cfg, "BNBUSDT")
-    assert (
-        fake_c.convert_calls == []
-    ), "BNB tidak boleh pernah dikonversi (proteksi keras)"
-    print(
-        "  Simbol dengan base asset BNB -> TIDAK PERNAH dikonversi (proteksi modal) -> OK"
-    )
-
-    cfg_paper = dict(cfg)
-    cfg_paper["MODE"] = "PAPER"
-    fake_d = FakeDustClient(convertible_assets=["PEPE"])
-    try_dust_sweep(fake_d, cfg_paper, "PEPEUSDT")
-    assert (
-        fake_d.convert_calls == []
-    ), "Mode PAPER tidak boleh memanggil convert_dust (endpoint /sapi bertanda tangan)"
-    print("  Mode PAPER -> dust sweep dilewati, tidak ada panggilan /sapi -> OK")
-
-    fake_e = FakeDustClient(convertible_assets=["PEPE"])
-    fake_e.fail_convert = True
-    try:
-        try_dust_sweep(fake_e, cfg, "PEPEUSDT")
-        gagal_ditangani = True
-    except BinanceAPIError:
-        gagal_ditangani = False
-    assert (
-        gagal_ditangani
-    ), "Kegagalan convert_dust (mis. rate limit) harus ditangani, bukan dilempar ke pemanggil"
-    print(
-        "  convert_dust gagal (simulasi rate limit Binance) -> ditangani dengan aman, tidak crash -> OK"
-    )
-
-    cfg_no_dust = dict(cfg)
-    cfg_no_dust["USE_DUST_SWEEP"] = False
-    fake_f = FakeDustClient(convertible_assets=["PEPE"])
-    try_dust_sweep(fake_f, cfg_no_dust, "PEPEUSDT")
-    assert (
-        fake_f.convert_calls == []
-    ), "USE_DUST_SWEEP=False harusnya menonaktifkan fitur ini sepenuhnya"
-    print("  USE_DUST_SWEEP=False -> fitur nonaktif total -> OK")
-
-    print("\n=== SELFTEST: get_equity None-safe saat API harga gangguan (T-05) ===")
-
-    class EquityClient:
-        def __init__(self, fail_price=False):
-            self.fail_price = fail_price
-
-        def get_account(self):
-            return {
-                "balances": [
-                    {"asset": "USDT", "free": "500", "locked": "0"},
-                    {"asset": "TEST", "free": "1.0", "locked": "0"},
-                ]
-            }
-
-        def get_price(self, symbol):
-            if self.fail_price:
-                raise BinanceAPIError(500, None, "simulasi gangguan API")
-            return 100.0
-
-    st_eq = dict(DEFAULT_STATE)
-    st_eq["current_symbol"] = "TESTUSDT"
-    st_eq["qty"] = 1.0
-    cfg_equity = dict(cfg)
-    cfg_equity["MODE"] = "PAPER"
-    eq_ok = get_equity(EquityClient(), cfg_equity, st_eq)
-    assert abs(eq_ok - 600.0) < 1e-9, f"equity harus 500 + 1x100 = 600, dapat {eq_ok}"
-    eq_none = get_equity(EquityClient(fail_price=True), cfg_equity, st_eq)
-    assert (
-        eq_none is None
-    ), "API harga gagal -> equity harus None, BUKAN 500 (posisi hilang semu)"
-    print(
-        "  Equity normal = 600; API gagal -> None (bukan angka keliru pemicu stop semu) -> OK"
-    )
-
-    print(
-        "\n=== SELFTEST: CLOSE_ALL_AT_LIMIT benar-benar menutup posisi (K-01/T-06) ==="
-    )
-    cfg_limit = dict(cfg_exit)
-    cfg_limit["CLOSE_ALL_AT_LIMIT"] = True
-
-    st_lim = dict(DEFAULT_STATE)
-    st_lim["current_symbol"] = "TESTUSDT"
-    st_lim["entry_price"] = 100.0
-    st_lim["qty"] = 1.0
-    st_lim["entry_time"] = state_mod.now_ms()
-    st_lim["dd_stopped"] = True
-    st_lim["dd_stop_until"] = state_mod.now_ms() + 3600 * 1000
-    maybe_force_close_at_risk_limit(
-        FakeTradeClient(), cfg_limit, filters_cache, st_lim, True, 100.0
-    )
-    assert (
-        st_lim["current_symbol"] is None
-    ), "Posisi harus ditutup paksa saat DD stop aktif"
-    assert (
-        st_lim["_limit_close_done"] is True
-    ), "Penanda episode harus di-set setelah penutupan paksa"
-    print(
-        "  DD stop aktif + posisi terbuka -> SELL paksa, _limit_close_done=True -> OK"
-    )
-
-    st_lim2 = dict(DEFAULT_STATE)
-    st_lim2["current_symbol"] = "TESTUSDT"
-    st_lim2["qty"] = 1.0
-    st_lim2["dd_stopped"] = True
-    st_lim2["_limit_close_done"] = True
-    klien2 = FakeTradeClient()
-    maybe_force_close_at_risk_limit(
-        klien2, cfg_limit, filters_cache, st_lim2, True, 100.0
-    )
-    assert klien2.orders == [], "Episode yang sama tidak boleh menutup dua kali"
-    assert st_lim2["current_symbol"] == "TESTUSDT"
-    print("  Penanda episode -> tidak ada penutupan berulang -> OK")
-
-    cfg_limit_off = dict(cfg_limit)
-    cfg_limit_off["CLOSE_ALL_AT_LIMIT"] = False
-    st_lim3 = dict(DEFAULT_STATE)
-    st_lim3["current_symbol"] = "TESTUSDT"
-    st_lim3["qty"] = 1.0
-    st_lim3["dd_stopped"] = True
-    klien3 = FakeTradeClient()
-    maybe_force_close_at_risk_limit(
-        klien3, cfg_limit_off, filters_cache, st_lim3, True, 100.0
-    )
-    assert klien3.orders == [], "CLOSE_ALL_AT_LIMIT=False tidak boleh menutup posisi"
-    print("  CLOSE_ALL_AT_LIMIT=False -> posisi dibiarkan, hanya entry dijeda -> OK")
-
-    st_lim4 = dict(DEFAULT_STATE)
-    st_lim4["_limit_close_done"] = True
-    maybe_force_close_at_risk_limit(
-        FakeTradeClient(), cfg_limit, filters_cache, st_lim4, False, 100.0
-    )
-    assert (
-        st_lim4["_limit_close_done"] is False
-    ), "Penanda harus direset saat episode stop berakhir"
-    print("  Episode stop berakhir -> penanda direset otomatis -> OK")
-
-    print(
-        "\n=== SELFTEST: rekonsiliasi state vs saldo exchange saat startup (S-02) ==="
-    )
-
-    class ReconClient:
-        def __init__(self, balances, fail=False):
-            self.balances = balances
-            self.fail = fail
-            self.calls = 0
-
-        def get_account(self):
-            self.calls += 1
-            if self.fail:
-                raise BinanceAPIError(500, None, "simulasi gangguan")
-            return {
-                "balances": [
-                    {"asset": a, "free": str(v), "locked": "0"}
-                    for a, v in self.balances.items()
-                ]
-            }
-
-    cfg_rec = dict(cfg)
-    cfg_rec["MODE"] = "PAPER"
-    cfg_rec["QUOTE_ASSET"] = "USDT"
-    with tempfile.TemporaryDirectory() as tmprec:
-        cfg_rec["STATE_FILE"] = f"{tmprec}/state.json"
-
-        st_r = dict(DEFAULT_STATE)
-        st_r["current_symbol"] = "PEPEUSDT"
-        st_r["qty"] = 1000.0
-        st_r["entry_price"] = 0.01
-        reconcile_state_with_exchange(ReconClient({}), cfg_rec, st_r)
-        assert (
-            st_r["current_symbol"] is None and st_r["qty"] == 0.0
-        ), "Saldo 0 -> posisi hantu harus direset"
-        print("  Saldo 0 di exchange -> posisi hantu direset -> OK")
-
-        st_r2 = dict(DEFAULT_STATE)
-        st_r2["current_symbol"] = "SOLUSDT"
-        st_r2["qty"] = 10.0
-        st_r2["entry_price"] = 100.0
-        reconcile_state_with_exchange(ReconClient({"SOL": 9.5}), cfg_rec, st_r2)
-        assert (
-            abs(st_r2["qty"] - 9.5) < 1e-12 and st_r2["entry_price"] == 100.0
-        ), "Qty harus disesuaikan ke saldo nyata"
-        print("  Qty state > saldo nyata -> qty disesuaikan -> OK")
-
-        cl_idle = ReconClient({})
-        st_idle = dict(DEFAULT_STATE)
-        reconcile_state_with_exchange(cl_idle, cfg_rec, st_idle)
-        assert (
-            cl_idle.calls == 1 and not st_idle["reconciliation_required"]
-        ), "State kosong harus cek saldo sekali tetapi tidak boleh memblokir akun benar-benar kosong"
-        st_r4 = dict(DEFAULT_STATE)
-        st_r4["current_symbol"] = "PEPEUSDT"
-        st_r4["qty"] = 10.0
-        reconcile_state_with_exchange(ReconClient({}, fail=True), cfg_rec, st_r4)
-        assert (
-            st_r4["current_symbol"] == "PEPEUSDT"
-        ), "API gagal -> state lama dipertahankan"
-        print("  State kosong -> cek saldo sekali; API gagal -> aman tanpa crash -> OK")
-
-    print("\n=== SELFTEST: filter usia listing (S-08) ===")
-    _listing_age_cache.clear()
-
-    class AgeClient:
-        def __init__(self, first_open):
-            self.first_open = first_open
-            self.calls = 0
-
-        def get_klines(
-            self, symbol, interval, limit=500, start_time_ms=None, end_time_ms=None
-        ):
-            self.calls += 1
-            if self.first_open is None:
-                return []
-            return [[self.first_open, "1", "1", "1", "1", "1", 0, "1"]]
-
-    NOW10 = 10 * 86_400_000
-    age10 = listing_age_days(AgeClient(0), "LAMAUSDT", NOW10)
-    assert abs(age10 - 10.0) < 1e-9, f"usia harus 10 hari, dapat {age10}"
-    cl_age = AgeClient(NOW10 - 2 * 86_400_000)
-    age2 = listing_age_days(cl_age, "BARUUSDT", NOW10)
-    assert abs(age2 - 2.0) < 1e-9, f"usia harus 2 hari, dapat {age2}"
-    age2b = listing_age_days(cl_age, "BARUUSDT", NOW10)
-    assert age2b == age2, "Hasil cache harus sama dengan hasil panggilan pertama"
-    assert cl_age.calls == 1, "Hasil kedua harus dari cache, bukan panggilan API baru"
-    assert (
-        listing_age_days(AgeClient(None), "KOSONGUSDT", NOW10) == 0.0
-    ), "Tanpa riwayat -> usia 0 (akan ditolak ambang minimum)"
-    print(
-        "  Usia 10 hari / 2 hari dihitung benar, cache hemat API, tanpa riwayat -> 0 -> OK"
-    )
-
-    print("\n=== SELFTEST: konfirmasi paralel identik dengan serial (L-03) ===")
-    MS_HARI = 86_400_000
-    NOW_T = 100 * MS_HARI
-
-    def _candle_5m(indeks: int, price: float, volume: float) -> list:
-        open_time = NOW_T + indeks * 5 * 60_000
-        return [
-            open_time,
-            str(price),
-            str(price),
-            str(price),
-            str(price),
-            str(volume),
-            open_time + 5 * 60_000 - 1,
-            str(volume * price),
-            0,
-            "0",
-            "0",
-            "0",
-        ]
-
-    def _konfirmasi_generator(lonjakan: bool = False):
-        rows = [_candle_5m(i, 100.0 + i * 0.01, 1_000.0) for i in range(20)]
-        if lonjakan:
-            rows.append(_candle_5m(20, 100.2, 5_000.0))
-        else:
-            rows.append(_candle_5m(20, 100.2, 1_000.0))
-        return rows
-
-    cfg_konfirmasi = {
-        "QUOTE_ASSET": "USDT",
-        "MIN_QUOTE_VOLUME_USDT_24H": 1_000_000,
-        "PUMP_MIN_24H_CHANGE_PCT": 6.0,
-        "PUMP_MAX_24H_CHANGE_PCT": 10.0,
-        "BTC_FILTER_ENABLED": False,
-        "EXTRA_EXCLUDE_SYMBOLS": [],
-        "ROLLING_VOLUME_FILTER_ENABLED": True,
-        "ROLLING_VOLUME_LOOKBACK_BARS": 20,
-        "ROLLING_VOLUME_SURGE_MULT": 2.0,
-        "ROLLING_VOLUME_CONFIRMATION_BARS": 1,
-        "CONFIRM_LOOKBACK_BARS": 60,
-        "ATR_PERIOD": 14,
-    }
-
-    ticker_konfirmasi = [
-        {
-            "symbol": "LONJAKUSDT",
-            "priceChangePercent": "8.0",
-            "quoteVolume": "5000000",
-            "lastPrice": "100.0",
-        },
-        {
-            "symbol": "DATARUSDT",
-            "priceChangePercent": "8.0",
-            "quoteVolume": "4000000",
-            "lastPrice": "100.0",
-        },
-    ]
-    sumber_konfirmasi = {
-        "LONJAKUSDT": _konfirmasi_generator(True),
-        "DATARUSDT": _konfirmasi_generator(False),
-    }
-    waktu_tutup = {"ms": NOW_T + 21 * 5 * 60_000}
-    asli_now_ms = state_mod.now_ms
-    state_mod.now_ms = lambda: waktu_tutup["ms"]
-    try:
-
-        def _serial(simbol: str):
-            raw = sumber_konfirmasi[simbol]
-            closed = [
-                k
-                for k in strategy.parse_klines(raw)
-                if k.close_time < state_mod.now_ms()
-            ]
-            lookback = strategy.confirm_window_bars(cfg_konfirmasi)
-            return closed[-lookback:]
-
-        def _paralel(simbol2):
-            lookback = strategy.confirm_window_bars(cfg_konfirmasi)
-            hasil = {}
-            for s in simbol2:
-                closed = [
-                    k
-                    for k in strategy.parse_klines(sumber_konfirmasi[s])
-                    if k.close_time < state_mod.now_ms()
-                ]
-                hasil[s] = closed[-lookback:]
-            return hasil
-
-        pilih_serial = scanner.find_best_candidate(
-            ticker_konfirmasi, _serial, cfg_konfirmasi, None
-        )
-
-        pilih_paralel = scanner.find_best_candidate(
-            ticker_konfirmasi,
-            _serial,
-            cfg_konfirmasi,
-            None,
-            klines_fetcher_many=_paralel,
-            prewarm_fn=lambda simbol2: None,
-        )
-
-        assert pilih_serial is not None, "kandidat dengan lonjakan harus ditemukan"
-        assert pilih_paralel is not None, "jalur paralel harus menemukan kandidat"
-        assert (
-            pilih_serial.symbol == "LONJAKUSDT"
-        ), f"yang dipilih harus LONJAKUSDT, dapat {pilih_serial.symbol}"
-        assert (
-            pilih_paralel.symbol == pilih_serial.symbol
-        ), "jalur paralel harus memilih simbol yang sama dengan jalur serial"
-        assert (
-            pilih_paralel.confirm_reason == pilih_serial.confirm_reason
-        ), "alasan konfirmasi harus sama persis antara serial dan paralel"
-
-        def _paralel_rusak(simbol2):
-            raise RuntimeError("jaringan putus")
-
-        pilih_gagal = scanner.find_best_candidate(
-            ticker_konfirmasi,
-            _serial,
-            cfg_konfirmasi,
-            None,
-            klines_fetcher_many=_paralel_rusak,
-        )
-        assert (
-            pilih_gagal is not None and pilih_gagal.symbol == "LONJAKUSDT"
-        ), "kegagalan pengambilan paralel harus jatuh ke mode serial"
-    finally:
-        state_mod.now_ms = asli_now_ms
-    print("  pilihan, alasan, dan fallback saat paralel gagal -> OK")
-
-    print("\n=== SELFTEST: snapshot ticker 24 jam dan timpaan harga WS (L-04) ===")
-    from market.market_data import MarketDataProvider
-    from market.market_ws import MarketWebSocket
-
-    ws_uji = MarketWebSocket.__new__(MarketWebSocket)
-    from market.market_ws import _StreamCache
-
-    ws_uji._prices = _StreamCache()
-    ws_uji._mini = _StreamCache()
-    ws_uji._mini_lock = __import__("threading").RLock()
-    ws_uji._mini_arr_ts = 0.0
-    ws_uji._handle_payload(
-        [
-            {
-                "e": "24hrMiniTicker",
-                "s": "AAAUSDT",
-                "c": "110.0",
-                "o": "100.0",
-                "v": "1000",
-                "q": "105000",
-            },
-            {
-                "e": "24hrMiniTicker",
-                "s": "BBBUSDT",
-                "c": "90.0",
-                "o": "100.0",
-                "v": "2000",
-                "q": "190000",
-            },
-            {
-                "e": "24hrMiniTicker",
-                "s": "RUSAKUSDT",
-                "c": "0",
-                "o": "100.0",
-                "v": "0",
-                "q": "0",
-            },
-        ]
-    )
-    data_ws, usia_ws = ws_uji.all_mini_tickers()
-    assert len(data_ws) == 3, f"snapshot harus 3 simbol, dapat {len(data_ws)}"
-    assert usia_ws < 1.0, "usia snapshot harus segar"
-
-    class _WsStub:
-        def __init__(self, data, usia):
-            self._data, self._usia = data, usia
-
-        def is_connected(self):
-            return True
-
-        def all_mini_tickers(self):
-            return self._data, self._usia
-
-    class _RestStub:
-        def __init__(self):
-            self.panggil = 0
-
-        def get_ticker_24hr_all(self):
-            self.panggil += 1
-            return [
-                {
-                    "symbol": "AAAUSDT",
-                    "lastPrice": "110.0",
-                    "priceChangePercent": "10.0",
-                    "quoteVolume": "105000",
-                }
-            ]
-
-        def close(self):
-            return None
-
-    def _daftar_ticker(jumlah: int = 3) -> list:
-        return [
-            {
-                "symbol": f"SIMBOL{i}USDT",
-                "lastPrice": "100.0",
-                "priceChangePercent": "8.0",
-                "quoteVolume": "2000000",
-            }
-            for i in range(jumlah)
-        ] + [
-            {
-                "symbol": "AAAUSDT",
-                "lastPrice": "100.0",
-                "priceChangePercent": "8.0",
-                "quoteVolume": "2000000",
-            }
-        ]
-
-    cfg_ws = {
-        "USE_WEBSOCKET": False,
-        "MAX_MARKET_DATA_AGE_SECONDS": 10.0,
-        "WS_LAST_PRICE_OVERLAY_ENABLED": True,
-        "TICKER_SNAPSHOT_TTL_SECONDS": 0,
-        "MARKET_DATA_WORKERS": 1,
-        "PAPER_DEPTH_LIMIT": 100,
-        "RATE_LIMIT_STATE_FILE": None,
-        "RATE_LIMIT_WEIGHT_LIMIT": 6000,
-        "RATE_LIMIT_SAFETY_MARGIN": 100,
-    }
-
-    provider = MarketDataProvider(cfg_ws)
-    provider.rest = _RestStub()
-    provider.rest.get_ticker_24hr_all = lambda: _daftar_ticker()
-    provider.get_ticker_24hr_all()
-    provider.get_ticker_24hr_all()
-    assert provider.rest.panggil == 0, "stub dipakai, penghitung tidak relevan"
-    provider.close()
-
-    class _RestHitung:
-        def __init__(self, daftar):
-            self.panggil = 0
-            self.daftar = daftar
-
-        def get_ticker_24hr_all(self):
-            self.panggil += 1
-            return self.daftar
-
-        def close(self):
-            return None
-
-    rest_hitung = _RestHitung(_daftar_ticker())
-    provider = MarketDataProvider(dict(cfg_ws, TICKER_SNAPSHOT_TTL_SECONDS=30))
-    provider.rest = rest_hitung
-    pertama = provider.get_ticker_24hr_all()
-    kedua = provider.get_ticker_24hr_all()
-    ketiga = provider.get_ticker_24hr_all()
-    assert (
-        rest_hitung.panggil == 1
-    ), f"TTL aktif hanya boleh mengunduh sekali, dapat {rest_hitung.panggil}"
-    assert len(pertama) == len(kedua) == len(ketiga) == 4, "isi snapshot harus sama"
-    assert provider._ticker_refresher is not None, "penyegar latar harus hidup"
-
-    with provider._ticker_lock:
-        provider._ticker_snapshot_ts = time.monotonic() - 10_000.0
-    provider.get_ticker_24hr_all()
-    assert rest_hitung.panggil == 2, "snapshot terlalu tua harus disegarkan sinkron"
-    provider.close()
-
-    data_overlay = {
-        "AAAUSDT": {"c": "123.5", "o": "100.0", "v": "1", "q": "1"},
-        "SIMBOL0USDT": {"c": "0", "o": "100.0", "v": "1", "q": "1"},
-    }
-    provider = MarketDataProvider(dict(cfg_ws, TICKER_SNAPSHOT_TTL_SECONDS=30))
-    provider.rest = _RestHitung(_daftar_ticker())
-    provider._use_ws = True
-    provider._ensure_ws = lambda: _WsStub(data_overlay, 0.5)
-    snap = provider.get_ticker_24hr_all()
-    peta_snap = {t["symbol"]: t for t in snap}
-    assert (
-        float(peta_snap["AAAUSDT"]["lastPrice"]) == 123.5
-    ), "harga terakhir harus ditimpa dengan harga WebSocket terbaru"
-    assert (
-        float(peta_snap["AAAUSDT"]["priceChangePercent"]) == 8.0
-    ), "persentase perubahan tidak boleh berubah oleh timpaan"
-    assert (
-        float(peta_snap["AAAUSDT"]["quoteVolume"]) == 2000000.0
-    ), "volume kuotasi tidak boleh berubah oleh timpaan"
-    assert (
-        float(peta_snap["SIMBOL0USDT"]["lastPrice"]) == 100.0
-    ), "harga tidak valid dari WebSocket harus diabaikan"
-    assert (
-        float(peta_snap["SIMBOL1USDT"]["lastPrice"]) == 100.0
-    ), "simbol tanpa data WebSocket harus tetap memakai harga snapshot"
-
-    cfg_timpa = {
-        "QUOTE_ASSET": "USDT",
-        "MIN_QUOTE_VOLUME_USDT_24H": 1_000_000,
-        "PUMP_MIN_24H_CHANGE_PCT": 6.0,
-        "PUMP_MAX_24H_CHANGE_PCT": 10.0,
-        "BTC_FILTER_ENABLED": False,
-        "EXTRA_EXCLUDE_SYMBOLS": [],
-    }
-    pilih_timpa = scanner.filter_and_rank_candidates(snap, cfg_timpa, None)
-    pilih_asli = scanner.filter_and_rank_candidates(
-        provider.rest.daftar, cfg_timpa, None
-    )
-    assert [c.symbol for c in pilih_timpa] == [
-        c.symbol for c in pilih_asli
-    ], "timpaan harga tidak boleh mengubah kandidat yang lolos"
-
-    provider._ensure_ws = lambda: _WsStub(data_overlay, 999.0)
-    snap_basi = provider.get_ticker_24hr_all()
-    peta_basi = {t["symbol"]: t for t in snap_basi}
-    assert (
-        float(peta_basi["AAAUSDT"]["lastPrice"]) == 100.0
-    ), "data WebSocket basi tidak boleh dipakai untuk menimpa"
-
-    provider._ws_overlay_enabled = False
-    provider._ensure_ws = lambda: _WsStub(data_overlay, 0.5)
-    snap_mati = provider.get_ticker_24hr_all()
-    peta_mati = {t["symbol"]: t for t in snap_mati}
-    assert (
-        float(peta_mati["AAAUSDT"]["lastPrice"]) == 100.0
-    ), "timpaan nonaktif harus menyisakan harga snapshot apa adanya"
-    provider.close()
-    print("  TTL, penyegar sinkron, timpaan harga, dan paritas kandidat -> OK")
-
-    print("\n=== SELFTEST: pengambilan klines paralel dan sesi per thread (L-05) ===")
-    from trading.clients.binance_client import BinanceSpotClient
-
-    class _RestParalel:
-        def __init__(self, delay=0.0):
-            self.delay = delay
-            self.jejak = []
-            self._lock = __import__("threading").Lock()
-
-        def get_klines(
-            self, symbol, interval, limit=500, start_time_ms=None, end_time_ms=None
-        ):
-            with self._lock:
-                self.jejak.append(symbol)
-            if self.delay:
-                __import__("time").sleep(self.delay)
-            if symbol == "GAGALUSDT":
-                raise RuntimeError("simbol tidak dikenal")
-            return [[0, "1", "1", "1", "1", "1", 0, "1"]]
-
-    rest_paralel = _RestParalel()
-    provider2 = MarketDataProvider(dict(cfg_ws, MARKET_DATA_WORKERS=8))
-    provider2.rest = rest_paralel
-    peta = provider2.get_klines_many(
-        ["AAAUSDT", "BBBUSDT", "CCCUSDT", "AAAUSDT", "GAGALUSDT"], "5m", 61
-    )
-    assert set(peta) == {
-        "AAAUSDT",
-        "BBBUSDT",
-        "CCCUSDT",
-        "GAGALUSDT",
-    }, f"simbol duplikat harus digabung, dapat {sorted(peta)}"
-    assert peta["GAGALUSDT"] is None, "simbol gagal harus None, bukan exception"
-    assert len(peta["AAAUSDT"]) == 1, "simbol valid harus tetap berisi candle"
-    assert (
-        len(rest_paralel.jejak) == 4
-    ), f"harus 4 panggilan (duplikat digabung), dapat {len(rest_paralel.jejak)}"
-
-    rest_serial = _RestParalel(delay=0.05)
-    provider3 = MarketDataProvider(dict(cfg_ws, MARKET_DATA_WORKERS=1))
-    provider3.rest = rest_serial
-    import time as _t
-
-    mulai = _t.monotonic()
-    provider3.get_klines_many(["A", "B", "C", "D"], "5m", 61)
-    lama_serial = _t.monotonic() - mulai
-    rest_paralel2 = _RestParalel(delay=0.05)
-    provider4 = MarketDataProvider(dict(cfg_ws, MARKET_DATA_WORKERS=8))
-    provider4.rest = rest_paralel2
-    mulai = _t.monotonic()
-    provider4.get_klines_many(["A", "B", "C", "D"], "5m", 61)
-    lama_paralel = _t.monotonic() - mulai
-    assert (
-        lama_serial >= 0.18
-    ), f"mode serial harus menumpuk delay, dapat {lama_serial:.3f}s"
-    assert (
-        lama_paralel < lama_serial * 0.75
-    ), f"mode paralel harus jauh lebih cepat ({lama_paralel:.3f}s vs {lama_serial:.3f}s)"
-
-    klien = BinanceSpotClient(
-        "", "", "http://127.0.0.1:1", allow_signed=False, rate_limit_state_file=None
-    )
-    try:
-        id_utama = id(klien.session)
-        assert id(klien.session) == id_utama, "sesi harus stabil dalam satu thread"
-        terkumpul = {}
-
-        def _baca():
-            terkumpul[id(__import__("threading").current_thread())] = [
-                id(klien.session),
-                id(klien.session),
-            ]
-
-        utas = [__import__("threading").Thread(target=_baca) for _ in range(3)]
-        for u in utas:
-            u.start()
-        for u in utas:
-            u.join()
-        semua_id = [i for pasang in terkumpul.values() for i in pasang]
-        assert len(set(semua_id)) == len(
-            terkumpul
-        ), "tiap thread harus punya sesi sendiri, dan stabil di thread itu"
-        assert id_utama not in set(
-            semua_id
-        ), "thread lain tidak boleh memakai sesi thread utama"
-    finally:
-        klien.close()
-    print(
-        "  dedup simbol, isolasi kegagalan, paralel lebih cepat, sesi per thread -> OK"
-    )
-
-    print(
-        "\n=== SELFTEST: gerbang trend timeframe tinggi (cache H1 + integrasi scanner) ==="
-    )
-    MS_JAM = 3_600_000
-    # Memakai ulang fixture konfirmasi 5m dari selftest paritas (L-03) supaya yang
-    # benar-benar diuji di sini hanya gerbang trend-nya.
-    cfg_trend = dict(
-        cfg_konfirmasi,
-        CONFIRM_INTERVAL="5m",
-        TREND_FILTER_ENABLED=True,
-        TREND_INTERVAL="1h",
-        TREND_EMA_FAST=20,
-        TREND_EMA_SLOW=50,
-        TREND_ADX_PERIOD=14,
-        TREND_ADX_MIN=20.0,
-        TREND_LOOKBACK_BARS=120,
-    )
-
-    def _baris_h1(arah: float, jumlah: int = 130, sekarang_ms: int = 0) -> list:
-        """Baris klines H1 format Binance, berakhir di bucket terakhir yang tutup."""
-        batas = ((int(sekarang_ms) // MS_JAM) - 1) * MS_JAM
-        rows = []
-        p = 100.0
-        for i in range(jumlah):
-            p *= 1.0 + arah * 0.002
-            open_time = batas - (jumlah - 1 - i) * MS_JAM
-            rows.append(
-                [
-                    open_time,
-                    str(p * 0.999),
-                    str(p * 1.003),
-                    str(p * 0.997),
-                    str(p),
-                    "1000",
-                    open_time + MS_JAM - 1,
-                    str(p * 1000),
-                    10,
-                    "500",
-                    "500000",
-                    "0",
-                ]
-            )
-        return rows
-
-    class KlienH1:
-        def __init__(self, rows, gagal: bool = False):
-            self.rows = rows
-            self.calls = 0
-            self.gagal = gagal
-            self.limit_terakhir = None
-
-        def get_klines(
-            self, symbol, interval, limit=500, start_time_ms=None, end_time_ms=None
-        ):
-            self.calls += 1
-            self.limit_terakhir = limit
-            if self.gagal:
-                raise RuntimeError("rate limit Binance")
-            assert interval == "1h", interval
-            return [list(r) for r in self.rows][-limit:]
-
-    NOW_H1 = NOW_T + 21 * 5 * 60_000  # jam pindai yang sama dengan fixture konfirmasi
-    klien_naik = KlienH1(_baris_h1(1.0, 130, NOW_H1))
-    cache_trend = TrendCache(klien_naik, cfg_trend)
-    jendela = cache_trend.window_klines("NAIKUSDT", NOW_H1)
-    assert len(jendela) == 120, len(jendela)
-    assert all(
-        k.close_time < NOW_H1 for k in jendela
-    ), "hanya candle tertutup yang boleh dipakai"
-    assert jendela[-1].open_time == (NOW_H1 // MS_JAM - 1) * MS_JAM, jendela[
-        -1
-    ].open_time
-    assert (
-        jendela[-1].close_time < NOW_H1
-    ), "candle terakhir harus benar-benar sudah tutup"
-    assert (
-        klien_naik.limit_terakhir == 121
-    ), f"unduhan dibatasi jendela + 1 candle, dapat {klien_naik.limit_terakhir}"
-    assert klien_naik.calls == 1, f"panggilan pertama harus 1, dapat {klien_naik.calls}"
-    cache_trend.window_klines("NAIKUSDT", NOW_H1 + 60_000)
-    assert klien_naik.calls == 1, "masih dalam jam yang sama tidak perlu unduh ulang"
-    cache_trend.window_klines("NAIKUSDT", NOW_H1 + MS_JAM)
-    assert (
-        klien_naik.calls == 2
-    ), f"jam berikutnya harus unduh ulang, dapat {klien_naik.calls}"
-    verdict_naik = cache_trend.verdict("NAIKUSDT", NOW_H1)
-    assert verdict_naik["ok"] and verdict_naik["bars"] == 120, verdict_naik["reason"]
-
-    cache_turun = TrendCache(KlienH1(_baris_h1(-1.0, 130, NOW_H1)), cfg_trend)
-    verdict_turun = cache_turun.verdict("TURUNUSDT", NOW_H1)
-    assert (
-        not verdict_turun["ok"] and "di bawah" in verdict_turun["reason"]
-    ), verdict_turun["reason"]
-
-    cache_pendek = TrendCache(KlienH1(_baris_h1(1.0, 40, NOW_H1)), cfg_trend)
-    verdict_pendek = cache_pendek.verdict("BARUUSDT", NOW_H1)
-    assert (
-        not verdict_pendek["ok"] and "kurang" in verdict_pendek["reason"]
-    ), verdict_pendek["reason"]
-
-    cache_rusak = TrendCache(KlienH1([], gagal=True), cfg_trend)
-    try:
-        cache_rusak.provider("GAGALUSDT")
-        raise AssertionError(
-            "gagal ambil candle trend harus melempar error ke pemanggil"
-        )
-    except RuntimeError:
-        pass
-    print(
-        "  cache: hanya candle tutup, jendela 120, hemat API per jam, gagal -> error terlihat"
-    )
-
-    asli_now = state_mod.now_ms
-    state_mod.now_ms = lambda: NOW_H1
-    try:
-        hasil_naik = scanner.trend_verdict(
-            "NAIKUSDT", cfg_trend, lambda s: cache_trend.window_klines(s, NOW_H1)
-        )
-        hasil_turun_scanner = scanner.trend_verdict(
-            "TURUNUSDT", cfg_trend, lambda s: cache_turun.window_klines(s, NOW_H1)
-        )
-
-        def _rusak(_simbol):
-            raise RuntimeError("jaringan putus")
-
-        hasil_rusak = scanner.trend_verdict("XUSDT", cfg_trend, _rusak)
-        hasil_nonaktif = scanner.trend_verdict(
-            "XUSDT", dict(cfg_trend, TREND_FILTER_ENABLED=False), _rusak
-        )
-        assert hasil_naik["ok"] and not hasil_turun_scanner["ok"]
-        assert (
-            not hasil_rusak["ok"] and "gagal diambil" in hasil_rusak["reason"]
-        ), hasil_rusak["reason"]
-        assert hasil_nonaktif[
-            "ok"
-        ], "filter nonaktif tidak boleh memanggil penyedia trend"
-
-        # integrasi di jalur pemilihan kandidat: konfirmasi 5m lolos, trend yang menentukan
-        panggilan = {"n": 0}
-
-        def provider_naik(_simbol):
-            panggilan["n"] += 1
-            return cache_trend.window_klines(_simbol, NOW_H1)
-
-        pilih_ok = scanner.find_best_candidate(
-            ticker_konfirmasi, _serial, cfg_trend, None, trend_provider=provider_naik
-        )
-        assert pilih_ok is not None and pilih_ok.symbol == "LONJAKUSDT", pilih_ok
-        assert "trend 1h" in pilih_ok.confirm_reason, pilih_ok.confirm_reason
-        assert pilih_ok.trend is not None and pilih_ok.trend["ok"]
-
-        pilih_tolak = scanner.find_best_candidate(
-            ticker_konfirmasi,
-            _serial,
-            cfg_trend,
-            None,
-            trend_provider=lambda s: cache_turun.window_klines(s, NOW_H1),
-        )
-        assert (
-            pilih_tolak is None
-        ), "trend H1 turun harus membuat semua kandidat ditolak"
-
-        pilih_gagal = scanner.find_best_candidate(
-            ticker_konfirmasi, _serial, cfg_trend, None, trend_provider=_rusak
-        )
-        assert pilih_gagal is None, "penyedia trend error harus fail closed"
-
-        panggilan["n"] = 0
-        pilih_mati = scanner.find_best_candidate(
-            ticker_konfirmasi,
-            _serial,
-            dict(cfg_trend, TREND_FILTER_ENABLED=False),
-            None,
-            trend_provider=provider_naik,
-        )
-        assert (
-            pilih_mati is not None and panggilan["n"] == 0
-        ), "filter nonaktif tidak boleh menambah panggilan API trend"
-
-        pilih_tanpa_provider = scanner.find_best_candidate(
-            ticker_konfirmasi, _serial, cfg_trend, None
-        )
-        assert (
-            pilih_tanpa_provider is None
-        ), "filter trend aktif tanpa penyedia candle harus fail closed, bukan lolos"
-        pilih_lama = scanner.find_best_candidate(
-            ticker_konfirmasi,
-            _serial,
-            dict(cfg_trend, TREND_FILTER_ENABLED=False),
-            None,
-        )
-        assert (
-            pilih_lama is not None
-        ), "pemanggil lama tanpa penyedia trend tetap jalan selama filter nonaktif"
-    finally:
-        state_mod.now_ms = asli_now
-    print(
-        "  scanner: lolos saat trend naik, ditolak saat turun, fail closed saat error,"
-    )
-    print("           tanpa panggilan API tambahan saat filter nonaktif -> OK")
-
-    print("\n=== SELFTEST: gerbang zona demand H1 (HTF_DEMAND_*) ===")
-    # cfg_konfirmasi tidak memuat kunci HTF_DEMAND_* sehingga gerbang H1 mati di
-    # semua seksi lain; hanya seksi ini yang mengaktifkannya dengan parameter
-    # kecil supaya fixture pendek tetap cukup.
-    cfg_htf = dict(
-        cfg_konfirmasi,
-        TREND_FILTER_ENABLED=False,
-        TREND_INTERVAL="1h",
-        HTF_DEMAND_FILTER_ENABLED=True,
-        HTF_DEMAND_LOOKBACK_BARS=6,
-        HTF_DEMAND_ZONE_BUFFER_PCT=1.0,
-        HTF_DEMAND_MAX_DISTANCE_PCT=8.0,
-        HTF_DEMAND_MIN_CLOSE_POSITION=0.4,
-    )
-
-    def _baris_h1_dasar(lonjakan: bool = False, sekarang_ms: int = 0) -> list:
-        """Candle H1: 10 jam dasar datar + 1 candle reaksi terakhir yang tutup."""
-        batas = ((int(sekarang_ms) // MS_JAM) - 1) * MS_JAM
-        rows = []
-        for i in range(11):
-            open_time = batas - (10 - i) * MS_JAM
-            if i < 10:
-                o, h, l, c = 99.9, 100.2, 99.8, 100.0
-            elif lonjakan:
-                o, h, l, c = 100.0, 116.0, 99.9, 115.0
-            else:
-                o, h, l, c = 100.0, 101.2, 99.9, 101.0
-            rows.append(
-                [
-                    open_time,
-                    str(o),
-                    str(h),
-                    str(l),
-                    str(c),
-                    "1000",
-                    open_time + MS_JAM - 1,
-                    str(c * 1000),
-                    10,
-                    "500",
-                    "500000",
-                    "0",
-                ]
-            )
-        return rows
-
-    klien_dasar = KlienH1(_baris_h1_dasar(False, NOW_H1))
-    klien_lonjakan = KlienH1(_baris_h1_dasar(True, NOW_H1))
-    cache_dasar = TrendCache(klien_dasar, cfg_htf)
-    cache_lonjakan = TrendCache(klien_lonjakan, cfg_htf)
-
-    # Jendela unduhan mengikuti lookback terbesar (demand 200 > trend default).
-    cfg_htf_besar = dict(cfg_htf, HTF_DEMAND_LOOKBACK_BARS=200)
-    klien_besar = KlienH1(_baris_h1_dasar(False, NOW_H1) * 20)
-    cache_besar = TrendCache(klien_besar, cfg_htf_besar)
-    jendela_besar = cache_besar.window_klines("BESARUSDT", NOW_H1)
-    assert len(jendela_besar) == 201, len(jendela_besar)
-    assert klien_besar.limit_terakhir == 202, klien_besar.limit_terakhir
-    verdict_besar = scanner.htf_demand_verdict(
-        "BESARUSDT", cfg_htf_besar, lambda s: cache_besar.window_klines(s, NOW_H1)
-    )
-    assert verdict_besar["ok"] and verdict_besar["bars"] == 201, verdict_besar
-
-    asli_now_htf = state_mod.now_ms
-    state_mod.now_ms = lambda: NOW_H1
-    try:
-        verdict_dasar = scanner.htf_demand_verdict(
-            "DASARUSDT", cfg_htf, lambda s: cache_dasar.window_klines(s, NOW_H1)
-        )
-        verdict_lonjakan = scanner.htf_demand_verdict(
-            "PUCUKUSDT", cfg_htf, lambda s: cache_lonjakan.window_klines(s, NOW_H1)
-        )
-        assert verdict_dasar["ok"], verdict_dasar["reason"]
-        assert (
-            verdict_dasar["zone_low"] is not None
-            and verdict_dasar["zone_high"] is not None
-        ), "batas zona demand H1 harus terisi saat lolos"
-        assert (
-            not verdict_lonjakan["ok"] and "terlalu jauh" in verdict_lonjakan["reason"]
-        ), verdict_lonjakan["reason"]
-
-        def _rusak_htf(_simbol):
-            raise RuntimeError("jaringan putus")
-
-        verdict_rusak = scanner.htf_demand_verdict("XUSDT", cfg_htf, _rusak_htf)
-        verdict_tanpa = scanner.htf_demand_verdict("XUSDT", cfg_htf, None)
-        verdict_nonaktif = scanner.htf_demand_verdict(
-            "XUSDT", dict(cfg_htf, HTF_DEMAND_FILTER_ENABLED=False), _rusak_htf
-        )
-        assert (
-            not verdict_rusak["ok"] and "gagal diambil" in verdict_rusak["reason"]
-        ), verdict_rusak["reason"]
-        assert (
-            not verdict_tanpa["ok"] and "tidak tersedia" in verdict_tanpa["reason"]
-        ), verdict_tanpa["reason"]
-        assert verdict_nonaktif[
-            "ok"
-        ], "gerbang nonaktif tidak boleh memanggil penyedia candle"
-
-        # Integrasi pemilihan kandidat: konfirmasi 5m fixture L-03 sudah lolos,
-        # gerbang demand H1 yang menentukan.
-        pilih_htf_ok = scanner.find_best_candidate(
-            ticker_konfirmasi,
-            _serial,
-            cfg_htf,
-            None,
-            trend_provider=lambda s: cache_dasar.window_klines(s, NOW_H1),
-        )
-        assert (
-            pilih_htf_ok is not None and pilih_htf_ok.symbol == "LONJAKUSDT"
-        ), pilih_htf_ok
-        assert (
-            "demand zone valid" in pilih_htf_ok.confirm_reason
-        ), pilih_htf_ok.confirm_reason
-        assert pilih_htf_ok.htf_demand is not None and pilih_htf_ok.htf_demand["ok"]
-
-        pilih_htf_tolak = scanner.find_best_candidate(
-            ticker_konfirmasi,
-            _serial,
-            cfg_htf,
-            None,
-            trend_provider=lambda s: cache_lonjakan.window_klines(s, NOW_H1),
-        )
-        assert (
-            pilih_htf_tolak is None
-        ), "harga H1 yang sudah jauh di atas zona harus menolak semua kandidat"
-
-        klien_pendek_htf = KlienH1(_baris_h1_dasar(False, NOW_H1)[-3:])
-        cache_pendek_htf = TrendCache(klien_pendek_htf, cfg_htf)
-        pilih_kurang_htf = scanner.find_best_candidate(
-            ticker_konfirmasi,
-            _serial,
-            cfg_htf,
-            None,
-            trend_provider=lambda s: cache_pendek_htf.window_klines(s, NOW_H1),
-        )
-        assert (
-            pilih_kurang_htf is None
-        ), "riwayat H1 kurang harus fail closed, bukan lolos"
-
-        panggilan_htf = {"n": 0}
-
-        def provider_hitung_htf(_simbol):
-            panggilan_htf["n"] += 1
-            return cache_dasar.window_klines(_simbol, NOW_H1)
-
-        pilih_htf_mati = scanner.find_best_candidate(
-            ticker_konfirmasi,
-            _serial,
-            dict(cfg_htf, HTF_DEMAND_FILTER_ENABLED=False),
-            None,
-            trend_provider=provider_hitung_htf,
-        )
-        assert (
-            pilih_htf_mati is not None and panggilan_htf["n"] == 0
-        ), "gerbang nonaktif tidak boleh menambah panggilan penyedia candle"
-    finally:
-        state_mod.now_ms = asli_now_htf
-    print(
-        "  zona H1: reaksi di dekat dasar lolos, harga sudah terbang ditolak,"
-    )
-    print(
-        "           data kurang/error fail closed, jendela mengikuti lookback terbesar,"
-    )
-    print("           nonaktif -> tanpa panggilan tambahan -> OK")
-
-
-    print("\n=== SELFTEST: gerbang zona demand harian (DAILY_DEMAND_*) ===")
-    # cfg_konfirmasi tidak memuat kunci DAILY_DEMAND_* sehingga gerbang harian
-    # mati di seluruh seksi lain; hanya seksi ini yang mengaktifkannya dengan
-    # parameter kecil supaya fixture pendek tetap cukup.
-    cfg_daily_bot = dict(
-        cfg_konfirmasi,
-        DAILY_DEMAND_FILTER_ENABLED=True,
-        DAILY_DEMAND_INTERVAL="1d",
-        DAILY_DEMAND_LOOKBACK_BARS=3,
-        DAILY_DEMAND_ZONE_BUFFER_PCT=1.0,
-        DAILY_DEMAND_MAX_DISTANCE_PCT=8.0,
-        DAILY_DEMAND_MIN_CLOSE_POSITION=0.4,
-    )
-    MS_HARI = 86_400_000
-    NOW_HARIAN = NOW_T
-
-    def _baris_harian_dasar(lonjakan: bool = False, sekarang_ms: int = 0) -> list:
-        """Candle harian: 4 hari dasar datar + 1 hari reaksi terakhir yang sudah tutup."""
-        batas = ((int(sekarang_ms) // MS_HARI) - 1) * MS_HARI
-        rows = []
-        for i in range(5):
-            open_time = batas - (4 - i) * MS_HARI
-            if i < 4:
-                o, h, l, c = 99.9, 100.2, 99.8, 100.0
-            elif lonjakan:
-                o, h, l, c = 100.0, 111.0, 99.9, 110.0
-            else:
-                o, h, l, c = 100.0, 101.2, 99.9, 101.0
-            rows.append(
-                [
-                    open_time,
-                    str(o),
-                    str(h),
-                    str(l),
-                    str(c),
-                    "1000",
-                    open_time + MS_HARI - 1,
-                    str(c * 1000),
-                    10,
-                    "500",
-                    "500000",
-                    "0",
-                ]
-            )
-        return rows
-
-    class KlienHarian:
-        def __init__(self, rows, gagal: bool = False):
-            self.rows = rows
-            self.calls = 0
-            self.gagal = gagal
-            self.limit_terakhir = None
-            self.interval_terakhir = None
-
-        def get_klines(
-            self, symbol, interval, limit=500, start_time_ms=None, end_time_ms=None
-        ):
-            self.calls += 1
-            self.limit_terakhir = limit
-            self.interval_terakhir = interval
-            if self.gagal:
-                raise RuntimeError("rate limit Binance")
-            return [list(r) for r in self.rows][-limit:]
-
-    klien_dasar_h = KlienHarian(_baris_harian_dasar(False, NOW_HARIAN))
-    klien_lonjak_h = KlienHarian(_baris_harian_dasar(True, NOW_HARIAN))
-    cache_dasar_h = DailyDemandCache(klien_dasar_h, cfg_daily_bot)
-    cache_lonjak_h = DailyDemandCache(klien_lonjak_h, cfg_daily_bot)
-
-    jendela_h = cache_dasar_h.window_klines("DASARUSDT", NOW_HARIAN)
-    assert len(jendela_h) == 4, len(jendela_h)
-    assert klien_dasar_h.interval_terakhir == "1d", klien_dasar_h.interval_terakhir
-    assert klien_dasar_h.limit_terakhir == 5, klien_dasar_h.limit_terakhir
-    assert all(
-        k.close_time < NOW_HARIAN for k in jendela_h
-    ), "hanya candle harian tertutup yang boleh dipakai"
-    cache_dasar_h.window_klines("DASARUSDT", NOW_HARIAN)
-    assert klien_dasar_h.calls == 1, "candle harian harus di-cache, bukan diunduh ulang"
-    assert cache_dasar_h.verdict("DASARUSDT", NOW_HARIAN)["ok"]
-
-    verdict_dasar_h = scanner.daily_demand_verdict(
-        "DASARUSDT", cfg_daily_bot, lambda s: cache_dasar_h.window_klines(s, NOW_HARIAN)
-    )
-    verdict_lonjak_h = scanner.daily_demand_verdict(
-        "LONJAKUSDT",
-        cfg_daily_bot,
-        lambda s: cache_lonjak_h.window_klines(s, NOW_HARIAN),
-    )
-    assert (
-        verdict_dasar_h["ok"] and verdict_dasar_h["interval"] == "1d"
-    ), verdict_dasar_h["reason"]
-    assert verdict_dasar_h["bars"] == 4, verdict_dasar_h
-    assert (
-        not verdict_lonjak_h["ok"] and "terlalu jauh" in verdict_lonjak_h["reason"]
-    ), verdict_lonjak_h["reason"]
-
-    def _rusak_harian(_simbol):
-        raise RuntimeError("jaringan putus")
-
-    verdict_rusak_h = scanner.daily_demand_verdict(
-        "XUSDT", cfg_daily_bot, _rusak_harian
-    )
-    verdict_tanpa_h = scanner.daily_demand_verdict("XUSDT", cfg_daily_bot, None)
-    assert (
-        not verdict_rusak_h["ok"] and "gagal diambil" in verdict_rusak_h["reason"]
-    ), verdict_rusak_h["reason"]
-    assert (
-        not verdict_tanpa_h["ok"] and "tidak tersedia" in verdict_tanpa_h["reason"]
-    ), verdict_tanpa_h["reason"]
-    assert scanner.daily_demand_verdict(
-        "XUSDT", dict(cfg_daily_bot, DAILY_DEMAND_FILTER_ENABLED=False), _rusak_harian
-    )["ok"], "gerbang nonaktif tidak boleh memanggil penyedia candle"
-
-    # Integrasi pemilihan kandidat: konfirmasi 5m fixture sudah lolos, gerbang
-    # harian yang menentukan.
-    pilih_harian_ok = scanner.find_best_candidate(
-        ticker_konfirmasi,
-        _serial,
-        cfg_daily_bot,
-        None,
-        daily_provider=lambda s: cache_dasar_h.window_klines(s, NOW_HARIAN),
-    )
-    assert (
-        pilih_harian_ok is not None
-        and pilih_harian_ok.daily_demand is not None
-        and pilih_harian_ok.daily_demand["ok"]
-    ), pilih_harian_ok
-    assert (
-        "demand zone valid" in pilih_harian_ok.confirm_reason
-    ), pilih_harian_ok.confirm_reason
-
-    pilih_harian_tolak = scanner.find_best_candidate(
-        ticker_konfirmasi,
-        _serial,
-        cfg_daily_bot,
-        None,
-        daily_provider=lambda s: cache_lonjak_h.window_klines(s, NOW_HARIAN),
-    )
-    assert (
-        pilih_harian_tolak is None
-    ), "harga yang sudah jauh di atas dasar harian harus menolak semua kandidat"
-
-    klien_pendek_h = KlienHarian(_baris_harian_dasar(False, NOW_HARIAN)[-2:])
-    cache_pendek_h = DailyDemandCache(klien_pendek_h, cfg_daily_bot)
-    pilih_kurang_h = scanner.find_best_candidate(
-        ticker_konfirmasi,
-        _serial,
-        cfg_daily_bot,
-        None,
-        daily_provider=lambda s: cache_pendek_h.window_klines(s, NOW_HARIAN),
-    )
-    assert pilih_kurang_h is None, "riwayat harian kurang harus fail closed, bukan lolos"
-
-    panggilan_h = {"n": 0}
-
-    def provider_hitung_h(_simbol):
-        panggilan_h["n"] += 1
-        return cache_dasar_h.window_klines(_simbol, NOW_HARIAN)
-
-    pilih_harian_mati = scanner.find_best_candidate(
-        ticker_konfirmasi,
-        _serial,
-        dict(cfg_daily_bot, DAILY_DEMAND_FILTER_ENABLED=False),
-        None,
-        daily_provider=provider_hitung_h,
-    )
-    assert (
-        pilih_harian_mati is not None and panggilan_h["n"] == 0
-    ), "gerbang nonaktif tidak boleh menambah panggilan penyedia candle harian"
-
-    klien_gagal_h = KlienHarian([], gagal=True)
-    cache_gagal_h = DailyDemandCache(klien_gagal_h, cfg_daily_bot)
-    try:
-        cache_gagal_h.window_klines("XUSDT", NOW_HARIAN)
-    except RuntimeError as exc:
-        assert "rate limit" in str(exc)
-    else:
-        raise AssertionError("kegagalan pengambilan candle harian harus terlihat")
-    print(
-        "  zona harian: reaksi di dekat dasar lolos, harga sudah terbang ditolak,"
-    )
-    print(
-        "               data kurang/error fail closed, cache sekali per hari,"
-    )
-    print("               nonaktif -> tanpa panggilan tambahan -> OK")
-
-    print("\n=== SELFTEST: gerbang EMA + ADX harian (DAILY_TREND_*) ===")
-    cfg_tren_harian = dict(
-        cfg_konfirmasi,
-        DAILY_DEMAND_FILTER_ENABLED=False,
-        TREND_FILTER_ENABLED=False,
-        HTF_DEMAND_FILTER_ENABLED=False,
-        DAILY_TREND_FILTER_ENABLED=True,
-        DAILY_TREND_INTERVAL="1d",
-        DAILY_TREND_EMA_FAST=20,
-        DAILY_TREND_EMA_SLOW=50,
-        DAILY_TREND_ADX_PERIOD=14,
-        DAILY_TREND_ADX_MIN=20.0,
-        DAILY_TREND_LOOKBACK_BARS=120,
-    )
-    NOW_TREN = 300 * MS_HARI
-
-    def _baris_harian_tren(faktor: float, n: int = 130) -> list:
-        """n candle harian tertutup dengan pertumbuhan harian `faktor`."""
-        batas = ((int(NOW_TREN) // MS_HARI) - 1) * MS_HARI
-        rows = []
-        harga = 100.0
-        seri = []
-        for _ in range(n):
-            harga *= faktor
-            seri.append(harga)
-        for idx, close in enumerate(seri):
-            open_time = batas - (n - 1 - idx) * MS_HARI
-            buka = close / faktor
-            rows.append(
-                [
-                    open_time,
-                    str(buka),
-                    str(max(buka, close) * 1.005),
-                    str(min(buka, close) * 0.995),
-                    str(close),
-                    "1000",
-                    open_time + MS_HARI - 1,
-                    str(close * 1000),
-                    10,
-                    "500",
-                    "500000",
-                    "0",
-                ]
-            )
-        return rows
-
-    klien_tren_naik = KlienHarian(_baris_harian_tren(1.01))
-    cache_tren_naik = DailyTrendCache(klien_tren_naik, cfg_tren_harian)
-    klien_tren_turun = KlienHarian(_baris_harian_tren(0.99))
-    cache_tren_turun = DailyTrendCache(klien_tren_turun, cfg_tren_harian)
-
-    jendela_tren = cache_tren_naik.window_klines("NAIKUSDT", NOW_TREN)
-    assert len(jendela_tren) == 120, len(jendela_tren)
-    assert klien_tren_naik.interval_terakhir == "1d", klien_tren_naik.interval_terakhir
-    assert klien_tren_naik.limit_terakhir == 121, klien_tren_naik.limit_terakhir
-    assert all(
-        k.close_time < NOW_TREN for k in jendela_tren
-    ), "hanya candle harian tertutup yang boleh dipakai"
-    cache_tren_naik.window_klines("NAIKUSDT", NOW_TREN)
-    assert klien_tren_naik.calls == 1, "candle harian EMA+ADX harus di-cache"
-
-    v_tren_naik = cache_tren_naik.verdict("NAIKUSDT", NOW_TREN)
-    v_tren_turun = cache_tren_turun.verdict("TURUNUSDT", NOW_TREN)
-    assert v_tren_naik["ok"] and v_tren_naik["interval"] == "1d", v_tren_naik["reason"]
-    assert (
-        not v_tren_turun["ok"] and "di bawah" in v_tren_turun["reason"]
-    ), v_tren_turun["reason"]
-
-    pilih_tren_ok = scanner.find_best_candidate(
-        ticker_konfirmasi,
-        _serial,
-        cfg_tren_harian,
-        None,
-        daily_trend_provider=lambda s: cache_tren_naik.window_klines(s, NOW_TREN),
-    )
-    assert (
-        pilih_tren_ok is not None
-        and pilih_tren_ok.daily_trend is not None
-        and pilih_tren_ok.daily_trend["ok"]
-        and "trend 1d naik" in pilih_tren_ok.confirm_reason
-    ), pilih_tren_ok
-    pilih_tren_turun = scanner.find_best_candidate(
-        ticker_konfirmasi,
-        _serial,
-        cfg_tren_harian,
-        None,
-        daily_trend_provider=lambda s: cache_tren_turun.window_klines(s, NOW_TREN),
-    )
-    assert pilih_tren_turun is None, "trend harian turun harus menolak semua kandidat"
-    pilih_tren_kontrol = scanner.find_best_candidate(
-        ticker_konfirmasi,
-        _serial,
-        dict(cfg_tren_harian, DAILY_TREND_FILTER_ENABLED=False),
-        None,
-        daily_trend_provider=lambda s: cache_tren_turun.window_klines(s, NOW_TREN),
-    )
-    assert (
-        pilih_tren_kontrol is not None
-    ), "kontrol tanpa gerbang EMA+ADX harian harus tetap menghasilkan kandidat"
-
-    panggilan_tren = {"n": 0}
-
-    def _provider_tren_hitung(simbol):
-        panggilan_tren["n"] += 1
-        return cache_tren_naik.window_klines(simbol, NOW_TREN)
-
-    scanner.find_best_candidate(
-        ticker_konfirmasi,
-        _serial,
-        dict(cfg_tren_harian, DAILY_TREND_FILTER_ENABLED=False),
-        None,
-        daily_trend_provider=_provider_tren_hitung,
-    )
-    assert (
-        panggilan_tren["n"] == 0
-    ), "gerbang EMA+ADX harian nonaktif tidak boleh memanggil penyedia candle"
-
-    def _provider_tren_rusak(_simbol):
-        raise RuntimeError("jaringan putus")
-
-    verdict_tren_rusak = scanner.daily_trend_verdict(
-        "XUSDT", cfg_tren_harian, _provider_tren_rusak
-    )
-    verdict_tren_tanpa = scanner.daily_trend_verdict("XUSDT", cfg_tren_harian, None)
-    assert (
-        not verdict_tren_rusak["ok"] and "gagal diambil" in verdict_tren_rusak["reason"]
-    ), verdict_tren_rusak["reason"]
-    assert not verdict_tren_tanpa["ok"], verdict_tren_tanpa["reason"]
-    print("  tren harian: naik lolos, turun ditolak, cache sekali per hari,")
-    print("               nonaktif tanpa panggilan tambahan, gagal ambil fail closed -> OK")
-
-    print("\n=== SELFTEST: blokir koin sama setelah loss (SAME_COIN_BLOCK) ===")
-    from trading.clients.binance_client import SymbolFilters as SF3
-    from decimal import Decimal as D3
-
-    cfg_blk = dict(cfg)
-    cfg_blk.update(
-        {
-            "MODE": "PAPER",
-            "SAME_COIN_BLOCK_HOURS": 24.0,
-            "SAME_COIN_BLOCK_LOSS_ONLY": True,
-            "USE_NATIVE_OCO": False,
-            "USE_NATIVE_STOP_LOSS": False,
-            "USE_DUST_SWEEP": False,
-            "COOLDOWN_MINUTES_AFTER_CLOSE": 0,
-        }
-    )
-    flt_blk = {
-        "LOSSBUSDT": SF3(
-            step_size=D3("0.00000001"),
-            min_qty=D3("0.00000001"),
-            min_notional=D3("1"),
-            tick_size=D3("0.0001"),
-        ),
-        "WINBUSDT": SF3(
-            step_size=D3("0.00000001"),
-            min_qty=D3("0.00000001"),
-            min_notional=D3("1"),
-            tick_size=D3("0.0001"),
-        ),
-    }
-
-    def _state_posisi(simbol, base, entry, qty):
-        st = dict(DEFAULT_STATE)
-        st["symbol_block_until"] = {}
-        st.update(
-            {
-                "current_symbol": simbol,
-                "entry_price": entry,
-                "qty": qty,
-                "entry_time": state_mod.now_ms(),
-            }
-        )
-        return st
-
-    # 1) Close dengan LOSS -> koin diblokir
-    klien_rugi = FakeTradeClient(base_asset="LOSSB", free=10.0, price=90.0)
-    st_rugi = _state_posisi("LOSSBUSDT", "LOSSB", 100.0, 10.0)
-    close_position(klien_rugi, cfg_blk, flt_blk, st_rugi, "STOP_LOSS")
-    assert st_rugi.get("current_symbol") is None, "posisi harus tertutup penuh"
-    until_rugi = _symbol_block_until_ts(st_rugi, "LOSSBUSDT")
-    assert until_rugi > state_mod.now_ms(), "koin yang loss harus diblokir"
-    assert until_rugi <= state_mod.now_ms() + 24 * 3600 * 1000 + 1000
-    print(f"  close LOSSS -> LOSSBUSDT diblokir sampai {_fmt_utc_ms(until_rugi)} -> OK")
-
-    # 2) Close dengan PROFIT -> tidak diblokir saat SAME_COIN_BLOCK_LOSS_ONLY aktif
-    klien_win = FakeTradeClient(base_asset="WINB", free=10.0, price=110.0)
-    st_win = _state_posisi("WINBUSDT", "WINB", 100.0, 10.0)
-    close_position(klien_win, cfg_blk, flt_blk, st_win, "TAKE_PROFIT")
-    assert st_win.get("current_symbol") is None
-    assert (
-        _symbol_block_until_ts(st_win, "WINBUSDT") == 0.0
-    ), "profit tidak boleh diblokir saat loss_only aktif"
-    print("  close PROFIT -> WINBUSDT tidak diblokir (loss_only aktif) -> OK")
-
-    # 3) SAME_COIN_BLOCK_LOSS_ONLY=False -> profit juga diblokir
-    cfg_blk_all = dict(cfg_blk, SAME_COIN_BLOCK_LOSS_ONLY=False)
-    klien_win2 = FakeTradeClient(base_asset="WINB", free=10.0, price=110.0)
-    st_win2 = _state_posisi("WINBUSDT", "WINB", 100.0, 10.0)
-    close_position(klien_win2, cfg_blk_all, flt_blk, st_win2, "TAKE_PROFIT")
-    assert (
-        _symbol_block_until_ts(st_win2, "WINBUSDT") > state_mod.now_ms()
-    ), "profit harus diblokir saat loss_only nonaktif"
-    print("  loss_only nonaktif -> close PROFIT juga diblokir -> OK")
-
-    # 4) SAME_COIN_BLOCK_HOURS=0 -> fitur nonaktif, loss pun tidak diblokir
-    cfg_blk_off = dict(cfg_blk, SAME_COIN_BLOCK_HOURS=0)
-    klien_rugi2 = FakeTradeClient(base_asset="LOSSB", free=10.0, price=90.0)
-    st_rugi2 = _state_posisi("LOSSBUSDT", "LOSSB", 100.0, 10.0)
-    close_position(klien_rugi2, cfg_blk_off, flt_blk, st_rugi2, "STOP_LOSS")
-    assert (
-        _symbol_block_until_ts(st_rugi2, "LOSSBUSDT") == 0.0
-    ), "hours=0 harus menonaktifkan blokir"
-    print("  hours=0 -> fitur nonaktif, loss tidak diblokir -> OK")
-
-    # 5) record_symbol_block: cek lookup case-insensitive dan aturan loss_only
-    st_rec = dict(DEFAULT_STATE)
-    assert record_symbol_block(st_rec, cfg_blk, "abc usdt".replace(" ", ""), -1.5)
-    assert _symbol_block_until_ts(st_rec, "ABCUSDT") > 0, "lookup harus case-insensitive"
-    assert not record_symbol_block(st_rec, cfg_blk, "PROFITUSDT", 2.0)
-    assert _symbol_block_until_ts(st_rec, "PROFITUSDT") == 0.0
-    print("  record_symbol_block: loss diblokir, profit tidak, case-insensitive -> OK")
-
-    # 6) open_position menolak koin yang sedang diblokir, dan membuka lagi
-    #    setelah blokir kedaluwarsa
-    cl_blk = SizingClient(1000.0)
-    st_op = dict(DEFAULT_STATE)
-    st_op["symbol_block_until"] = {"TESTBUSDT": state_mod.now_ms() + 3_600_000}
-    open_position(cl_blk, cfg_size, size_filters, st_op, cand)
-    assert not cl_blk.orders, "entry koin yang diblokir harus ditolak"
-    assert not st_op.get("pending_order"), "penolakan tidak boleh meninggalkan pending"
-    cl_exp = SizingClient(1000.0)
-    st_exp = dict(DEFAULT_STATE)
-    st_exp["symbol_block_until"] = {"TESTBUSDT": state_mod.now_ms() - 1}
-    open_position(cl_exp, cfg_size, size_filters, st_exp, cand)
-    assert cl_exp.orders, "entry harus jalan lagi setelah blokir kedaluwarsa"
-    print("  open_position: koin diblokir ditolak, blokir kedaluwarsa lolos -> OK")
-
-    # 7) Scanner mengecualikan koin yang diblokir dari kandidat
-    cfg_scan_blk = dict(cfg)
-    cfg_scan_blk["_blocked_symbols"] = {"AUSDT"}
-    ranked_blk = scanner.filter_and_rank_candidates(tickers, cfg_scan_blk, tradable)
-    symbols_blk = [c.symbol for c in ranked_blk]
-    assert symbols_blk == ["BUSDT"], f"koin diblokir harus dikecualikan: {symbols_blk}"
-    print("  scanner: AUSDT diblokir -> kandidat tersisa BUSDT -> OK")
-
-    # 8) load_pump_state men-sanitasi dan memangkas symbol_block_until
-    import json as _json
-
-    state_path_blk = os.path.join(
-        tempfile.gettempdir(), "pump_bot_selftest_block_state.json"
-    )
-    now_blk = state_mod.now_ms()
-    with open(state_path_blk, "w", encoding="utf-8") as fh:
-        _json.dump(
-            {
-                "symbol_block_until": {
-                    "AAAUSDT": now_blk + 3_600_000,
-                    "OLDBUSDT": now_blk - 1,
-                    "BADUSDT": "bukan-angka",
-                    "bad key": now_blk + 1000,
-                }
-            },
-            fh,
-        )
-    st_load = load_pump_state(state_path_blk)
-    blocks_load = st_load.get("symbol_block_until")
-    assert isinstance(blocks_load, dict) and set(blocks_load) == {
-        "AAAUSDT"
-    }, f"sanitasi/pruning salah: {blocks_load}"
-    with open(state_path_blk, "w", encoding="utf-8") as fh:
-        _json.dump({"symbol_block_until": [1, 2, 3]}, fh)
-    st_load2 = load_pump_state(state_path_blk)
-    assert st_load2.get("symbol_block_until") == {}, st_load2.get(
-        "symbol_block_until"
-    )
-    os.remove(state_path_blk)
-    print("  load_pump_state: entri invalid dibuang, kedaluwarsa dipangkas -> OK")
-
-    # 9) Config baru lolos validasi schema (default harus valid untuk PAPER/LIVE)
-    from config.settings_schema import validate_candidate
-
-    for mode_blk in ("PAPER", "LIVE"):
-        cand_cfg = dict(PUMP_CONFIG)
-        cand_cfg["MODE"] = mode_blk
-        _cleaned, _errors, _warnings = validate_candidate(cand_cfg, mode_blk)
-        assert not _errors, f"config default tidak valid untuk {mode_blk}: {_errors}"
-    print("  validate_candidate: SAME_COIN_BLOCK_* lolos untuk PAPER dan LIVE -> OK")
-
-    print("\nSEMUA SELFTEST LULUS.")
-    print("(Selftest ini TIDAK menghubungi Binance sama sekali -- murni logika lokal.)")
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description="Pump Scanner Bot Binance Spot")
     parser.add_argument(
-        "--selftest",
+        "--acknowledge-missing-live-state",
         action="store_true",
-        help="Jalankan audit logika murni (tanpa jaringan) lalu keluar.",
+        help="Konfirmasi operator untuk menginisialisasi state LIVE yang hilang.",
     )
     args = parser.parse_args()
-    if args.selftest:
-        selftest()
-        return 0
 
     from infrastructure.network.file_descriptors import raise_fd_limit
 
-    # Batas fd bawaan 1024 terlalu sempit untuk proses yang memegang lock file,
-    # soket Binance, dan worker klines sekaligus (lihat OSError(24) 07-10-2026).
     soft, hard, berubah = raise_fd_limit()
     if berubah:
         logger.info(
@@ -6452,11 +5483,21 @@ def main() -> int:
     except InvalidModeError as exc:
         print(str(exc), file=sys.stderr)
         return 2
+    if args.acknowledge_missing_live_state and mode != "LIVE":
+        print(
+            "--acknowledge-missing-live-state hanya berlaku pada mode LIVE.",
+            file=sys.stderr,
+        )
+        return 2
 
     runtime = BotRuntime(mode)
     try:
         with runtime as lifecycle:
-            code = run(PUMP_CONFIG, lifecycle=lifecycle)
+            code = run(
+                PUMP_CONFIG,
+                lifecycle=lifecycle,
+                allow_missing_live_state=args.acknowledge_missing_live_state,
+            )
             runtime.finish(
                 code, None if code == 0 else "Bot berhenti dengan kode error."
             )

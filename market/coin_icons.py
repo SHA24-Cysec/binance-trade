@@ -1,13 +1,3 @@
-"""Pencarian ikon koin berdasarkan simbol aset dasar (mis. BOME dari BOMEUSDT).
-
-Sumber: endpoint publik CoinGecko /api/v3/search (tanpa API key). Hasil disimpan
-di cache file JSON agar setiap simbol hanya dicari sesekali. Bila CoinGecko
-membatasi permintaan (HTTP 429), pencarian dihentikan sementara dan tidak
-disimpan sebagai "tidak ditemukan", sehingga dicoba lagi nanti.
-
-Catatan atribusi: data CoinGecko wajib dicantumkan sumbernya di tampilan
-produksi sesuai syarat penggunaan CoinGecko.
-"""
 
 from __future__ import annotations
 
@@ -26,9 +16,9 @@ logger = logging.getLogger("coin_icons")
 
 SEARCH_URL = "https://api.coingecko.com/api/v3/search"
 SEARCH_TIMEOUT_S = 8
-TTL_FOUND_S = 30 * 86400      # ikon yang ditemukan: simpan 30 hari
-TTL_MISSING_S = 1 * 86400     # tidak ditemukan: coba lagi setelah 1 hari
-RATE_LIMIT_PAUSE_S = 600      # setelah HTTP 429: jeda pencarian 10 menit
+TTL_FOUND_S = 30 * 86400
+TTL_MISSING_S = 1 * 86400
+RATE_LIMIT_PAUSE_S = 600
 SYMBOL_RE = re.compile(r"^[A-Za-z0-9]{1,20}$")
 
 _lock = threading.Lock()
@@ -38,7 +28,6 @@ _blocked_until = 0.0
 
 
 def configure(path: Path) -> None:
-    """Tentukan lokasi file cache. Dipanggil sekali saat dashboard dimuat."""
     global _store_path, _store
     with _lock:
         _store_path = Path(path)
@@ -64,7 +53,6 @@ def _save_store() -> None:
 
 
 def _pick_best(coins: list, symbol: str) -> Optional[str]:
-    """Ambil ikon dari koin yang simbolnya persis sama dan peringkat pasarnya tertinggi."""
     exact = [
         c for c in coins
         if str(c.get("symbol", "")).upper() == symbol and c.get("large")
@@ -76,7 +64,6 @@ def _pick_best(coins: list, symbol: str) -> Optional[str]:
 
 
 def resolve_icon_url(symbol: str) -> Optional[str]:
-    """Kembalikan URL gambar ikon untuk simbol, atau None bila tidak tersedia."""
     global _blocked_until
     if not SYMBOL_RE.match(symbol or ""):
         return None
@@ -91,7 +78,6 @@ def resolve_icon_url(symbol: str) -> Optional[str]:
                 return entry.get("url")
 
         if now < _blocked_until:
-            # Sedang dibatasi: pakai hasil lama bila ada, jangan cari ulang.
             return entry.get("url") if isinstance(entry, dict) else None
 
         try:

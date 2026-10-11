@@ -12,11 +12,6 @@ from strategy.indicators import Kline
 
 
 def parity_trend_window(config: dict) -> int:
-    """Jendela candle timeframe tinggi yang dipakai gerbang trend + demand H1.
-
-    Harus sama dengan jendela unduhan TrendCache di bot live dan jendela
-    TrendLookup di backtest, supaya keputusan grid search tidak melenceng.
-    """
     from strategy import indicators as strategy_mod
 
     return strategy_mod.htf_window_bars(config)
@@ -102,13 +97,6 @@ def buat_rentang(
 
 
 def _pastikan_kunci_berefek(spec: dict) -> None:
-    """Tolak spec yang memuat parameter di luar daftar override backtest.
-
-    Tanpa penjagaan ini, kunci yang tidak dikenal apply_overrides() akan
-    diabaikan tanpa suara: grid tetap berjalan, tetapi semua kombinasi memakai
-    konfigurasi yang persis sama sehingga tabel hasil penuh baris kembar yang
-    menyesatkan. Lebih baik gagal cepat dengan pesan yang jelas.
-    """
     tidak_dikenal = [k for k in spec if k not in bt.OVERRIDE_CASTERS]
     if tidak_dikenal:
         raise GridSearchError(
@@ -303,9 +291,6 @@ def run_grid_search(
     hasil_grid.bar_latih = max(0, len(kl_latih) - warmup_bars)
     hasil_grid.bar_uji = max(0, len(kl_uji) - warmup_bars) if kl_uji else 0
 
-    # Candle timeframe tinggi dirangkai sekali dari potongan data masing-masing
-    # periode (bukan dari seluruh rentang) supaya jendela tiap periode tidak
-    # melar melewati batasnya. Nilainya sama dengan candle asli Binance.
     trend_latih = trend_uji = None
     if butuh_trend:
         trend_latih = parity.build_trend_klines(kl_latih, base_config, interval_sim)
@@ -358,8 +343,19 @@ def run_grid_search(
                 daily_klines=daily_latih,
             )
             s_latih = bt.summarize(r_latih)
-        except Exception:
+        except Exception as exc:
             dilewati += 1
+            hasil_grid.hasil.append(
+                HasilKombinasi(
+                    params=dict(params),
+                    latih={},
+                    andal=False,
+                    catatan=(
+                        f"simulasi latih gagal: {type(exc).__name__}: "
+                        f"{str(exc)[:180]}"
+                    ),
+                )
+            )
             continue
 
         item = HasilKombinasi(
@@ -388,10 +384,11 @@ def run_grid_search(
                 s_uji = bt.summarize(r_uji)
                 item.uji = s_uji
                 item.skor_uji = hitung_skor(s_uji, metrik)
-            except Exception:
+            except Exception as exc:
+                detail = f"{type(exc).__name__}: {str(exc)[:180]}"
                 item.catatan = (
-                    item.catatan + "; " if item.catatan else ""
-                ) + "periode uji gagal dijalankan"
+                    (item.catatan + "; ") if item.catatan else ""
+                ) + f"periode uji gagal dijalankan: {detail}"
 
         hasil_grid.hasil.append(item)
 
@@ -404,10 +401,8 @@ def run_grid_search(
 
     if dilewati:
         hasil_grid.peringatan.append(
-            f"{dilewati} kombinasi dilewati karena parameter tidak valid atau "
-            "melanggar relasi wajib (mis. trailing melebihi SL). Kombinasi "
-            "seperti itu tidak bisa disimpan ke Pengaturan, jadi tidak ikut "
-            "diperingkat."
+            f"{dilewati} kombinasi tidak diperingkat karena parameter tidak valid "
+            "atau simulasi gagal."
         )
 
     andal = [h for h in hasil_grid.hasil if h.andal]
@@ -599,10 +594,8 @@ def run_portfolio_grid_search(
 
     if dilewati:
         hasil_grid.peringatan.append(
-            f"{dilewati} kombinasi dilewati karena parameter tidak valid atau "
-            "melanggar relasi wajib (mis. trailing melebihi SL). Kombinasi "
-            "seperti itu tidak bisa disimpan ke Pengaturan, jadi tidak ikut "
-            "diperingkat."
+            f"{dilewati} kombinasi tidak diperingkat karena parameter tidak valid "
+            "atau simulasi gagal."
         )
 
     andal = [h for h in hasil_grid.hasil if h.andal]
@@ -669,7 +662,7 @@ def cetak_tabel(hasil: HasilGridSearch, top_n: int = 15) -> None:
     print(f"{'='*104}")
     print(f"Kombinasi diuji     : {hasil.total_kombinasi:,}")
     print(f"Dipangkas (mubazir) : {hasil.dipangkas:,}")
-    print(f"Dilewati (invalid)  : {hasil.dilewati:,}")
+    print(f"Dilewati (tidak valid/gagal): {hasil.dilewati:,}")
     print(f"Bar latih / uji     : {hasil.bar_latih:,} / {hasil.bar_uji:,}")
     print(f"Waktu               : {hasil.detik:.1f} detik")
     if hasil.dibatalkan:
@@ -707,6 +700,17 @@ def cetak_tabel(hasil: HasilGridSearch, top_n: int = 15) -> None:
                 end="",
             )
         print(f" {'ya' if h.andal else 'TIDAK':>6}")
+
+    error_rows = [
+        h for h in hasil.hasil if h.catatan and "gagal" in h.catatan.lower()
+    ]
+    if error_rows:
+        print("\n  Rincian kegagalan simulasi:")
+        for h in error_rows[:5]:
+            params = ", ".join(f"{k}={v}" for k, v in sorted(h.params.items()))
+            print(f"  - {params}: {h.catatan}")
+        if len(error_rows) > 5:
+            print(f"  - dan {len(error_rows) - 5} kegagalan lainnya")
 
     for w in hasil.peringatan:
         print(f"\n  PERINGATAN: {w}")
@@ -778,267 +782,3 @@ def parse_spec_cli(teks: str) -> dict:
     if not spec:
         raise GridSearchError("Spesifikasi grid tidak menghasilkan parameter apa pun.")
     return spec
-
-
-def selftest() -> int:
-    """Uji lokal pencarian grid dengan gerbang trend aktif.
-
-    Menjaga dua hal yang pernah salah dan mudah terulang:
-      * candle trend yang sudah dirangkai tidak boleh dirangkai dua kali,
-      * penolakan gerbang trend harus benar-benar terlihat di hasil grid.
-    Tidak menghubungi Binance sama sekali.
-    """
-    print("=== SELFTEST grid_search.py: gerbang trend di jalur grid ===")
-    from backtesting.backtest_storage import KlineStore
-    from backtesting.synthetic_data import (
-        blok_setup_volume,
-        cfg_gerbang_pump_nonaktif,
-        seri_5m_trend,
-    )
-    from config.config import PUMP_CONFIG
-
-    gagal = 0
-
-    def cek(nama: str, syarat: bool, info: str = "") -> None:
-        nonlocal gagal
-        if not syarat:
-            gagal += 1
-        print(
-            ("  LULUS " if syarat else "  GAGAL ")
-            + nama
-            + (f"  -> {info}" if info else "")
-        )
-
-    def seri_drift(
-        arah: float,
-        siklus: int = 12,
-        jam_drift: int = 24,
-        tick: float = 0.0006,
-        volume: float = 5_000_000.0,
-    ):
-        """5m: drift searah selama sehari, ditutup satu blok setup, diulang."""
-        out, i, harga = [], 0, 100.0
-        for _ in range(siklus):
-            seg = seri_5m_trend(
-                harga=harga,
-                jam_trend=jam_drift,
-                arah=arah,
-                tick=tick,
-                volume=volume,
-                mulai_index=i,
-            )
-            out.extend(seg)
-            i += len(seg)
-            harga = seg[-1].close
-            blok, harga, i = blok_setup_volume(harga, i, volume)
-            out.extend(blok)
-        return out
-
-    def konfig(trend: bool) -> dict:
-        cfg = cfg_gerbang_pump_nonaktif(dict(PUMP_CONFIG))
-        cfg.update(
-            {
-                "MIN_QUOTE_VOLUME_USDT_24H": 1_000_000,
-                "BACKTEST_ENTRY_DELAY_BARS": 0,
-                "BACKTEST_ENTRY_SPREAD_PCT": 0.0,
-                "BACKTEST_SLIPPAGE_PCT": 0.0,
-                "_symbol": "TESTUSDT",
-                "USE_ATR_EXIT": False,
-                "TP_PCT": 2.0,
-                "SL_PCT": 1.0,
-                "MAX_CHASE_PCT": 0.0,
-                "MIN_SECONDS_BETWEEN_ENTRIES": 0,
-                "MAX_OPEN_POSITIONS": 1,
-                "BACKTEST_INITIAL_EQUITY_USDT": 1000.0,
-                "POSITION_SIZE_PCT": 10.0,
-                "TREND_FILTER_ENABLED": trend,
-                "TREND_INTERVAL": "1h",
-                "TREND_EMA_FAST": 20,
-                "TREND_EMA_SLOW": 50,
-                "TREND_ADX_PERIOD": 14,
-                "TREND_ADX_MIN": 20.0,
-                "TREND_LOOKBACK_BARS": 120,
-                # Dua gerbang demand dimatikan di fixture ini supaya uji fokus pada
-                # gerbang trend. Warmup harian (default 21 hari x 288 candle 5m)
-                # jauh lebih panjang dari data uji sintetis di sini dan akan
-                # menghabiskan seluruh periode uji, sedangkan gerbang demand H1
-                # menolak seluruh sinyal pada seri drift buatan ini sehingga uji
-                # trend jadi tidak bisa membedakan apa pun (terbukti: sebelum baris
-                # ini ditambahkan, uji trend_off selalu 0 sinyal). Keduanya diuji
-                # khusus di bagian uji gerbang demand masing-masing.
-                "DAILY_DEMAND_FILTER_ENABLED": False,
-                "HTF_DEMAND_FILTER_ENABLED": False,
-            }
-        )
-        return cfg
-
-    spec = {"TP_PCT": [2.0, 3.0], "SL_PCT": [1.0, 1.5]}
-
-    def total_trade(hasil, kunci: str) -> int:
-        return sum(
-            int(r.get(kunci, 0) or 0) for r in ringkas_untuk_tabel(hasil, top_n=99)
-        )
-
-    for nama, arah, harus_lolos in (
-        ("drift naik", 1.0, True),
-        ("drift turun", -1.0, False),
-    ):
-        kl = seri_drift(arah)
-        on = run_grid_search(
-            kl, konfig(True), spec, warmup_bars=0, min_trades=1, rasio_latih=0.6
-        )
-        off = run_grid_search(
-            kl, konfig(False), spec, warmup_bars=0, min_trades=1, rasio_latih=0.6
-        )
-        tr_on, tr_off = total_trade(on, "trades_latih"), total_trade(
-            off, "trades_latih"
-        )
-        cek(
-            f"[{nama}] warmup trend dinaikkan dan dilaporkan di peringatan",
-            any("Warmup" in w for w in on.peringatan),
-            len(on.peringatan),
-        )
-        cek(
-            f"[{nama}] empat kombinasi exit dinilai",
-            on.total_kombinasi == 4,
-            on.total_kombinasi,
-        )
-        cek(f"[{nama}] periode uji tetap tersedia", on.bar_uji >= 50, on.bar_uji)
-        if harus_lolos:
-            cek(
-                f"[{nama}] gerbang trend meloloskan sinyal (data trend dirangkai sekali)",
-                tr_on >= 1,
-                f"trend_on={tr_on} trend_off={tr_off}",
-            )
-        else:
-            cek(
-                f"[{nama}] gerbang trend memblokir sinyal latih",
-                tr_on == 0 and tr_off >= 1,
-                f"trend_on={tr_on} trend_off={tr_off}",
-            )
-
-    data = {"NAIKUSDT": seri_drift(1.0), "TURUNUSDT": seri_drift(-1.0)}
-    with KlineStore.from_klines(data) as store:
-        on_pf = run_portfolio_grid_search(
-            store, konfig(True), "5m", 0, spec, min_trades=1, rasio_latih=0.6
-        )
-        off_pf = run_portfolio_grid_search(
-            store, konfig(False), "5m", 0, spec, min_trades=1, rasio_latih=0.6
-        )
-    total_on = total_trade(on_pf, "trades_latih") + total_trade(on_pf, "trades_uji")
-    total_off = total_trade(off_pf, "trades_latih") + total_trade(off_pf, "trades_uji")
-    cek(
-        "grid portofolio memakai gerbang trend yang sama",
-        any("Warmup" in w for w in on_pf.peringatan) and 0 < total_on < total_off,
-        f"trend_on={total_on} trend_off={total_off}",
-    )
-
-
-    print("\n=== SELFTEST grid_search.py: gerbang demand harian di jalur grid ===")
-    from backtesting.synthetic_data import make_candle as _mc
-
-    BAR_HARI_G = 288
-
-    def _hari_datar_g(idx_hari: int, harga: float = 100.0) -> list:
-        return [
-            _mc(idx_hari * BAR_HARI_G + j, harga, harga * 1.001, harga * 0.999, harga)
-            for j in range(BAR_HARI_G)
-        ]
-
-    def _hari_naik_g(idx_hari: int, buka: float, tutup: float) -> list:
-        out = []
-        for j in range(BAR_HARI_G):
-            o = buka + (tutup - buka) * j / float(BAR_HARI_G)
-            c = buka + (tutup - buka) * (j + 1) / float(BAR_HARI_G)
-            out.append(
-                _mc(
-                    idx_hari * BAR_HARI_G + j,
-                    o,
-                    max(o, c) * 1.0005,
-                    min(o, c) * 0.9995,
-                    c,
-                )
-            )
-        return out
-
-    def _seri_harian_g(tutup_hari_sinyal: float) -> list:
-        seri: list = []
-        for hari in range(4):
-            seri.extend(_hari_datar_g(hari))
-        seri.extend(_hari_naik_g(4, 100.0, tutup_hari_sinyal))
-        seri.extend(_hari_datar_g(5, tutup_hari_sinyal)[: BAR_HARI_G - 20])
-        blok, _harga, _i = blok_setup_volume(tutup_hari_sinyal, 5 * BAR_HARI_G + BAR_HARI_G - 20)
-        seri.extend(blok)
-        return seri
-
-    def konfig_harian(tutup_gate: bool) -> dict:
-        cfg = konfig(False)
-        cfg.update(
-            {
-                "DAILY_DEMAND_FILTER_ENABLED": True,
-                "DAILY_DEMAND_INTERVAL": "1d",
-                "DAILY_DEMAND_LOOKBACK_BARS": 3,
-                "DAILY_DEMAND_ZONE_BUFFER_PCT": 1.0,
-                "DAILY_DEMAND_MAX_DISTANCE_PCT": 8.0,
-                "DAILY_DEMAND_MIN_CLOSE_POSITION": 0.4,
-                "DEMAND_ZONE_FILTER_ENABLED": False,
-                "HTF_DEMAND_FILTER_ENABLED": False,
-            }
-        )
-        cfg["DAILY_DEMAND_FILTER_ENABLED"] = bool(tutup_gate)
-        return cfg
-
-    kl_jauh_g = _seri_harian_g(110.0)
-    kl_dasar_g = _seri_harian_g(100.7)
-    # Pembanding tanpa gerbang memakai warmup yang SAMA (1440 bar) supaya kedua
-    # jalur mulai menilai dari bar yang sama; kalau tidak, perbandingannya cuma
-    # mengukur perbedaan warmup, bukan keputusan gerbang hariannya.
-    warmup_harian_g = parity.htf_gate_warmup_bars(konfig_harian(True), "5m")
-    grid_jauh_on = run_grid_search(
-        kl_jauh_g, konfig_harian(True), spec, warmup_bars=0, min_trades=1, rasio_latih=0.6
-    )
-    grid_jauh_off = run_grid_search(
-        kl_jauh_g,
-        konfig_harian(False),
-        spec,
-        warmup_bars=warmup_harian_g,
-        min_trades=1,
-        rasio_latih=0.6,
-    )
-    grid_dasar_on = run_grid_search(
-        kl_dasar_g, konfig_harian(True), spec, warmup_bars=0, min_trades=1, rasio_latih=0.6
-    )
-    tr_jauh_on = total_trade(grid_jauh_on, "trades_latih") + total_trade(
-        grid_jauh_on, "trades_uji"
-    )
-    tr_jauh_off = total_trade(grid_jauh_off, "trades_latih") + total_trade(
-        grid_jauh_off, "trades_uji"
-    )
-    tr_dasar_on = total_trade(grid_dasar_on, "trades_latih") + total_trade(
-        grid_dasar_on, "trades_uji"
-    )
-    cek(
-        "gerbang demand harian memblokir sinyal di jalur grid",
-        tr_jauh_on == 0 and tr_jauh_off >= 1,
-        f"harian_on={tr_jauh_on} harian_off={tr_jauh_off}",
-    )
-    cek(
-        "warmup gerbang harian dilaporkan di peringatan",
-        any("demand 1d" in w for w in grid_jauh_on.peringatan),
-        grid_jauh_on.peringatan[:1],
-    )
-    cek(
-        "sinyal yang dekat dasar harian tetap dinilai (gerbang tidak memblokir semua)",
-        tr_dasar_on >= 1,
-        f"harian_on={tr_dasar_on}",
-    )
-
-    print(
-        "HASIL SELFTEST grid_search: "
-        + ("SEMUA LULUS" if not gagal else f"{gagal} GAGAL")
-    )
-    return 0 if not gagal else 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(selftest())

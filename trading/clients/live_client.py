@@ -111,10 +111,23 @@ class LiveClient(ExchangeClient):
                 None,
                 "API key tidak mengizinkan Spot & Margin Trading",
             )
+        if permission.get("enableWithdrawals") is not False:
+            raise BinanceAPIError(
+                403,
+                None,
+                "API key harus menonaktifkan izin withdrawal",
+            )
+        if permission.get("ipRestrict") is not True:
+            raise BinanceAPIError(
+                403,
+                None,
+                "API key harus mengaktifkan pembatasan IP",
+            )
         self._spot_permission_verified_until = now + 60.0
         if not self._spot_permission_logged:
             logger.info(
-                "Izin API key Spot trading terverifikasi melalui "
+                "Izin API key terverifikasi: read aktif, Spot trading aktif, "
+                "withdrawal nonaktif, dan pembatasan IP aktif melalui "
                 "GET /sapi/v1/account/apiRestrictions."
             )
             self._spot_permission_logged = True
@@ -148,7 +161,8 @@ class LiveClient(ExchangeClient):
         if not self._account_permission_diagnostic_logged:
             logger.info(
                 "DIAGNOSTIK AMAN permission akun: permissions=%s | "
-                "canTrade=%s | accountType=%s | apiRestrictionsSpot=True. "
+                "canTrade=%s | accountType=%s | apiRestrictions=read+spot, "
+                "withdrawals-disabled, ip-restricted. "
                 "Saldo, UID, API key, dan secret tidak dicatat.",
                 self._safe_permission_diagnostic(account),
                 self._safe_diagnostic_label(account.get("canTrade")),
@@ -261,6 +275,9 @@ class LiveClient(ExchangeClient):
             order_id=order_id,
             orig_client_order_id=orig_client_order_id,
         )
+
+    def get_my_trades(self, symbol: str, order_id: int) -> list:
+        return self.signed.get_my_trades(symbol, order_id)
 
     def get_open_orders(self, symbol: Optional[str] = None) -> list:
         return self.signed.get_open_orders(symbol)

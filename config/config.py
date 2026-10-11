@@ -44,22 +44,22 @@ PUMP_CONFIG = {
     "BTC_LOOKBACK_BARS": 3,
     "USE_ATR_EXIT": True,
     "ATR_PERIOD": 14,
-    "ATR_MULT_SL": 8.0,  # 1.5
-    "ATR_MULT_TP": 16.0,  # 3.0
-    "ATR_MULT_TRAIL": 5.0,  # 1.0
-    "ATR_MULT_BE_TRIGGER": 6.0,  # 1.0
-    "ATR_MULT_BE_LOCK": 0.75,  # 0.1
-    "ATR_MULT_TRAIL_START": 16.0,  # 1.5
+    "ATR_MULT_SL": 8.0,
+    "ATR_MULT_TP": 16.0,
+    "ATR_MULT_TRAIL": 5.0,
+    "ATR_MULT_BE_TRIGGER": 6.0,
+    "ATR_MULT_BE_LOCK": 0.75,
+    "ATR_MULT_TRAIL_START": 16.0,
     "EXTRA_EXCLUDE_SYMBOLS": [],
     "BACKTEST_INITIAL_EQUITY_USDT": 0.0,
     "BACKTEST_CACHE_ENABLED": True,
     "BACKTEST_CACHE_FILE": "data/backtest_cache.sqlite3",
     "BACKTEST_CACHE_FRESH_HOURS": 24,
     "BACKTEST_CACHE_TTL_DAYS": 30,
-    "USE_TP": False,  # dimatikan: hasil validasi 365 hari
+    "USE_TP": False,
     "TP_PCT": 4.0,
     "USE_STOP_LOSS": True,
-    "USE_NATIVE_OCO": False,  # OCO memerlukan TP aktif; SL tetap lewat USE_NATIVE_STOP_LOSS
+    "USE_NATIVE_OCO": False,
     "USE_NATIVE_STOP_LOSS": True,
     "NATIVE_OCO_LIMIT_BUFFER_PCT": 0.10,
     "SL_PCT": 1.8,
@@ -83,10 +83,11 @@ PUMP_CONFIG = {
     "SUPERVISOR_RESTART_BACKOFF_SECONDS": 5,
     "STATE_FILE": "data/pump_bot_state.json",
     "LOG_FILE": "logs/pump_bot.log",
+    "TRADE_LEDGER_FILE": "data/pump_trade_ledger.jsonl",
     "HEARTBEAT_INTERVAL_SECONDS": 300,
     "CONTROL_FILE": "data/pump_bot_control.json",
     "USE_DUST_SWEEP": True,
-    "TOP_N_CANDIDATES_TO_CONFIRM": 5, #30
+    "TOP_N_CANDIDATES_TO_CONFIRM": 5,
     "CONFIRM_INTERVAL": "5m",
     "CONFIRM_LOOKBACK_BARS": 60,
     "TREND_FILTER_ENABLED": True,
@@ -317,6 +318,14 @@ def get_log_file(config: dict = None) -> str:
     return _mode_filename(str(cfg.get("LOG_FILE", "logs/pump_bot.log")), get_mode(cfg))
 
 
+def get_trade_ledger_file(config: dict = None) -> str:
+    cfg = PUMP_CONFIG if config is None else config
+    return _mode_filename(
+        str(cfg.get("TRADE_LEDGER_FILE", "data/pump_trade_ledger.jsonl")),
+        get_mode(cfg),
+    )
+
+
 def get_control_file(config: dict = None) -> str:
     cfg = PUMP_CONFIG if config is None else config
     return _mode_filename(
@@ -335,6 +344,7 @@ def _finalize_config_dict(cfg: dict) -> dict:
     cfg["BASE_URL"] = get_base_url(cfg)
     cfg["STATE_FILE"] = _runtime_path(get_state_file(cfg))
     cfg["LOG_FILE"] = _runtime_path(get_log_file(cfg))
+    cfg["TRADE_LEDGER_FILE"] = _runtime_path(get_trade_ledger_file(cfg))
     cfg["CONTROL_FILE"] = _runtime_path(get_control_file(cfg))
     cfg["PAPER_ACCOUNT_STATE_FILE"] = _runtime_path(get_paper_account_file(cfg))
     cfg["RATE_LIMIT_STATE_FILE"] = _runtime_path(

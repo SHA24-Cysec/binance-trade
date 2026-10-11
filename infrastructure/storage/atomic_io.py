@@ -93,9 +93,6 @@ def interprocess_lock(path: os.PathLike | str) -> Iterator[None]:
             finally:
                 _release_lock(fd)
         finally:
-            # Penutupan tidak boleh melempar: kalau ditutup dengan galat,
-            # pengecualian asli (misalnya galat bisnis di dalam blok with) akan
-            # tertutup dan fd tetap tertinggal di beberapa jalur.
             try:
                 os.close(fd)
             except OSError as exc:

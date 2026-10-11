@@ -190,11 +190,6 @@ def seri_5m_trend(
     mulai_index: int = 0,
     ayun: float = 0.0,
 ) -> list[Kline]:
-    """Candle 5m dengan arah trend per jam yang ditentukan.
-
-    arah > 0 naik, arah < 0 turun. `ayun` menyisipkan candle berlawanan arah
-    setiap beberapa candle supaya ADX tidak melulu 100 (trend naik tapi lemah).
-    """
     out: list[Kline] = []
     i = mulai_index
     price = float(harga)
@@ -202,8 +197,6 @@ def seri_5m_trend(
     for bar in range(total):
         langkah = tick * (1.0 if arah >= 0 else -1.0) * abs(arah)
         if ayun > 0:
-            # gigi gergaji: naik lebih besar, turun lebih kecil, jadi net tetap
-            # searah `arah` tetapi ADX tidak pernah jenuh 100.
             langkah = tick * (1.0 + ayun) if bar % 2 == 0 else -tick * ayun * abs(arah)
         price = price * (1.0 + langkah)
         out.append(
@@ -223,12 +216,6 @@ def seri_5m_trend(
 def blok_setup_volume(
     harga: float, mulai_index: int, volume: float = 5_000_000.0, lonjakan: float = 3.0
 ) -> tuple[list[Kline], float, int]:
-    """Blok kecil 20 candle: basis sempit lalu breakout dengan lonjakan volume.
-
-    Dirancang lolos filter volume rolling dan filter zona demand pada konfigurasi
-    default bot, dan hanya memakai data dari blok itu sendiri sehingga bisa
-    ditempel pada seri trend naik maupun turun.
-    """
     out: list[Kline] = []
     i = mulai_index
     harga = float(harga)
@@ -268,7 +255,6 @@ def seri_trend_dengan_setup(
     ayun: float = 0.0,
     lonjakan: float = 3.0,
 ) -> list[Kline]:
-    """Seri trend berarah lalu ditutup blok setup entry yang sah secara lokal."""
     out = seri_5m_trend(
         harga=harga, jam_trend=jam_trend, arah=arah, tick=tick, volume=volume, ayun=ayun
     )

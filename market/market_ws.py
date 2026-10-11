@@ -4,6 +4,7 @@ import json
 import logging
 import threading
 import time
+from collections import OrderedDict
 from typing import Any, Optional
 
 try:
@@ -17,6 +18,8 @@ except ImportError:
 logger = logging.getLogger("market_ws")
 
 _PROACTIVE_RECONNECT_SECONDS = 23 * 3600
+_MAX_STREAMS_PER_CONNECTION = 1024
+_MAX_BOOK_TICKER_STREAMS = _MAX_STREAMS_PER_CONNECTION - 1
 _PING_INTERVAL = 20
 _PING_TIMEOUT = 10
 
@@ -76,7 +79,7 @@ class MarketWebSocket:
 
         self._sub_lock = threading.RLock()
         self._want_all_mini = False
-        self._want_streams: set[str] = set()
+        self._want_streams: OrderedDict[str, None] = OrderedDict()
         self._msg_id = 0
         self._last_connect_ts = 0.0
         self._connected_once = False
@@ -105,16 +108,7 @@ class MarketWebSocket:
             t.join(timeout=5.0)
 
     def subscribe_symbol(self, symbol: str, book_ticker: bool = True) -> None:
-        s = symbol.lower()
-        new: list[str] = []
-        with self._sub_lock:
-            if book_ticker:
-                name = f"{s}@bookTicker"
-                if name not in self._want_streams:
-                    self._want_streams.add(name)
-                    new.append(name)
-        if new:
-            self._send({"method": "SUBSCRIBE", "params": new, "id": self._next_id()})
+        self.subscribe_symbols((symbol,), book_ticker=book_ticker)
 
     def get_price(self, symbol: str) -> tuple[Optional[float], float]:
         return self._prices.get(symbol.upper())
@@ -123,19 +117,69 @@ class MarketWebSocket:
         return self._book.get(symbol.upper())
 
     def subscribe_symbols(self, symbols, book_ticker: bool = True) -> None:
-        new: list[str] = []
+        if not book_ticker:
+            return
+        requested: list[str] = []
+        seen: set[str] = set()
+        for symbol in symbols or ():
+            value = str(symbol).strip().lower()
+            if not value:
+                continue
+            stream = f"{value}@bookTicker"
+            if stream not in seen:
+                requested.append(stream)
+                seen.add(stream)
+        if not requested:
+            return
+
+        new_streams: list[str] = []
+        removed_streams: list[str] = []
         with self._sub_lock:
-            for symbol in symbols or ():
-                s = str(symbol).strip().lower()
-                if not s:
-                    continue
-                if book_ticker:
-                    name = f"{s}@bookTicker"
-                    if name not in self._want_streams:
-                        self._want_streams.add(name)
-                        new.append(name)
-        if new:
-            self._send({"method": "SUBSCRIBE", "params": new, "id": self._next_id()})
+            for stream in requested:
+                if stream in self._want_streams:
+                    self._want_streams.move_to_end(stream)
+                else:
+                    self._want_streams[stream] = None
+                    new_streams.append(stream)
+            while len(self._want_streams) > _MAX_BOOK_TICKER_STREAMS:
+                evicted, _ = self._want_streams.popitem(last=False)
+                if evicted in new_streams:
+                    new_streams.remove(evicted)
+                else:
+                    removed_streams.append(evicted)
+
+            if removed_streams:
+                self._send(
+                    {
+                        "method": "UNSUBSCRIBE",
+                        "params": removed_streams,
+                        "id": self._next_id(),
+                    }
+                )
+            if new_streams:
+                self._send(
+                    {
+                        "method": "SUBSCRIBE",
+                        "params": new_streams,
+                        "id": self._next_id(),
+                    }
+                )
+            active_count = len(self._want_streams)
+
+        if removed_streams:
+            logger.warning(
+                "Batas WebSocket bookTicker tercapai: %d/%d stream dipertahankan; "
+                "%d stream paling lama dilepas.",
+                active_count,
+                _MAX_BOOK_TICKER_STREAMS,
+                len(removed_streams),
+            )
+        elif new_streams:
+            logger.debug(
+                "WebSocket bookTicker bertambah: %d/%d stream aktif.",
+                active_count,
+                _MAX_BOOK_TICKER_STREAMS,
+            )
 
     def all_mini_tickers(self) -> "tuple[dict[str, dict], float]":
         with self._mini_lock:
@@ -162,6 +206,11 @@ class MarketWebSocket:
         joined = "/".join(sorted(streams))
         return f"{self.ws_base_url}/stream?streams={joined}"
 
+    def _configured_stream_count(self) -> int:
+        with self._sub_lock:
+            includes_mini_ticker = self._want_all_mini or not self._want_streams
+            return len(self._want_streams) + int(includes_mini_ticker)
+
     def _send(self, payload: dict) -> None:
         app = self._app
         if app is None or not self._connected.is_set():
@@ -183,7 +232,11 @@ class MarketWebSocket:
             url = self._build_url()
             self._last_connect_ts = time.monotonic()
             self._connected_once = False
-            logger.info("WebSocket menyambung: %s", url)
+            logger.info(
+                "WebSocket menyambung dengan %d/%d stream.",
+                self._configured_stream_count(),
+                _MAX_STREAMS_PER_CONNECTION,
+            )
             self._app = WebSocketApp(
                 url,
                 on_open=self._on_open,
@@ -213,7 +266,11 @@ class MarketWebSocket:
     def _on_open(self, _app) -> None:
         self._connected.set()
         self._connected_once = True
-        logger.info("WebSocket tersambung.")
+        logger.info(
+            "WebSocket tersambung dengan %d/%d stream.",
+            self._configured_stream_count(),
+            _MAX_STREAMS_PER_CONNECTION,
+        )
 
     def _on_error(self, _app, error) -> None:
         logger.debug("WebSocket error: %s", error)
@@ -226,6 +283,24 @@ class MarketWebSocket:
         try:
             obj = json.loads(message)
         except (ValueError, TypeError):
+            return
+        if isinstance(obj, dict) and "id" in obj and (
+            "result" in obj or "code" in obj or "msg" in obj
+        ):
+            if "code" in obj or "msg" in obj:
+                logger.warning(
+                    "Permintaan kontrol WebSocket ditolak (id=%s, code=%s): %s",
+                    obj.get("id"),
+                    obj.get("code"),
+                    str(obj.get("msg") or "respons error tanpa pesan")[:180],
+                )
+            else:
+                logger.debug(
+                    "Ack kontrol WebSocket id=%s; stream=%d/%d.",
+                    obj.get("id"),
+                    self._configured_stream_count(),
+                    _MAX_STREAMS_PER_CONNECTION,
+                )
             return
         data = obj.get("data") if isinstance(obj, dict) else None
         if data is None:

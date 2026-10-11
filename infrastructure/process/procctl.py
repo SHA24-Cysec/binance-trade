@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 import os
 import signal
 import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 if os.name == "nt":
     import ctypes
@@ -251,13 +254,63 @@ def send_graceful_signal(pid: int, *, process_group: bool = True) -> None:
             os.kill(int(pid), signal.SIGTERM)
 
 
+def _taskkill_process_tree(pid: int) -> bool:
+    system_root = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
+    executable = (
+        os.path.join(system_root, "System32", "taskkill.exe")
+        if system_root
+        else "taskkill.exe"
+    )
+    try:
+        result = subprocess.run(
+            [executable, "/PID", str(pid), "/T", "/F"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=10.0,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning(
+            "Fallback taskkill untuk pohon proses PID %s gagal (%s); "
+            "terminasi proses induk akan dicoba.",
+            pid,
+            exc,
+        )
+        return False
+
+    if result.returncode == 0:
+        logger.info("Pohon proses Windows PID %s dihentikan dengan taskkill.", pid)
+        return True
+
+    output = str(result.stdout or "").strip().replace("\r", " ")[:240]
+    logger.warning(
+        "Fallback taskkill untuk pohon proses PID %s gagal dengan kode %s (%s); "
+        "terminasi proses induk akan dicoba.",
+        pid,
+        result.returncode,
+        output or "tanpa rincian",
+    )
+    return False
+
+
 def force_kill(
     pid: int, tree: ProcessTreeHandle | None = None, *, process_group: bool = True
 ) -> None:
     if os.name == "nt":
+        try:
+            target_pid = int(pid)
+        except (TypeError, ValueError):
+            return
+        if target_pid <= 0:
+            return
         if tree is not None and tree.terminate(exit_code=1):
             return
-        handle = _kernel32.OpenProcess(_PROCESS_TERMINATE, False, int(pid))
+        if _taskkill_process_tree(target_pid):
+            return
+        handle = _kernel32.OpenProcess(_PROCESS_TERMINATE, False, target_pid)
         if not handle:
             return
         try:

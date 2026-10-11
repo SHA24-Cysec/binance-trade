@@ -65,9 +65,6 @@ def is_structurally_allowed_symbol(
         return False
     if symbol in set(config.get("EXTRA_EXCLUDE_SYMBOLS", [])):
         return False
-    # Koin yang sedang diblokir oleh aturan SAME_COIN_BLOCK (loss sebelumnya)
-    # dikecualikan dari kandidat. Kunci privat ini hanya diisi oleh run loop bot;
-    # backtest tidak mengisinya sehingga tidak terpengaruh.
     if symbol in set(config.get("_blocked_symbols") or ()):
         return False
     if tradable_symbols is not None and symbol not in tradable_symbols:
@@ -496,11 +493,6 @@ def setup_quality_key(setup: SetupResult, candidate: Candidate) -> tuple:
 
 
 def trend_verdict(symbol: str, config: dict, trend_provider) -> dict:
-    """Gerbang trend timeframe tinggi untuk satu kandidat.
-
-    Aturan fail closed yang sama seperti filter BTC: kalau candle trend tidak
-    bisa diambil atau riwayatnya kurang, kandidat DITOLAK, bukan diloloskan.
-    """
     from strategy import indicators as strategy_mod
 
     interval = str(config.get("TREND_INTERVAL", "1h") or "1h")
@@ -545,14 +537,6 @@ def trend_verdict(symbol: str, config: dict, trend_provider) -> dict:
 
 
 def htf_demand_verdict(symbol: str, config: dict, trend_provider) -> dict:
-    """Gerbang zona demand timeframe tinggi (default H1) untuk satu kandidat.
-
-    Melengkapi gerbang trend: memakai candle timeframe tinggi yang SAMA dari
-    penyedia yang sama (TrendCache di live, TrendLookup di backtest), jadi
-    tidak ada unduhan tambahan ke Binance. Fail closed seperti gerbang trend:
-    kalau candle tidak bisa diambil atau riwayatnya kurang, kandidat DITOLAK,
-    bukan diloloskan.
-    """
     from strategy import indicators as strategy_mod
 
     interval = str(config.get("TREND_INTERVAL", "1h") or "1h")
@@ -594,15 +578,6 @@ def htf_demand_verdict(symbol: str, config: dict, trend_provider) -> dict:
 
 
 def daily_demand_verdict(symbol: str, config: dict, daily_provider) -> dict:
-    """Gerbang zona demand harian (default 1d) untuk satu kandidat.
-
-    Lapisan ketiga setelah zona demand M5 dan zona demand H1. Memakai penyedia
-    candle harian tersendiri (DailyDemandCache di live, DailyDemandLookup di
-    backtest) karena intervalnya berbeda dari TREND_INTERVAL, sehingga tidak
-    bisa menumpang cache candle H1. Fail closed seperti gerbang lain: kalau
-    candle harian tidak bisa diambil atau riwayatnya kurang, kandidat DITOLAK,
-    bukan diloloskan.
-    """
     from strategy import indicators as strategy_mod
 
     try:
@@ -647,13 +622,6 @@ def daily_demand_verdict(symbol: str, config: dict, daily_provider) -> dict:
 
 
 def daily_trend_verdict(symbol: str, config: dict, daily_trend_provider) -> dict:
-    """Gerbang EMA + ADX timeframe harian (default 1d) untuk satu kandidat.
-
-    Lapisan tambahan di atas gerbang trend H1 dan gerbang demand. Memakai penyedia
-    candle harian tersendiri (DailyTrendCache di live, DailyTrendLookup di backtest)
-    karena intervalnya bisa berbeda dari TREND_INTERVAL. Fail closed: kalau candle
-    harian tidak bisa diambil, kosong, atau riwayatnya kurang, kandidat DITOLAK.
-    """
     from strategy import indicators as strategy_mod
 
     try:

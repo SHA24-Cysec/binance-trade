@@ -461,6 +461,16 @@ class BotProcessManager:
         cfg = cfgmod.PUMP_CONFIG
         if not bool(cfg.get("SUPERVISOR_AUTO_RESTART", False)):
             return
+        state_path = str(cfg.get("STATE_FILE") or "")
+        if mode == "LIVE" and (
+            not state_path or not Path(state_path).exists()
+        ):
+            self._auto_restart_mode = None
+            self._last_job_warning = (
+                "Auto-restart LIVE diblokir karena file state hilang; "
+                "konfirmasi operator melalui dashboard diperlukan."
+            )
+            return
         now = time.monotonic()
         window = max(
             60.0, float(cfg.get("SUPERVISOR_RESTART_WINDOW_SECONDS", 300) or 300)
@@ -661,7 +671,12 @@ class BotProcessManager:
         target = _mode(mode or cfgmod.get_mode(cfgmod.PUMP_CONFIG))
         return mode_switch_guard(target)
 
-    def start(self, *, _auto_restart: bool = False) -> dict:
+    def start(
+        self,
+        *,
+        _auto_restart: bool = False,
+        allow_missing_live_state: bool = False,
+    ) -> dict:
         cfgmod = self._config()
         with self._operation_lock:
             with self._lock:
@@ -676,6 +691,22 @@ class BotProcessManager:
                         + "; ".join(cfgmod.CONFIG_LOAD_ERRORS)
                     )
                 mode = cfgmod.require_valid_mode(cfgmod.PUMP_CONFIG)
+                state_file_missing = not Path(
+                    cfgmod.PUMP_CONFIG["STATE_FILE"]
+                ).exists()
+                if allow_missing_live_state and mode != "LIVE":
+                    raise BotControlError(
+                        "Konfirmasi state hilang hanya berlaku pada mode LIVE."
+                    )
+                if (
+                    mode == "LIVE"
+                    and state_file_missing
+                    and not allow_missing_live_state
+                ):
+                    raise BotControlError(
+                        "File state LIVE tidak ditemukan. Gunakan konfirmasi eksplisit "
+                        "di dashboard setelah memeriksa posisi dan order akun."
+                    )
                 current = self.status(mode)
                 if current["status"] in ("STARTING", "RUNNING", "STOPPING"):
                     raise BotControlError(
@@ -694,9 +725,12 @@ class BotProcessManager:
                 env = os.environ.copy()
                 env["PUMP_BOT_MANAGED"] = "1"
                 env["PUMP_BOT_MANAGED_MODE"] = mode
+                bot_args = ["trading.pump_scanner_bot"]
+                if mode == "LIVE" and state_file_missing:
+                    bot_args.append("--acknowledge-missing-live-state")
                 proc, tree = procctl.spawn_python(
                     "-m",
-                    args=["trading.pump_scanner_bot"],
+                    args=bot_args,
                     cwd=PROJECT_ROOT,
                     env=env,
                 )

@@ -89,7 +89,7 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "RATE_LIMIT_STATE_FILE": _field(
         "Sistem",
         "Ledger rate limit",
-        "File runtime bersama untuk koordinasi REQUEST_WEIGHT lintas proses.",
+        "File dasar ledger REQUEST_WEIGHT API dan SAPI per endpoint lintas proses.",
         "str",
         read_only=True,
     ),
@@ -621,6 +621,13 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     ),
     "LOG_FILE": _field(
         "Sistem", "File log", "Path runtime internal per mode.", "str", read_only=True
+    ),
+    "TRADE_LEDGER_FILE": _field(
+        "Sistem",
+        "Ledger trade",
+        "Riwayat fill dan PnL per mode yang digunakan dashboard.",
+        "str",
+        read_only=True,
     ),
     "HEARTBEAT_INTERVAL_SECONDS": _field(
         "Sistem",
@@ -1192,11 +1199,6 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         "bool",
         dangerous=True,
     ),
-    # ------------------------------------------------------------ Tampilan IDR
-    # Satu grup khusus untuk lapisan tampilan rupiah. Semua field di grup ini
-    # hanya dibaca dashboard; bot, sizing, order, dan backtest tidak memakainya.
-    # Nilai kurs selalu ditampilkan sebagai pelengkap: angka USDT tetap menjadi
-    # angka utama, rupiah menyusul di baris sub judul.
     "IDR_DISPLAY_ENABLED": _field(
         "Tampilan IDR",
         "Tampilkan nilai rupiah",
@@ -1340,11 +1342,9 @@ REMOVED_PARAMETERS = frozenset(
         "DETECTOR_WEIGHT_VOLUME24",
         "DETECTOR_TOP_N",
         "DAILY_KLINE_CACHE_TTL_SECONDS",
-        # Stop harian dihapus total: kunci lama di settings.json dibuang diam-diam.
         "USE_DAILY_STOP",
         "MAX_DAILY_LOSS_PERCENT",
         "DAILY_PROFIT_TARGET_PERCENT",
-        # Remove obsolete detector-score settings from older mode overrides.
         "DETECTOR_ENABLED",
         "DETECTOR_WEIGHT_CHANGE",
         "DETECTOR_WEIGHT_VOLUME5M",
@@ -1491,7 +1491,6 @@ def coerce_field(key: str, value: Any, candidate: dict) -> Any:
 
 
 def _angka_untuk_relasi(cfg: dict, key: str) -> float | None:
-    """Ambil angka untuk aturan silang. None berarti kuncinya tidak bisa dipakai."""
     if key not in cfg or cfg[key] is None:
         return None
     try:
@@ -1510,22 +1509,6 @@ def _flag_untuk_relasi(cfg: dict, key: str, default: bool) -> bool:
 
 
 def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str]:
-    """Satu sumber kebenaran untuk aturan silang antar parameter.
-
-    Semua pemanggil (penyimpanan setting di dashboard, validasi parameter
-    backtest, dan penyaring kombinasi grid search) wajib lewat sini supaya
-    ketiganya tidak bisa berbeda pendapat lagi tentang konfigurasi yang sama.
-
-    mode_aware=False : dipakai penyimpanan setting. Relasi exit dan demand dicek
-        apa pun mode yang sedang aktif, karena mode bisa dipindah kapan saja dan
-        kombinasi yang terbalik harus ketahuan sebelum disimpan.
-    mode_aware=True  : dipakai jalur simulasi. Hanya relasi dari mode aktif yang
-        dicek, supaya kombinasi grid yang sedang menyetel parameter nonaktif tidak
-        dibatalkan tanpa sebab.
-
-    Kunci yang tidak ada di `cfg` membuat aturannya dilewati, jadi fungsi ini aman
-    untuk config sebagian (misalnya cfg milik test atau grid).
-    """
 
     def ambil(*keys: str) -> "list[float] | None":
         nilai = [_angka_untuk_relasi(cfg, k) for k in keys]
@@ -1588,10 +1571,6 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
             "harus lebih besar dari PUMP_MIN_24H_CHANGE_PCT (atau 0 untuk menonaktifkan)"
         )
 
-    # Tampilan IDR: mode MANUAL tanpa angka kurs hanya menghasilkan dashboard
-    # tanpa elemen rupiah sama sekali, jadi lebih baik ditolak saat disimpan
-    # daripada baru ketahuan saat halaman dibuka. Relasi ini dicek di semua
-    # jalur karena sifatnya statis (tidak bergantung mode PAPER/LIVE).
     if "IDR_RATE_MODE" in cfg and "IDR_RATE_MANUAL" in cfg:
         mode_kurs = str(cfg.get("IDR_RATE_MODE", "AUTO") or "AUTO").strip().upper()
         nilai_kurs = _angka_untuk_relasi(cfg, "IDR_RATE_MANUAL")
@@ -1617,7 +1596,7 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
         menit_konfirmasi = _INTERVAL_MINUTES.get(
             str(cfg.get("CONFIRM_INTERVAL", "")).lower()
         )
-    except ImportError:  # strategi belum tersedia saat skema dimuat sendiri
+    except ImportError:
         menit_trend = menit_konfirmasi = None
     if menit_trend and menit_konfirmasi:
         if menit_trend % menit_konfirmasi != 0 or menit_trend < menit_konfirmasi:
@@ -1635,7 +1614,7 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
         menit_konfirmasi_harian = _INTERVAL_MINUTES_HARIAN.get(
             str(cfg.get("CONFIRM_INTERVAL", "")).lower()
         )
-    except ImportError:  # strategi belum tersedia saat skema dimuat sendiri
+    except ImportError:
         menit_harian = menit_konfirmasi_harian = None
     if menit_harian and menit_konfirmasi_harian:
         if menit_harian % menit_konfirmasi_harian != 0 or (
@@ -1684,7 +1663,7 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
             menit_konfirmasi_tren_harian = _INTERVAL_MINUTES_TREN_HARIAN.get(
                 str(cfg.get("CONFIRM_INTERVAL", "")).lower()
             )
-        except ImportError:  # strategi belum tersedia saat skema dimuat sendiri
+        except ImportError:
             menit_tren_harian = menit_konfirmasi_tren_harian = None
         if menit_tren_harian and menit_konfirmasi_tren_harian:
             if menit_tren_harian % menit_konfirmasi_tren_harian != 0 or (
@@ -1741,12 +1720,6 @@ def validate_candidate(
             str(cleaned.get("MODE", "")).strip().upper() == normalized_mode,
             "MODE pada konfigurasi tidak sama dengan mode yang sedang divalidasi",
         )
-        # Semua aturan silang antar parameter diambil dari satu sumber yang sama
-        # dengan validasi parameter backtest dan penyaring kombinasi grid search.
-        # Di jalur penyimpanan setting, mode_aware dimatikan sehingga kombinasi
-        # exit yang terbalik tetap ditolak walau mode exit-nya sedang tidak aktif:
-        # mode bisa dipindah kapan saja dan settings.json tidak boleh menyimpan
-        # nilai yang begitu dipindah langsung rusak.
         for kunci_relasi, pesan_relasi in relation_violations(cleaned).items():
             relation(kunci_relasi, False, pesan_relasi)
 

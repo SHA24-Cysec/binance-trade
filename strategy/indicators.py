@@ -176,29 +176,6 @@ def atr(klines: list[Kline], period: int = 14) -> float | None:
 
 
 def detect_demand_zone(klines: list[Kline], config: dict) -> dict:
-    """Konfirmasi posisi harga terhadap zona demand pada candle tertutup.
-
-    Aturan, dipakai identik oleh LIVE, PAPER, dan backtest:
-
-    1. zona_low  = low terendah "rak", yaitu candle di dalam DEMAND_LOOKBACK_BARS
-                   candle tertutup terakhir yang menutup di area dasar (area
-                   akumulasi; sumbu sesaat dan candle impuls tidak ikut).
-    2. zone_high = puncak body terendah di dalam rak, ditebalkan minimal
-                   DEMAND_ZONE_BUFFER_PCT di atas zona_low.
-    3. close candle sinyal tidak boleh menembus zona_low.
-    4. candle sinyal harus hijau terhadap open-nya sendiri dan terhadap close
-       candle sebelumnya (reaksi demand, bukan pantulan lemah).
-    5. close_pos = (close - low) / (high - low) harus >=
-       DEMAND_MIN_CLOSE_POSITION (dorongan pembeli, menolak ekor atas panjang).
-    6. jarak harga diukur dari BATAS ATAS zona (zone_high), bukan dari dasar:
-       (close / zone_high - 1) * 100 tidak boleh melewati
-       DEMAND_MAX_DISTANCE_PCT. Toleransi riil dari dasar zona karena itu
-       sekitar DEMAND_ZONE_BUFFER_PCT + DEMAND_MAX_DISTANCE_PCT.
-
-    Semua kegagalan bersifat menolak entry (fail closed), termasuk data kurang
-    atau OHLC tidak valid. Saat DEMAND_ZONE_FILTER_ENABLED dimatikan, fungsi
-    selalu lolos tanpa membaca candle sama sekali.
-    """
     if not bool(config.get("DEMAND_ZONE_FILTER_ENABLED", False)):
         return {
             "ok": True,
@@ -248,31 +225,11 @@ def detect_demand_zone(klines: list[Kline], config: dict) -> dict:
                 "close_position": None,
             }
 
-    # --- pemetaan dasar zona demand -------------------------------------
-    # `prior` sudah persis DEMAND_LOOKBACK_BARS candle tertutup terakhir
-    # (dipotong di baris di atas), jadi seluruh jendela itulah yang memetakan
-    # dasar demand. Inilah yang membuat DEMAND_LOOKBACK_BARS benar-benar
-    # mengubah geometri zona, bukan hanya syarat jumlah data.
-    #
-    # Dasarnya dicari lewat "rak" (shelf): candle di dalam jendela yang MENUTUP
-    # di area dasar, tidak lebih tinggi dari DEMAND_ZONE_BUFFER_PCT di atas
-    # level dasar. Menutup, bukan menyentuh: candle impuls besar yang low-ya
-    # masih menyentuh dasar tapi close-ya sudah melayang bukan area akumulasi,
-    # dan sumbu panjang sesaat (flash dump) juga bukan. Kalau rak dihitung dari
-    # low, dua hal itu ikut masuk ke rak, puncak zona ikut naik, selisih ke
-    # harga mengecil, dan filter jadi longgar justru pada saat harga paling
-    # rawan dibeli di pucuk.
-    #
-    # Rak wajib berisi minimal 2 candle. Kalau tidak (jendela terlalu sempit,
-    # atau harga sudah lurus naik tanpa konsolidasi), pemetaan jatuh kembali ke
-    # konsolidasi 6 candle terbaru supaya filter tidak fail-open tanpa dasar.
     window = prior
     anchor = min(float(k.close) for k in window)
     band = anchor * (1.0 + buffer_pct / 100.0)
     shelf = [k for k in window if float(k.close) <= band]
     if len(shelf) >= 2:
-        # Dasar zona tidak boleh lebih dalam dari pita buffer di bawah level
-        # dasar: sumbu yang lebih panjang dari itu adalah spike, bukan support.
         zone_low = max(
             min(float(k.low) for k in shelf), anchor * (1.0 - buffer_pct / 100.0)
         )
@@ -280,17 +237,7 @@ def detect_demand_zone(klines: list[Kline], config: dict) -> dict:
     else:
         base_candles = window[-min(len(window), 6) :]
         zone_low = min(float(k.low) for k in base_candles)
-    # Atap zona = puncak body TERENDAH di dalam area dasar, bukan tertinggi.
-    # Rak bisa miring (base yang merangkak naik); memakai puncak tertinggi akan
-    # melebarkan zona ke atas sehingga harga yang sudah lari jauh masih dianggap
-    # dekat demand. Terukur di 108 skenario x 300 seri: dengan puncak tertinggi
-    # ada 3 skenario yang justru lebih longgar daripada filter versi sebelumnya
-    # dan lookback 6 kehilangan status mode kompatibilitasnya (+4,0% entry);
-    # dengan puncak terendah tidak ada satu pun skenario yang lebih longgar dan
-    # lookback 6 kembali persis seperti perilaku lama (+0,0%).
     base_body = min(max(float(k.open), float(k.close)) for k in base_candles)
-    # Tebal minimum zona tetap DIAM-nya, bukan ikut-ikutan melebar. zone_low tidak
-    # mungkin melewati base_body karena setiap candle punya open/close >= low-nya.
     zone_high = max(base_body, zone_low * (1.0 + buffer_pct / 100.0))
 
     sig_open = float(signal.open)
@@ -443,12 +390,6 @@ def trend_interval_minutes(config: dict) -> int:
 
 
 def trend_required_bars(config: dict) -> int:
-    """Candle trend minimum agar EMA dan ADX benar-benar terdefinisi.
-
-    EMA butuh `periode` candle untuk seed SMA. ADX Wilder butuh `periode` nilai
-    TR/DM untuk seed ATR/DM, lalu `periode` nilai DX lagi untuk seed ADX,
-    sehingga minimal 2 x periode candle.
-    """
     fast = max(2, int(config.get("TREND_EMA_FAST", 20) or 20))
     slow = max(3, int(config.get("TREND_EMA_SLOW", 50) or 50))
     adx_period = max(2, int(config.get("TREND_ADX_PERIOD", 14) or 14))
@@ -456,12 +397,6 @@ def trend_required_bars(config: dict) -> int:
 
 
 def trend_window_bars(config: dict) -> int:
-    """Jumlah candle trend yang dipakai gerbang trend.
-
-    Nilai yang SAMA dipakai bot live (limit fetch dari Binance) dan backtest
-    (potongan jendela dari candle yang sudah tutup), supaya keputusan keduanya
-    identik. Endpoint klines Binance membatasi 1000 candle per panggilan.
-    """
     diminta = int(config.get("TREND_LOOKBACK_BARS", 120) or 120)
     diminta = max(1, min(TREND_KLINE_LIMIT - 1, diminta))
     return max(trend_required_bars(config), diminta)
@@ -480,7 +415,6 @@ def htf_demand_enabled(config: dict) -> bool:
 
 
 def htf_demand_lookback_bars(config: dict) -> int:
-    """Lookback gerbang demand HTF, dijepit ke rentang yang bisa diunduh."""
     lookback = int(
         config.get(
             "HTF_DEMAND_LOOKBACK_BARS",
@@ -492,30 +426,16 @@ def htf_demand_lookback_bars(config: dict) -> int:
 
 
 def htf_demand_window_bars(config: dict) -> int:
-    """Candle HTF minimum untuk gerbang zona demand (0 kalau nonaktif)."""
     if not htf_demand_enabled(config):
         return 0
     return htf_demand_lookback_bars(config) + 1
 
 
 def htf_window_bars(config: dict) -> int:
-    """Jendela gabungan penyedia candle HTF (gerbang trend + gerbang demand).
-
-    evaluate_trend_filter memotong sendiri jendelanya (TREND_LOOKBACK_BARS),
-    jadi melebarkan unduhan/cache demi gerbang demand TIDAK mengubah verdict
-    EMA/ADX. Bot live (TrendCache) dan backtest (TrendLookup) sama-sama
-    memakai fungsi ini supaya jendela keduanya selalu identik.
-    """
     return max(trend_window_bars(config), htf_demand_window_bars(config))
 
 
 def htf_demand_gate_config(config: dict) -> dict:
-    """Terjemahkan kunci HTF_DEMAND_* ke kunci DEMAND_* milik detect_demand_zone.
-
-    Logika zona tidak diduplikasi: gerbang timeframe tinggi memanggil fungsi
-    yang sama persis dengan gerbang chart (M5), hanya parameternya yang
-    berbeda, sehingga keputusan LIVE, PAPER, dan backtest otomatis identik.
-    """
     return {
         "DEMAND_ZONE_FILTER_ENABLED": htf_demand_enabled(config),
         "DEMAND_LOOKBACK_BARS": htf_demand_lookback_bars(config),
@@ -552,25 +472,6 @@ def htf_demand_gate_config(config: dict) -> dict:
 def evaluate_htf_demand(
     klines: list[Kline], config: dict, signal_close_time_ms: Optional[int] = None
 ) -> dict:
-    """Gerbang zona demand timeframe tinggi (default H1) untuk menyaring entry.
-
-    Melengkapi gerbang demand chart (M5): entry hanya lolos kalau candle HTF
-    terakhir yang SUDAH TUTUP juga bereaksi di dekat zona demand HTF (dasar
-    akumulasi timeframe tinggi), bukan sedang melayang jauh di atasnya.
-    Aturan zonanya identik dengan detect_demand_zone (satu sumber kode),
-    hanya parameternya yang diambil dari kunci HTF_DEMAND_*:
-
-      * HTF_DEMAND_LOOKBACK_BARS      (default 72 candle H1 = 3 hari struktur)
-      * HTF_DEMAND_ZONE_BUFFER_PCT    (default 1.5%)
-      * HTF_DEMAND_MAX_DISTANCE_PCT   (default 10%, diukur dari atap zona)
-      * HTF_DEMAND_MIN_CLOSE_POSITION (default 0.40)
-
-    Fail closed seperti gerbang trend: data kurang atau OHLC tidak valid
-    menolak entry, bukan meloloskannya. Candle yang belum tutup dibuang di
-    sini walaupun pemanggil lupa menyaringnya (anti repaint), sama seperti
-    evaluate_trend_filter. Saat HTF_DEMAND_FILTER_ENABLED dimatikan, fungsi
-    selalu lolos tanpa membaca candle sama sekali.
-    """
     interval = str(config.get("TREND_INTERVAL", "1h") or "1h").strip().lower()
     wajib = htf_demand_window_bars(config)
     if not htf_demand_enabled(config):
@@ -608,7 +509,6 @@ DAILY_DEMAND_DEFAULTS = {
 
 
 def daily_demand_interval(config: dict) -> str:
-    """Interval gerbang demand harian (default 1d)."""
     raw = str(
         config.get("DAILY_DEMAND_INTERVAL", DAILY_DEMAND_DEFAULTS["DAILY_DEMAND_INTERVAL"])
         or DAILY_DEMAND_DEFAULTS["DAILY_DEMAND_INTERVAL"]
@@ -630,7 +530,6 @@ def daily_demand_enabled(config: dict) -> bool:
 
 
 def daily_demand_lookback_bars(config: dict) -> int:
-    """Lookback gerbang demand harian, dijepit ke rentang yang bisa diunduh."""
     lookback = int(
         config.get(
             "DAILY_DEMAND_LOOKBACK_BARS",
@@ -642,19 +541,12 @@ def daily_demand_lookback_bars(config: dict) -> int:
 
 
 def daily_demand_window_bars(config: dict) -> int:
-    """Candle harian minimum untuk gerbang zona demand (0 kalau nonaktif)."""
     if not daily_demand_enabled(config):
         return 0
     return daily_demand_lookback_bars(config) + 1
 
 
 def daily_demand_gate_config(config: dict) -> dict:
-    """Terjemahkan kunci DAILY_DEMAND_* ke kunci DEMAND_* milik detect_demand_zone.
-
-    Sama seperti gerbang demand H1: logika zona tidak diduplikasi, fungsinya
-    yang dipanggil ulang dengan parameter berbeda. Itu yang menjaga keputusan
-    LIVE, PAPER, dan backtest tetap identik tanpa tiga salinan aturan.
-    """
     return {
         "DEMAND_ZONE_FILTER_ENABLED": daily_demand_enabled(config),
         "DEMAND_LOOKBACK_BARS": daily_demand_lookback_bars(config),
@@ -691,30 +583,6 @@ def daily_demand_gate_config(config: dict) -> dict:
 def evaluate_daily_demand(
     klines: list[Kline], config: dict, signal_close_time_ms: Optional[int] = None
 ) -> dict:
-    """Gerbang zona demand harian (default 1d) sebagai lapisan ketiga konfirmasi.
-
-    Melengkapi gerbang demand chart (M5) dan gerbang demand H1: entry hanya lolos
-    kalau candle harian terakhir yang SUDAH TUTUP juga bereaksi di dekat dasar
-    akumulasi harian, bukan sedang melayang jauh di atasnya. Aturan zonanya
-    identik dengan detect_demand_zone (satu sumber kode), hanya parameternya yang
-    diambil dari kunci DAILY_DEMAND_*:
-
-      * DAILY_DEMAND_INTERVAL          (default 1d)
-      * DAILY_DEMAND_LOOKBACK_BARS     (default 20 hari struktur harga)
-      * DAILY_DEMAND_ZONE_BUFFER_PCT   (default 2.0%)
-      * DAILY_DEMAND_MAX_DISTANCE_PCT  (default 12%, diukur dari atap zona)
-      * DAILY_DEMAND_MIN_CLOSE_POSITION (default 0.40)
-
-    Candle harian jauh lebih lebar daripada H1, jadi ambang jarak dan tebal zona
-    memang lebih longgar; itu sebabnya parameter harian dipisahkan dari H1
-    walau mesin zonanya sama.
-
-    Fail closed seperti gerbang lain: data kurang, OHLC tidak valid, atau candle
-    gagal diambil berarti entry DITOLAK. Candle yang belum tutup dibuang di sini
-    walaupun pemanggil lupa menyaringnya (anti repaint). Saat
-    DAILY_DEMAND_FILTER_ENABLED dimatikan, fungsi selalu lolos tanpa membaca
-    candle sama sekali.
-    """
     interval = daily_demand_interval(config)
     wajib = daily_demand_window_bars(config)
     if not daily_demand_enabled(config):
@@ -743,12 +611,6 @@ def evaluate_daily_demand(
 
 
 def daily_warmup_bars(config: dict, interval: str) -> int:
-    """Candle interval simulasi yang wajib ada untuk gerbang demand harian (0 kalau nonaktif).
-
-    Candle harian dirangkai dari candle interval simulasi (default 288 candle 5m
-    per hari), jadi warmup backtest harus menutupi
-    (lookback harian + 1 candle sinyal) x rasio + satu bucket cadangan.
-    """
     if not daily_demand_enabled(config):
         return 0
     sim_minutes = int(INTERVAL_MINUTES.get(str(interval), 5))
@@ -765,14 +627,6 @@ def daily_warmup_bars(config: dict, interval: str) -> int:
 
 
 def htf_gate_warmup_bars(config: dict, interval: str) -> int:
-    """Warmup gabungan SEMUA gerbang timeframe tinggi yang aktif (0 kalau tidak ada).
-
-    Gerbang trend dan gerbang demand H1 memakai interval TREND_INTERVAL yang
-    sama, sedangkan gerbang demand harian memakai interval sendiri. Ketiganya
-    membaca dari awal rentang data yang sama, jadi kebutuhan yang dipakai adalah
-    yang TERBESAR, bukan jumlahnya. Tanpa ini, backtest bisa mulai mengevaluasi
-    bar sebelum candle harian cukup, dan hasilnya nol trade tanpa penjelasan.
-    """
     butuh = 0
     if bool(config.get("TREND_FILTER_ENABLED", False)) or htf_demand_enabled(config):
         butuh = max(butuh, trend_warmup_bars(config, interval))
@@ -784,12 +638,6 @@ def htf_gate_warmup_bars(config: dict, interval: str) -> int:
 
 
 def trend_warmup_bars(config: dict, interval: str) -> int:
-    """Candle interval simulasi yang wajib tersedia sebelum bar entry pertama.
-
-    Backtest membentuk candle timeframe tinggi dengan merangkai candle
-    interval simulasi, jadi warmup harus menutupi (jumlah candle HTF pada
-    jendela gabungan trend + demand + 1 bucket) x rasio.
-    """
     sim_minutes = int(INTERVAL_MINUTES.get(str(interval), 5))
     trend_minutes = trend_interval_minutes(config)
     if trend_minutes % sim_minutes:
@@ -805,13 +653,6 @@ def trend_warmup_bars(config: dict, interval: str) -> int:
 def aggregate_klines(
     klines: list[Kline], target_minutes: int, source_minutes: Optional[int] = None
 ) -> list[Kline]:
-    """Rangkai candle timeframe tinggi dari candle yang lebih kecil.
-
-    Hanya bucket yang LENGKAP yang dipakai: bucket yang kekurangan candle
-    (data bolong atau jam terakhir yang belum selesai) dibuang, supaya high/low
-    dan volume candle rangkaian tidak pernah setengah matang. Nilai OHLCV hasil
-    rangkaian sama dengan candle asli Binance untuk rentang yang sama.
-    """
     target_ms = int(target_minutes) * 60_000
     if source_minutes is None:
         if len(klines) >= 2:
@@ -858,11 +699,6 @@ def aggregate_klines(
 
 
 def ema_series(values: list[float], period: int) -> list[Optional[float]]:
-    """EMA klasik dengan seed SMA pada `period` nilai pertama.
-
-    Panjang hasil selalu sama dengan panjang input; None berarti belum
-    terdefinisi (data belum cukup), bukan angka nol yang menyesatkan.
-    """
     period = int(period)
     n = len(values)
     out: list[Optional[float]] = [None] * n
@@ -889,13 +725,6 @@ def ema_series(values: list[float], period: int) -> list[Optional[float]]:
 
 
 def adx_series(klines: list[Kline], period: int = 14) -> list[Optional[float]]:
-    """ADX Wilder (periode default 14), sejajar dengan daftar candle.
-
-    Rumus mengikuti definisi asli Wilder: TR dan directional movement dihaluskan
-    dengan smoothing Wilder (bukan EMA biasa), DX = 100 x |DI+ - DI-| / (DI+ + DI-),
-    lalu ADX = rata-rata Wilder dari DX. None berarti belum/ tidak bisa dihitung
-    (misalnya rentang harga nol total sehingga pembagi nol).
-    """
     period = int(period)
     n = len(klines)
     out: list[Optional[float]] = [None] * n
@@ -971,17 +800,6 @@ def evaluate_trend_filter(
     signal_close_time_ms: Optional[int] = None,
     nama_kunci_jendela: str = "TREND_LOOKBACK_BARS",
 ) -> dict:
-    """Gerbang trend timeframe tinggi (default H1) untuk menyaring entry.
-
-    Aturan, semuanya dari candle yang SUDAH TUTUP (tanpa repaint):
-      1. close candle terakhir > EMA cepat,
-      2. EMA cepat > EMA lambat,
-      3. ADX >= TREND_ADX_MIN (kecuali ambangnya 0, artinya cek kekuatan trend mati).
-
-    Candle yang belum tutup selalu dibuang di sini, walaupun pemanggil lupa
-    menyaringnya, sehingga hasil live dan backtest tidak bisa berbeda karena
-    candle yang masih berjalan.
-    """
     interval = str(config.get("TREND_INTERVAL", "1h") or "1h").strip().lower()
     if interval not in INTERVAL_MINUTES:
         return {
@@ -1165,19 +983,6 @@ def evaluate_trend_filter(
     }
 
 
-# ---------------------------------------------------------------------------
-# Gerbang EMA + ADX timeframe harian (DAILY_TREND_*)
-#
-# Lapisan TAMBAHAN di atas gerbang trend H1 dan gerbang demand. Aturannya
-# identik dengan gerbang trend H1 (close > EMA cepat, EMA cepat > EMA lambat,
-# ADX >= ambang), hanya saja candlenya harian dan parameternya dipisah.
-#
-# Rumus EMA dan ADX TIDAK diduplikasi: kunci DAILY_TREND_* diterjemahkan ke
-# kunci TREND_* lalu memanggil evaluate_trend_filter yang sama persis. Dengan
-# begitu bot live, PAPER, backtest, dan grid search memakai angka yang sama.
-#
-# Default NONAKTIF (DAILY_TREND_FILTER_ENABLED=False).
-# ---------------------------------------------------------------------------
 
 DAILY_TREND_DEFAULTS = {
     "DAILY_TREND_FILTER_ENABLED": False,
@@ -1195,7 +1000,6 @@ def daily_trend_enabled(config: dict) -> bool:
 
 
 def daily_trend_interval(config: dict) -> str:
-    """Interval gerbang EMA+ADX harian (default 1d). Melempar ValueError kalau tidak dikenal."""
     raw = str(
         config.get("DAILY_TREND_INTERVAL", DAILY_TREND_DEFAULTS["DAILY_TREND_INTERVAL"])
         or DAILY_TREND_DEFAULTS["DAILY_TREND_INTERVAL"]
@@ -1213,11 +1017,6 @@ def daily_trend_interval_minutes(config: dict) -> int:
 
 
 def daily_trend_gate_config(config: dict) -> dict:
-    """Terjemahkan kunci DAILY_TREND_* ke kunci TREND_* milik evaluate_trend_filter.
-
-    Hanya dipanggil saat gerbang aktif (lihat evaluate_daily_trend), jadi
-    DAILY_TREND_INTERVAL yang salah tidak mengganggu bot saat gerbang mati.
-    """
     d = DAILY_TREND_DEFAULTS
     return {
         "TREND_FILTER_ENABLED": daily_trend_enabled(config),
@@ -1231,25 +1030,18 @@ def daily_trend_gate_config(config: dict) -> dict:
 
 
 def daily_trend_window_bars(config: dict) -> int:
-    """Jumlah candle harian tertutup yang dipakai gerbang EMA+ADX (0 kalau nonaktif)."""
     if not daily_trend_enabled(config):
         return 0
     return trend_window_bars(daily_trend_gate_config(config))
 
 
 def daily_trend_required_bars(config: dict) -> int:
-    """Candle harian minimum agar EMA dan ADX harian terdefinisi (0 kalau nonaktif)."""
     if not daily_trend_enabled(config):
         return 0
     return trend_required_bars(daily_trend_gate_config(config))
 
 
 def daily_trend_warmup_bars(config: dict, interval: str) -> int:
-    """Candle interval simulasi yang wajib ada sebelum bar entry pertama (0 kalau nonaktif).
-
-    Candle harian dirangkai dari candle interval simulasi (mis. 288 candle 5m
-    per hari), jadi warmup menutupi (jendela harian + 1 bucket) x rasio.
-    """
     if not daily_trend_enabled(config):
         return 0
     sim_minutes = int(INTERVAL_MINUTES.get(str(interval), 5))
@@ -1268,17 +1060,6 @@ def daily_trend_warmup_bars(config: dict, interval: str) -> int:
 def evaluate_daily_trend(
     klines: list[Kline], config: dict, signal_close_time_ms: Optional[int] = None
 ) -> dict:
-    """Gerbang EMA+ADX timeframe harian sebagai lapisan konfirmasi tambahan.
-
-    Aturan (dari candle harian yang SUDAH TUTUP, tanpa repaint):
-      1. close candle harian terakhir > EMA cepat (default 20),
-      2. EMA cepat > EMA lambat (default 50),
-      3. ADX(14) >= DAILY_TREND_ADX_MIN (default 20; 0 mematikan cek kekuatan).
-
-    Semua logika dan fail-closed-nya dipakai ulang dari evaluate_trend_filter.
-    Saat DAILY_TREND_FILTER_ENABLED dimatikan, fungsi langsung lolos tanpa
-    membaca candle sama sekali.
-    """
     if not daily_trend_enabled(config):
         raw = str(config.get("DAILY_TREND_INTERVAL", "1d") or "1d").strip().lower()
         return {
@@ -1301,795 +1082,3 @@ def evaluate_daily_trend(
         signal_close_time_ms,
         nama_kunci_jendela="DAILY_TREND_LOOKBACK_BARS",
     )
-
-
-# ---------------------------------------------------------------------------
-# Selftest indikator trend
-#
-# Nilai referensi EMA dan ADX di bawah diambil dari TA-Lib 0.8.1 (implementasi
-# rujukan industri untuk EMA dan ADX Wilder) pada seri deterministik yang sama.
-# EMA cocok sampai batas presisi float; ADX TA-Lib memakai cara seed smoothing
-# Wilder yang sedikit berbeda sehingga selisihnya menyusut secara geometris
-# (0.006 persen setelah 140 candle, nol setelah sekitar 250 candle) dan karena
-# itu diuji dengan toleransi kecil yang didokumentasikan.
-# ---------------------------------------------------------------------------
-
-_REF_CLOSE_TERAKHIR = 111.10647491522288
-_REF_EMA20_TERAKHIR = 109.4661022879455
-_REF_EMA50_TERAKHIR = 106.74824666390583
-_REF_ADX14_TERAKHIR_SERI_AYUN = 24.90058798601024
-
-
-def _seri_uji_deterministik(n: int = 60) -> list[Kline]:
-    import math as _math
-
-    out: list[Kline] = []
-    for i in range(n):
-        harga = 100.0 * (1.0 + 0.01 * _math.sin(i / 5.0) + i * 0.002)
-        out.append(
-            Kline(
-                open_time=i * 3_600_000,
-                open=harga * 0.999,
-                high=harga * 1.004,
-                low=harga * 0.996,
-                close=harga,
-                close_time=i * 3_600_000 + 3_599_999,
-                volume=1.0,
-                quote_volume=harga,
-            )
-        )
-    return out
-
-
-def _seri_uji_riak(
-    n: int = 130,
-    amplitudo: float = 4.0,
-    drift: float = 0.08,
-    akhir_naik: int = 10,
-    tick_akhir: float = 0.0008,
-) -> list[Kline]:
-    """Seri dengan susunan EMA naik tetapi ADX lemah (pasar beriak).
-
-    Sepuluh candle terakhir dibuat naik halus supaya close berada di atas EMA,
-    sementara riak besar sebelumnya menahan ADX di bawah ambang.
-    """
-    import math as _math
-
-    out: list[Kline] = []
-    harga = 100.0
-    for i in range(n):
-        if i >= n - akhir_naik:
-            harga = harga * (1.0 + tick_akhir)
-        else:
-            harga = 100.0 + amplitudo * _math.sin(i / 2.0) + drift * i
-        out.append(
-            Kline(
-                open_time=i * 3_600_000,
-                open=harga * 0.999,
-                high=harga * 1.003,
-                low=harga * 0.997,
-                close=harga,
-                close_time=i * 3_600_000 + 3_599_999,
-                volume=1.0,
-                quote_volume=harga,
-            )
-        )
-    return out
-
-
-def _seri_uji_ayun(n: int = 140) -> list[Kline]:
-    import math as _math
-
-    out: list[Kline] = []
-    for i in range(n):
-        harga = 100.0 + 4.0 * _math.sin(i / 3.0) + 0.05 * i
-        out.append(
-            Kline(
-                open_time=i * 3_600_000,
-                open=harga * 0.998,
-                high=harga * 1.005,
-                low=harga * 0.995,
-                close=harga,
-                close_time=i * 3_600_000 + 3_599_999,
-                volume=1.0,
-                quote_volume=harga,
-            )
-        )
-    return out
-
-
-def selftest() -> int:
-    print("=== SELFTEST indikator trend (EMA, ADX, rangkaian candle, gerbang) ===")
-    gagal = 0
-
-    def cek(nama: str, syarat: bool, info: str = "") -> None:
-        nonlocal gagal
-        if not syarat:
-            gagal += 1
-        print(
-            ("  LULUS " if syarat else "  GAGAL ")
-            + nama
-            + (f"  -> {info}" if info else "")
-        )
-
-    # --- EMA ---
-    seri = _seri_uji_deterministik()
-    tutup = [k.close for k in seri]
-    ema20 = ema_series(tutup, 20)
-    ema50 = ema_series(tutup, 50)
-    cek(
-        "EMA belum terdefinisi sebelum periode terpenuhi",
-        all(v is None for v in ema20[:19]) and ema20[19] is not None,
-    )
-    cek(
-        "EMA50 belum terdefinisi pada 49 candle pertama",
-        ema50[48] is None and ema50[49] is not None,
-    )
-    cek(
-        "EMA20 akhir sama dengan referensi TA-Lib",
-        abs(ema20[-1] - _REF_EMA20_TERAKHIR) < 1e-9,
-        f"{ema20[-1]:.10f}",
-    )
-    cek(
-        "EMA50 akhir sama dengan referensi TA-Lib",
-        abs(ema50[-1] - _REF_EMA50_TERAKHIR) < 1e-9,
-        f"{ema50[-1]:.10f}",
-    )
-    cek(
-        "close akhir sama dengan referensi", abs(tutup[-1] - _REF_CLOSE_TERAKHIR) < 1e-9
-    )
-    datar = [5.0] * 40
-    cek(
-        "EMA seri datar sama dengan nilainya sendiri",
-        abs(ema_series(datar, 20)[-1] - 5.0) < 1e-12,
-    )
-    naik_linear = [100.0 + i for i in range(60)]
-    e = ema_series(naik_linear, 20)[-1]
-    _sma20 = sum(naik_linear[-20:]) / 20
-    cek(
-        "EMA seri naik berada di antara SMA dan harga terakhir",
-        _sma20 <= e <= naik_linear[-1],
-        f"{e:.6f}",
-    )
-
-    # --- ADX ---
-    adx_satur = adx_series(seri, 14)
-    cek(
-        "ADX terdefinisi mulai candle ke-2x periode + 1",
-        all(v is None for v in adx_satur[:27]) and adx_satur[27] is not None,
-    )
-    cek(
-        "ADX seri naik monoton jenuh di 100",
-        abs(adx_satur[-1] - 100.0) < 1e-9,
-        f"{adx_satur[-1]:.6f}",
-    )
-    adx_ayun = adx_series(_seri_uji_ayun(), 14)
-    cek(
-        "ADX seri berayun sama dengan referensi TA-Lib (toleransi 0.01)",
-        abs(adx_ayun[-1] - _REF_ADX14_TERAKHIR_SERI_AYUN) < 0.01,
-        f"{adx_ayun[-1]:.6f} vs {_REF_ADX14_TERAKHIR_SERI_AYUN:.6f}",
-    )
-    cek(
-        "ADX seri berayun di bawah ambang 30 (tidak jenuh)",
-        adx_ayun[-1] < 30.0,
-        f"{adx_ayun[-1]:.2f}",
-    )
-    adx_datar = adx_series(
-        [
-            Kline(
-                i * 3_600_000, 1.0, 1.0, 1.0, 1.0, i * 3_600_000 + 3_599_999, 1.0, 1.0
-            )
-            for i in range(40)
-        ],
-        14,
-    )
-    cek(
-        "ADX rentang harga nol tidak dihitung (None, fail closed)",
-        all(v is None for v in adx_datar),
-    )
-    cek("ADX data kurang ditolak", all(v is None for v in adx_series(seri[:20], 14)))
-
-    # --- rangkaian candle ---
-    lima = [
-        Kline(
-            open_time=i * 300_000,
-            open=100.0 + i,
-            high=100.5 + i,
-            low=99.5 + i,
-            close=100.2 + i,
-            close_time=i * 300_000 + 299_999,
-            volume=10.0,
-            quote_volume=1000.0,
-        )
-        for i in range(24)
-    ]
-    jam = aggregate_klines(lima, 60, 5)
-    cek(
-        "12 candle 5m menjadi 1 candle 1h",
-        len(jam) == 2 and jam[0].open_time == 0 and jam[1].open_time == 3_600_000,
-    )
-    cek(
-        "OHLC hasil rangkaian benar",
-        jam[0].open == lima[0].open
-        and jam[0].close == lima[11].close
-        and jam[0].high == max(k.high for k in lima[:12])
-        and jam[0].low == min(k.low for k in lima[:12]),
-    )
-    cek(
-        "volume hasil rangkaian adalah jumlah anaknya",
-        abs(jam[0].volume - 120.0) < 1e-9
-        and abs(jam[0].quote_volume - 12_000.0) < 1e-9,
-    )
-    cek(
-        "close_time candle rangkaian menutup bucket", jam[0].close_time == 3_600_000 - 1
-    )
-    bolong = [k for i, k in enumerate(lima) if i not in (3, 4)]
-    cek(
-        "bucket tidak lengkap dibuang (bukan dipakai setengah matang)",
-        len(aggregate_klines(bolong, 60, 5)) == 1,
-    )
-    cek(
-        "rangkaian interval tidak bulat ditolak",
-        _gagal_tertangkap(lambda: aggregate_klines(lima, 7, 5)),
-    )
-
-    # --- gerbang trend ---
-    cfg = {
-        "TREND_FILTER_ENABLED": True,
-        "TREND_INTERVAL": "1h",
-        "TREND_EMA_FAST": 20,
-        "TREND_EMA_SLOW": 50,
-        "TREND_ADX_PERIOD": 14,
-        "TREND_ADX_MIN": 20.0,
-        "TREND_LOOKBACK_BARS": 120,
-    }
-
-    def jam_deret(a: float, n: int = 130) -> list[Kline]:
-        out = []
-        p = 100.0
-        for i in range(n):
-            p *= a
-            out.append(
-                Kline(
-                    i * 3_600_000,
-                    p,
-                    p * 1.002,
-                    p * 0.998,
-                    p,
-                    i * 3_600_000 + 3_599_999,
-                    1.0,
-                    p,
-                )
-            )
-        return out
-
-    naik = evaluate_trend_filter(jam_deret(1.004), cfg)
-    turun = evaluate_trend_filter(jam_deret(0.996), cfg)
-    riak = evaluate_trend_filter(_seri_uji_riak(), cfg)
-    cek("trend naik diloloskan", naik["ok"], naik["reason"])
-    cek(
-        "trend turun ditolak",
-        (not turun["ok"]) and "di bawah" in turun["reason"],
-        turun["reason"],
-    )
-    cek(
-        "susunan EMA naik tetapi ADX lemah ditolak",
-        (not riak["ok"]) and "lemah" in riak["reason"],
-        riak["reason"],
-    )
-    cek(
-        "riak memang punya susunan EMA naik (bukan salah tolak karena struktur)",
-        bool(riak["checks"]["harga_di_atas_ema_cepat"])
-        and bool(riak["checks"]["ema_cepat_di_atas_ema_lambat"]),
-    )
-    cek(
-        "ADX_MIN 0 meloloskan riak (cek kekuatan trend benar-benar dimatikan)",
-        evaluate_trend_filter(_seri_uji_riak(), dict(cfg, TREND_ADX_MIN=0.0))["ok"],
-    )
-    datar_penuh = evaluate_trend_filter(jam_deret(1.0), cfg)
-    cek(
-        "harga rata sempurna ditolak (close tidak lebih tinggi dari EMA)",
-        not datar_penuh["ok"],
-        datar_penuh["reason"],
-    )
-    cek(
-        "filter nonaktif selalu lolos",
-        evaluate_trend_filter(jam_deret(0.996), dict(cfg, TREND_FILTER_ENABLED=False))[
-            "ok"
-        ],
-    )
-    kurang = evaluate_trend_filter(jam_deret(1.004, 40), cfg)
-    cek(
-        "riwayat kurang ditolak (fail closed)",
-        (not kurang["ok"]) and "kurang" in kurang["reason"],
-        kurang["reason"],
-    )
-    cek(
-        "jendela dipakai persis TREND_LOOKBACK_BARS",
-        evaluate_trend_filter(jam_deret(1.004), cfg)["bars"] == 120,
-    )
-    cek(
-        "candle belum tutup dibuang walau diberikan pemanggil",
-        evaluate_trend_filter(
-            jam_deret(1.004)
-            + [
-                Kline(
-                    130 * 3_600_000,
-                    1.0,
-                    1.0,
-                    1.0,
-                    1.0,
-                    130 * 3_600_000 + 3_599_999,
-                    1.0,
-                    1.0,
-                )
-            ],
-            cfg,
-        )["bars"]
-        == 120,
-    )
-    cek(
-        "TREND_INTERVAL tidak dikenal ditolak",
-        not evaluate_trend_filter(jam_deret(1.004), dict(cfg, TREND_INTERVAL="7h"))[
-            "ok"
-        ],
-    )
-    cek(
-        "harga tidak wajar ditolak",
-        not evaluate_trend_filter(
-            [
-                Kline(
-                    i * 3_600_000,
-                    1.0,
-                    1.0,
-                    1.0,
-                    0.0,
-                    i * 3_600_000 + 3_599_999,
-                    1.0,
-                    1.0,
-                )
-                for i in range(130)
-            ],
-            cfg,
-        )["ok"],
-        "harga nol",
-    )
-    cek(
-        "helper kebutuhan warmup menghitung rasio interval",
-        trend_warmup_bars(cfg, "5m") == trend_window_bars(cfg) * 12 + 12,
-    )
-    cek(
-        "warmup menolak trend yang lebih pendek dari interval simulasi",
-        _gagal_tertangkap(
-            lambda: trend_warmup_bars(dict(cfg, TREND_INTERVAL="30m"), "1h")
-        ),
-    )
-
-    # --- zona demand: knob lookback harus benar-benar mengubah geometri ---
-    def _k(o, h, l, c, i=0):
-        return Kline(
-            i * 300_000, o, h, l, c, i * 300_000 + 299_999, 1000.0, 1000.0 * c
-        )
-
-    cfg_dem = dict(
-        DEMAND_ZONE_FILTER_ENABLED=True,
-        DEMAND_LOOKBACK_BARS=20,
-        DEMAND_ZONE_BUFFER_PCT=0.8,
-        DEMAND_MAX_DISTANCE_PCT=3.5,
-        DEMAND_MIN_CLOSE_POSITION=0.45,
-    )
-
-    # Base datar 14 candle di 100, kaki naik 6 candle sampai 103.6, lalu sinyal
-    # di 104.15. Sinyal ini +3,43% dari atap dasar versi 6 candle (lolos) tapi
-    # +3,53% dari atap dasar versi 20 candle (ditolak): hanya batas 3,5% yang
-    # membedakan keduanya, jadi selisihnya murni akibat lookback.
-    datar = [_k(99.9, 100.2, 99.8, 100.0, i) for i in range(14)]
-    kaki = []
-    for j in range(6):
-        o = 100.0 + 0.6 * j
-        c = o + 0.6
-        kaki.append(_k(o, c + 0.1, o - 0.1, c, 14 + j))
-    sinyal = _k(103.8, 104.35, 103.7, 104.15, 20)
-    seri = datar + kaki + [sinyal]
-
-    ketat = detect_demand_zone(seri, dict(cfg_dem, DEMAND_LOOKBACK_BARS=20))
-    longgar = detect_demand_zone(seri, dict(cfg_dem, DEMAND_LOOKBACK_BARS=6))
-    cek(
-        "DEMAND_LOOKBACK_BARS mengubah atap zona (knob tidak mati)",
-        abs(ketat["zone_high"] - 100.5984) < 1e-9
-        and abs(longgar["zone_high"] - 100.6992) < 1e-9,
-        f"lookback 20 -> atap {ketat['zone_high']:.4f}, "
-        f"lookback 6 -> {longgar['zone_high']:.4f}",
-    )
-    cek(
-        "lookback panjang memblokir entry yang sudah di kaki naik",
-        (not ketat["ok"]) and "terlalu jauh" in ketat["reason"],
-        ketat["reason"],
-    )
-    cek(
-        "lookback pendek memetakan dasar terbaru sehingga entry sama lolos",
-        longgar["ok"] and abs(longgar["distance_pct"] - 3.43) < 0.01,
-        longgar["reason"],
-    )
-
-    # Sumbu panjang sesaat (flash dump) bukan support: dasarnya dipotong ke pita
-    # buffer, bukan ditetapkan di dasar jurang.
-    sumur = [_k(99.9, 100.2, 99.8, 100.0, i) for i in range(20)]
-    sumur[10] = _k(99.9, 100.2, 80.0, 99.9, 10)
-    spike = detect_demand_zone(
-        sumur + [_k(99.9, 100.2, 99.8, 100.0, 20), _k(100.0, 100.6, 99.9, 100.5, 21)],
-        cfg_dem,
-    )
-    cek(
-        "sumbu panjang sendirian tidak dijadikan dasar demand",
-        spike["ok"] and spike["zone_low"] is not None and spike["zone_low"] > 99.0,
-        f"dasar {spike['zone_low']:.4f} (bukan 80.0) -> {spike['reason'][:52]}",
-    )
-    cek(
-        "data kurang tetap ditolak (fail closed)",
-        not detect_demand_zone(sumur[:5], cfg_dem)["ok"],
-    )
-    cek(
-        "filter nonaktif selalu lolos",
-        detect_demand_zone([], dict(cfg_dem, DEMAND_ZONE_FILTER_ENABLED=False))["ok"],
-    )
-    cek(
-        "batas atas zona tidak pernah di bawah dasarnya (invarian)",
-        all(
-            (r["zone_high"] is None) or r["zone_high"] >= r["zone_low"]
-            for r in (
-                detect_demand_zone(seri, dict(cfg_dem, DEMAND_LOOKBACK_BARS=b))
-                for b in range(3, 21)
-            )
-        )
-    )
-
-    # --- Gerbang demand timeframe tinggi (H1): logika zona sama, parameter sendiri ---
-    cfg_htf = dict(
-        HTF_DEMAND_FILTER_ENABLED=True,
-        HTF_DEMAND_LOOKBACK_BARS=6,
-        HTF_DEMAND_ZONE_BUFFER_PCT=1.0,
-        HTF_DEMAND_MAX_DISTANCE_PCT=8.0,
-        HTF_DEMAND_MIN_CLOSE_POSITION=0.4,
-        TREND_INTERVAL="1h",
-    )
-
-    def _k_jam(o, h, l, c, i=0):
-        return Kline(
-            i * 3_600_000, o, h, l, c, i * 3_600_000 + 3_599_999, 1000.0, 1000.0 * c
-        )
-
-    dasar_jam = [_k_jam(99.9, 100.2, 99.8, 100.0, i) for i in range(10)]
-    reaksi_jam = dasar_jam + [_k_jam(100.0, 101.2, 99.9, 101.0, 10)]
-    lolos_htf = evaluate_htf_demand(reaksi_jam, cfg_htf)
-    cek(
-        "reaksi hijau segar di dekat zona demand H1 lolos",
-        lolos_htf["ok"] and lolos_htf["interval"] == "1h",
-        lolos_htf["reason"],
-    )
-    banding = detect_demand_zone(reaksi_jam, htf_demand_gate_config(cfg_htf))
-    cek(
-        "gerbang H1 identik dengan detect_demand_zone berparameter terpetakan",
-        lolos_htf["ok"] == banding["ok"]
-        and lolos_htf["zone_low"] == banding["zone_low"]
-        and lolos_htf["zone_high"] == banding["zone_high"]
-        and lolos_htf["distance_pct"] == banding["distance_pct"],
-    )
-    melambung = list(dasar_jam)
-    for j in range(3):
-        o = 100.0 + 5.0 * (j + 1)
-        melambung.append(_k_jam(o, o + 1.0, o - 0.5, o + 0.5, 10 + j))
-    jauh_htf = evaluate_htf_demand(melambung, cfg_htf)
-    cek(
-        "harga yang sudah terbang jauh di atas dasar H1 ditolak (anti pucuk)",
-        (not jauh_htf["ok"]) and "terlalu jauh" in jauh_htf["reason"],
-        jauh_htf["reason"],
-    )
-    cek(
-        "data H1 kurang tetap ditolak (fail closed)",
-        not evaluate_htf_demand(dasar_jam[:3], cfg_htf)["ok"],
-    )
-    mati_htf = evaluate_htf_demand([], dict(cfg_htf, HTF_DEMAND_FILTER_ENABLED=False))
-    cek(
-        "gerbang H1 nonaktif selalu lolos tanpa membaca candle",
-        mati_htf["ok"] and "nonaktif" in mati_htf["reason"],
-        mati_htf["reason"],
-    )
-    belum_tutup = reaksi_jam + [_k_jam(101.0, 120.0, 100.9, 119.0, 11)]
-    anti_repaint = evaluate_htf_demand(
-        belum_tutup, cfg_htf, signal_close_time_ms=reaksi_jam[-1].close_time
-    )
-    cek(
-        "candle H1 yang belum tutup tidak dipakai (anti repaint)",
-        anti_repaint["ok"] and anti_repaint["bars"] == len(reaksi_jam),
-        f"bars={anti_repaint['bars']}",
-    )
-    cek(
-        "jendela HTF gabungan mengikuti lookback terbesar (trend vs demand)",
-        htf_window_bars(dict(cfg_htf, TREND_LOOKBACK_BARS=120)) == 120
-        and htf_window_bars(dict(cfg_htf, HTF_DEMAND_LOOKBACK_BARS=200)) == 201,
-        f"{htf_window_bars(dict(cfg_htf, TREND_LOOKBACK_BARS=120))} / "
-        f"{htf_window_bars(dict(cfg_htf, HTF_DEMAND_LOOKBACK_BARS=200))}",
-    )
-
-
-    # --- Gerbang demand harian (D1): mesin zona sama, parameter sendiri ---
-    cfg_daily = dict(
-        DAILY_DEMAND_FILTER_ENABLED=True,
-        DAILY_DEMAND_INTERVAL="1d",
-        DAILY_DEMAND_LOOKBACK_BARS=3,
-        DAILY_DEMAND_ZONE_BUFFER_PCT=1.0,
-        DAILY_DEMAND_MAX_DISTANCE_PCT=8.0,
-        DAILY_DEMAND_MIN_CLOSE_POSITION=0.4,
-    )
-
-    def _k_hari(o, h, l, c, i=0):
-        return Kline(
-            i * 86_400_000, o, h, l, c, i * 86_400_000 + 86_399_999, 1000.0, 1000.0 * c
-        )
-
-    cek(
-        "interval harian default 1d dan jendelanya lookback + 1 candle sinyal",
-        daily_demand_interval(cfg_daily) == "1d"
-        and daily_demand_interval_minutes(cfg_daily) == 1440
-        and daily_demand_window_bars(cfg_daily) == 4,
-    )
-    cek(
-        "warmup harian = (lookback + 1) hari x 288 candle 5m + 1 bucket",
-        daily_warmup_bars(cfg_daily, "5m") == 4 * 288 + 288
-        and htf_gate_warmup_bars(cfg_daily, "5m") == 4 * 288 + 288,
-    )
-    cek(
-        "warmup gabungan mengambil kebutuhan TERBESAR, bukan jumlahnya",
-        htf_gate_warmup_bars(
-            dict(cfg_daily, TREND_FILTER_ENABLED=True, TREND_INTERVAL="1h", TREND_LOOKBACK_BARS=120),
-            "5m",
-        )
-        == max(4 * 288 + 288, 120 * 12 + 12),
-    )
-    cek(
-        "gerbang harian nonaktif selalu lolos dan warmupnya nol",
-        evaluate_daily_demand([], dict(cfg_daily, DAILY_DEMAND_FILTER_ENABLED=False))["ok"]
-        and daily_warmup_bars(dict(cfg_daily, DAILY_DEMAND_FILTER_ENABLED=False), "5m") == 0
-        and htf_gate_warmup_bars(
-            dict(cfg_daily, DAILY_DEMAND_FILTER_ENABLED=False), "5m"
-        )
-        == 0,
-    )
-    cek(
-        "data harian kurang tetap ditolak (fail closed)",
-        not evaluate_daily_demand(
-            [_k_hari(100.0, 100.5, 99.5, 100.0, i) for i in range(3)], cfg_daily
-        )["ok"],
-    )
-    cek(
-        "interval harian tak dikenal ditolak",
-        _gagal_tertangkap(lambda: daily_demand_interval(dict(cfg_daily, DAILY_DEMAND_INTERVAL="2d"))),
-    )
-    cek(
-        "interval harian yang bukan kelipatan interval simulasi ditolak",
-        _gagal_tertangkap(
-            lambda: daily_warmup_bars(dict(cfg_daily, DAILY_DEMAND_INTERVAL="12h"), "8h")
-        ),
-    )
-    cek(
-        "warmup harian mengikuti interval yang dipilih (12h dengan simulasi 1h)",
-        daily_warmup_bars(dict(cfg_daily, DAILY_DEMAND_INTERVAL="12h"), "1h") == 4 * 12 + 12,
-    )
-
-    dasar_hari = [_k_hari(100.0, 100.2, 99.8, 100.0, i) for i in range(3)]
-    reaksi_hari = dasar_hari + [_k_hari(100.0, 100.8, 99.9, 100.7, 3)]
-    lolos_harian = evaluate_daily_demand(reaksi_hari, cfg_daily)
-    cek(
-        "reaksi hijau segar di dekat dasar harian lolos",
-        lolos_harian["ok"] and lolos_harian["interval"] == "1d",
-        lolos_harian["reason"],
-    )
-    banding_harian = detect_demand_zone(reaksi_hari, daily_demand_gate_config(cfg_daily))
-    cek(
-        "gerbang harian identik dengan detect_demand_zone berparameter terpetakan",
-        lolos_harian["ok"] == banding_harian["ok"]
-        and lolos_harian["zone_low"] == banding_harian["zone_low"]
-        and lolos_harian["zone_high"] == banding_harian["zone_high"]
-        and lolos_harian["distance_pct"] == banding_harian["distance_pct"],
-    )
-    jauh_harian = evaluate_daily_demand(
-        dasar_hari + [_k_hari(100.0, 110.5, 99.9, 110.0, 3)], cfg_daily
-    )
-    cek(
-        "harga yang sudah terbang jauh di atas dasar harian ditolak (anti pucuk)",
-        (not jauh_harian["ok"]) and "terlalu jauh" in jauh_harian["reason"],
-        jauh_harian["reason"],
-    )
-    belum_tutup_harian = reaksi_hari + [_k_hari(100.7, 120.0, 100.6, 119.0, 4)]
-    anti_repaint_harian = evaluate_daily_demand(
-        belum_tutup_harian, cfg_daily, signal_close_time_ms=reaksi_hari[-1].close_time
-    )
-    cek(
-        "candle harian yang belum tutup tidak dipakai (anti repaint)",
-        anti_repaint_harian["ok"] and anti_repaint_harian["bars"] == len(reaksi_hari),
-        f"bars={anti_repaint_harian['bars']}",
-    )
-    cek(
-        "jendela harian dipakai persis lookback + 1 candle",
-        evaluate_daily_demand(
-            [_k_hari(100.0, 100.2, 99.8, 100.0, i) for i in range(10)], cfg_daily
-        )["required"]
-        == 4,
-    )
-
-    # --- gerbang EMA + ADX harian (DAILY_TREND_*) ---
-    def _hari_deret(a: float, n: int = 130) -> list[Kline]:
-        out = []
-        p = 100.0
-        for i in range(n):
-            p *= a
-            out.append(
-                Kline(
-                    i * 86_400_000,
-                    p,
-                    p * 1.005,
-                    p * 0.995,
-                    p,
-                    i * 86_400_000 + 86_399_999,
-                    1000.0,
-                    1000.0 * p,
-                )
-            )
-        return out
-
-    cfg_dtrend = dict(
-        DAILY_TREND_FILTER_ENABLED=True,
-        **{k: v for k, v in DAILY_TREND_DEFAULTS.items() if k != "DAILY_TREND_FILTER_ENABLED"},
-    )
-    cfg_dtrend_off = dict(cfg_dtrend, DAILY_TREND_FILTER_ENABLED=False)
-    cek(
-        "default harian: interval 1d, EMA 20/50, ADX 14 min 20, jendela 120",
-        daily_trend_interval(cfg_dtrend) == "1d"
-        and daily_trend_gate_config(cfg_dtrend)["TREND_EMA_FAST"] == 20
-        and daily_trend_gate_config(cfg_dtrend)["TREND_EMA_SLOW"] == 50
-        and daily_trend_gate_config(cfg_dtrend)["TREND_ADX_PERIOD"] == 14
-        and daily_trend_gate_config(cfg_dtrend)["TREND_ADX_MIN"] == 20.0
-        and daily_trend_window_bars(cfg_dtrend) == 120,
-    )
-    lolos_nonaktif = evaluate_daily_trend([], cfg_dtrend_off)
-    cek(
-        "gerbang harian nonaktif lolos tanpa membaca candle",
-        lolos_nonaktif["ok"] and lolos_nonaktif["bars"] == 0,
-        lolos_nonaktif["reason"],
-    )
-    naik_harian = evaluate_daily_trend(_hari_deret(1.01), cfg_dtrend)
-    cek(
-        "trend harian naik dan kuat diloloskan",
-        naik_harian["ok"] and naik_harian["interval"] == "1d",
-        naik_harian["reason"],
-    )
-    turun_harian = evaluate_daily_trend(_hari_deret(0.99), cfg_dtrend)
-    cek(
-        "trend harian turun ditolak",
-        (not turun_harian["ok"]) and "di bawah" in turun_harian["reason"],
-        turun_harian["reason"],
-    )
-    # Deret tren murni menghasilkan ADX tepat 100, jadi deret berombak dipakai
-    # supaya ADX berada di bawah 100 dan ambangnya benar-benar bisa menolak.
-    def _hari_berombak(n: int = 130) -> list[Kline]:
-        out = []
-        p = 100.0
-        for i in range(n):
-            p *= 1.03 if i % 2 == 0 else 0.99
-            out.append(
-                Kline(
-                    i * 86_400_000,
-                    p,
-                    p * 1.01,
-                    p * 0.99,
-                    p,
-                    i * 86_400_000 + 86_399_999,
-                    1000.0,
-                    1000.0 * p,
-                )
-            )
-        return out
-
-    # Ambang 0 sengaja melewati perhitungan ADX, jadi ambang kecil di atas nol dipakai.
-    adx_berombak = evaluate_daily_trend(
-        _hari_berombak(), dict(cfg_dtrend, DAILY_TREND_ADX_MIN=0.0001)
-    )["adx"]
-    lemah_harian = evaluate_daily_trend(
-        _hari_berombak(), dict(cfg_dtrend, DAILY_TREND_ADX_MIN=(adx_berombak or 0.0) + 1.0)
-    )
-    cek(
-        "ADX harian di bawah ambang ditolak",
-        adx_berombak is not None
-        and adx_berombak < 99.0
-        and (not lemah_harian["ok"])
-        and "lemah" in lemah_harian["reason"],
-        f"ADX={adx_berombak} | {lemah_harian['reason']}",
-    )
-    kuat_harian = evaluate_daily_trend(
-        _hari_berombak(), dict(cfg_dtrend, DAILY_TREND_ADX_MIN=(adx_berombak or 0.0) - 1.0)
-    )
-    cek(
-        "ADX harian tepat di atas ambang tidak ditolak oleh cek ADX",
-        "lemah" not in kuat_harian["reason"],
-        kuat_harian["reason"],
-    )
-    cek(
-        "ADX_MIN 0 mematikan cek kekuatan, susunan EMA saja dipakai",
-        evaluate_daily_trend(
-            _hari_deret(1.01), dict(cfg_dtrend, DAILY_TREND_ADX_MIN=0.0)
-        )["ok"],
-    )
-    kurang_harian = evaluate_daily_trend(_hari_deret(1.01, n=30), cfg_dtrend)
-    cek(
-        "riwayat harian kurang dari minimum EMA50 ditolak (fail closed)",
-        (not kurang_harian["ok"]) and "kurang" in kurang_harian["reason"],
-        kurang_harian["reason"],
-    )
-    seri_belum_tutup = _hari_deret(1.01, n=130)
-    tutup_terakhir = seri_belum_tutup[-2].close_time
-    # Candle terakhir sengaja dibuat ekstrem (turun tajam). Kalau ikut terbaca,
-    # close dan EMA akan berubah. Hasilnya harus identik dengan deret tanpa candle itu.
-    seri_belum_tutup[-1] = Kline(
-        seri_belum_tutup[-1].open_time,
-        seri_belum_tutup[-1].open,
-        seri_belum_tutup[-1].high,
-        seri_belum_tutup[-1].low,
-        seri_belum_tutup[-1].low * 0.5,
-        seri_belum_tutup[-1].close_time,
-        1000.0,
-        1000.0,
-    )
-    anti_repaint_tren = evaluate_daily_trend(
-        seri_belum_tutup, cfg_dtrend, signal_close_time_ms=tutup_terakhir
-    )
-    tanpa_candle_berjalan = evaluate_daily_trend(
-        seri_belum_tutup[:-1], cfg_dtrend
-    )
-    cek(
-        "candle harian yang belum tutup diabaikan (anti repaint)",
-        anti_repaint_tren["ok"] == tanpa_candle_berjalan["ok"]
-        and anti_repaint_tren["values"] == tanpa_candle_berjalan["values"]
-        and anti_repaint_tren["values"]["close"] == seri_belum_tutup[-2].close,
-        f"close={anti_repaint_tren['values'].get('close')}",
-    )
-    cek(
-        "hasil harian identik dengan evaluate_trend_filter berparameter terpetakan",
-        naik_harian["ok"]
-        == evaluate_trend_filter(_hari_deret(1.01), daily_trend_gate_config(cfg_dtrend))["ok"]
-        and naik_harian["values"] == evaluate_trend_filter(
-            _hari_deret(1.01), daily_trend_gate_config(cfg_dtrend)
-        )["values"],
-    )
-    gagal_interval = _gagal_tertangkap(
-        lambda: daily_trend_interval(dict(cfg_dtrend, DAILY_TREND_INTERVAL="7d"))
-    )
-    cek("DAILY_TREND_INTERVAL tidak dikenal ditolak saat gerbang aktif", gagal_interval)
-    cek(
-        "warmup harian = (jendela 120 hari + 1) x 288 candle 5m",
-        daily_trend_warmup_bars(cfg_dtrend, "5m") == 121 * 288
-        and daily_trend_warmup_bars(cfg_dtrend_off, "5m") == 0,
-        f"{daily_trend_warmup_bars(cfg_dtrend, '5m')}",
-    )
-    cek(
-        "warmup gabungan memasukkan gerbang EMA+ADX harian (kebutuhan terbesar)",
-        htf_gate_warmup_bars(cfg_dtrend, "5m") >= 121 * 288,
-    )
-
-    print(
-        "HASIL SELFTEST indicators: "
-        + ("SEMUA LULUS" if not gagal else f"{gagal} GAGAL")
-    )
-    return 0 if not gagal else 1
-
-
-def _gagal_tertangkap(fn) -> bool:
-    try:
-        fn()
-    except (ValueError, TypeError):
-        return True
-    return False
-
-
-if __name__ == "__main__":
-    raise SystemExit(selftest())

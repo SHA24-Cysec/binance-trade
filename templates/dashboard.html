@@ -198,6 +198,13 @@
         align-items: center;
         gap: 7px;
       }
+      .ip-pill {
+        max-width: 100%;
+        font-variant-numeric: tabular-nums;
+      }
+      #publicEgressIpText {
+        overflow-wrap: anywhere;
+      }
       .dot {
         width: 7px;
         height: 7px;
@@ -2068,6 +2075,16 @@
             <span class="dot on" id="fxDot"></span
             ><span id="fxText">1 USDT ≈ Rp -</span>
           </span>
+          <span
+            class="pill ip-pill"
+            id="publicEgressIpPill"
+            role="status"
+            aria-live="polite"
+            title="IP dideteksi melalui api.ipify.org. Untuk allowlist, pastikan cocok dengan IP yang benar-benar dipakai ke Binance. Hasilnya dapat berbeda jika ada proxy atau rute khusus."
+          >
+            <span class="dot warn" id="publicEgressIpDot"></span>
+            <span id="publicEgressIpText">IP egress: mendeteksi…</span>
+          </span>
           <span class="refresh"
             ><span class="spin"></span
             ><span id="lastUpdate">memuat…</span></span
@@ -2262,6 +2279,9 @@
                 <span class="cn-icon"></span><span class="cn-text"></span><button type="button" class="cn-x" aria-label="Tutup" onclick="closeNotice(this.parentNode)">×</button>
               </div>
               <div id="modeConflictWarning" class="cnotice err" role="alert">
+                <span class="cn-icon"></span><span class="cn-text"></span><button type="button" class="cn-x" aria-label="Tutup" onclick="closeNotice(this.parentNode)">×</button>
+              </div>
+              <div id="liveStateMissingWarning" class="cnotice err" role="alert">
                 <span class="cn-icon"></span><span class="cn-text"></span><button type="button" class="cn-x" aria-label="Tutup" onclick="closeNotice(this.parentNode)">×</button>
               </div>
               <div id="openPositionWarning" class="cnotice err" role="alert">
@@ -2768,6 +2788,23 @@
           <h3 id="botActionTitle">Konfirmasi Aksi Bot</h3>
           <p id="botActionText"></p>
           <div
+            id="missingStateAcknowledgement"
+            style="display: none; margin-bottom: 14px"
+          >
+            <label class="bt-toggle">
+              <input
+                type="checkbox"
+                id="missingStateAck"
+                onchange="updateMissingStateAcknowledgement()"
+              />
+              <span
+                >Saya sudah memeriksa posisi dan order terbuka di akun LIVE. Saya
+                mengizinkan state dan baseline risiko baru; posisi lama yang
+                tidak tercatat tidak akan dipulihkan otomatis.</span
+              >
+            </label>
+          </div>
+          <div
             id="botPositionChoice"
             style="display: none; margin-bottom: 14px"
           >
@@ -3144,6 +3181,11 @@
 
         let flags=[];
         if(s.flags.dd_stopped) flags.push('🛑 DD-STOP aktif');
+        if(s.accounting && s.accounting.blocked){
+          flags.push('⛔ Entry LIVE ditahan: accounting belum terverifikasi ('+esc(s.accounting.block_reason||'menunggu rekonsiliasi')+')');
+        } else if(s.accounting && s.accounting.active_status==='LEGACY_UNVERIFIED'){
+          flags.push('⚠️ Posisi legacy dikelola, PnL belum terverifikasi');
+        }
         document.getElementById('footer').innerHTML='Dashboard kontrol lokal · bot dijalankan manual melalui Resume Bot.'+(flags.length?' &nbsp;|&nbsp; '+flags.join(' · '):'');
 
         // Panel posisi dirender lewat renderPositionPanel supaya rel harga
@@ -4014,10 +4056,12 @@
       function renderSummary(sum, quote){
         const rc=document.getElementById('cardRealized');
         document.getElementById('realizedVal').innerHTML='<span class="'+cls(sum.total_pnl)+'">'+sign(sum.total_pnl)+fmt(sum.total_pnl)+' '+esc(quote)+'</span>'+idrSub(sum.total_pnl, sum.total_pnl>0);
-        document.getElementById('realizedSub').textContent=sum.total_trades+' trade selesai';
+        document.getElementById('realizedSub').textContent=sum.total_trades+' trade terverifikasi'+(sum.unverified_trades?' · '+sum.unverified_trades+' belum terverifikasi':'');
         rc.className='card '+(sum.total_pnl>=0?'good':'bad');
         document.getElementById('winVal').textContent= sum.total_trades? fmt(sum.win_rate,1)+'%':'-';
-        document.getElementById('winSub').innerHTML= sum.total_trades? ('<span class="pos">'+fmt(sum.wins,0)+'W</span> / <span class="neg">'+fmt(sum.losses,0)+'L</span> · terbaik '+sign(sum.best_pct)+fmt(sum.best_pct,1)+'%') : 'belum ada trade';
+        document.getElementById('winSub').innerHTML= sum.total_trades
+          ? ('<span class="pos">'+fmt(sum.wins,0)+'W</span> / <span class="neg">'+fmt(sum.losses,0)+'L</span> · terbaik '+sign(sum.best_pct)+fmt(sum.best_pct,1)+'%')
+          : (sum.unverified_trades?'PnL belum masuk rasio sampai accounting diverifikasi':'belum ada trade');
       }
 
       function renderTrades(trades, quote){
@@ -4027,18 +4071,30 @@
         const tb=document.getElementById('tradeBody');
         const closed=trades.filter(t=>t.sell_time);
         if(!closed.length){tb.innerHTML='<tr><td colspan="9" class="empty">Belum ada trade yang selesai.</td></tr>';return;}
-        tb.innerHTML=closed.map(t=>`
+        tb.innerHTML=closed.map(t=>{
+          const verified=String(t.accounting_status||'LEGACY_UNVERIFIED').toUpperCase()==='VERIFIED';
+          const pnl=verified?(t.net_pnl_quote??t.pnl):t.estimated_pnl_quote;
+          const pct=verified?t.pnl_pct:null;
+          const statusLabel=verified?'NET TERKONFIRMASI':(String(t.accounting_status||'LEGACY_UNVERIFIED').toUpperCase()==='LEGACY_UNVERIFIED'?'LEGACY · ESTIMASI':'BELUM TERVERIFIKASI');
+          const pnlHtml=verified
+            ? '<span class="'+cls(pnl)+'">'+sign(pnl)+fmt(pnl)+'</span>'
+            : (pnl!==null&&pnl!==undefined?'<span class="mut">est. bruto '+sign(pnl)+fmt(pnl)+'</span>':'<span class="mut">belum tersedia</span>');
+          const pctHtml=verified
+            ? sign(pct)+fmt(pct)+'%'
+            : (t.pnl_pct!==null&&t.pnl_pct!==undefined?'est. '+sign(t.pnl_pct)+fmt(t.pnl_pct)+'%':'-');
+          return `
           <tr>
             <td class="mono mut">${esc(t.sell_time||'-')}${t.paper?' <span class="tag dry">PAPER</span>':''}</td>
             <td>${symLabel(t.symbol, 20)}</td>
             <td class="mono">${fmtP(t.entry||t.buy_price)}</td>
             <td class="mono">${fmtP(t.sell_price)}</td>
             <td class="mono">${fmt(t.qty,4)}</td>
-            <td class="mono ${cls(t.pnl_pct)}">${sign(t.pnl_pct)}${fmt(t.pnl_pct)}%</td>
-            <td class="mono ${cls(t.pnl)}">${sign(t.pnl)}${fmt(t.pnl)}</td>
-            <td class="mono mut">${idrCell(t.pnl)}</td>
-            <td>${reasonTag(t.reason)}</td>
-          </tr>`).join('');
+            <td class="mono ${cls(pct)}">${pctHtml}</td>
+            <td class="mono ${cls(verified?pnl:null)}">${pnlHtml}</td>
+            <td class="mono mut">${verified?idrCell(pnl):'-'}</td>
+            <td>${reasonTag(t.reason)}<div class="mut" style="font-size:10px;margin-top:3px">${statusLabel}</div>${t.accounting_note?'<div class="mut" style="font-size:10px">'+esc(t.accounting_note)+'</div>':''}</td>
+          </tr>`;
+        }).join('');
       }
 
       function renderLogs(events){
@@ -4049,7 +4105,7 @@
 
       function renderChart(trades){
         const wrap=document.getElementById('chartWrap');
-        const closed=trades.filter(t=>t.sell_time && 'pnl' in t).slice().reverse();
+        const closed=trades.filter(t=>t.sell_time && String(t.accounting_status||'LEGACY_UNVERIFIED').toUpperCase()==='VERIFIED' && t.pnl!==null && t.pnl!==undefined && Number.isFinite(Number(t.pnl))).slice().reverse();
         if(closed.length<1){wrap.innerHTML='<div class="empty"><div class="big">📊</div>Belum ada data trade untuk digambar.</div>';return;}
         let cum=0; const pts=[0];
         closed.forEach(t=>{cum+=t.pnl; pts.push(cum);});
@@ -4283,6 +4339,34 @@
         }
       }
 
+      function renderPublicEgressIp(info){
+        const text=document.getElementById('publicEgressIpText');
+        const dot=document.getElementById('publicEgressIpDot');
+        if(!text||!dot) return;
+        const data=info&&typeof info==='object'?info:{};
+        const ip=typeof data.ip==='string'?data.ip.trim():'';
+        const status=String(data.status||'UNCHECKED').toUpperCase();
+        if(status==='OK'&&ip){
+          text.textContent='IP egress: '+ip;
+          dot.className='dot on';
+        }else if(status==='REFRESHING'&&ip){
+          text.textContent='IP egress: '+ip+' · memperbarui';
+          dot.className='dot warn';
+        }else if(status==='STALE'&&ip){
+          text.textContent='IP egress: '+ip+' · data lama';
+          dot.className='dot warn';
+        }else if(status==='CHECKING'){
+          text.textContent='IP egress: mendeteksi…';
+          dot.className='dot warn';
+        }else if(status==='ERROR'){
+          text.textContent='IP egress: tidak terdeteksi';
+          dot.className='dot off';
+        }else{
+          text.textContent='IP egress: belum tersedia';
+          dot.className='dot off';
+        }
+      }
+
       async function loadControlStatus(){
         if(_pollingPaused||_controlStatusInFlight) return;
         _controlStatusInFlight=true;
@@ -4295,6 +4379,7 @@
           if(!r.ok) throw new Error(d.error||'Status gagal dimuat.');
           _controlState=d;
           renderControlOperation(d.operation);
+          renderPublicEgressIp(d.public_egress_ip);
           const operationBusy=controlOperationActive(d.operation)||_localControlBusy;
           if(controlOperationActive(d.operation)) nextDelay=750;
           document.getElementById('processStatusBox').innerHTML=processLabel(d.process)+
@@ -4309,7 +4394,7 @@
           const guardSafe=!d.mode_guard||d.mode_guard.safe!==false;
           if(resumeBtn){
             resumeBtn.disabled=operationBusy||!!d.read_only||!configSafe||!guardSafe||!['STOPPED','CRASHED'].includes(status);
-            resumeBtn.title=operationBusy?'Aksi bot sedang diproses.':'Lanjutkan proses bot yang berhenti.';
+            resumeBtn.title=operationBusy?'Aksi bot sedang diproses.':(d.mode==='LIVE'&&d.live_state_missing?'File state LIVE hilang; konfirmasi eksplisit diperlukan.':'Lanjutkan proses bot yang berhenti.');
           }
           if(stopBtn){
             stopBtn.disabled=operationBusy||!!d.read_only||!['STARTING','RUNNING'].includes(status);
@@ -4322,6 +4407,10 @@
           if(modeProblems.length){
             showPersistentNotice(mw,'err','⛔','<b>Resume Bot diblokir.</b> '+modeProblems.map(esc).join(' ')+' Ubah BOT_MODE di .env hanya setelah mode lama berhenti dan posisinya kosong, lalu jalankan ulang dashboard.',modeProblems.join('|'));
           }else{hideNotice(mw);}
+          const sw=document.getElementById('liveStateMissingWarning');
+          if(d.mode==='LIVE'&&d.live_state_missing){
+            showPersistentNotice(sw,'err','⛔','<b>State LIVE tidak ditemukan.</b> Resume Bot diblokir sampai operator memeriksa posisi dan order, lalu memberi konfirmasi eksplisit untuk state serta baseline risiko baru.','live-state-missing');
+          }else{hideNotice(sw);}
           const w=document.getElementById('openPositionWarning');
           if(d.position&&d.position.has_position){
             showPersistentNotice(w,'err','⚠️',`Posisi terbuka <b>${esc(d.position.symbol)}</b>, qty ${esc(d.position.qty)}. Stop dengan posisi dipertahankan membuat SL/TP bot tidak aktif.`,'pos:'+d.position.symbol+':'+d.position.qty);
@@ -4353,21 +4442,45 @@
         const pos=_controlState&&_controlState.position;
         const isResume=action==='START';
         const label=isResume?'Resume Bot':'Stop Bot';
-        document.getElementById('botActionTitle').textContent='Konfirmasi '+label;
+        const missingLiveState=isResume&&_controlState&&_controlState.mode==='LIVE'&&_controlState.live_state_missing;
+        const stateAck=document.getElementById('missingStateAck');
+        const stateAckWrap=document.getElementById('missingStateAcknowledgement');
+        stateAck.checked=false;
+        stateAckWrap.style.display=missingLiveState?'block':'none';
+        document.getElementById('botActionTitle').textContent=missingLiveState?'Konfirmasi inisialisasi state LIVE':'Konfirmasi '+label;
         document.getElementById('botActionText').textContent=isResume
-          ? 'Bot akan dilanjutkan memakai mode dan settings aktif.'
+          ? (missingLiveState
+              ? 'File state LIVE tidak ditemukan. Melanjutkan akan membuat state baru dan menginisialisasi peak equity dari saldo saat ini. Posisi atau order lama yang tidak tersimpan tidak direkonstruksi otomatis. Lanjutkan hanya setelah memeriksa akun Binance dan memulihkan state dari backup jika tersedia.'
+              : 'Bot akan dilanjutkan memakai mode dan settings aktif.')
           : 'Bot akan dihentikan secara graceful.';
         document.getElementById('botPositionChoice').style.display=(pos&&pos.has_position&&!isResume)?'block':'none';
         const confirmBtn=document.getElementById('botActionConfirmBtn');
-        confirmBtn.textContent=label;
+        confirmBtn.textContent=missingLiveState?'Akui dan mulai state baru':label;
+        confirmBtn.disabled=!!missingLiveState;
         confirmBtn.classList.toggle('resume',isResume);
         document.getElementById('botActionModal').classList.add('show');
       }
-      function closeBotActionModal(){document.getElementById('botActionModal').classList.remove('show');_pendingBotAction=null;}
+      function updateMissingStateAcknowledgement(){
+        const required=document.getElementById('missingStateAcknowledgement').style.display!=='none';
+        const checked=document.getElementById('missingStateAck').checked;
+        document.getElementById('botActionConfirmBtn').disabled=_localControlBusy||(required&&!checked);
+      }
+      function closeBotActionModal(){
+        document.getElementById('botActionModal').classList.remove('show');
+        document.getElementById('missingStateAck').checked=false;
+        document.getElementById('missingStateAcknowledgement').style.display='none';
+        _pendingBotAction=null;
+      }
       async function confirmBotAction(){
         if(!_pendingBotAction||_localControlBusy)return;
         const action=_pendingBotAction;
         const label=action==='START'?'Resume Bot':'Stop Bot';
+        const missingLiveState=action==='START'&&_controlState&&_controlState.mode==='LIVE'&&_controlState.live_state_missing;
+        const acknowledgeMissingState=!!(missingLiveState&&document.getElementById('missingStateAck').checked);
+        if(missingLiveState&&!acknowledgeMissingState){
+          toast('warn','Konfirmasi diperlukan','Centang pengakuan state LIVE yang hilang sebelum melanjutkan.');
+          return;
+        }
         const btn=document.getElementById('botActionConfirmBtn');
         btn.disabled=true;
         btn.textContent='Mengirim...';
@@ -4384,7 +4497,7 @@
         pauseBackgroundPolling();
 
         try{
-          let r=await adminFetch('/api/control/prepare',{body:JSON.stringify({action:action,position_policy:policy})});
+          let r=await adminFetch('/api/control/prepare',{body:JSON.stringify({action:action,position_policy:policy,acknowledge_missing_live_state:acknowledgeMissingState})});
           let d=await responseJson(r);
           if(!r.ok)throw new Error(d.error||'Persiapan aksi gagal.');
           r=await adminFetch('/api/control/execute',{body:JSON.stringify({confirmation_id:d.confirmation_id})});

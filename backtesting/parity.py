@@ -230,11 +230,6 @@ def next_entry_allowed(close_time_ms: int, config: dict) -> int:
 
 
 def same_coin_block_hours(config: dict) -> float:
-    """Durasi blokir entry ulang koin yang sama dalam jam (0 = nonaktif).
-
-    Satu sumber kebenaran untuk aturan SAME_COIN_BLOCK_HOURS yang dipakai bot
-    live (trading/pump_scanner_bot.py) dan kedua jalur backtest.
-    """
     try:
         hours = float(config.get("SAME_COIN_BLOCK_HOURS", 0) or 0)
     except (TypeError, ValueError):
@@ -245,17 +240,10 @@ def same_coin_block_hours(config: dict) -> float:
 
 
 def same_coin_block_loss_only(config: dict) -> bool:
-    """True kalau hanya trade loss yang memicu blokir koin sama."""
     return bool(config.get("SAME_COIN_BLOCK_LOSS_ONLY", True))
 
 
 def same_coin_block_until_ms(close_time_ms: int, pnl_quote: float, config: dict) -> int:
-    """Waktu (ms) sampai kapan entry koin yang sama diblokir setelah trade ditutup.
-
-    Mengembalikan close_time_ms apa adanya (artinya tidak ada blokir tambahan)
-    kalau fitur nonaktif atau, pada mode loss-only, trade tidak rugi. PnL dalam
-    mata uang kuotasi, sama seperti PnL di close_position bot live.
-    """
     hours = same_coin_block_hours(config)
     close_time_ms = int(close_time_ms)
     if hours <= 0:
@@ -272,7 +260,6 @@ def same_coin_block_until_ms(close_time_ms: int, pnl_quote: float, config: dict)
 
 
 def same_coin_blocked(symbol: str, now_ms: int, blocks: dict) -> bool:
-    """True kalau simbol sedang diblokir aturan SAME_COIN_BLOCK pada waktu now_ms."""
     if not isinstance(blocks, dict) or not symbol:
         return False
     try:
@@ -287,12 +274,6 @@ def same_coin_blocked(symbol: str, now_ms: int, blocks: dict) -> bool:
 def same_coin_block_record(
     blocks: dict, symbol: str, close_time_ms: int, pnl_quote: float, config: dict
 ) -> None:
-    """Catat blokir koin yang baru ditutup di simulasi.
-
-    `blocks` diubah in-place (dipanggil hanya dari backtest yang memegang
-    state lokal per jalannya). Entri kedaluwarsa dipangkas supaya pemetaan
-    tidak terus membesar.
-    """
     if not symbol or not isinstance(blocks, dict):
         return
     close_time_ms = int(close_time_ms)
@@ -314,14 +295,6 @@ def same_coin_block_record(
 
 
 class TrendLookup:
-    """Jendela candle trend (timeframe tinggi) untuk gerbang entry.
-
-    Aturan pengambilan jendela di sini adalah aturan yang SAMA dengan bot live
-    (TrendCache pada trading/pump_scanner_bot.py): pakai TREND_LOOKBACK_BARS
-    candle terakhir yang SUDAH TUTUP pada saat candle sinyal ditutup, lalu
-    hitung ulang EMA dan ADX pada jendela itu. Jadi kalau data candle trendnya
-    sama, keputusan live dan backtest juga sama.
-    """
 
     def __init__(self, trend_klines: Sequence[Kline], config: dict) -> None:
         from strategy import indicators as strategy_mod
@@ -330,9 +303,6 @@ class TrendLookup:
         self.interval = (
             strategy_mod.trend_interval(config) if _interval_ok(config) else None
         )
-        # Jendela gabungan (gerbang trend + gerbang demand HTF), sama dengan
-        # jendela unduhan TrendCache di bot live. evaluate_trend_filter
-        # memotong sendiri jendelanya, jadi verdict EMA/ADX tidak berubah.
         self.window = strategy_mod.htf_window_bars(config)
         self.required = strategy_mod.trend_required_bars(config)
         self.klines = list(trend_klines)
@@ -346,7 +316,6 @@ class TrendLookup:
         return evaluate_trend(self.window_at(signal_close_time_ms), self.config)
 
     def htf_demand_at(self, signal_close_time_ms: int) -> dict:
-        """Verdict gerbang zona demand HTF pada jendela yang sama dengan live."""
         from strategy import indicators as strategy_mod
 
         return strategy_mod.evaluate_htf_demand(
@@ -362,11 +331,6 @@ def _interval_ok(config: dict) -> bool:
 
 
 def build_trend_klines(klines: Sequence[Kline], config: dict, interval: str) -> list:
-    """Candle trend untuk backtest, dirangkai dari candle interval simulasi.
-
-    Contoh: candle 1h dibentuk dari 12 candle 5m. Hanya bucket yang lengkap yang
-    dipakai, sehingga nilai OHLCV-nya identik dengan candle asli Binance.
-    """
     from strategy import indicators as strategy_mod
 
     trend_minutes = strategy_mod.trend_interval_minutes(config)
@@ -386,15 +350,6 @@ def make_trend_lookup(
     *,
     sudah_dirangkai: bool = False,
 ) -> Optional[TrendLookup]:
-    """Lookup gerbang timeframe tinggi (trend + demand HTF) untuk backtest.
-
-    `sudah_dirangkai=True` dipakai kalau pemanggil sudah merangkai candle trend
-    sendiri (mis. trend_latih/trend_uji di pencarian grid), supaya candle trend
-    tidak dirangkai dua kali dan jendelanya tidak melar.
-
-    Lookup dibangun kalau GERBANG TREND atau GERBANG DEMAND HTF aktif; kalau
-    keduanya mati, tidak ada candle timeframe tinggi yang perlu dirangkai.
-    """
     if not config.get("TREND_FILTER_ENABLED", False) and not config.get(
         "HTF_DEMAND_FILTER_ENABLED", False
     ):
@@ -408,18 +363,12 @@ def make_trend_lookup(
 
 
 def trend_warmup_bars(config: dict, interval: str) -> int:
-    """Jumlah candle interval simulasi yang dibutuhkan gerbang trend.
-
-    Dipakai jalur pencarian grid (satu simbol) yang bekerja dalam satuan bar,
-    sedangkan jalur portofolio memakai trend_warmup_ms.
-    """
     from strategy import indicators as strategy_mod
 
     return strategy_mod.trend_warmup_bars(config, interval)
 
 
 def trend_warmup_ms(config: dict, interval: str) -> int:
-    """Warmup (ms) yang wajib tersedia sebelum bar entry pertama dievaluasi."""
     from strategy import indicators as strategy_mod
 
     return strategy_mod.trend_warmup_bars(
@@ -428,39 +377,30 @@ def trend_warmup_ms(config: dict, interval: str) -> int:
 
 
 def daily_demand_enabled(config: dict) -> bool:
-    """Gerbang zona demand harian aktif atau tidak (satu sumber dengan live)."""
     from strategy import indicators as strategy_mod
 
     return strategy_mod.daily_demand_enabled(config)
 
 
 def daily_demand_window_bars(config: dict) -> int:
-    """Jumlah candle harian untuk satu jendela gerbang demand harian."""
     from strategy import indicators as strategy_mod
 
     return strategy_mod.daily_demand_window_bars(config)
 
 
 def daily_demand_lookback_bars(config: dict) -> int:
-    """Lookback candle harian gerbang demand harian (dipakai laporan peringatan)."""
     from strategy import indicators as strategy_mod
 
     return strategy_mod.daily_demand_lookback_bars(config)
 
 
 def daily_trend_window_bars(config: dict) -> int:
-    """Jumlah candle harian untuk gerbang EMA + ADX harian (0 kalau nonaktif)."""
     from strategy import indicators as strategy_mod
 
     return strategy_mod.daily_trend_window_bars(config)
 
 
 def daily_trend_warmup_ms(config: dict, interval: str) -> int:
-    """Warmup (ms) gerbang EMA + ADX harian saja (0 kalau nonaktif).
-
-    Dipakai pesan dan batas hari minimal di dashboard, supaya angkanya sama
-    dengan yang dipakai strategy.indicators.htf_gate_warmup_bars.
-    """
     from strategy import indicators as strategy_mod
 
     return strategy_mod.daily_trend_warmup_bars(
@@ -469,19 +409,12 @@ def daily_trend_warmup_ms(config: dict, interval: str) -> int:
 
 
 def htf_gate_warmup_bars(config: dict, interval: str) -> int:
-    """Warmup gabungan semua gerbang timeframe tinggi yang aktif (0 kalau tidak ada).
-
-    Dipakai jalur pencarian grid (satuan bar); jalur portofolio memakai
-    htf_gate_warmup_ms. Isinya satu sumber dengan strategy.indicators supaya
-    live, backtest, dan grid search tidak pernah memakai angka berbeda.
-    """
     from strategy import indicators as strategy_mod
 
     return strategy_mod.htf_gate_warmup_bars(config, interval)
 
 
 def htf_gate_warmup_ms(config: dict, interval: str) -> int:
-    """Warmup (ms) gerbang timeframe tinggi gabungan (trend + demand H1 + demand harian)."""
     from strategy import indicators as strategy_mod
 
     return strategy_mod.htf_gate_warmup_bars(
@@ -496,16 +429,6 @@ def evaluate_trend(klines: Sequence[Kline], config: dict) -> dict:
 
 
 class DailyDemandLookup:
-    """Jendela candle harian untuk gerbang demand harian di backtest.
-
-    Aturannya harus sama persis dengan bot live (DailyDemandCache pada
-    trading/pump_scanner_bot.py): pakai DAILY_DEMAND_LOOKBACK_BARS + 1 candle
-    harian terakhir yang SUDAH TUTUP pada saat candle sinyal ditutup, lalu
-    jalankan mesin zona yang sama (evaluate_daily_demand). Candle harian di
-    sini dirangkai dari candle interval simulasi, jadi nilainya identik dengan
-    candle harian asli Binance untuk rentang yang sama dan tidak ada unduhan
-    tambahan ke bursa.
-    """
 
     def __init__(self, daily_klines: Sequence[Kline], config: dict) -> None:
         from strategy import indicators as strategy_mod
@@ -521,7 +444,6 @@ class DailyDemandLookup:
         return self.klines[max(0, idx - self.window) : idx]
 
     def daily_demand_at(self, signal_close_time_ms: int) -> dict:
-        """Verdict gerbang demand harian pada jendela yang sama dengan live."""
         from strategy import indicators as strategy_mod
 
         return strategy_mod.evaluate_daily_demand(
@@ -536,12 +458,6 @@ def make_daily_lookup(
     *,
     sudah_dirangkai: bool = False,
 ) -> Optional[DailyDemandLookup]:
-    """Lookup gerbang demand harian untuk backtest (None kalau gerbang mati).
-
-    `sudah_dirangkai=True` dipakai kalau pemanggil sudah merangkai candle harian
-    sendiri (mis. jalur pencarian grid yang membagi data latih dan data uji),
-    supaya candle harian tidak dirangkai dua kali dan jendelanya tidak melar.
-    """
     from strategy import indicators as strategy_mod
 
     if not strategy_mod.daily_demand_enabled(config):
@@ -555,7 +471,6 @@ def make_daily_lookup(
 def build_daily_klines(
     klines: Sequence[Kline], config: dict, interval: str
 ) -> list[Kline]:
-    """Candle harian untuk backtest, dirangkai dari candle interval simulasi."""
     from strategy import indicators as strategy_mod
 
     source_minutes = strategy_mod.INTERVAL_MINUTES.get(str(interval))
@@ -572,14 +487,6 @@ def build_daily_klines(
 
 
 class DailyTrendLookup:
-    """Jendela candle harian untuk gerbang EMA + ADX harian di backtest.
-
-    Aturannya harus sama persis dengan bot live (DailyTrendCache pada
-    trading/pump_scanner_bot.py): pakai DAILY_TREND_LOOKBACK_BARS candle harian
-    terakhir yang SUDAH TUTUP pada saat candle sinyal ditutup, lalu jalankan
-    evaluate_daily_trend. Candle harian dirangkai dari candle interval simulasi,
-    jadi tidak ada unduhan tambahan ke bursa.
-    """
 
     def __init__(self, daily_klines: Sequence[Kline], config: dict) -> None:
         from strategy import indicators as strategy_mod
@@ -595,7 +502,6 @@ class DailyTrendLookup:
         return self.klines[max(0, idx - self.window) : idx]
 
     def verdict_at(self, signal_close_time_ms: int) -> dict:
-        """Verdict gerbang EMA + ADX harian pada jendela yang sama dengan live."""
         from strategy import indicators as strategy_mod
 
         return strategy_mod.evaluate_daily_trend(
@@ -606,7 +512,6 @@ class DailyTrendLookup:
 def build_daily_trend_klines(
     klines: Sequence[Kline], config: dict, interval: str
 ) -> list[Kline]:
-    """Candle harian untuk gerbang EMA + ADX harian, dirangkai dari candle simulasi."""
     from strategy import indicators as strategy_mod
 
     source_minutes = strategy_mod.INTERVAL_MINUTES.get(str(interval))
@@ -629,7 +534,6 @@ def make_daily_trend_lookup(
     *,
     sudah_dirangkai: bool = False,
 ) -> Optional[DailyTrendLookup]:
-    """Lookup gerbang EMA + ADX harian untuk backtest (None kalau gerbang mati)."""
     from strategy import indicators as strategy_mod
 
     if not strategy_mod.daily_trend_enabled(config):

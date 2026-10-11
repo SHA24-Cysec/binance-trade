@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from copy import deepcopy
 import os
 import time
 from datetime import datetime, timezone
@@ -14,6 +15,7 @@ from infrastructure.storage.atomic_io import (
 )
 
 logger = logging.getLogger("state")
+STATE_FILE_MISSING = "STATE_FILE_MISSING"
 
 DEFAULT_STATE = {
     "be_active": False,
@@ -24,19 +26,26 @@ DEFAULT_STATE = {
     "peak_equity": None,
     "dd_stopped": False,
     "dd_stop_until": 0,
+    "trade_accounting": None,
+    "accounting_blocked": False,
+    "accounting_block_reason": "",
+    "accounting_retry_after_ms": 0,
+    "accounting_pending_trades": [],
+    "last_closed_trade": None,
+    "pending_native_settlement": None,
 }
 
 
 def _load_state_checked_unlocked(path: str) -> tuple[dict, bool, str]:
     if not os.path.exists(path):
         logger.info("File state %s tidak ditemukan, mulai dari state kosong.", path)
-        return dict(DEFAULT_STATE), True, ""
+        return deepcopy(DEFAULT_STATE), False, STATE_FILE_MISSING
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         if not isinstance(data, dict):
             raise ValueError("root state harus object JSON")
-        merged = dict(DEFAULT_STATE)
+        merged = deepcopy(DEFAULT_STATE)
         merged.update(data)
         return merged, True, ""
     except (json.JSONDecodeError, ValueError, TypeError) as exc:
@@ -47,11 +56,11 @@ def _load_state_checked_unlocked(path: str) -> tuple[dict, bool, str]:
             logger.error("State %s rusak dan gagal diarsipkan: %s", path, backup_exc)
         message = f"Gagal membaca state valid {path}: {exc}. Cadangan: {backup}"
         logger.error("%s. Membuat state default fail-closed.", message)
-        return dict(DEFAULT_STATE), False, message
+        return deepcopy(DEFAULT_STATE), False, message
     except OSError as exc:
         message = f"Gagal membaca state {path}: {exc}"
         logger.error("%s. Membuat state default fail-closed.", message)
-        return dict(DEFAULT_STATE), False, message
+        return deepcopy(DEFAULT_STATE), False, message
 
 
 def load_state_checked(path: str) -> tuple[dict, bool, str]:

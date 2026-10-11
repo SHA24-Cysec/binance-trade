@@ -117,6 +117,9 @@ class ExchangeClient(ABC):
         orig_client_order_id: Optional[str] = None,
     ) -> dict: ...
 
+    def get_my_trades(self, symbol: str, order_id: int) -> list:
+        raise NotImplementedError("trade fill history tidak tersedia pada client ini")
+
     def get_order_list(
         self,
         order_list_id: Optional[int] = None,

@@ -15,7 +15,7 @@ from typing import Any, Optional
 
 import requests
 
-from infrastructure.network.file_descriptors import EMFILE, is_emfile
+from infrastructure.network.file_descriptors import is_emfile
 from infrastructure.network.rate_limiter import (
     RateLimitBlockedError,
     SharedRequestWeightLimiter,
@@ -55,35 +55,14 @@ class BinanceTransportError(BinanceAPIError):
         super().__init__(0, None, msg)
 
 
-# Batas default jumlah sesi HTTP yang dipegang satu klien. Dipilih longgar agar
-# tidak pernah memaksa penutupan sesi milik thread yang masih aktif memakai.
 MAX_SESSIONS_DEFAULT = 16
 
 
 class _SessionRegistry:
-    """Pemegang ``requests.Session`` per thread dengan batas dan pendauran ulang.
-
-    Latar belakang: tiap thread butuh sesinya sendiri, tetapi penyimpanan berupa
-    ``list`` membuat sesi dari thread yang sudah mati menumpuk selamanya. Setiap
-    sesi memegang koneksi HTTPS yang masih hidup, jadi satu sesi bocor berarti
-    satu file descriptor bocor. Pada mesin pemilik repo, tumpukan ini memicu
-    ``OSError(24, 'Too many open files')`` pada lock state, pada werkzeug, dan
-    pada permintaan harga ke Binance (log 07-10-2026).
-
-    Aturan main:
-
-    1. Sesi tetap per thread (sifat lama dipertahankan).
-    2. Registry menyimpan hanya sesi milik thread yang masih hidup, dihitung
-       lewat rujukan lemah ke objek thread.
-    3. Saat batas terlampaui, sesi milik thread yang sudah mati dan tidak sedang
-       dipakai request ditutup lebih dulu. Kalau masih lewat batas, pemanggil
-       diberi peringatan; sesi aktif tidak pernah diputus di tengah request.
-    """
 
     def __init__(self, max_sessions: int = MAX_SESSIONS_DEFAULT) -> None:
         self._tls = threading.local()
         self._lock = threading.Lock()
-        # thread (rujukan lemah) -> [session, jumlah request aktif]
         self._entries: "weakref.WeakKeyDictionary[threading.Thread, list]" = (
             weakref.WeakKeyDictionary()
         )
@@ -94,13 +73,6 @@ class _SessionRegistry:
 
     @staticmethod
     def _konfigurasi_pool(session, pool_maxsize: int = 4) -> None:
-        """Batasi koneksi simpanan per sesi.
-
-        Bawaan urllib3 menyimpan hingga 10 soket per host per sesi. Karena sesi
-        dipegang per thread, kombinasi "banyak thread singkat x 10 soket" inilah
-        yang menghabiskan fd. Empat soket per host cukup untuk satu thread dan
-        membuat sisa soket yang menganggur ditutup oleh pool itu sendiri.
-        """
         try:
             adapter = requests.adapters.HTTPAdapter(
                 pool_connections=2, pool_maxsize=max(1, int(pool_maxsize))
@@ -111,7 +83,6 @@ class _SessionRegistry:
         session.mount("https://", adapter)
 
     def set_headers(self, headers: dict) -> None:
-        """Header yang akan dipasang pada setiap sesi baru (termasuk yang sudah ada)."""
         with self._lock:
             self._headers = dict(headers)
             sesi = [entry[0] for entry in self._entries.values()]
@@ -129,7 +100,6 @@ class _SessionRegistry:
         return session
 
     def bind(self, headers: dict | None = None) -> None:
-        """Daftarkan sesi untuk thread pemanggil (dipanggil sekali per thread)."""
         if headers:
             self.set_headers(headers)
         thread = threading.current_thread()
@@ -151,7 +121,6 @@ class _SessionRegistry:
 
     @contextlib.contextmanager
     def use(self):
-        """Tandai satu request aktif pada sesi thread ini, lalu tagih penutupan."""
         session = self.get()
         thread = threading.current_thread()
         with self._lock:
@@ -178,7 +147,6 @@ class _SessionRegistry:
                     logger.debug("Gagal menutup sesi usang", exc_info=True)
 
     def _reap_locked(self) -> list:
-        """Tutup sesi milik thread mati. Panggil dengan ``_lock`` sudah digenggam."""
         ditutup = []
         for thread, entry in list(self._entries.items()):
             if len(self._entries) <= self.max_sessions:
@@ -199,11 +167,6 @@ class _SessionRegistry:
         return ditutup
 
     def close_all(self) -> list:
-        """Kembalikan sesi terdaftar dan kosongkan registry.
-
-        Pemanggil yang menutup sessi-nya, supaya exception dari session.close()
-        tidak terjadi sambil memegang kunci registry.
-        """
         with self._lock:
             items = [entry[0] for entry in self._entries.values()]
             self._entries.clear()
@@ -245,7 +208,6 @@ QUOTE_PRECISION_DEFAULT = 8
 
 
 def _quote_precision_places(value) -> int:
-    """Ubah presisi quote asset menjadi jumlah desimal yang aman (0..18)."""
     try:
         places = int(value)
     except (TypeError, ValueError):
@@ -254,21 +216,11 @@ def _quote_precision_places(value) -> int:
 
 
 def _round_down_places(value, places: int):
-    """Bulatkan KE BAWAH ke jumlah desimal tertentu memakai Decimal.
-
-    Dipakai untuk parameter quoteOrderQty. Nilai hasil perhitungan float
-    (contoh 7.58 * 0.995 = 7.5421000000000005) mengandung belasan desimal dan
-    ditolak bursa dengan kode -1111 "Parameter 'quoteOrderQty' has too much
-    precision". Pembulatan ke bawah dipilih supaya nilai tidak pernah melebihi
-    saldo yang tersedia.
-    """
     number = value if isinstance(value, Decimal) else Decimal(str(value))
     if not number.is_finite():
         raise ValueError(f"nilai non-finite tidak boleh dibulatkan: {value!r}")
     step = Decimal(1).scaleb(-_quote_precision_places(places))
     hasil = number.quantize(step, rounding=ROUND_DOWN)
-    # Buang nol di belakang koma supaya teks yang dikirim ringkas
-    # (7.54210000 -> 7.5421) tanpa mengubah nilainya.
     teks = format(hasil, "f")
     if "." in teks:
         teks = teks.rstrip("0").rstrip(".")
@@ -279,6 +231,15 @@ def _round_down_places(value, places: int):
 
 _REDACT_PARAMS = ("signature", "apiKey", "api_key", "secret", "token")
 _REDACT_RE = re.compile(r"(?i)\b(" + "|".join(_REDACT_PARAMS) + r")=[^&\s\"'>]*")
+
+# SAPI budgets are independent per endpoint, with separate IP and UID headers.
+SAPI_IP_WEIGHT_LIMIT = 12_000
+SAPI_UID_WEIGHT_LIMIT = 180_000
+_SAPI_REQUEST_LIMITS = {
+    ("GET", "/sapi/v1/account/apiRestrictions"): ("ip", 1),
+    ("POST", "/sapi/v1/asset/dust-btc"): ("ip", 1),
+    ("POST", "/sapi/v1/asset/dust"): ("uid", 10),
+}
 
 
 class BinanceSpotClient:
@@ -306,10 +267,6 @@ class BinanceSpotClient:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.allow_signed = allow_signed
-        # Satu sesi per thread, disimpan di registry yang tahu diri: sesi milik
-        # thread yang sudah mati ditutup sehingga soket dan file descriptornya
-        # kembali. Sebelumnya sesi ditumpuk di list tanpa batas (penyebab
-        # "Too many open files" pada log 07-10-2026).
         self._registry = _SessionRegistry(max_sessions=max_sessions)
         self._prime_session()
         self._time_offset_ms = 0
@@ -318,18 +275,39 @@ class BinanceSpotClient:
             limit=rate_limit_limit,
             safety_margin=rate_limit_safety_margin,
         )
+        self._sapi_rate_limiters: dict[
+            tuple[str, str], SharedRequestWeightLimiter
+        ] = {}
+        for (sapi_method, sapi_path), (scope, _weight) in _SAPI_REQUEST_LIMITS.items():
+            sapi_limit = (
+                SAPI_UID_WEIGHT_LIMIT if scope == "uid" else SAPI_IP_WEIGHT_LIMIT
+            )
+            sapi_state_file = None
+            if rate_limit_state_file:
+                route_slug = (
+                    f"{sapi_method.lower()}-{sapi_path.strip('/').replace('/', '-')}"
+                )
+                sapi_state_file = (
+                    f"{rate_limit_state_file}.sapi-{scope}-{route_slug}"
+                )
+            self._sapi_rate_limiters[(sapi_method, sapi_path)] = (
+                SharedRequestWeightLimiter(
+                    sapi_state_file,
+                    limit=sapi_limit,
+                    safety_margin=rate_limit_safety_margin,
+                    window_seconds=60,
+                )
+            )
 
         self.used_weight_1m = 0
         self.blocked_until = 0.0
 
     @property
     def _sessions_lock(self) -> threading.Lock:
-        # Kompatibel dengan kode/lama yang mengharapkan kunci registry.
         return self._registry._lock
 
     @property
     def _sessions(self) -> list:
-        # Kompatibel dengan pembacaan diagnostik: daftar sesi yang masih terdaftar.
         return self._registry.sessions
 
     def _new_session(self):
@@ -396,15 +374,24 @@ class BinanceSpotClient:
             return 2
         if path == "/api/v3/account" and method == "GET":
             return 20
-        if path == "/sapi/v1/account/apiRestrictions" and method == "GET":
-            return 1
+        sapi_limit = _SAPI_REQUEST_LIMITS.get((method, path))
+        if sapi_limit is not None:
+            return sapi_limit[1]
         if path == "/api/v3/order" and method == "GET":
             return 4
+        if path == "/api/v3/myTrades" and method == "GET":
+            return 5 if params.get("orderId") is not None else 20
         if path == "/api/v3/orderList" and method == "GET":
             return 4
         if path == "/api/v3/openOrders" and method == "GET":
             return 6 if params.get("symbol") else 80
         return 1
+
+    def _limiter_for_request(
+        self, method: str, path: str
+    ) -> SharedRequestWeightLimiter:
+        route = (str(method or "GET").upper(), str(path or ""))
+        return self._sapi_rate_limiters.get(route, self._rate_limiter)
 
     def _request(
         self,
@@ -438,17 +425,16 @@ class BinanceSpotClient:
             return f"{u}?{q}" if q else u
 
         request_weight = self._estimate_request_weight(method, path, base_params)
+        request_limiter = self._limiter_for_request(method, path)
         last_exc = None
         skip_shared_block = False
         for attempt in range(1, max_retries + 1):
             try:
                 try:
                     if skip_shared_block:
-                        self._rate_limiter.record_retry_after_server_wait(
-                            request_weight
-                        )
+                        request_limiter.record_retry_after_server_wait(request_weight)
                     else:
-                        self._rate_limiter.reserve(request_weight)
+                        request_limiter.reserve(request_weight)
                     skip_shared_block = False
                 except RateLimitBlockedError as exc:
                     raise BinanceRateLimitError(
@@ -461,7 +447,7 @@ class BinanceSpotClient:
                 with self._registry.use() as sesi:
                     resp = sesi.request(method, url, timeout=self.timeout)
 
-                self._record_used_weight(resp.headers)
+                self._record_used_weight(resp.headers, method, path)
 
                 if resp.status_code >= 400:
                     try:
@@ -476,7 +462,9 @@ class BinanceSpotClient:
 
                     if resp.status_code in (429, 418):
                         retry_after = self._parse_retry_after(resp.headers)
-                        self._note_rate_limited(resp.status_code, retry_after)
+                        self._note_rate_limited(
+                            resp.status_code, retry_after, limiter=request_limiter
+                        )
                         raise BinanceRateLimitError(
                             resp.status_code, code, msg, retry_after=retry_after
                         )
@@ -578,13 +566,6 @@ class BinanceSpotClient:
 
     @staticmethod
     def _ringkas_galat(exc: BaseException) -> str:
-        """Ringkas pesan galat, dengan penanda khusus bila penyebabnya fd habis.
-
-        `Max retries exceeded ... SSLError(OSError(24, 'Too many open files'))`
-        sering disalahartikan sebagai gangguan jaringan Binance. Padahal artinya
-        proses sendiri kehabisan file descriptor, jadi perbaikannya di sisi proses,
-        bukan di sisi bursa.
-        """
         teks = BinanceSpotClient._redact(exc)
         if is_emfile(exc):
             return (
@@ -595,14 +576,36 @@ class BinanceSpotClient:
             )
         return teks
 
-    def _record_used_weight(self, headers) -> None:
+    def _record_used_weight(
+        self, headers, method: str | None = None, path: str | None = None
+    ) -> None:
         try:
-            raw = headers.get("x-mbx-used-weight-1m") or headers.get(
-                "X-MBX-USED-WEIGHT-1M"
-            )
+            raw = headers.get("x-mbx-used-weight-1m")
+            if raw is None:
+                raw = headers.get("X-MBX-USED-WEIGHT-1M")
             if raw is not None:
-                self.used_weight_1m = int(raw)
+                self.used_weight_1m = max(0, int(raw))
                 self._rate_limiter.observe_server_weight(self.used_weight_1m)
+        except (TypeError, ValueError):
+            pass
+
+        if method is None or path is None:
+            return
+        route = (str(method or "GET").upper(), str(path or ""))
+        metadata = _SAPI_REQUEST_LIMITS.get(route)
+        if metadata is None:
+            return
+        scope = metadata[0]
+        try:
+            raw_sapi = headers.get(f"x-sapi-used-{scope}-weight-1m")
+            if raw_sapi is None:
+                raw_sapi = headers.get(
+                    f"X-SAPI-USED-{scope.upper()}-WEIGHT-1M"
+                )
+            if raw_sapi is not None:
+                self._sapi_rate_limiters[route].observe_server_weight(
+                    max(0, int(raw_sapi))
+                )
         except (TypeError, ValueError):
             pass
 
@@ -616,12 +619,17 @@ class BinanceSpotClient:
             pass
         return None
 
-    def _note_rate_limited(self, status_code: int, retry_after: Optional[int]) -> None:
+    def _note_rate_limited(
+        self,
+        status_code: int,
+        retry_after: Optional[int],
+        limiter: SharedRequestWeightLimiter | None = None,
+    ) -> None:
         wait = retry_after if retry_after else (300 if status_code == 418 else 60)
         self.blocked_until = max(
             getattr(self, "blocked_until", 0.0), time.time() + wait
         )
-        self._rate_limiter.block(wait)
+        (limiter or self._rate_limiter).block(wait)
 
     def is_rate_limited(self) -> bool:
         return time.time() < getattr(self, "blocked_until", 0.0)
@@ -638,7 +646,6 @@ class BinanceSpotClient:
         return self._request("GET", "/api/v3/ticker/24hr", {})
 
     def get_ticker_24hr(self, symbol: str, max_retries: int = 2) -> dict:
-        # Satu simbol: bobot 2 (dibanding 80 untuk semua simbol).
         return self._request(
             "GET", "/api/v3/ticker/24hr", {"symbol": symbol}, max_retries=max_retries
         )
@@ -703,6 +710,43 @@ class BinanceSpotClient:
             params["origClientOrderId"] = str(orig_client_order_id)
         return self._request("GET", "/api/v3/order", params, signed=True)
 
+    def get_my_trades(self, symbol: str, order_id: int) -> list:
+        symbol = str(symbol).upper()
+        order_id = int(order_id)
+        if not symbol or order_id <= 0:
+            raise ValueError("get_my_trades memerlukan symbol dan orderId valid")
+        limit = 1000
+        trades = []
+        from_id = None
+        seen_ids = set()
+        for _page_number in range(100):
+            params = {"symbol": symbol, "orderId": order_id, "limit": limit}
+            if from_id is not None:
+                params["fromId"] = from_id
+            page = self._request("GET", "/api/v3/myTrades", params, signed=True)
+            if not isinstance(page, list):
+                raise BinanceAPIError(502, None, "respons myTrades bukan list")
+            if any(not isinstance(item, dict) for item in page):
+                raise BinanceAPIError(502, None, "respons myTrades berisi item tidak valid")
+            for item in page:
+                trade_id = item.get("id")
+                if trade_id is None:
+                    raise BinanceAPIError(502, None, "respons myTrades kehilangan trade ID")
+                key = str(trade_id)
+                if key not in seen_ids:
+                    trades.append(item)
+                    seen_ids.add(key)
+            if len(page) < limit:
+                return trades
+            try:
+                next_from_id = max(int(item["id"]) for item in page) + 1
+            except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                raise BinanceAPIError(502, None, "trade ID myTrades tidak valid") from exc
+            if from_id is not None and next_from_id <= from_id:
+                raise BinanceAPIError(502, None, "pagination myTrades tidak maju")
+            from_id = next_from_id
+        raise BinanceAPIError(502, None, "pagination myTrades melewati batas aman")
+
     def cancel_order(
         self,
         symbol: str,
@@ -748,9 +792,6 @@ class BinanceSpotClient:
                 raise ValueError("quantity MARKET harus lebih besar dari nol")
             params["quantity"] = _fmt_num(quantity)
         if quote_order_qty is not None:
-            # Lapis pengaman terakhir sebelum dikirim: bulatkan ke bawah sesuai
-            # presisi quote asset. Tanpa ini nilai float berdesimal panjang
-            # (mis. 7.5421000000000005) ditolak bursa dengan kode -1111.
             quote_order_qty = _round_down_places(
                 quote_order_qty,
                 _quote_precision_places(
@@ -989,8 +1030,6 @@ class SymbolFilters:
         self.permission_metadata_verified = bool(
             permission_metadata_verified and self.permission_sets
         )
-        # Presisi quote asset (quoteAssetPrecision dari exchangeInfo). Dipakai
-        # untuk membulatkan quoteOrderQty sebelum dikirim ke bursa.
         self.quote_precision = _quote_precision_places(quote_precision)
 
         if self.step_size <= 0 or self.lot_step_size <= 0 or self.tick_size <= 0:
@@ -1158,12 +1197,6 @@ class SymbolFilters:
         return self._round_step(price, self.tick_size, rounding=rounding)
 
     def round_quote_amount(self, value: float) -> float:
-        """Bulatkan nominal quote (USDT) ke presisi quote asset bursa.
-
-        Wajib dipakai sebelum mengirim quoteOrderQty: hasil perhitungan float
-        seperti 7.58 * 0.995 = 7.5421000000000005 akan ditolak dengan
-        -1111 "Parameter 'quoteOrderQty' has too much precision".
-        """
         return float(_round_down_places(value, self.quote_precision))
 
     def market_qty_valid(self, qty: float) -> bool:
@@ -1228,200 +1261,3 @@ def build_filters_cache(exchange_info: dict) -> dict:
         except (KeyError, ValueError, TypeError, ArithmeticError) as exc:
             logger.debug("Lewati parsing filter untuk %s: %s", symbol, exc)
     return cache
-
-
-def selftest() -> int:
-    """Audit registry sesi: tidak ada sesi yatim, tidak ada soket yatim.
-
-    Regresi yang dijaga (log 07-10-2026): sesi HTTP per thread dulu disimpan di
-    list tanpa batas. Thread scan dan thread request dashboard lahir dan mati
-    setiap beberapa detik, tetapi sesinya (beserta soket HTTPS yang dipegangnya)
-    dibiarkan hidup. File descriptor naik terus sampai sistem menolak buka apa
-    pun lagi dan seluruh proses tumbang dengan OSError(24).
-    """
-    import gc
-    import os
-    import socket
-    import tempfile
-
-    def fd_count() -> int | None:
-        try:
-            return len(os.listdir("/proc/self/fd"))
-        except OSError:  # pragma: no cover - non-Linux
-            return None
-
-    def pasangan_soket() -> socket.socket:
-        a, b = socket.socketpair()
-        b.close()
-        return a
-
-    def klien_hampa(**kv):
-        return BinanceSpotClient(
-            "", "", "http://127.0.0.1:1", allow_signed=False, rate_limit_state_file=None, **kv
-        )
-
-    gagal = 0
-    print("=== SELFTEST: registry sesi BinanceSpotClient ===")
-
-    klien = klien_hampa()
-    try:
-        id_utama = id(klien.session)
-        assert id(klien.session) == id_utama, "sesi harus stabil dalam satu thread"
-        hasil = {}
-
-        def baca():
-            sesi1 = id(klien.session)
-            with klien._registry.use():
-                pass
-            hasil[threading.get_ident()] = (sesi1, id(klien.session))
-
-        utas = [threading.Thread(target=baca) for _ in range(3)]
-        for u in utas:
-            u.start()
-        for u in utas:
-            u.join()
-        semua = {i for pasang in hasil.values() for i in pasang}
-        assert len({p[0] for p in hasil.values()}) == 3, "tiap thread butuh sesi sendiri"
-        assert all(p[0] == p[1] for p in hasil.values()), "sesi harus stabil di thread itu"
-        assert id_utama not in semua, "thread lain tidak boleh pakai sesi thread utama"
-        print("  sesi per thread, stabil, tidak dibagikan -> OK")
-    except AssertionError as exc:
-        gagal += 1
-        print(f"  [GAGAL] isolasi sesi per thread: {exc}")
-    finally:
-        klien.close()
-
-    klien = klien_hampa(max_sessions=8)
-    try:
-        def beban():
-            sesi = klien.session
-            if not hasattr(sesi, "_soket_uji"):
-                sesi._soket_uji = []
-            sesi._soket_uji.append(pasangan_soket())
-            with klien._registry.use():
-                pass
-
-        awal = fd_count()
-        for _ in range(6):
-            utas = [threading.Thread(target=beban) for _ in range(8)]
-            for u in utas:
-                u.start()
-            for u in utas:
-                u.join()
-            del utas
-            gc.collect()
-            with klien._registry.use():
-                pass
-            gc.collect()
-        akhir = fd_count()
-        if awal is None or akhir is None:  # pragma: no cover - non-Linux
-            print("  [SKIP] pengukuran fd butuh /proc/self/fd (Linux)")
-        else:
-            assert akhir - awal <= 3, f"fd tumbuh {akhir - awal} setelah 48 thread"
-            assert (
-                klien._registry.dibuat >= 48
-            ), f"48 sesi seharusnya dibuat, tercatat {klien._registry.dibuat}"
-            assert klien._registry.ditutup > 0, "sesi thread mati wajib ditutup"
-            assert (
-                len(klien._registry) <= klien._registry.max_sessions + 1
-            ), f"registry melewati batas: {len(klien._registry)}"
-            print(
-                f"  48 thread singkat: fd {awal} -> {akhir}, sesi dibuat "
-                f"{klien._registry.dibuat}, ditutup {klien._registry.ditutup} -> OK"
-            )
-        # pola lama (list tanpa batas) sebagai pembanding, harus tetap terukur
-        tumpukan: list = []
-        awal_lama = fd_count()
-
-        def beban_lama():
-            sesi = requests.Session()
-            tumpukan.append(sesi)
-            if not hasattr(sesi, "_soket_uji"):
-                sesi._soket_uji = []
-            sesi._soket_uji.append(pasangan_soket())
-
-        utas = [threading.Thread(target=beban_lama) for _ in range(8)]
-        for u in utas:
-            u.start()
-        for u in utas:
-            u.join()
-        del utas
-        gc.collect()
-        naik_lama = (fd_count() or 0) - (awal_lama or 0)
-        for sesi in tumpukan:
-            sesi.close()
-        tumpukan.clear()
-        assert naik_lama >= 6, "pembanding pola lama harus terlihat boros fd"
-        print(
-            f"  pembanding pola lama (list tanpa batas): +{naik_lama} fd untuk 8 "
-            "thread, pola baru: 0 -> OK"
-        )
-    except AssertionError as exc:
-        gagal += 1
-        print(f"  [GAGAL] pendauran ulang sesi: {exc}")
-    finally:
-        klien.close()
-
-    klien = klien_hampa()
-    dipanggil: list = []
-
-    class Penutup:
-        def close(self):
-            dipanggil.append(1)
-
-    thread = threading.current_thread()
-    klien._registry._entries[thread] = [Penutup(), 0]
-    klien.close()
-    try:
-        assert dipanggil, "close() wajib menutup sesi milik thread utama"
-        assert len(klien._registry) == 0, "registry harus kosong setelah close()"
-        print("  close() menutup sesi terdaftar dan mengosongkan registry -> OK")
-    except AssertionError as exc:
-        gagal += 1
-        print(f"  [GAGAL] close(): {exc}")
-
-    with tempfile.TemporaryDirectory() as tmp:
-        ledger = os.path.join(tmp, "ledger.json")
-        k1 = BinanceSpotClient(
-            "KUNCI", "sekret", "http://127.0.0.1:1", rate_limit_state_file=ledger
-        )
-        try:
-            assert k1.session.headers.get("X-MBX-APIKEY") == "KUNCI", (
-                "sesi thread pembuat wajib membawa header kunci API"
-            )
-            header_thread = {}
-
-            def cek_header():
-                with k1._registry.use():
-                    header_thread["h"] = k1.session.headers.get("X-MBX-APIKEY")
-
-            u = threading.Thread(target=cek_header)
-            u.start()
-            u.join()
-            assert (
-                header_thread.get("h") == "KUNCI"
-            ), "sesi thread baru juga harus membawa header kunci API"
-            print("  header X-MBX-APIKEY terpasang di sesi setiap thread -> OK")
-        except AssertionError as exc:
-            gagal += 1
-            print(f"  [GAGAL] header kunci API: {exc}")
-        finally:
-            k1.close()
-
-    if is_emfile(OSError(EMFILE, "x")) and not is_emfile(ValueError("x")):
-        print("  penanda EMFILE pada pesan transport -> OK")
-    else:  # pragma: no cover - seharusnya tidak terjadi
-        gagal += 1
-        print("  [GAGAL] penanda EMFILE tidak bekerja")
-
-    if gagal:
-        print(f"SELFTEST binance_client: {gagal} GAGAL")
-        return 1
-    print("SEMUA SELFTEST binance_client.py LULUS.")
-    return 0
-
-
-if __name__ == "__main__":
-    import sys
-
-    sys.exit(selftest())
