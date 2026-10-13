@@ -265,6 +265,7 @@ def run_backtest(
 
     controls = parity.AccountRiskControls(config, initial_equity)
     bar_ms = strategy.interval_to_ms(interval)
+    cap_ms = parity.max_hold_ms(config, interval)
     btc_lookup = parity.make_btc_lookup(btc_klines, config, bar_ms)
     gate_cfg = parity.gate_config(config, btc_lookup)
     btc_warning = parity.btc_filter_warning(config, btc_lookup)
@@ -456,7 +457,9 @@ def run_backtest(
                         chase_skips += 1
                         i += 1
                         continue
-                    pos = parity.PositionState(exec_entry_price, lv)
+                    pos = parity.PositionState(
+                        exec_entry_price, lv, entry_time=entry_time_value
+                    )
                     position_notional = sizing["notional"]
                     equity_before_entry = equity
                     entry_price = exec_entry_price
@@ -469,7 +472,9 @@ def run_backtest(
         hold_minutes = (candle.close_time - entry_time) / 60000.0
         exit_reason = None
         exit_price = None
-        verdict = parity.evaluate_candle_exit(pos, candle, config)
+        verdict = parity.evaluate_candle_exit(
+            pos, candle, config, cap_ms=cap_ms, bar_ms=bar_ms
+        )
         if verdict is not None:
             exit_reason, exit_price = verdict
 
@@ -754,6 +759,7 @@ OVERRIDE_CASTERS = {
         "ATR_MULT_BE_LOCK": float,
         "ATR_MULT_TRAIL_START": float,
         "ATR_MULT_TRAIL": float,
+        "MAX_HOLD_HOURS": float,
         "SL_PCT": float,
         "TP_PCT": float,
         "BE_TRIGGER_PCT": float,
@@ -1002,6 +1008,27 @@ def validate_params(cfg: dict) -> None:
                 f"wajar ({lo:g}..{hi:g})."
             )
 
+    max_hold = cfg.get("MAX_HOLD_HOURS")
+    if max_hold is not None and max_hold != "":
+        lo, hi = _rentang_demand("MAX_HOLD_HOURS", 0.0, parity.MAX_HOLD_HOURS_LIMIT)
+        try:
+            nilai_hold = float(max_hold)
+        except (TypeError, ValueError):
+            raise BacktestError(
+                f"Parameter 'MAX_HOLD_HOURS'={max_hold} bukan angka."
+            ) from None
+        if not math.isfinite(nilai_hold) or not (lo <= nilai_hold <= hi):
+            raise BacktestError(
+                f"Parameter 'MAX_HOLD_HOURS'={max_hold} di luar rentang wajar "
+                f"({lo:g}..{hi:g}). 0 berarti time stop nonaktif."
+            )
+        # Cek juga terhadap interval simulasi: batas di bawah 2 bar ditolak supaya
+        # time stop tidak menutup posisi pada bar entry-nya sendiri.
+        try:
+            parity.max_hold_ms(cfg, cfg.get("CONFIRM_INTERVAL", "5m"))
+        except ValueError as exc:
+            raise BacktestError(str(exc)) from exc
+
 
 def print_single_result(result: BacktestResult) -> None:
     summary = summarize(result)
@@ -1097,7 +1124,18 @@ def main():
     parser.add_argument(
         "--grid-top", type=int, default=15, help="Jumlah baris teratas yang dicetak."
     )
+    parser.add_argument(
+        "--selftest",
+        action="store_true",
+        help="Jalankan pemeriksaan aturan exit (termasuk time stop) tanpa menyentuh Binance.",
+    )
     args = parser.parse_args()
+
+    if args.selftest:
+        from backtesting.exit_selftest import run as _run_exit_selftest
+
+        sukses, _ = _run_exit_selftest(verbose=True)
+        raise SystemExit(0 if sukses else 1)
 
     if len(_sys.argv) == 1:
         parser.print_help()

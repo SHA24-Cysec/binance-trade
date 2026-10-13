@@ -480,7 +480,8 @@
         color: #2dd4bf;
         border-color: rgba(45, 212, 191, 0.28);
       }
-      .tag.fade {
+      .tag.fade,
+      .tag.time_stop {
         background: rgba(245, 158, 11, 0.13);
         color: var(--amber);
         border-color: rgba(245, 158, 11, 0.28);
@@ -2440,6 +2441,13 @@
               <label>Langkah Trailing %</label>
               <input type="number" id="btTrStep" min="0.01" step="0.1" />
             </div>
+            <div
+              class="bt-field"
+              title="Time stop: posisi ditutup otomatis setelah umurnya mencapai batas ini. 0 = nonaktif. Berlaku di mode ATR maupun persen tetap, dan diperiksa setelah SL/BE/trailing."
+            >
+              <label>Batas waktu tahan (jam)</label>
+              <input type="number" id="btMaxHold" min="0" max="720" step="0.5" />
+            </div>
             <div class="bt-field bt-actions">
               <label>&nbsp;</label>
               <div style="display: flex; gap: 8px">
@@ -3091,6 +3099,7 @@
           if(k.includes('TAKE_PROFIT')) return '<span class="tag tp">TP</span>';
           if(k.includes('BREAKEVEN')) return '<span class="tag be">BE</span>';
           if(k.includes('TRAILING')) return '<span class="tag tr">TRAIL</span>';
+          if(k.includes('TIME_STOP')) return '<span class="tag time_stop">WAKTU</span>';
           if(k.includes('MANUAL_CLOSE')) return '<span class="tag manual">MANUAL</span>';
           return '<span class="tag dry">'+esc(k)+'</span>';
         });
@@ -4561,6 +4570,9 @@
           document.getElementById('btBeLock').value = d.BE_LOCK_PCT;
           document.getElementById('btTrStart').value = d.TRAILING_START_PCT;
           document.getElementById('btTrStep').value = d.TRAILING_STEP_PCT;
+          if(d.MAX_HOLD_HOURS !== undefined && d.MAX_HOLD_HOURS !== null){
+            document.getElementById('btMaxHold').value = d.MAX_HOLD_HOURS;
+          }
           btUpdateExitMode();
           if(d.default_days) document.getElementById('btDays').value = d.default_days;
           if(d.default_max_symbols) document.getElementById('btMaxSymbols').value = d.default_max_symbols;
@@ -4672,6 +4684,7 @@
           BE_LOCK_PCT: document.getElementById('btBeLock').value,
           TRAILING_START_PCT: document.getElementById('btTrStart').value,
           TRAILING_STEP_PCT: document.getElementById('btTrStep').value,
+          MAX_HOLD_HOURS: document.getElementById('btMaxHold').value,
         };
 
         if(payload.SL_PCT === '') delete payload.SL_PCT;
@@ -4751,6 +4764,7 @@
         ['ATR_MULT_BE_LOCK', 'ATR mult BE kunci'],
         ['ATR_MULT_TRAIL_START', 'ATR mult trail mulai'],
         ['ATR_MULT_TRAIL', 'ATR mult trail langkah'],
+        ['MAX_HOLD_HOURS', 'Batas waktu tahan (jam)'],
       ];
       const BT_GRID_PARAMS_PERSEN = [
         ['SL_PCT', 'SL %'],
@@ -4759,6 +4773,7 @@
         ['BE_LOCK_PCT', 'BE kunci %'],
         ['TRAILING_START_PCT', 'Trailing mulai %'],
         ['TRAILING_STEP_PCT', 'Trailing langkah %'],
+        ['MAX_HOLD_HOURS', 'Batas waktu tahan (jam)'],
       ];
       let _btGridDefaults = null;
       const btGridMaxKombinasi = () =>
@@ -4980,7 +4995,7 @@
         ATR_MULT_TRAIL_START: 'btAtrTrStart', ATR_MULT_TRAIL: 'btAtrTrStep',
         SL_PCT: 'btSl', TP_PCT: 'btTp', BE_TRIGGER_PCT: 'btBeTrig',
         BE_LOCK_PCT: 'btBeLock', TRAILING_START_PCT: 'btTrStart',
-        TRAILING_STEP_PCT: 'btTrStep',
+        TRAILING_STEP_PCT: 'btTrStep', MAX_HOLD_HOURS: 'btMaxHold',
       };
 
       function btPakaiGridParams(idx){
@@ -5180,12 +5195,14 @@
       function btReasonTagClass(r){
         const key=String(r===null||r===undefined?'':r).toUpperCase();
         const map={STOP_LOSS:'stop_loss',TAKE_PROFIT:'take_profit',BREAKEVEN:'breakeven',
-                   TRAILING_STOP:'trailing_stop',END_OF_DATA:'end_of_data',RISK_LIMIT_TRIGGERED:'end_of_data'};
+                   TRAILING_STOP:'trailing_stop',TIME_STOP:'time_stop',
+                   END_OF_DATA:'end_of_data',RISK_LIMIT_TRIGGERED:'end_of_data'};
         return map[key] || 'dry';
       }
       function btReasonLabel(r){
         const key=String(r===null||r===undefined?'':r).toUpperCase();
         const map = {STOP_LOSS:'SL', TAKE_PROFIT:'TP', BREAKEVEN:'BE', TRAILING_STOP:'TRAIL',
+                     TIME_STOP:'WAKTU',
                      END_OF_DATA:'DATA HABIS', RISK_LIMIT_TRIGGERED:'BATAS RISIKO',
                      FILTER_HTF_DEMAND:'GERBANG DEMAND H1',
                      FILTER_DAILY_DEMAND:'GERBANG DEMAND D1',

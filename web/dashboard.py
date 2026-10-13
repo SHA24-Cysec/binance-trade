@@ -786,6 +786,7 @@ BT_PARAM_KEYS = (
     "ATR_MULT_BE_LOCK",
     "ATR_MULT_TRAIL_START",
     "ATR_MULT_TRAIL",
+    "MAX_HOLD_HOURS",
     "SL_PCT",
     "TP_PCT",
     "BE_TRIGGER_PCT",
@@ -1292,7 +1293,9 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 + " detik seperti bot asli). "
                 "Urutan konservatif: stop BE/trailing yang sudah aktif dari candle sebelumnya, "
                 "lalu STOP_LOSS, TAKE_PROFIT, dan BE/trailing yang baru aktif di candle yang "
-                "sama. Stop Loss dianggap kena lebih dulu kalau ambigu dalam satu candle.",
+                "sama. Stop Loss dianggap kena lebih dulu kalau ambigu dalam satu candle. "
+                "TIME_STOP (MAX_HOLD_HOURS) diperiksa paling akhir dan menutup posisi di "
+                "harga close candle terakhir yang umurnya masih di dalam batas.",
                 "Entry memodelkan spread (BACKTEST_ENTRY_SPREAD_PCT), slippage "
                 "(BACKTEST_SLIPPAGE_PCT), dan jeda eksekusi (BACKTEST_ENTRY_DELAY_BARS). "
                 "Fee taker beli dan jual sudah dipotong. Kedalaman order book belum "
@@ -2606,5 +2609,19 @@ def main(*, auto_start_bot: bool = False) -> int:
 
 
 if __name__ == "__main__":
-    argparse.ArgumentParser(description="Dashboard bot").parse_args()
+    _parser = argparse.ArgumentParser(description="Dashboard bot")
+    _parser.add_argument(
+        "--selftest",
+        action="store_true",
+        help=(
+            "Jalankan pemeriksaan aturan exit (termasuk time stop) tanpa "
+            "menjalankan server dashboard."
+        ),
+    )
+    _args = _parser.parse_args()
+    if _args.selftest:
+        from backtesting.exit_selftest import run as _run_exit_selftest
+
+        _sukses, _ = _run_exit_selftest(verbose=True)
+        raise SystemExit(0 if _sukses else 1)
     raise SystemExit(main(auto_start_bot=False))

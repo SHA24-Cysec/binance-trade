@@ -372,6 +372,71 @@ def resolve_exit_levels(config: dict) -> dict:
     }
 
 
+MS_PER_HOUR = 3_600_000
+TIME_STOP_REASON = "TIME_STOP"
+# Batas atas MAX_HOLD_HOURS yang diterima validator dan schema (30 hari).
+MAX_HOLD_HOURS_LIMIT = 720.0
+
+
+def max_hold_ms(config: dict, interval: str) -> int:
+    """Batas waktu tahan posisi (time stop) dalam ms; 0 berarti NONAKTIF.
+
+    Aturan ini dipakai bersama oleh backtest dan bot live supaya keduanya
+    menutup posisi yang mengendap pada umur yang sama. Nilainya hanya berubah
+    bersama config, jadi panggil sekali di luar loop simulasi (atau cache di
+    sisi live) supaya tidak menambah beban per bar maupun per poll.
+
+    Syarat minimal 2 bar mencegah time stop menutup posisi pada bar entry-nya
+    sendiri: exit semacam itu pasti rugi karena biaya eksekusi belum sempat
+    tertutup oleh pergerakan harga.
+    """
+    raw = config.get("MAX_HOLD_HOURS")
+    if raw is None or raw == "":
+        return 0
+    try:
+        cap_h = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"MAX_HOLD_HOURS harus berupa angka, diterima: {raw!r}")
+    if not math.isfinite(cap_h):
+        raise ValueError("MAX_HOLD_HOURS harus angka berhingga.")
+    if cap_h < 0.0:
+        raise ValueError("MAX_HOLD_HOURS tidak boleh negatif (0 = nonaktif).")
+    if cap_h == 0.0:
+        return 0
+    if cap_h > MAX_HOLD_HOURS_LIMIT:
+        raise ValueError(
+            f"MAX_HOLD_HOURS maksimal {MAX_HOLD_HOURS_LIMIT:g} jam "
+            f"({MAX_HOLD_HOURS_LIMIT / 24:g} hari), diminta {cap_h:g} jam."
+        )
+    bar_ms = interval_to_ms(interval)
+    cap_ms = int(round(cap_h * MS_PER_HOUR))
+    if cap_ms < 2 * bar_ms:
+        raise ValueError(
+            f"MAX_HOLD_HOURS {cap_h:g} jam terlalu sempit untuk interval {interval}: "
+            f"minimal 2 bar = {2 * bar_ms / MS_PER_HOUR:g} jam."
+        )
+    return cap_ms
+
+
+def time_stop_due(entry_time: int, now_ms: int, cap_ms: int, bar_ms: int) -> bool:
+    """Keputusan time stop: tutup pada evaluasi terakhir yang masih di dalam batas.
+
+    Menunggu satu bar lagi (backtest) atau satu poll lagi (live) sudah pasti
+    membuat umur posisi melewati cap, jadi exit dilakukan sekarang. Dengan
+    aturan ini umur posisi saat exit tidak pernah lebih dari MAX_HOLD_HOURS.
+
+    entry_time 0 berarti waktu entry tidak diketahui (misalnya state lama yang
+    belum mencatatnya), sehingga time stop tidak dijalankan untuk posisi itu.
+    """
+    if int(cap_ms) <= 0 or int(bar_ms) <= 0:
+        return False
+    entry = int(entry_time or 0)
+    now = int(now_ms or 0)
+    if entry <= 0 or now <= 0:
+        return False
+    return (now - entry) + int(bar_ms) > int(cap_ms)
+
+
 TREND_KLINE_LIMIT = 1000
 
 

@@ -361,6 +361,17 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         maximum=50,
         unit="x",
     ),
+    "MAX_HOLD_HOURS": _field(
+        "SL dan TP",
+        "Batas waktu tahan (time stop)",
+        "Tutup posisi otomatis saat umurnya mencapai batas ini. 0 = nonaktif. "
+        "Exit harga (SL, breakeven, trailing) tetap diprioritaskan pada bar yang "
+        "sama, jadi time stop hanya menutup posisi yang mengendap tanpa arah.",
+        "float",
+        minimum=0,
+        maximum=720,
+        unit="jam",
+    ),
     "EXTRA_EXCLUDE_SYMBOLS": _field(
         "Scan",
         "Blacklist simbol",
@@ -1682,6 +1693,23 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
         if nilai is not None and nilai[0] < nilai[1]:
             keluar["DAILY_DEMAND_MAX_DISTANCE_PCT"] = (
                 "harus lebih besar atau sama dengan DAILY_DEMAND_ZONE_BUFFER_PCT"
+            )
+
+    batas_tahan = _angka_untuk_relasi(cfg, "MAX_HOLD_HOURS")
+    if batas_tahan is not None and batas_tahan > 0:
+        try:
+            from strategy.indicators import INTERVAL_MINUTES as _INTERVAL_MINUTES_TAHAN
+
+            menit_bar = _INTERVAL_MINUTES_TAHAN.get(
+                str(cfg.get("CONFIRM_INTERVAL", "")).lower()
+            )
+        except ImportError:
+            menit_bar = None
+        if menit_bar and batas_tahan * 60.0 < 2.0 * float(menit_bar):
+            keluar["MAX_HOLD_HOURS"] = (
+                "minimal 2 bar CONFIRM_INTERVAL "
+                f"({2.0 * float(menit_bar) / 60.0:g} jam) supaya posisi tidak ditutup "
+                "pada bar entry-nya sendiri; isi 0 untuk menonaktifkan time stop"
             )
 
     return keluar

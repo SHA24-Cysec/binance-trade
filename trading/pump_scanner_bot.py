@@ -4537,6 +4537,57 @@ def check_manual_control(
     close_position(client, config, filters_cache, state, "MANUAL_CLOSE_DASHBOARD")
 
 
+_MAX_HOLD_CACHE: dict = {}
+_MAX_HOLD_WARNED: set = set()
+
+
+def _max_hold_cap_ms(config: dict) -> int:
+    """Batas time stop dalam ms (0 = nonaktif), dari MAX_HOLD_HOURS.
+
+    Dipanggil setiap poll, jadi hasilnya di-cache per (nilai, interval). Aturan
+    dan validasinya memakai fungsi yang sama dengan backtest
+    (strategy.indicators.max_hold_ms) supaya live dan backtest tidak menyimpang.
+    Nilai yang tidak valid tidak boleh mematikan bot: time stop dinonaktifkan
+    dan peringatannya dicatat sekali.
+    """
+    raw = config.get("MAX_HOLD_HOURS")
+    interval = str(config.get("CONFIRM_INTERVAL", "5m") or "5m")
+    kunci = (repr(raw), interval)
+    cached = _MAX_HOLD_CACHE.get(kunci)
+    if cached is not None:
+        return cached
+    try:
+        cap_ms = strategy.max_hold_ms(config, interval)
+    except ValueError as exc:
+        cap_ms = 0
+        if kunci not in _MAX_HOLD_WARNED:
+            _MAX_HOLD_WARNED.add(kunci)
+            logger.warning("Time stop nonaktif karena konfigurasi: %s", exc)
+    _MAX_HOLD_CACHE[kunci] = cap_ms
+    return cap_ms
+
+
+def _time_stop_due(config: dict, state: dict) -> bool:
+    """True bila umur posisi sudah mencapai batas MAX_HOLD_HOURS.
+
+    Umur dihitung dari state['entry_time'] (transactTime dari bursa) ke waktu
+    poll sekarang, dengan aturan yang sama persis seperti backtest: exit pada
+    evaluasi terakhir yang masih di dalam batas, sehingga umur posisi tidak
+    pernah melewati MAX_HOLD_HOURS. Posisi tanpa entry_time (state lama) tidak
+    ditutup paksa oleh aturan ini.
+    """
+    cap_ms = _max_hold_cap_ms(config)
+    if cap_ms <= 0:
+        return False
+    entry_ms = int(state.get("entry_time") or 0)
+    if entry_ms <= 0:
+        return False
+    bar_ms = strategy.interval_to_ms(
+        str(config.get("CONFIRM_INTERVAL", "5m") or "5m")
+    )
+    return strategy.time_stop_due(entry_ms, state_mod.now_ms(), cap_ms, bar_ms)
+
+
 def manage_exit(
     client: ExchangeClient,
     config: dict,
@@ -4640,6 +4691,10 @@ def manage_exit(
         reasons.append("BREAKEVEN")
     if state["trailing_active"] and current_price <= state["trailing_stop_price"]:
         reasons.append("TRAILING_STOP")
+    # Time stop dipakai hanya bila tidak ada alasan berbasis harga pada poll ini,
+    # sama seperti backtest: SL/BE/TRAIL selalu menang pada bar yang sama.
+    if not reasons and _time_stop_due(config, state):
+        reasons.append(strategy.TIME_STOP_REASON)
     if reasons:
         close_position(
             client,
@@ -5453,7 +5508,18 @@ def main() -> int:
         action="store_true",
         help="Konfirmasi operator untuk menginisialisasi state LIVE yang hilang.",
     )
+    parser.add_argument(
+        "--selftest",
+        action="store_true",
+        help="Jalankan pemeriksaan aturan exit (termasuk time stop) tanpa menyentuh Binance.",
+    )
     args = parser.parse_args()
+
+    if args.selftest:
+        from backtesting.exit_selftest import run as _run_exit_selftest
+
+        sukses, _ = _run_exit_selftest(verbose=True)
+        return 0 if sukses else 1
 
     from infrastructure.network.file_descriptors import raise_fd_limit
 

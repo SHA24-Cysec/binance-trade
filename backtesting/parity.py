@@ -4,7 +4,13 @@ import math
 from bisect import bisect_right
 from typing import Optional, Sequence
 
-from strategy.indicators import Kline
+from strategy.indicators import (
+    MAX_HOLD_HOURS_LIMIT,
+    TIME_STOP_REASON,
+    Kline,
+    max_hold_ms,
+    time_stop_due,
+)
 
 MS_PER_MIN = 60_000
 
@@ -19,10 +25,16 @@ class PositionState:
         "be_stop",
         "trailing_active",
         "trailing_stop",
+        "entry_time",
     )
 
-    def __init__(self, entry_price: float, levels: dict) -> None:
+    def __init__(
+        self, entry_price: float, levels: dict, entry_time: int = 0
+    ) -> None:
         self.entry_price = float(entry_price)
+        # Waktu entry dalam ms epoch. 0 berarti tidak diketahui, sehingga time
+        # stop otomatis nonaktif untuk posisi itu (perilaku lama tetap aman).
+        self.entry_time = int(entry_time or 0)
         self.levels = {
             "sl": float(levels["sl_pct"]),
             "tp": float(levels["tp_pct"]),
@@ -39,7 +51,11 @@ class PositionState:
 
 
 def evaluate_candle_exit(
-    pos: PositionState, candle: Kline, config: dict
+    pos: PositionState,
+    candle: Kline,
+    config: dict,
+    cap_ms: int = 0,
+    bar_ms: int = 0,
 ) -> Optional[tuple[str, float]]:
     entry = pos.entry_price
     lv = pos.levels
@@ -91,6 +107,11 @@ def evaluate_candle_exit(
         return "BREAKEVEN", min(pos.be_stop, candle.open)
     if pos.trailing_active and candle.low <= pos.trailing_stop:
         return "TRAILING_STOP", min(pos.trailing_stop, candle.open)
+    # TIME STOP dievaluasi paling akhir: SL/BE/TRAIL tetap menang pada bar yang
+    # sama, jadi hierarki exit yang lama tidak berubah sama sekali. Exit memakai
+    # harga close bar ini karena alasan penutupan adalah waktu, bukan level harga.
+    if time_stop_due(pos.entry_time, candle.close_time, cap_ms, bar_ms):
+        return TIME_STOP_REASON, candle.close
     return None
 
 

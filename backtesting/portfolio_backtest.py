@@ -749,6 +749,7 @@ def run_portfolio_backtest(
 
     controls = parity.AccountRiskControls(config, initial_equity)
     bar_ms = INTERVAL_MINUTES.get(interval, 5) * MS_PER_MIN
+    cap_ms = parity.max_hold_ms(config, interval)
     btc_lookup = parity.make_btc_lookup(btc_klines, config, bar_ms)
     gate_cfg = parity.gate_config(config, btc_lookup)
     btc_warning = parity.btc_filter_warning(config, btc_lookup)
@@ -932,7 +933,9 @@ def run_portfolio_backtest(
 
             exit_reason = None
             exit_price = None
-            verdict = parity.evaluate_candle_exit(position, candle, config)
+            verdict = parity.evaluate_candle_exit(
+                position, candle, config, cap_ms=cap_ms, bar_ms=bar_ms
+            )
             if verdict is not None:
                 exit_reason, exit_price = verdict
 
@@ -1217,7 +1220,9 @@ def run_portfolio_backtest(
                 )
             continue
         holding = sym
-        position = parity.PositionState(exec_entry_price, lv)
+        position = parity.PositionState(
+            exec_entry_price, lv, entry_time=entry_time_value
+        )
         position_notional = sizing["notional"]
         equity_before_entry = equity
         entry_price = exec_entry_price
