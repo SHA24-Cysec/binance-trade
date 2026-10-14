@@ -105,7 +105,7 @@ def select_universe(
     cfg["MIN_QUOTE_VOLUME_USDT_24H"] = float(config.get("MIN_QUOTE_VOLUME_USDT_24H", 0))
 
     ranked = scanner.filter_and_rank_candidates(
-        tickers, cfg, tradable_symbols, apply_pump_gate=False
+        tickers, cfg, tradable_symbols, apply_market_gate=False
     )
     ranked.sort(key=lambda c: c.quote_volume, reverse=True)
     symbols = [c.symbol for c in ranked]
@@ -483,7 +483,7 @@ def precompute_entry_signals(
             if vol24 < min_vol:
                 continue
             pct24 = pct_arr[pos]
-            gate_ok, _gate_reason = scanner.evaluate_pump_gate(
+            gate_ok, _gate_reason = scanner.evaluate_market_gate(
                 pct24, vol24, gate_cfg, btc_drop_pct=btc_drop
             )
             if gate_ok:
@@ -908,7 +908,7 @@ def run_portfolio_backtest(
                 if vol24 < min_vol:
                     continue
                 pct24 = pct_arr[pos]
-                gate_ok, _gate_reason = scanner.evaluate_pump_gate(
+                gate_ok, _gate_reason = scanner.evaluate_market_gate(
                     pct24, vol24, gate_cfg, btc_drop_pct=btc_drop
                 )
                 if not gate_ok:

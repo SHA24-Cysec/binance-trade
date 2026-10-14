@@ -44,7 +44,6 @@ def config_dasar(cap_jam: float | None = CAP_CONTOH, ekor: str = "datar") -> dic
     entry. Yang diuji di sini adalah aturan EXIT, bukan aturan entry.
     """
     cfg = deepcopy(PUMP_CONFIG)
-    cfg = sd.cfg_gerbang_pump_nonaktif(cfg)
     cfg.update(
         {
             "_symbol": "",
@@ -57,6 +56,7 @@ def config_dasar(cap_jam: float | None = CAP_CONTOH, ekor: str = "datar") -> dic
             "BTC_FILTER_ENABLED": False,
             "ROLLING_VOLUME_FILTER_ENABLED": False,
             "DEMAND_ZONE_FILTER_ENABLED": False,
+            "PUMP_MIN_24H_CHANGE_PCT": -1000.0,
             "MIN_QUOTE_VOLUME_USDT_24H": 0.0,
             "USE_ATR_EXIT": True,
             "USE_TP": False,
@@ -220,19 +220,35 @@ def cek_batas_berjenjang() -> str:
 
 def cek_time_stop_nonaktif_aman() -> str:
     """MAX_HOLD_HOURS=0 harus identik dengan config lama yang tidak punya kunci itu."""
-    tanpa_kunci = jalankan("datar", None, panjang_ekor=400)
-    cap_nol = jalankan("datar", 0.0, panjang_ekor=400)
-    assert jejak_trade(tanpa_kunci) == jejak_trade(cap_nol), (
-        "hasil dengan MAX_HOLD_HOURS=0 berbeda dari hasil tanpa kunci sama sekali"
-    )
-    assert tanpa_kunci.trades, "rangkaian kontrol tidak menghasilkan trade"
-    assert all(
-        t.reason != strategy.TIME_STOP_REASON for t in tanpa_kunci.trades
-    ), "TIME_STOP muncul padahal fiturnya nonaktif"
-    return (
-        f"{len(tanpa_kunci.trades)} trade identik pada dua konfigurasi, "
-        "tidak ada satu pun TIME_STOP"
-    )
+    ringkas = []
+    for ekor in ("datar", "invalidasi", "naik"):
+        tanpa_kunci = jalankan(ekor, None, panjang_ekor=400)
+        cap_nol = jalankan(ekor, 0.0, panjang_ekor=400)
+        assert jejak_trade(tanpa_kunci) == jejak_trade(cap_nol), (
+            f"skenario {ekor}: MAX_HOLD_HOURS=0 berbeda dari config tanpa kunci"
+        )
+        assert bt.summarize(tanpa_kunci) == bt.summarize(cap_nol), (
+            f"skenario {ekor}: ringkasan equity atau posisi terbuka berbeda"
+        )
+        assert tanpa_kunci.trades or tanpa_kunci.mark_to_market_open, (
+            f"skenario {ekor}: rangkaian kontrol tidak menghasilkan posisi"
+        )
+        if ekor == "datar":
+            assert tanpa_kunci.mark_to_market_open, (
+                "posisi pada ekor datar seharusnya masih terbuka tanpa time stop"
+            )
+        else:
+            assert tanpa_kunci.trades, (
+                f"skenario {ekor}: exit berbasis harga tidak menghasilkan trade"
+            )
+        assert all(
+            t.reason != strategy.TIME_STOP_REASON for t in tanpa_kunci.trades
+        ), "TIME_STOP muncul padahal fiturnya nonaktif"
+        ringkas.append(
+            f"{ekor}: {len(tanpa_kunci.trades)} trade tertutup, "
+            f"{int(tanpa_kunci.mark_to_market_open)} posisi terbuka"
+        )
+    return "; ".join(ringkas) + "; hasil identik tanpa TIME_STOP"
 
 
 def cek_prioritas_exit_harga() -> str:

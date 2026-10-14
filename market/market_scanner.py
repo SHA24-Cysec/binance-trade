@@ -92,31 +92,19 @@ def _angka_wajar(nilai) -> bool:
     return angka >= 0.0
 
 
-def _change_window_ok(price_change_pct, config: dict) -> tuple[bool, str]:
-    min_change = float(config.get("PUMP_MIN_24H_CHANGE_PCT", 10.0) or 0.0)
-    max_change = float(config.get("PUMP_MAX_24H_CHANGE_PCT", 0.0) or 0.0)
+def _validate_price_change(price_change_pct) -> tuple[bool, str]:
     try:
         change = float(price_change_pct)
     except (TypeError, ValueError):
         return False, f"priceChangePercent tidak bisa dibaca ({price_change_pct!r})"
-    if math.isnan(change) or math.isinf(change):
+    if not math.isfinite(change):
         return False, f"priceChangePercent tidak wajar ({price_change_pct!r})"
-    if change < min_change:
-        return False, f"kenaikan 24 jam {change:.2f}% di bawah ambang {min_change:g}%"
-    if max_change > 0 and change > max_change:
-        return False, (
-            f"kenaikan 24 jam {change:.2f}% melewati batas atas "
-            f"{max_change:g}% (koin sudah terlalu tinggi)"
-        )
     return True, ""
 
 
-def evaluate_pump_gate(
+def evaluate_market_gate(
     price_change_pct, quote_volume, config: dict, btc_drop_pct: float | None = None
 ) -> tuple[bool, str]:
-    min_change = float(config.get("PUMP_MIN_24H_CHANGE_PCT", 10.0) or 0.0)
-    max_change = float(config.get("PUMP_MAX_24H_CHANGE_PCT", 0.0) or 0.0)
-
     if btc_drop_pct is None:
         btc_drop_pct = config.get("_btc_drop_pct")
     if config.get("BTC_FILTER_ENABLED", False):
@@ -137,29 +125,27 @@ def evaluate_pump_gate(
     if not _angka_wajar(quote_volume):
         return False, f"quote_volume 24 jam tidak wajar ({quote_volume!r})"
 
-    window_ok, window_reason = _change_window_ok(price_change_pct, config)
-    if not window_ok:
-        return False, window_reason
+    data_ok, data_reason = _validate_price_change(price_change_pct)
+    if not data_ok:
+        return False, data_reason
 
+    try:
+        minimum = float(config.get("PUMP_MIN_24H_CHANGE_PCT", 10.0))
+    except (TypeError, ValueError):
+        return False, "minimum pump 24 jam bukan angka yang valid"
+    if not math.isfinite(minimum):
+        return False, "minimum pump 24 jam bukan angka yang valid"
     change = float(price_change_pct)
-    rentang = (
-        f"{min_change:g}% sampai {max_change:g}%"
-        if max_change > 0
-        else f">= {min_change:g}%"
-    )
-    return True, f"pump sah: naik {change:.2f}% (rentang {rentang})"
+    if change < minimum:
+        return False, f"kenaikan 24 jam {change:.2f}% di bawah ambang {minimum:g}%"
+
+    return True, f"filter pasar lolos: kenaikan 24 jam {change:.2f}% >= {minimum:g}%"
 
 
-def is_pumping_today(
-    symbol: str, price_change_pct, quote_volume, config: dict
-) -> tuple[bool, str]:
-    return evaluate_pump_gate(price_change_pct, quote_volume, config)
-
-
-def pump_gate_ok_at(
+def market_gate_ok_at(
     price_change_pct, quote_volume, config: dict, btc_drop_pct: "float | None" = None
 ) -> bool:
-    ok, _r = evaluate_pump_gate(
+    ok, _r = evaluate_market_gate(
         price_change_pct, quote_volume, config, btc_drop_pct=btc_drop_pct
     )
     return ok
@@ -170,7 +156,7 @@ def filter_and_rank_candidates(
     config: dict,
     tradable_symbols: "set | None" = None,
     *,
-    apply_pump_gate: bool = True,
+    apply_market_gate: bool = True,
 ) -> list[Candidate]:
     quote_asset = config["QUOTE_ASSET"]
     min_vol = float(config.get("MIN_QUOTE_VOLUME_USDT_24H", 0) or 0)
@@ -192,19 +178,21 @@ def filter_and_rank_candidates(
         except (KeyError, ValueError, TypeError):
             continue
 
-        if last_price <= 0:
+        if not math.isfinite(last_price) or last_price <= 0:
+            continue
+        if not math.isfinite(price_change_pct) or not _angka_wajar(quote_volume):
             continue
         if quote_volume < min_vol:
             continue
 
         lolos_struktural += 1
 
-        if apply_pump_gate:
-            ok_pump, alasan = is_pumping_today(
-                symbol, price_change_pct, quote_volume, config
+        if apply_market_gate:
+            ok_market, alasan = evaluate_market_gate(
+                price_change_pct, quote_volume, config
             )
-            if not ok_pump:
-                logger.debug("Gerbang pump menolak %s: %s", symbol, alasan)
+            if not ok_market:
+                logger.debug("Filter pasar menolak %s: %s", symbol, alasan)
                 continue
 
         out.append(
@@ -219,26 +207,13 @@ def filter_and_rank_candidates(
 
     out.sort(key=lambda c: c.quote_volume, reverse=True)
 
-    if apply_pump_gate:
-        if out:
-            logger.info(
-                "Gerbang pump: %d kandidat lolos dari %d simbol yang lolos "
-                "saringan likuiditas.",
-                len(out),
-                lolos_struktural,
-            )
-        else:
-            logger.info(
-                "Gerbang pump: 0 kandidat lolos gerbang pump (dari %d simbol "
-                "yang lolos saringan likuiditas). Ambang: naik %g%% sampai %s.",
-                lolos_struktural,
-                float(config.get("PUMP_MIN_24H_CHANGE_PCT", 10.0) or 0.0),
-                (
-                    f"{float(config.get('PUMP_MAX_24H_CHANGE_PCT', 0.0) or 0.0):g}%"
-                    if float(config.get("PUMP_MAX_24H_CHANGE_PCT", 0.0) or 0.0) > 0
-                    else "tanpa batas atas"
-                ),
-            )
+    if apply_market_gate:
+        logger.info(
+            "Filter pasar: %d kandidat lolos dari %d simbol yang lolos "
+            "saringan likuiditas.",
+            len(out),
+            lolos_struktural,
+        )
     return out
 
 
@@ -478,7 +453,7 @@ def detect_entry_setup(klines: list[Kline], config: dict) -> SetupResult:
         )
     return SetupResult(
         True,
-        f"entry sah: gerbang pump lolos, {volume_detail}, {demand['reason']}",
+        f"entry sah: {volume_detail}, {demand['reason']}",
         signal_close=klines[-1].close,
         atr_value=strategy.atr(klines, int(config.get("ATR_PERIOD", 14) or 14)),
         demand_zone_low=demand.get("zone_low"),

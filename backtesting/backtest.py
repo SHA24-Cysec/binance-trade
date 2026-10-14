@@ -349,7 +349,7 @@ def run_backtest(
                 and st is not None
                 and st["vol24h"] >= min_vol
                 and candle.open_time >= next_entry_allowed_at
-                and scanner.pump_gate_ok_at(
+                and scanner.market_gate_ok_at(
                     st["pct24h"],
                     st["vol24h"],
                     gate_cfg,
@@ -797,7 +797,6 @@ OVERRIDE_CASTERS = {
         "TREND_ADX_MIN": float,
         "TREND_LOOKBACK_BARS": int,
         "PUMP_MIN_24H_CHANGE_PCT": float,
-        "PUMP_MAX_24H_CHANGE_PCT": float,
         "MIN_QUOTE_VOLUME_USDT_24H": float,
         "ROLLING_VOLUME_FILTER_ENABLED": _as_bool,
         "ROLLING_VOLUME_LOOKBACK_BARS": int,
@@ -974,24 +973,18 @@ def validate_params(cfg: dict) -> None:
             "dan bot live memakai jendela yang sama."
         )
 
-    pump_min = cfg.get("PUMP_MIN_24H_CHANGE_PCT")
-    pump_max = cfg.get("PUMP_MAX_24H_CHANGE_PCT")
-    if pump_min is not None:
-        if not (-1000.0 <= float(pump_min) <= 1000.0):
-            raise BacktestError(
-                f"Parameter 'PUMP_MIN_24H_CHANGE_PCT'={pump_min} di luar rentang wajar (-1000..1000)."
-            )
-    if pump_max is not None:
-        if not (0.0 <= float(pump_max) <= 1000.0):
-            raise BacktestError(
-                f"Parameter 'PUMP_MAX_24H_CHANGE_PCT'={pump_max} di luar rentang wajar (0..1000)."
-            )
-    if pump_min is not None and pump_max is not None:
-        if float(pump_max) != 0.0 and float(pump_max) <= float(pump_min):
-            raise BacktestError(
-                f"PUMP_MAX_24H_CHANGE_PCT={pump_max} harus lebih besar dari "
-                f"PUMP_MIN_24H_CHANGE_PCT={pump_min} (atau 0 untuk menonaktifkan batas atas)."
-            )
+    pump_min = cfg.get("PUMP_MIN_24H_CHANGE_PCT", 10.0)
+    try:
+        minimum = float(pump_min)
+    except (TypeError, ValueError):
+        raise BacktestError(
+            f"Parameter 'PUMP_MIN_24H_CHANGE_PCT'={pump_min!r} bukan angka."
+        ) from None
+    if not math.isfinite(minimum) or not (-1000.0 <= minimum <= 1000.0):
+        raise BacktestError(
+            f"Parameter 'PUMP_MIN_24H_CHANGE_PCT'={pump_min!r} "
+            "di luar rentang wajar (-1000..1000)."
+        )
 
     block_hours = cfg.get("SAME_COIN_BLOCK_HOURS")
     if block_hours is not None:

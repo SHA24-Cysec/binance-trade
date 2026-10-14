@@ -1301,8 +1301,9 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "Fee taker beli dan jual sudah dipotong. Kedalaman order book belum "
                 "dimodelkan, jadi order besar di koin tipis akan lebih buruk dari ini. "
                 "Filter kedalaman, ketimpangan bid/ask, dan sell wall juga hanya berlaku di "
-                "PAPER dan LIVE (snapshot order book tidak tersedia historis). Batas atas "
-                "kenaikan 24 jam (PUMP_MAX_24H_CHANGE_PCT) SUDAH diterapkan di backtest.",
+                "PAPER dan LIVE (snapshot order book tidak tersedia historis). "
+                "Batas minimum kenaikan 24 jam (PUMP_MIN_24H_CHANGE_PCT) "
+                "diterapkan sesuai konfigurasi, tanpa batas maksimum kenaikan.",
                 "Gerbang trend timeframe tinggi (TREND_FILTER_ENABLED) SUDAH disimulasikan dan "
                 "memakai aturan yang sama dengan bot live: TREND_LOOKBACK_BARS candle trend "
                 "terakhir yang sudah tutup pada saat candle sinyal ditutup, lalu close > EMA cepat, "
@@ -1499,8 +1500,9 @@ def _bt_run_grid_job(
                 "Fill memodelkan spread, slippage, dan fee taker dua sisi. Kedalaman "
                 "order book TIDAK dimodelkan, jadi order besar di koin tipis akan "
                 "lebih buruk dari hasil di sini. Filter kedalaman, ketimpangan bid/ask, dan "
-                "sell wall hanya berlaku di PAPER dan LIVE. Batas atas kenaikan 24 jam "
-                "(PUMP_MAX_24H_CHANGE_PCT) SUDAH diterapkan di backtest.",
+                "sell wall hanya berlaku di PAPER dan LIVE. Batas minimum kenaikan "
+                "24 jam (PUMP_MIN_24H_CHANGE_PCT) diterapkan sesuai konfigurasi, "
+                "tanpa batas maksimum kenaikan.",
                 "Filter live yang SUDAH disimulasikan dari candle: filter BTC, "
                 "MAX_CHASE_PCT, MIN_SECONDS_BETWEEN_TRADES, COOLDOWN_MINUTES_AFTER_CLOSE, "
                 "equity stop, dan CLOSE_ALL_AT_LIMIT (dicek saat candle "

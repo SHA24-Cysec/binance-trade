@@ -174,13 +174,6 @@ def seri_banyak_setup(
     return out
 
 
-def cfg_gerbang_pump_nonaktif(config: dict) -> dict:
-    out = dict(config)
-    out["PUMP_MIN_24H_CHANGE_PCT"] = -1000.0
-    out["PUMP_MAX_24H_CHANGE_PCT"] = 0.0
-    return out
-
-
 def seri_5m_trend(
     harga: float = 100.0,
     jam_trend: int = 130,

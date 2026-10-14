@@ -249,22 +249,12 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     ),
     "PUMP_MIN_24H_CHANGE_PCT": _field(
         "Monitoring Pasar",
-        "Minimum perubahan 24 jam",
-        "Filter monitoring perubahan harga 24 jam.",
+        "Minimum pump 24 jam",
+        "Kenaikan harga minimum dalam 24 jam untuk menjadi kandidat. Nilai tepat pada ambang diterima. Tidak ada batas maksimum kenaikan.",
         "float",
         minimum=0,
         maximum=1000,
         unit="%",
-    ),
-    "PUMP_MAX_24H_CHANGE_PCT": _field(
-        "Monitoring Pasar",
-        "Maksimum perubahan 24 jam",
-        "Koin yang sudah naik lebih dari persen ini dalam 24 jam ditolak agar bot tidak membeli di pucuk. Harus lebih besar dari minimum. 0 = nonaktif.",
-        "float",
-        minimum=0,
-        maximum=1000,
-        unit="%",
-        dangerous=True,
     ),
     "BTC_FILTER_ENABLED": _field(
         "Monitoring Pasar",
@@ -1333,6 +1323,7 @@ def _read_doc_unlocked() -> tuple[dict, list[str]]:
 
 REMOVED_PARAMETERS = frozenset(
     {
+        "PUMP_MAX_24H_CHANGE_PCT",
         "MIN_CLOSE_POSITION_IN_RANGE",
         "SWING_LOOKBACK_BARS",
         "SWING_PIVOT_WING_BARS",
@@ -1576,12 +1567,6 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
             if nilai is not None and nilai <= 0:
                 keluar["TP_PCT"] = "harus lebih besar dari nol saat Take Profit aktif"
 
-    nilai = pasangan("PUMP_MAX_24H_CHANGE_PCT", "PUMP_MIN_24H_CHANGE_PCT")
-    if nilai is not None and nilai[0] != 0 and nilai[0] <= nilai[1]:
-        keluar["PUMP_MAX_24H_CHANGE_PCT"] = (
-            "harus lebih besar dari PUMP_MIN_24H_CHANGE_PCT (atau 0 untuk menonaktifkan)"
-        )
-
     if "IDR_RATE_MODE" in cfg and "IDR_RATE_MANUAL" in cfg:
         mode_kurs = str(cfg.get("IDR_RATE_MODE", "AUTO") or "AUTO").strip().upper()
         nilai_kurs = _angka_untuk_relasi(cfg, "IDR_RATE_MANUAL")
@@ -1787,17 +1772,16 @@ def validate_candidate(
                     "DAILY_TREND_ADX_MIN nol: cek kekuatan trend harian mati, hanya susunan EMA "
                     "yang menyaring entry."
                 )
-        if cleaned["PUMP_MIN_24H_CHANGE_PCT"] <= 0:
+        if cleaned["PUMP_MIN_24H_CHANGE_PCT"] == 0:
             warnings.append(
-                "PUMP_MIN_24H_CHANGE_PCT nol atau kurang: gerbang kenaikan 24 jam "
-                "praktis mati dan koin yang turun ikut menjadi kandidat."
+                "PUMP_MIN_24H_CHANGE_PCT nol: perubahan 24 jam yang datar atau "
+                "positif lolos batas minimum; perubahan negatif tetap ditolak."
             )
         if cleaned["PUMP_MIN_24H_CHANGE_PCT"] >= 50:
             warnings.append(
                 "PUMP_MIN_24H_CHANGE_PCT sangat tinggi, kandidat bisa nol "
                 "untuk waktu yang lama."
             )
-
         relation(
             "RATE_LIMIT_SAFETY_MARGIN",
             int(cleaned.get("RATE_LIMIT_SAFETY_MARGIN", 0))
