@@ -10,12 +10,12 @@ from typing import Any
 
 try:
     import fcntl
-except ImportError:  # pragma: no cover - tergantung platform
+except ImportError:
     fcntl = None
 
 try:
     import msvcrt
-except ImportError:  # pragma: no cover - tergantung platform
+except ImportError:
     msvcrt = None
 
 from infrastructure.paths import DATA_DIR
@@ -133,24 +133,19 @@ def _release_lock(fd: int) -> None:
         pass
 
 
-def _remove_if_unheld(lock_path: Path, report: dict, data_dir: Path) -> None:
+def _probe_lock_holder(lock_path: Path, data_dir: Path) -> str | None:
     try:
         fd = os.open(lock_path, os.O_RDWR)
     except FileNotFoundError:
-        return
+        return "hilang"
     except OSError as exc:
-        report["kept"].append(f"{lock_path.name} ({exc.__class__.__name__})")
-        return
+        return exc.__class__.__name__
     try:
         if not _try_acquire_lock(fd):
-            report["kept"].append(f"{lock_path.name} (masih dipegang proses lain)")
-            return
+            return "masih dipegang proses lain"
         try:
             if live_runtime_owner(data_dir):
-                report["kept"].append(f"{lock_path.name} (proses muncul mendadak)")
-                return
-            lock_path.unlink(missing_ok=True)
-            report["deleted"].append(lock_path.name)
+                return "proses muncul mendadak"
         finally:
             _release_lock(fd)
     finally:
@@ -158,6 +153,22 @@ def _remove_if_unheld(lock_path: Path, report: dict, data_dir: Path) -> None:
             os.close(fd)
         except OSError:
             pass
+    return None
+
+
+def _remove_if_unheld(lock_path: Path, report: dict, data_dir: Path) -> None:
+    alasan = _probe_lock_holder(lock_path, data_dir)
+    if alasan == "hilang":
+        return
+    if alasan is not None:
+        report["kept"].append(f"{lock_path.name} ({alasan})")
+        return
+    try:
+        lock_path.unlink(missing_ok=True)
+    except OSError as exc:
+        report["kept"].append(f"{lock_path.name} ({exc.__class__.__name__})")
+        return
+    report["deleted"].append(lock_path.name)
 
 
 def cleanup_runtime_leftovers(
@@ -234,7 +245,7 @@ def cleanup_runtime_leftovers(
                     report["deleted"].append(path.name)
                 except OSError as exc:
                     report["kept"].append(f"{path.name} ({exc.__class__.__name__})")
-    except Exception as exc:  # noqa: BLE001 - pembersihan tak boleh fatal
+    except Exception as exc:
         report["aborted"] = f"Galat pembersihan: {type(exc).__name__}: {exc}"
     return report
 

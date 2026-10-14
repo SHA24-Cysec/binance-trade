@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 from copy import deepcopy
 
@@ -337,7 +339,10 @@ _PROJECT_ROOT = str(PROJECT_ROOT)
 
 
 def _runtime_path(path: str) -> str:
-    return path if os.path.isabs(path) else os.path.join(_PROJECT_ROOT, path)
+    raw = os.path.expanduser(str(path))
+    if not os.path.isabs(raw):
+        raw = os.path.join(_PROJECT_ROOT, raw)
+    return os.path.normpath(raw)
 
 
 def _finalize_config_dict(cfg: dict) -> dict:

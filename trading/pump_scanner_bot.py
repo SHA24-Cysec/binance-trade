@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import logging
-import logging.handlers
 import math
 import os
 import signal
@@ -39,7 +38,9 @@ from config.config import (
     require_valid_mode,
 )
 from market import market_scanner as scanner
+from infrastructure.console import configure_utf8_console
 from infrastructure.storage import state as state_mod
+from infrastructure.storage.log_rotation import SafeRotatingFileHandler
 from infrastructure.storage.trade_ledger import append_trade_record
 from trading.accounting import (
     TradeAccountingError,
@@ -218,7 +219,7 @@ def setup_logging(config: dict) -> None:
     setattr(console, _LOGGING_MARKER, True)
     root.addHandler(console)
     Path(str(config["LOG_FILE"])).parent.mkdir(parents=True, exist_ok=True)
-    file_handler = logging.handlers.RotatingFileHandler(
+    file_handler = SafeRotatingFileHandler(
         config["LOG_FILE"], maxBytes=5_000_000, backupCount=5, encoding="utf-8"
     )
     file_handler.setFormatter(fmt)
@@ -4691,8 +4692,6 @@ def manage_exit(
         reasons.append("BREAKEVEN")
     if state["trailing_active"] and current_price <= state["trailing_stop_price"]:
         reasons.append("TRAILING_STOP")
-    # Time stop dipakai hanya bila tidak ada alasan berbasis harga pada poll ini,
-    # sama seperti backtest: SL/BE/TRAIL selalu menang pada bar yang sama.
     if not reasons and _time_stop_due(config, state):
         reasons.append(strategy.TIME_STOP_REASON)
     if reasons:
@@ -5502,6 +5501,7 @@ def run(
 
 
 def main() -> int:
+    configure_utf8_console()
     parser = argparse.ArgumentParser(description="Pump Scanner Bot Binance Spot")
     parser.add_argument(
         "--acknowledge-missing-live-state",

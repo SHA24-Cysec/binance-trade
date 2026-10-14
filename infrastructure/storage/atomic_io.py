@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
@@ -40,6 +41,19 @@ def _thread_lock_for(lock_path: str) -> threading.RLock:
 
 _LOCK_OFFSET = 0
 _LOCK_LENGTH = 1
+_LOCK_WAIT_TIMEOUT_SECONDS = 120.0
+_LOCK_POLL_INITIAL_SECONDS = 0.01
+_LOCK_POLL_MAX_SECONDS = 0.25
+_LOCK_BUSY_ERRNOS = frozenset(
+    code
+    for code in (
+        getattr(errno, "EACCES", None),
+        getattr(errno, "EDEADLK", None),
+        getattr(errno, "EDEADLOCK", None),
+        getattr(errno, "EAGAIN", None),
+    )
+    if code is not None
+)
 
 
 def _open_lock_fd(lock_path: str) -> int:
@@ -55,12 +69,30 @@ def _open_lock_fd(lock_path: str) -> int:
     return fd
 
 
+def _acquire_lock_windows(fd: int) -> None:
+    deadline = time.monotonic() + _LOCK_WAIT_TIMEOUT_SECONDS
+    delay = _LOCK_POLL_INITIAL_SECONDS
+    while True:
+        os.lseek(fd, _LOCK_OFFSET, os.SEEK_SET)
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, _LOCK_LENGTH)
+            return
+        except OSError as exc:
+            if exc.errno not in _LOCK_BUSY_ERRNOS:
+                raise
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Lock file tidak didapat dalam {_LOCK_WAIT_TIMEOUT_SECONDS:.0f} detik"
+                ) from exc
+        time.sleep(delay)
+        delay = min(delay * 2.0, _LOCK_POLL_MAX_SECONDS)
+
+
 def _acquire_lock(fd: int) -> None:
     if fcntl is not None:
         fcntl.flock(fd, fcntl.LOCK_EX)
     elif msvcrt is not None:
-        os.lseek(fd, _LOCK_OFFSET, os.SEEK_SET)
-        msvcrt.locking(fd, msvcrt.LK_LOCK, _LOCK_LENGTH)
+        _acquire_lock_windows(fd)
 
 
 def _release_lock(fd: int) -> None:
@@ -84,7 +116,7 @@ def interprocess_lock(path: os.PathLike | str) -> Iterator[None]:
     lock_path = f"{target}.lock"
     parent = os.path.dirname(lock_path) or "."
     Path(parent).mkdir(parents=True, exist_ok=True)
-    with _thread_lock_for(os.path.abspath(lock_path)):
+    with _thread_lock_for(os.path.normcase(os.path.abspath(lock_path))):
         fd = _open_lock_fd(lock_path)
         try:
             _acquire_lock(fd)
