@@ -42,6 +42,15 @@ from infrastructure.console import configure_utf8_console
 from infrastructure.storage import state as state_mod
 from infrastructure.storage.log_rotation import SafeRotatingFileHandler
 from infrastructure.storage.trade_ledger import append_trade_record
+from trading import strategy_drawdown as strategy_dd
+from trading.equity import (
+    account_risk_snapshot,
+    _effective_account_permissions,
+    _spot_api_key_permission_verified,
+    _validate_live_account_snapshot,
+    collect_equity,
+    publish_equity,
+)
 from trading.accounting import (
     TradeAccountingError,
     normalize_fills,
@@ -489,96 +498,6 @@ def _clear_reconciliation(state: dict) -> None:
     state["reconciliation_assets"] = []
 
 
-def _spot_api_key_permission_verified(account: dict) -> bool:
-    return (
-        account.get(ACCOUNT_SPOT_PERMISSION_VERIFIED) is True
-        and str(account.get(ACCOUNT_SPOT_PERMISSION_SOURCE) or "")
-        == "GET /sapi/v1/account/apiRestrictions"
-    )
-
-
-def _effective_account_permissions(account: dict) -> set[str]:
-    permissions: set[str] = set()
-    raw = account.get("permissions")
-    if isinstance(raw, list):
-        permissions.update(
-            item.strip().upper()
-            for item in raw
-            if isinstance(item, str) and item.strip()
-        )
-    if (
-        account.get("canTrade") is True
-        and str(account.get("accountType") or "").upper() == "SPOT"
-        and ("SPOT" in permissions or _spot_api_key_permission_verified(account))
-    ):
-        permissions.add("SPOT")
-    return permissions
-
-
-def _validate_live_account_snapshot(account: dict, quote_asset: str) -> None:
-    if not isinstance(account, dict):
-        raise BinanceAPIError(502, None, "respons account bukan object")
-    if account.get("canTrade") is not True:
-        raise BinanceAPIError(403, None, "akun Binance melaporkan canTrade bukan true")
-    account_type = str(account.get("accountType") or "").upper()
-    if account_type != "SPOT":
-        raise BinanceAPIError(
-            403, None, f"accountType bukan SPOT: {account_type or 'kosong'}"
-        )
-    permissions = account.get("permissions")
-    api_key_spot_verified = _spot_api_key_permission_verified(account)
-    if permissions is None:
-        if not api_key_spot_verified:
-            raise BinanceAPIError(
-                403,
-                None,
-                "permission SPOT tidak ada pada account dan izin API key belum terverifikasi",
-            )
-    elif not isinstance(permissions, list):
-        raise BinanceAPIError(502, None, "field permissions account bukan list")
-    else:
-        if any(not isinstance(item, str) or not item.strip() for item in permissions):
-            raise BinanceAPIError(502, None, "field permissions account tidak valid")
-        normalized_permissions = {item.strip().upper() for item in permissions}
-        if "SPOT" not in normalized_permissions and not api_key_spot_verified:
-            raise BinanceAPIError(
-                403,
-                None,
-                "permission SPOT account/API key tidak dapat diverifikasi",
-            )
-    if "SPOT" not in _effective_account_permissions(account):
-        raise BinanceAPIError(403, None, "izin efektif SPOT tidak dapat dibentuk")
-    balances = account.get("balances")
-    if not isinstance(balances, list):
-        raise BinanceAPIError(502, None, "balances account tidak tersedia")
-    seen: set[str] = set()
-    for item in balances:
-        if not isinstance(item, dict):
-            raise BinanceAPIError(502, None, "entri balance bukan object")
-        asset = str(item.get("asset") or "")
-        if not asset or asset in seen:
-            raise BinanceAPIError(
-                502, None, f"asset balance kosong/duplikat: {asset!r}"
-            )
-        seen.add(asset)
-        try:
-            free = float(item.get("free"))
-            locked = float(item.get("locked"))
-        except (TypeError, ValueError):
-            raise BinanceAPIError(502, None, f"balance {asset} bukan angka") from None
-        if (
-            not math.isfinite(free)
-            or not math.isfinite(locked)
-            or free < 0
-            or locked < 0
-        ):
-            raise BinanceAPIError(502, None, f"balance {asset} tidak valid")
-    if quote_asset not in seen:
-        raise BinanceAPIError(
-            502, None, f"balance aset kuotasi {quote_asset} tidak tersedia"
-        )
-
-
 def _known_open_order_client_ids(state: dict) -> set[str]:
     known: set[str] = set()
     pending = state.get("pending_order")
@@ -602,147 +521,7 @@ def get_equity(
     state: dict,
     position_price: float | None = None,
 ) -> "float | None":
-    quote_asset = str(config.get("QUOTE_ASSET") or "").strip().upper()
-    if not quote_asset:
-        logger.warning("Ekuitas akun tidak dapat dihitung: aset kuotasi kosong.")
-        return None
-
-    def unverified(reason: str) -> None:
-        logger.warning(
-            "Ekuitas seluruh akun tidak dapat diverifikasi (%s). "
-            "Evaluasi batas risiko dilewati satu iterasi.",
-            reason,
-        )
-        return None
-
-    try:
-        account = client.get_account()
-        if str(config.get("MODE", "PAPER")).upper() == "LIVE":
-            _validate_live_account_snapshot(account, quote_asset)
-    except Exception as exc:
-        return unverified(
-            f"snapshot account tidak tersedia/valid: {type(exc).__name__}"
-        )
-
-    if not isinstance(account, dict):
-        return unverified("respons account bukan object")
-    raw_balances = account.get("balances")
-    if not isinstance(raw_balances, list):
-        return unverified("daftar balances tidak tersedia")
-
-    balances: dict[str, float] = {}
-    for item in raw_balances:
-        if not isinstance(item, dict):
-            return unverified("entri balance bukan object")
-        asset = str(item.get("asset") or "").strip().upper()
-        if not asset or asset in balances:
-            return unverified(f"aset kosong atau duplikat: {asset or '<kosong>'}")
-        try:
-            free = float(item.get("free"))
-            locked = float(item.get("locked"))
-        except (TypeError, ValueError, OverflowError):
-            return unverified(f"saldo {asset} bukan angka")
-        if (
-            not math.isfinite(free)
-            or not math.isfinite(locked)
-            or free < 0
-            or locked < 0
-        ):
-            return unverified(f"saldo {asset} tidak valid")
-        total = free + locked
-        if not math.isfinite(total):
-            return unverified(f"saldo total {asset} tidak finite")
-        balances[asset] = total
-
-    equity_parts = [balances.get(quote_asset, 0.0)]
-    active_symbol = str(state.get("current_symbol") or "").strip().upper()
-    active_price = None
-    if position_price is not None:
-        try:
-            candidate = float(position_price)
-        except (TypeError, ValueError, OverflowError):
-            candidate = 0.0
-        if math.isfinite(candidate) and candidate > 0:
-            active_price = candidate
-
-    assets_to_price = []
-    for asset, total in balances.items():
-        if asset == quote_asset or total <= 0:
-            continue
-        symbol = f"{asset}{quote_asset}"
-        if symbol == active_symbol and active_price is not None:
-            equity_parts.append(total * active_price)
-        else:
-            assets_to_price.append((asset, symbol, total))
-
-    if assets_to_price:
-        try:
-            tickers = client.get_ticker_24hr_all()
-        except Exception as exc:
-            return unverified(f"snapshot ticker tidak tersedia: {type(exc).__name__}")
-        if not isinstance(tickers, list):
-            return unverified("snapshot ticker bukan list")
-
-        ticker_by_symbol = {}
-        duplicate_symbols = set()
-        for ticker in tickers:
-            if not isinstance(ticker, dict):
-                continue
-            symbol = str(ticker.get("symbol") or "").strip().upper()
-            if not symbol:
-                continue
-            if symbol in ticker_by_symbol:
-                duplicate_symbols.add(symbol)
-            else:
-                ticker_by_symbol[symbol] = ticker
-
-        try:
-            ticker_ttl = float(config.get("TICKER_SNAPSHOT_TTL_SECONDS", 30.0) or 0.0)
-            max_market_age = float(
-                config.get("MAX_MARKET_DATA_AGE_SECONDS", 10.0) or 0.0
-            )
-        except (TypeError, ValueError, OverflowError):
-            return unverified("batas umur snapshot ticker bukan angka")
-        if (
-            not math.isfinite(ticker_ttl)
-            or not math.isfinite(max_market_age)
-            or ticker_ttl < 0
-            or max_market_age < 0
-        ):
-            return unverified("batas umur snapshot ticker tidak valid")
-        max_age_seconds = min(
-            ticker_ttl + max_market_age, max(60.0, max_market_age)
-        )
-        max_age_ms = int(max_age_seconds * 1000.0)
-        now_ms = int(time.time() * 1000.0)
-
-        for asset, symbol, amount in assets_to_price:
-            if symbol in duplicate_symbols:
-                return unverified(f"ticker {symbol} duplikat")
-            ticker = ticker_by_symbol.get(symbol)
-            if ticker is None:
-                return unverified(f"harga bid {symbol} tidak tersedia")
-            try:
-                bid = float(ticker.get("bidPrice"))
-                close_time_ms = int(ticker.get("closeTime"))
-            except (TypeError, ValueError, OverflowError):
-                return unverified(f"bid/timestamp {symbol} bukan angka")
-            if not math.isfinite(bid) or bid <= 0 or close_time_ms <= 0:
-                return unverified(f"bid/timestamp {symbol} tidak valid")
-            if abs(now_ms - close_time_ms) > max_age_ms:
-                return unverified(f"snapshot {symbol} kedaluwarsa")
-            value = amount * bid
-            if not math.isfinite(value):
-                return unverified(f"nilai saldo {asset} tidak finite")
-            equity_parts.append(value)
-
-    try:
-        equity = math.fsum(equity_parts)
-    except OverflowError:
-        return unverified("total ekuitas overflow")
-    if not math.isfinite(equity) or equity < 0:
-        return unverified("total ekuitas tidak valid")
-    return equity
+    return collect_equity(client, config, state, position_price=position_price)["equity"]
 
 
 def account_risk_gate(config: dict) -> "tuple[bool, str]":
@@ -3809,6 +3588,11 @@ def open_position(
     candidate: "scanner.Candidate",
     reference_price: "float | None" = None,
 ) -> None:
+    try:
+        strategy_dd.require_entry_period(config, state)
+    except Exception as exc:
+        logger.warning("Entry ditahan: periode DD strategi belum siap (%s).", type(exc).__name__)
+        return
     if (
         str(config.get("MODE", "PAPER")).upper() == "LIVE"
         and state.get("accounting_blocked")
@@ -4990,6 +4774,7 @@ def run(
     consecutive_errors = 0
     last_time_sync = time.time()
     last_heartbeat = 0.0
+    last_strategy_init_warning = (None, 0.0)
     last_reconciliation = time.time()
     TIME_SYNC_INTERVAL_SECONDS = 15 * 60
     FILTERS_REFRESH_INTERVAL_SECONDS = 6 * 3600
@@ -5184,7 +4969,11 @@ def run(
                 manage_exit(client, config, filters_cache, state, current_price)
 
             equity_price = current_price if state.get("current_symbol") else None
-            equity = get_equity(client, config, state, position_price=equity_price)
+            equity_snapshot = collect_equity(
+                client, config, state, position_price=equity_price
+            )
+            strategy_initial_snapshot = equity_snapshot if not state.get("current_symbol") and not state.get("qty") else None
+            equity = equity_snapshot["equity"]
             if equity is None:
                 entries_paused = True
                 reconciliation_reason = (
@@ -5199,9 +4988,32 @@ def run(
             else:
                 entries_paused = update_equity_controls(state, equity, config)
 
+            equity_snapshot["risk_snapshot"] = account_risk_snapshot(equity, state)
+            try:
+                publish_equity(config, equity_snapshot)
+            except (OSError, ValueError, TypeError):
+                logger.warning(
+                    "Snapshot equity dashboard gagal disimpan; kontrol risiko tetap memakai snapshot saat ini.",
+                    exc_info=True,
+                )
+
             maybe_force_close_at_risk_limit(
                 client, config, filters_cache, state, entries_paused, current_price
             )
+
+            strategy_period = strategy_dd.auto_entry_gate(client, config, state, strategy_initial_snapshot)
+            strategy_period_ready = strategy_period["ready"]
+            if strategy_period.get("created"):
+                logger.info(
+                    "DD STRATEGI AUTO: modal awal=%s %s | periode=%s | entry belum dikirim.",
+                    strategy_period["initial_capital"], config["QUOTE_ASSET"], strategy_period["period_id"],
+                )
+            if not strategy_period_ready:
+                reason = strategy_period["reason"]
+                previous_reason, previous_time = last_strategy_init_warning
+                if reason != previous_reason or time.time() - previous_time >= 30.0:
+                    logger.warning("Entry baru menunggu periode DD strategi: %s. Pengelolaan exit tetap berjalan.", reason)
+                    last_strategy_init_warning = (reason, time.time())
 
             do_scan = (
                 time.time() * 1000 - state.get("last_scan_time", 0)
@@ -5213,7 +5025,8 @@ def run(
 
                 now = state_mod.now_ms()
                 can_enter = (
-                    not state["current_symbol"]
+                    strategy_period_ready
+                    and not state["current_symbol"]
                     and not state.get("pending_order")
                     and not state.get("reconciliation_required")
                     and not (mode == "LIVE" and state.get("accounting_blocked"))
@@ -5436,11 +5249,13 @@ def run(
                     else "n/a (API harga gangguan)"
                 )
                 logger.info(
-                    "[HEARTBEAT] Bot masih berjalan | equity=%s %s | %s%s",
+                    "[HEARTBEAT] Bot masih berjalan | equity=%s %s | %s%s | snapshot=%s | captured_at_ms=%s",
                     equity_str,
                     config["QUOTE_ASSET"],
                     posisi_info,
                     flag_str,
+                    equity_snapshot["snapshot_id"],
+                    equity_snapshot["captured_at_ms"],
                 )
 
             state_mod.save_state(config["STATE_FILE"], state)

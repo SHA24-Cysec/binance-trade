@@ -11,6 +11,7 @@ import secrets
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
 from hmac import compare_digest
@@ -36,6 +37,17 @@ from infrastructure.network.file_descriptors import fd_status, raise_fd_limit
 from infrastructure.network.public_ip import get_public_egress_ip_status
 from infrastructure.storage import state as state_mod
 from infrastructure.storage.trade_ledger import load_trade_records
+from trading.equity import (
+    SpotEquityReader,
+    account_drawdown_view,
+    collect_equity,
+    equity_context,
+    equity_envelope,
+    equity_view,
+    load_equity,
+)
+from trading import strategy_drawdown as strategy_dd
+from infrastructure.process.runtime_control import BotModeLock, BotAlreadyRunningError
 from market import coin_icons
 from market.fx_rate import IdrRateProvider
 from infrastructure.process.runtime_control import BotControlError, BotProcessManager
@@ -362,6 +374,8 @@ PRICE_TTL = 5.0
 VOLUME_TTL = 30.0
 _volume_cache: dict = {}
 BALANCE_TTL = 30.0
+_equity_lock = threading.RLock()
+_equity_cache = {"context": None, "envelope": None, "ts": 0.0}
 
 
 def get_client():
@@ -440,6 +454,27 @@ def get_live_price(symbol: str):
         return price
     except Exception:
         return cached[0] if cached else None
+
+
+def get_account_equity(process_status: dict) -> dict:
+    active = process_status.get("status") in ("STARTING", "RUNNING", "STOPPING")
+    with _equity_lock:
+        if active:
+            _equity_cache.update(context=None, envelope=None, ts=0.0)
+            return equity_view(load_equity(PUMP_CONFIG), PUMP_CONFIG, process_status)
+        context = equity_context(PUMP_CONFIG)
+        now = time.monotonic()
+        if _equity_cache["context"] != context:
+            _equity_cache.update(context=context, envelope=None, ts=0.0)
+        envelope = _equity_cache["envelope"]
+        if envelope is None or now - _equity_cache["ts"] >= BALANCE_TTL:
+            client = get_client()
+            reader = SpotEquityReader(client) if client is not None and not is_paper(PUMP_CONFIG) else client
+            latest = collect_equity(reader, PUMP_CONFIG, {}, source="DASHBOARD")
+            previous = envelope or load_equity(PUMP_CONFIG)
+            envelope = equity_envelope(latest, previous)
+            _equity_cache.update(envelope=envelope, ts=time.monotonic())
+        return equity_view(envelope, PUMP_CONFIG)
 
 
 def get_live_balance():
@@ -604,14 +639,7 @@ def build_status():
         pnl_usdt = (live_price - entry) * qty
         position_value = live_price * qty
 
-    balances = get_live_balance()
-    usdt_free = None
-    equity_live = None
-    if balances is not None:
-        usdt_free = balances.get(QUOTE, {}).get("free", 0.0)
-        equity_live = usdt_free
-        if has_position and live_price:
-            equity_live += qty * live_price
+    account_equity = get_account_equity(process_status)
 
     hold_minutes = None
     if has_position and state.get("entry_time"):
@@ -631,7 +659,7 @@ def build_status():
         "mode": get_mode(PUMP_CONFIG),
         "paper": is_paper(PUMP_CONFIG),
         "backtest_enabled": backtest_enabled(PUMP_CONFIG),
-        "live_connected": live_price is not None or balances is not None,
+        "live_connected": live_price is not None or account_equity["equity_status"] == "VALID",
         "bot_alive": process_status["status"] in ("STARTING", "RUNNING", "STOPPING"),
         "process": process_status,
         "config_errors": list(CONFIG_LOAD_ERRORS),
@@ -655,6 +683,8 @@ def build_status():
             "trailing_active": bool(state.get("trailing_active")),
             "trailing_stop_price": float(state.get("trailing_stop_price", 0) or 0),
         },
+        "drawdown_strategy": strategy_dd.strategy_view(PUMP_CONFIG),
+        "drawdown_account": account_drawdown_view(state, account_equity, process_status, PUMP_CONFIG),
         "accounting": {
             "blocked": bool(state.get("accounting_blocked")),
             "block_reason": str(state.get("accounting_block_reason") or ""),
@@ -663,8 +693,7 @@ def build_status():
             "unpriced_fee_count": len(trade_accounting.get("unpriced_fees") or []),
         },
         "account": {
-            "usdt_free": usdt_free,
-            "equity_live": equity_live,
+            **account_equity,
             "peak_equity": state.get("peak_equity"),
             "max_drawdown_pct": float(state.get("max_dd_pct") or 0.0),
             "dd_reset_count": int(state.get("dd_reset_count") or 0),
@@ -2272,6 +2301,103 @@ def api_all():
             "log_levels": level_count,
         }
     )
+
+
+@contextmanager
+def _drawdown_maintenance():
+    with _control_operation_lock:
+        if _active_control_operation() or CONFIG_LOAD_ERRORS:
+            raise strategy_dd.DrawdownError("Operasi bot masih aktif atau konfigurasi belum valid.")
+        with _process_manager._operation_lock:
+            status = _process_manager.status(get_mode(PUMP_CONFIG))
+            if status.get("status") != "STOPPED" or _process_manager._auto_restart_mode:
+                raise strategy_dd.DrawdownError("Hentikan bot secara normal sebelum mengatur periode strategi.")
+            if not _process_manager.mode_guard(get_mode(PUMP_CONFIG)).get("safe"):
+                raise strategy_dd.DrawdownError("Konteks mode lain belum aman untuk pemeliharaan.")
+            reservation = BotModeLock(get_mode(PUMP_CONFIG), global_scope=True)
+            reservation.acquire()
+            try:
+                yield
+            finally:
+                reservation.release()
+
+
+def _strategy_initial_balance():
+    client = get_client()
+    if client is None:
+        raise strategy_dd.DrawdownError("Client akun belum tersedia.")
+    if is_paper(PUMP_CONFIG):
+        path = PUMP_CONFIG.get("PAPER_ACCOUNT_STATE_FILE")
+        if not path:
+            raise strategy_dd.DrawdownError("File akun PAPER tidak tersedia.")
+        with open(path, "rb") as handle:
+            account_file = strategy_dd.strict_json(handle.read())
+        if not isinstance(account_file, dict) or account_file.get("open_orders") != []:
+            raise strategy_dd.DrawdownError("Akun PAPER masih memiliki order atau datanya tidak valid.")
+        reader = client
+    else:
+        orders = client.get_open_orders()
+        if orders != []:
+            raise strategy_dd.DrawdownError("Akun Spot masih memiliki order terbuka atau respons order tidak valid.")
+        reader = SpotEquityReader(client)
+    snapshot = collect_equity(reader, PUMP_CONFIG, {}, source="DASHBOARD")
+    if snapshot["status"] != "VALID":
+        raise strategy_dd.DrawdownError("Saldo belum terverifikasi. Tidak dapat mengusulkan modal awal.")
+    if int(time.time() * 1000) - snapshot["captured_at_ms"] > 30000:
+        raise strategy_dd.DrawdownError("Pemeriksaan saldo terlalu lama. Ulangi pemeriksaan.")
+    return snapshot["quote_free"]
+
+
+@app.route("/api/strategy-dd/prepare", methods=["POST"])
+def api_strategy_dd_prepare():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or data.get("acknowledge") is not True:
+        return jsonify({"error": "Konfirmasikan bahwa periode baru hanya mengubah statistik strategi."}), 400
+    try:
+        capital = strategy_dd.amount(data.get("initial_capital"), positive=True)
+        with _drawdown_maintenance():
+            inspection = strategy_dd.inspect_initialization(PUMP_CONFIG)
+            if inspection["period_id"] is None:
+                raise strategy_dd.DrawdownError("Periode pertama dibuat otomatis oleh bot sebelum entry. Tidak perlu menetapkan modal awal melalui dashboard.")
+            free = _strategy_initial_balance()
+            if capital > strategy_dd.amount(free):
+                raise strategy_dd.DrawdownError("Modal awal tidak boleh melebihi saldo quote bebas yang terverifikasi.")
+            token = _make_confirmation("strategy-dd", {**inspection, "initial_capital": str(capital)}, ttl=120)
+        return jsonify({"confirmation_id": token, "initial_capital": str(capital), "quote": QUOTE, "previous_period_id": inspection["period_id"], "expires_in": 120})
+    except (strategy_dd.DrawdownError, BotControlError, BotAlreadyRunningError, OSError, ValueError, TypeError) as exc:
+        text = str(exc) if isinstance(exc, strategy_dd.DrawdownError) else "Pemeriksaan periode gagal: " + type(exc).__name__
+        return jsonify({"error": text}), 409
+    except Exception as exc:
+        logger.warning("Pemeriksaan DD strategi gagal: %s", type(exc).__name__)
+        return jsonify({"error": "Pemeriksaan akun gagal. Tidak ada konfirmasi sukses; periksa status periode sebelum mencoba lagi."}), 503
+
+
+@app.route("/api/strategy-dd/execute", methods=["POST"])
+def api_strategy_dd_execute():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or data.get("confirmed") is not True:
+        return jsonify({"error": "Konfirmasi akhir diperlukan."}), 400
+    token = data.get("confirmation_id")
+    if not isinstance(token, str):
+        return jsonify({"error": "ID konfirmasi tidak valid."}), 400
+    payload = _take_confirmation(token, "strategy-dd")
+    if not payload:
+        return jsonify({"error": "Konfirmasi tidak valid, sudah dipakai, atau kedaluwarsa."}), 409
+    try:
+        if payload["context"] != strategy_dd.context(PUMP_CONFIG):
+            raise strategy_dd.DrawdownError("Konteks akun berubah. Ulangi konfirmasi.")
+        with _drawdown_maintenance():
+            free = _strategy_initial_balance()
+            if strategy_dd.amount(payload["initial_capital"]) > strategy_dd.amount(free):
+                raise strategy_dd.DrawdownError("Saldo bebas berubah dan tidak mencukupi modal yang dikonfirmasi.")
+            period = strategy_dd.initialize(PUMP_CONFIG, payload["initial_capital"], payload["fingerprint"])
+        return jsonify({"period_id": period["period_id"], "started_at_ms": period["started_at_ms"], "message": "Periode strategi dimulai. Kontrol risiko akun dan ledger tidak direset."})
+    except (strategy_dd.DrawdownError, BotControlError, BotAlreadyRunningError, OSError, ValueError, TypeError) as exc:
+        text = str(exc) if isinstance(exc, strategy_dd.DrawdownError) else "Periode belum dapat dibuat: " + type(exc).__name__
+        return jsonify({"error": text}), 409
+    except Exception as exc:
+        logger.warning("Pemeriksaan DD strategi gagal: %s", type(exc).__name__)
+        return jsonify({"error": "Pemeriksaan akun gagal. Tidak ada konfirmasi sukses; periksa status periode sebelum mencoba lagi."}), 503
 
 
 @app.route("/api/control/status")

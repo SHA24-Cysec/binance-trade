@@ -2038,6 +2038,30 @@
           scroll-behavior: auto !important;
         }
       }
+      .equity-breakdown { margin-top: 12px; border-top: 1px solid rgba(148,163,184,.18); padding-top: 9px; font-size: 12px; }
+      .equity-breakdown > div { display: flex; justify-content: space-between; gap: 10px; margin: 5px 0; }
+      #equityMeta { margin-top: 10px; overflow-wrap: anywhere; line-height: 1.7; }
+      .equity-details { margin-top: 12px; font-size: 12px; }
+      .equity-details summary { cursor: pointer; color: var(--green, #4ade80); }
+      .equity-table-wrap { overflow-x: auto; margin: 10px 0; }
+      .equity-details table { width: 100%; font-size: 11px; }
+      .equity-details th, .equity-details td { padding: 6px; white-space: nowrap; text-align: right; }
+      .equity-details th:first-child, .equity-details td:first-child { text-align: left; }
+      .account-summary { grid-template-columns: repeat(4,minmax(0,1fr)); }
+      .drawdown-cards { grid-template-columns: repeat(2,minmax(0,1fr)); align-items:start; }
+      .dd-row { display:flex; justify-content:space-between; gap:12px; padding:7px 0; font-size:12px; border-bottom:1px solid var(--border); }
+      .dd-note { color:var(--muted); font-size:12px; line-height:1.7; margin:12px 0; }
+      #ddSub, #strategyDdMeta, #strategyDdPeriod { overflow-wrap:anywhere; margin-top:9px; line-height:1.7; }
+      .dd-button { margin:10px 0; padding:9px 12px; border:1px solid var(--border2); border-radius:8px; background:var(--panel2); color:var(--txt); cursor:pointer; }
+      .dd-button:disabled { opacity:.45; cursor:not-allowed; }
+      .dd-input { width:100%; padding:10px; margin:9px 0 16px; background:var(--bg); color:var(--txt); border:1px solid var(--border2); border-radius:8px; }
+      .dd-ack { display:flex; align-items:flex-start; gap:9px; font-size:12px; line-height:1.7; }
+      .dd-ack input { margin-top:5px; }
+      #strategyPeriodModal .modal-box { max-width:510px; max-height:90vh; overflow-y:auto; }
+      #strategyPeriodMessage { overflow-wrap:anywhere; }
+      [hidden] { display:none !important; }
+      @media(max-width:960px) { .account-summary {grid-template-columns:repeat(2,minmax(0,1fr));} }
+      @media(max-width:640px) { .drawdown-cards,.account-summary {grid-template-columns:1fr;} }
     </style>
   </head>
   <body>
@@ -2147,13 +2171,28 @@
       </nav>
 
       <div class="tabpane" id="paneIkhtisar" role="tabpanel">
-        <div class="grid cards glass-cards" style="margin-bottom: 16px">
+        <div class="grid cards glass-cards account-summary" style="margin-bottom: 16px">
           <div class="card" id="cardEquity">
-                        <div class="label" id="equityLabel">Equity (Live)</div>
+                        <div class="label" id="equityLabel">Equity Akun Spot (Live)</div>
             <div class="value mono" id="equityVal">
               <span class="skel" style="width: 70%"></span>
             </div>
-            <div class="sub" id="equitySub">saldo + nilai posisi</div>
+            <div class="sub" id="equitySub">seluruh saldo Spot, termasuk aset lain</div>
+            <div class="equity-breakdown">
+              <div><span>Saldo terkunci</span><span class="mono" id="equityLocked">-</span></div>
+              <div><span>Aset non-quote</span><span class="mono" id="equityOther">-</span></div>
+            </div>
+            <div class="sub" id="equityMeta" aria-live="polite">Menunggu snapshot equity</div>
+            <details class="equity-details" id="equityDetails">
+              <summary>Lihat rincian aset</summary>
+              <div class="equity-table-wrap">
+                <table>
+                  <thead><tr><th>Aset</th><th>Bebas</th><th>Terkunci</th><th>Nilai quote</th></tr></thead>
+                  <tbody id="equityAssets"><tr><td colspan="4">Belum ada data</td></tr></tbody>
+                </table>
+              </div>
+              <div class="sub">Nilai indikatif berbasis bid, sebelum biaya dan slippage. Bukan seluruhnya dana siap pakai.</div>
+            </details>
           </div>
           <div class="card" id="cardPnl">
                         <div class="label">PnL Posisi Terbuka</div>
@@ -2176,12 +2215,27 @@
             </div>
             <div class="sub" id="winSub">-</div>
           </div>
+        </div>
+
+        <div class="grid drawdown-cards" style="margin-bottom:16px">
           <div class="card" id="cardDd">
-                        <div class="label">Max Drawdown</div>
-            <div class="value mono" id="ddVal">
-              <span class="skel" style="width: 70%"></span>
-            </div>
-            <div class="sub" id="ddSub">dari puncak equity</div>
+            <div class="label">Drawdown Akun Spot · Proteksi</div>
+            <div class="value mono" id="ddCurrent">-</div>
+            <div class="sub">DD saat ini</div>
+            <div class="dd-row"><span>Max DD periode risiko</span><strong class="mono" id="ddVal">-</strong></div>
+            <div class="sub" id="ddSub">Menunggu snapshot risiko bot</div>
+            <div class="dd-note">Termasuk perubahan nilai BNB dan aset lain. Kontrol risiko akun tidak diubah.</div>
+          </div>
+          <div class="card" id="cardStrategyDd">
+            <div class="label">Drawdown Strategi · Realisasi</div>
+            <div class="value mono" id="strategyDdCurrent">-</div>
+            <div class="sub">DD saat ini dari transaksi selesai</div>
+            <div class="dd-row"><span>Max DD periode strategi</span><strong class="mono" id="strategyDdMax">-</strong></div>
+            <div class="dd-row"><span>Modal strategi sekarang</span><span class="mono" id="strategyCapital">-</span></div>
+            <div class="dd-row"><span>Modal awal</span><span class="mono" id="strategyInitial">-</span></div>
+            <div class="dd-row"><span>Transaksi selesai</span><span class="mono" id="strategyTrades">-</span></div>
+            <div class="sub" id="strategyDdMeta" aria-live="polite">Menunggu inisialisasi otomatis</div>
+            <div class="sub" id="strategyDdPeriod">Periode belum ditetapkan</div>
           </div>
         </div>
 
@@ -2309,6 +2363,12 @@
             </div>
           </section>
         </div>
+        <details class="panel" id="strategyAdvanced" style="margin-top:16px">
+          <summary>Pengaturan lanjutan · Periode DD strategi</summary>
+          <p class="dd-note">Tidak diperlukan untuk penggunaan pertama. Bot menetapkan modal awal otomatis dan melanjutkan periode yang tersimpan setelah restart. Gunakan tindakan ini hanya jika sengaja ingin mengganti periode statistik.</p>
+          <button class="dd-button" id="strategyPeriodBtn" onclick="openStrategyPeriod()" disabled>Mulai periode baru</button>
+          <div class="sub">Periode lama diarsipkan. Bot harus berhenti normal, tanpa posisi/order atau accounting tertunda. Tidak mengubah saldo, sizing, ledger, atau DD-stop akun.</div>
+        </details>
       </div>
 
       <div class="tabpane" id="paneBacktest" role="tabpanel" hidden>
@@ -2792,6 +2852,22 @@
           </div>
         </div>
       </div>
+      <div class="modal-overlay" id="strategyPeriodModal" role="dialog" aria-modal="true" aria-labelledby="strategyPeriodTitle">
+        <div class="modal-box">
+          <h3 id="strategyPeriodTitle">Periode DD Strategi Baru</h3>
+          <p>Ini hanya menetapkan modal dasar statistik. Tidak memindahkan dana, mengubah sizing/order, melepas DD-stop akun, atau menghapus ledger. Riwayat sebelum periode baru tidak dihitung.</p>
+          <label for="strategyInitialInput">Modal awal <span id="strategyQuote"></span></label>
+          <input class="dd-input" id="strategyInitialInput" type="number" min="0.00000001" max="1000000000000000" step="any" inputmode="decimal" oninput="invalidateStrategyConfirmation()" />
+          <label class="dd-ack"><input id="strategyAcknowledge" type="checkbox" onchange="invalidateStrategyConfirmation()" /> Saya menyetujui nominal modal awal dan periode baru. Periode lama, jika ada, diarsipkan; kontrol risiko akun tetap berlaku.</label>
+          <p id="strategyPeriodMessage" aria-live="polite"></p>
+          <div class="modal-actions">
+            <button class="modal-cancel" id="strategyCancel" onclick="closeStrategyPeriod()">Tutup</button>
+            <button class="modal-confirm" id="strategyPrepare" onclick="prepareStrategyPeriod()">Periksa &amp; lanjut</button>
+            <button class="modal-confirm" id="strategyExecute" onclick="executeStrategyPeriod()" hidden>Konfirmasi periode baru</button>
+          </div>
+        </div>
+      </div>
+
       <div class="modal-overlay" id="botActionModal">
         <div class="modal-box">
           <h3 id="botActionTitle">Konfirmasi Aksi Bot</h3>
@@ -2912,7 +2988,173 @@
         return timedFetch(url, opts, 12000);
       }
       const fmt = (n,d=2)=> (n===null||n===undefined||isNaN(n))?'-':Number(n).toLocaleString(LOCALE,{minimumFractionDigits:d,maximumFractionDigits:d});
+      setInterval(() => {
+        if (equityDisplaySnapshot) renderEquityDetails(equityDisplaySnapshot, equityDisplayQuote, false);
+      }, 1000);
       const fmtP = (n,d=6)=> (n===null||n===undefined||isNaN(n))?'-':Number(n).toLocaleString(LOCALE,{minimumFractionDigits:2,maximumFractionDigits:d});
+      let equityDisplaySnapshot = null;
+      let equityDisplayQuote = '';
+      let equityDisplayReceivedAt = 0;
+      function renderEquityDetails(a, quote, received = true) {
+        if (received) {
+          equityDisplaySnapshot = a;
+          equityDisplayQuote = quote;
+          equityDisplayReceivedAt = performance.now();
+        }
+        const amount = value => value == null ? '-' : fmt(value, 4) + ' ' + quote;
+        document.getElementById('equityLocked').textContent = amount(a.quote_locked);
+        document.getElementById('equityOther').textContent = amount(a.other_assets_value);
+        const elapsed = Math.max(0, (performance.now() - equityDisplayReceivedAt) / 1000);
+        const age = a.equity_age_seconds == null ? null : a.equity_age_seconds + elapsed;
+        const status = a.equity_status === 'VALID' && age != null && age > 30 ? 'STALE' : (a.equity_status || 'WAITING');
+        const labels = {VALID: 'Valid', STALE: 'Kedaluwarsa · nilai terakhir', UNVERIFIED: 'Belum terverifikasi', WAITING: 'Menunggu snapshot'};
+        const source = a.equity_source === 'BOT' ? 'snapshot bot' : 'pembaruan mandiri dashboard';
+        const timestamp = a.equity_updated_at_ms ? new Date(a.equity_updated_at_ms).toLocaleString('id-ID') : null;
+        const parts = [labels[status] || status, source];
+        if (timestamp) parts.push(timestamp);
+        if (age != null) parts.push('usia ' + Math.floor(age) + ' detik');
+        if (a.equity_snapshot_id) parts.push('ID ' + a.equity_snapshot_id);
+        if (a.equity_error) parts.push(a.equity_error);
+        const meta = document.getElementById('equityMeta');
+        meta.textContent = parts.join(' · ');
+        meta.style.color = status === 'VALID' ? '' : 'var(--amber, #fbbf24)';
+        document.getElementById('equityVal').style.color = status === 'STALE' ? 'var(--amber, #fbbf24)' : '';
+        document.getElementById('equityAssets').innerHTML = (a.assets || []).map(asset =>
+          '<tr><td>' + esc(asset.asset) + '</td><td>' + fmt(asset.free, 8) + '</td><td>' + fmt(asset.locked, 8) + '</td><td>' + fmt(asset.value, 6) + ' ' + esc(quote) + '</td></tr>'
+        ).join('') || '<tr><td colspan="4">Belum ada data terverifikasi</td></tr>';
+      }
+
+      let drawdownStatus = null;
+      let drawdownReceivedAt = 0;
+      let strategyConfirmation = null;
+      let strategyBusy = false;
+      function renderDrawdowns(s, received = true) {
+        if (received) {
+          drawdownStatus = s;
+          drawdownReceivedAt = performance.now();
+        }
+        const oldResponse = performance.now() - drawdownReceivedAt > 30000;
+        const account = s.drawdown_account || {};
+        const strategy = s.drawdown_strategy || {status: 'UNINITIALIZED'};
+        const result = strategy.result;
+        const pct = value => value == null ? '-' : fmt(value, 2) + '%';
+        const capitalText = value => Number(value).toLocaleString('id-ID', {minimumFractionDigits:2, maximumFractionDigits:8}) + ' ' + s.quote;
+        document.getElementById('ddCurrent').textContent = pct(account.current_dd_pct);
+        document.getElementById('ddVal').textContent = pct(account.max_dd_pct);
+        const accountLabels = {VALID: 'Snapshot bot valid', STALE: 'Snapshot kedaluwarsa', WAITING: 'Menunggu snapshot risiko bot', STOPPED: 'Bot berhenti; Max DD dari state terakhir', UNVERIFIED: 'Equity belum terverifikasi'};
+        let accountText = accountLabels[account.status] || 'Data belum tersedia';
+        accountText += account.stop_enabled ? ' · proteksi aktif, batas ' + pct(account.limit_pct) : ' · equity stop nonaktif dalam konfigurasi';
+        accountText += ' · reset akun ' + (account.reset_count || 0) + 'x';
+        if (account.snapshot_id) accountText += ' · ID ' + account.snapshot_id;
+        document.getElementById('ddSub').textContent = (oldResponse ? 'Respons dashboard kedaluwarsa · ' : '') + accountText;
+        document.getElementById('strategyDdCurrent').textContent = pct(result && result.current_dd_pct);
+        document.getElementById('strategyDdMax').textContent = pct(result && result.max_dd_pct);
+        document.getElementById('strategyCapital').textContent = result ? capitalText(result.capital) : '-';
+        document.getElementById('strategyInitial').textContent = result ? capitalText(result.initial_capital) : '-';
+        document.getElementById('strategyTrades').textContent = result ? String(result.closed_trade_count) : '-';
+        let message = strategy.status === 'UNINITIALIZED' ? 'Menunggu inisialisasi otomatis oleh bot sebelum entry pertama.' : strategy.status === 'VALID' ? (result && result.closed_trade_count ? 'Transaksi selesai terverifikasi.' : 'Belum ada transaksi selesai pada periode ini.') : 'Data tidak lengkap. ' + (result ? 'Menampilkan hasil terakhir yang lengkap. ' : '') + (strategy.error || 'Menunggu rekonsiliasi.');
+        if (strategy.status === 'UNINITIALIZED' && strategy.initialization_error) message += ' ' + strategy.initialization_error;
+        if (result && result.revised_trade_count) message += ' ' + result.revised_trade_count + ' transaksi memakai revisi accounting terbaru; statistik historis dihitung ulang.';
+        if (strategy.open_position) message += ' Posisi terbuka belum masuk DD realisasi.';
+        if (oldResponse) message = 'Respons dashboard kedaluwarsa. ' + message;
+        const meta = document.getElementById('strategyDdMeta');
+        meta.textContent = message;
+        meta.style.color = strategy.status === 'INCOMPLETE' || oldResponse ? 'var(--amber, #fbbf24)' : '';
+        document.getElementById('strategyDdPeriod').textContent = strategy.period_id ? 'Sejak ' + new Date(strategy.started_at_ms).toLocaleString('id-ID') + ' · ID ' + strategy.period_id + (result && result.calculated_at_ms ? ' · Kalkulasi ' + new Date(result.calculated_at_ms).toLocaleString('id-ID') : '') : 'Periode belum ditetapkan';
+        const button = document.getElementById('strategyPeriodBtn');
+        button.textContent = 'Mulai periode baru';
+        button.disabled = oldResponse || s.read_only || !s.process || s.process.status !== 'STOPPED' || strategy.status !== 'VALID' || !strategy.period_id;
+      }
+      setInterval(() => {
+        if (drawdownStatus) renderDrawdowns(drawdownStatus, false);
+      }, 1000);
+      function invalidateStrategyConfirmation() {
+        strategyConfirmation = null;
+        document.getElementById('strategyExecute').hidden = true;
+        document.getElementById('strategyPrepare').hidden = false;
+        document.getElementById('strategyPeriodMessage').textContent = '';
+      }
+      function openStrategyPeriod() {
+        if (!drawdownStatus || document.getElementById('strategyPeriodBtn').disabled) return;
+        invalidateStrategyConfirmation();
+        const a = drawdownStatus.account || {};
+        document.getElementById('strategyInitialInput').value = a.equity_status === 'VALID' && a.usdt_free != null ? String(a.usdt_free) : '';
+        document.getElementById('strategyQuote').textContent = drawdownStatus.quote || '';
+        document.getElementById('strategyAcknowledge').checked = false;
+        document.getElementById('strategyPeriodModal').classList.add('show');
+        document.getElementById('strategyInitialInput').focus();
+      }
+      function closeStrategyPeriod() {
+        if (strategyBusy) return;
+        document.getElementById('strategyPeriodModal').classList.remove('show');
+        invalidateStrategyConfirmation();
+        document.getElementById('strategyPeriodBtn').focus();
+      }
+      function strategySetBusy(value) {
+        strategyBusy = value;
+        for (const id of ['strategyPrepare','strategyExecute','strategyCancel','strategyInitialInput','strategyAcknowledge']) document.getElementById(id).disabled = value;
+      }
+      async function prepareStrategyPeriod() {
+        if (strategyBusy) return;
+        const input = document.getElementById('strategyInitialInput');
+        const acknowledged = document.getElementById('strategyAcknowledge').checked;
+        const message = document.getElementById('strategyPeriodMessage');
+        if (!input.value.trim() || !input.checkValidity() || !acknowledged) {
+          message.textContent = 'Isi nominal modal positif dan centang persetujuan.';
+          return;
+        }
+        strategySetBusy(true);
+        message.textContent = 'Memeriksa bot, posisi, order, saldo, dan ledger...';
+        try {
+          const response = await adminFetch('/api/strategy-dd/prepare', {body: JSON.stringify({initial_capital:input.value.trim(), acknowledge:true})});
+          const data = await responseJson(response);
+          if (!response.ok) throw new Error(data.error || 'Pemeriksaan gagal.');
+          strategyConfirmation = data.confirmation_id;
+          message.textContent = 'Konfirmasi akhir: mulai periode baru dengan modal ' + data.initial_capital + ' ' + data.quote + '. ' + (data.previous_period_id ? 'Periode sebelumnya diarsipkan. ' : '') + 'DD akun dan ledger tidak direset. Konfirmasi berlaku 120 detik.';
+          document.getElementById('strategyPrepare').hidden = true;
+          document.getElementById('strategyExecute').hidden = false;
+        } catch (error) {
+          invalidateStrategyConfirmation();
+          message.textContent = error.message || 'Pemeriksaan gagal.';
+        } finally {
+          strategySetBusy(false);
+        }
+      }
+      async function executeStrategyPeriod() {
+        if (strategyBusy || !strategyConfirmation) return;
+        strategySetBusy(true);
+        const token = strategyConfirmation;
+        strategyConfirmation = null;
+        const message = document.getElementById('strategyPeriodMessage');
+        try {
+          const response = await adminFetch('/api/strategy-dd/execute', {body:JSON.stringify({confirmation_id:token,confirmed:true})});
+          const data = await responseJson(response);
+          if (!response.ok) throw new Error(data.error || 'Periode belum dapat dibuat.');
+          message.textContent = data.message;
+          document.getElementById('strategyExecute').hidden = true;
+          document.getElementById('strategyPrepare').hidden = true;
+          await refresh();
+        } catch (error) {
+          invalidateStrategyConfirmation();
+          message.textContent = (error.message || 'Permintaan gagal.') + ' Periksa status periode sebelum mencoba lagi.';
+          await refresh();
+        } finally {
+          strategySetBusy(false);
+        }
+      }
+      document.addEventListener('keydown', event => {
+        const modal = document.getElementById('strategyPeriodModal');
+        if (!modal.classList.contains('show')) return;
+        if (event.key === 'Escape') closeStrategyPeriod();
+        if (event.key === 'Tab') {
+          const items = Array.from(modal.querySelectorAll('input,button')).filter(item => !item.disabled && !item.hidden);
+          if (!items.length) {event.preventDefault(); return;}
+          const first = items[0], last = items[items.length - 1];
+          if (event.shiftKey && document.activeElement === first) {last.focus(); event.preventDefault();}
+          if (!event.shiftKey && document.activeElement === last) {first.focus(); event.preventDefault();}
+        }
+      });
+
       function fmtExitVsEntry(raw, atr, entry, suffix){
         if(raw===null||raw===undefined||raw==='') return 'nonaktif';
         const n = Number(raw);
@@ -3161,21 +3403,14 @@
         else{cd.className='dot off';ct.textContent='Offline (data dari file)';}
 
         const a=s.account;
-        document.getElementById('equityLabel').textContent = isPaper ? 'Equity (Paper)' : 'Equity (Live)';
-        document.getElementById('equityVal').textContent = a.equity_live!=null? fmt(a.equity_live)+' '+s.quote : '-';
-        const ddEl = document.getElementById('ddVal');
-        if(a.max_drawdown_pct!=null){
-          const ddv = Number(a.max_drawdown_pct);
-          ddEl.innerHTML = '<span class="'+(ddv>0?'neg':'')+'">'+fmt(ddv,2)+'%</span>';
-          document.getElementById('ddSub').textContent = 'batas reset '+fmt(a.max_drawdown_limit_pct,1)+'% · direset '+fmt(a.dd_reset_count||0,0)+'x';
-        } else {
-          ddEl.textContent = '-';
-          document.getElementById('ddSub').textContent = 'belum ada data equity';
-        }
+        document.getElementById('equityLabel').textContent = isPaper ? 'Equity Akun Spot (Paper)' : 'Equity Akun Spot (Live)';
+        document.getElementById('equityVal').textContent = a.equity_live!=null? fmt(a.equity_display!=null ? a.equity_display : a.equity_live)+' '+s.quote : '-';
+        renderDrawdowns(s);
         const eqIdr = idrOf(a.equity_live);
         document.getElementById('equitySub').textContent = a.usdt_free!=null
           ? ((eqIdr!=null? '≈ '+fmtIDR(eqIdr,false)+' · ' : '') + 'bebas: '+fmt(a.usdt_free)+' '+s.quote)
-          : 'butuh API key untuk saldo';
+          : 'Saldo belum terverifikasi';
+        renderEquityDetails(a, s.quote);
 
         const p=s.position;
         const oc=document.getElementById('cardPnl');
