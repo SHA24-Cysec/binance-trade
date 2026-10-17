@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Callable, Optional
 
 
@@ -46,8 +47,87 @@ class Candidate:
     setup: "Optional[SetupResult]" = None
     trend: "Optional[dict]" = None
     htf_demand: "Optional[dict]" = None
-    daily_demand: "Optional[dict]" = None
-    daily_trend: "Optional[dict]" = None
+    m15_demand: "Optional[dict]" = None
+    m15_trend: "Optional[dict]" = None
+
+
+@dataclass
+class ScanDiagnostics:
+    market_candidates: int = 0
+    checked_candidates: int = 0
+    latest_signal_close_ms: int = 0
+    rejection_counts: dict[str, int] = field(default_factory=dict)
+    examples: dict[str, tuple[str, str]] = field(default_factory=dict)
+
+    def observe_signal(self, klines: list) -> None:
+        if not klines:
+            return
+        try:
+            close_ms = int(klines[-1].close_time)
+        except (AttributeError, TypeError, ValueError):
+            return
+        self.latest_signal_close_ms = max(self.latest_signal_close_ms, close_ms)
+
+    def reject(self, stage: str, symbol: str, reason: str) -> None:
+        self.rejection_counts[stage] = self.rejection_counts.get(stage, 0) + 1
+        detail = "".join(ch if ch.isprintable() else " " for ch in str(reason))
+        detail = " ".join(detail.split()) or "alasan tidak tersedia"
+        sample_symbol = "".join(ch if ch.isprintable() else " " for ch in str(symbol))
+        sample_symbol = " ".join(sample_symbol.split())[:32]
+        if len(detail) > 140:
+            detail = detail[:137] + "..."
+        self.examples.setdefault(stage, (sample_symbol, detail))
+
+    def signature(self) -> tuple:
+        return (
+            self.market_candidates,
+            self.checked_candidates,
+            self.latest_signal_close_ms,
+            tuple(
+                (stage, count, self.examples.get(stage))
+                for stage, count in sorted(self.rejection_counts.items())
+            ),
+        )
+
+    def log_lines(self, config: dict) -> list[str]:
+        if not self.checked_candidates:
+            return []
+        interval = str(config.get("CONFIRM_INTERVAL", "5m"))
+        htf_interval = str(config.get("TREND_INTERVAL", "1h"))
+        labels = {
+            "CANDLE_CONFIRM": f"candle {interval} gagal diambil",
+            "HISTORY_CONFIRM": f"riwayat {interval} kurang",
+            "VOLUME_CONFIRM": f"volume rolling {interval}",
+            "DEMAND_CONFIRM": f"demand {interval}",
+            "SETUP_CONFIRM": f"konfirmasi {interval}",
+            "TREND_HTF": f"trend {htf_interval}",
+            "DEMAND_HTF": f"demand {htf_interval}",
+            "DEMAND_M15": "demand M15",
+            "TREND_M15": "EMA + ADX M15",
+        }
+        candle = "belum tersedia"
+        if self.latest_signal_close_ms > 0:
+            try:
+                candle = datetime.fromtimestamp(
+                    self.latest_signal_close_ms / 1000, tz=timezone.utc
+                ).strftime("%H:%M:%S UTC")
+            except (OverflowError, OSError, ValueError):
+                candle = "waktu candle tidak valid"
+        lines = [
+            f"Diagnostik entry: {self.checked_candidates} dari "
+            f"{self.market_candidates} kandidat pasar diperiksa; "
+            f"candle konfirmasi terbaru tutup {candle}.",
+            "Diagnostik: setiap simbol dicatat pada gerbang pertama yang gagal.",
+        ]
+        for stage, label in labels.items():
+            count = self.rejection_counts.get(stage, 0)
+            if not count:
+                continue
+            symbol, reason = self.examples.get(stage, ("-", "alasan tidak tersedia"))
+            lines.append(
+                f"Penolakan {label}: {count} kandidat; contoh {symbol}: {reason}"
+            )
+        return lines
 
 
 def _looks_leveraged(base_asset: str) -> bool:
@@ -552,35 +632,34 @@ def htf_demand_verdict(symbol: str, config: dict, trend_provider) -> dict:
     return strategy_mod.evaluate_htf_demand(list(klines), config)
 
 
-def daily_demand_verdict(symbol: str, config: dict, daily_provider) -> dict:
+def m15_demand_verdict(
+    symbol: str, config: dict, m15_provider, signal_close_time_ms: int | None = None
+) -> dict:
     from strategy import indicators as strategy_mod
 
-    try:
-        interval = strategy_mod.daily_demand_interval(config)
-    except ValueError:
-        interval = str(config.get("DAILY_DEMAND_INTERVAL", "1d") or "1d")
+    interval = strategy_mod.M15_INTERVAL
     kosong = {
         "interval": interval,
         "bars": 0,
-        "required": strategy_mod.daily_demand_window_bars(config),
+        "required": strategy_mod.m15_demand_window_bars(config),
         "zone_low": None,
         "zone_high": None,
         "distance_pct": None,
         "close_position": None,
     }
-    if not bool(config.get("DAILY_DEMAND_FILTER_ENABLED", False)):
+    if not bool(config.get("M15_DEMAND_FILTER_ENABLED", False)):
         return {"ok": True, "reason": f"filter demand {interval} nonaktif", **kosong}
-    if daily_provider is None:
+    if m15_provider is None:
         return {
             "ok": False,
             "reason": (
-                f"filter demand {interval} aktif tetapi penyedia candle harian "
+                f"filter demand {interval} aktif tetapi penyedia candle M15 "
                 "tidak tersedia (fail closed)"
             ),
             **kosong,
         }
     try:
-        klines = daily_provider(symbol)
+        klines = m15_provider(symbol)
     except Exception as exc:
         return {
             "ok": False,
@@ -593,21 +672,22 @@ def daily_demand_verdict(symbol: str, config: dict, daily_provider) -> dict:
             "reason": f"candle demand {interval} {symbol} kosong",
             **kosong,
         }
-    return strategy_mod.evaluate_daily_demand(list(klines), config)
+    return strategy_mod.evaluate_m15_demand(
+        list(klines), config, signal_close_time_ms
+    )
 
 
-def daily_trend_verdict(symbol: str, config: dict, daily_trend_provider) -> dict:
+def m15_trend_verdict(
+    symbol: str, config: dict, m15_trend_provider, signal_close_time_ms: int | None = None
+) -> dict:
     from strategy import indicators as strategy_mod
 
-    try:
-        interval = strategy_mod.daily_trend_interval(config)
-    except ValueError:
-        interval = str(config.get("DAILY_TREND_INTERVAL", "1d") or "1d")
+    interval = strategy_mod.M15_INTERVAL
     kosong = {
         "interval": interval,
         "bars": 0,
-        "required": strategy_mod.daily_trend_required_bars(config),
-        "window": strategy_mod.daily_trend_window_bars(config),
+        "required": strategy_mod.m15_trend_required_bars(config),
+        "window": strategy_mod.m15_trend_window_bars(config),
         "close": None,
         "ema_fast": None,
         "ema_slow": None,
@@ -615,19 +695,19 @@ def daily_trend_verdict(symbol: str, config: dict, daily_trend_provider) -> dict
         "checks": {},
         "values": {},
     }
-    if not strategy_mod.daily_trend_enabled(config):
+    if not strategy_mod.m15_trend_enabled(config):
         return {"ok": True, "reason": f"filter trend {interval} nonaktif", **kosong}
-    if daily_trend_provider is None:
+    if m15_trend_provider is None:
         return {
             "ok": False,
             "reason": (
-                f"filter trend {interval} aktif tetapi penyedia candle harian "
+                f"filter trend {interval} aktif tetapi penyedia candle M15 "
                 "tidak tersedia (fail closed)"
             ),
             **kosong,
         }
     try:
-        klines = daily_trend_provider(symbol)
+        klines = m15_trend_provider(symbol)
     except Exception as exc:
         return {
             "ok": False,
@@ -640,7 +720,9 @@ def daily_trend_verdict(symbol: str, config: dict, daily_trend_provider) -> dict
             "reason": f"candle trend {interval} {symbol} kosong",
             **kosong,
         }
-    return strategy_mod.evaluate_daily_trend(list(klines), config)
+    return strategy_mod.evaluate_m15_trend(
+        list(klines), config, signal_close_time_ms
+    )
 
 
 def find_best_candidate(
@@ -651,11 +733,18 @@ def find_best_candidate(
     klines_fetcher_many: "Optional[Callable[[list], dict]]" = None,
     prewarm_fn: "Optional[Callable[[list], None]]" = None,
     trend_provider: "Optional[Callable[[str], list]]" = None,
-    daily_provider: "Optional[Callable[[str], list]]" = None,
-    daily_trend_provider: "Optional[Callable[[str], list]]" = None,
+    m15_provider: "Optional[Callable[[str], list]]" = None,
+    m15_trend_provider: "Optional[Callable[[str], list]]" = None,
+    diagnostics: Optional[ScanDiagnostics] = None,
 ) -> Optional[Candidate]:
     ranked = filter_and_rank_candidates(tickers, config, tradable_symbols)
     top_n = ranked[: int(config.get("TOP_N_CANDIDATES_TO_CONFIRM", 10) or 10)]
+    if diagnostics is not None:
+        diagnostics.market_candidates = len(ranked)
+        diagnostics.checked_candidates = len(top_n)
+        diagnostics.latest_signal_close_ms = 0
+        diagnostics.rejection_counts.clear()
+        diagnostics.examples.clear()
     if not top_n:
         return None
 
@@ -685,13 +774,28 @@ def find_best_candidate(
         except Exception as exc:
             cand.confirmed = False
             cand.confirm_reason = f"gagal mengambil candle: {exc}"
+            if diagnostics is not None:
+                diagnostics.reject("CANDLE_CONFIRM", cand.symbol, cand.confirm_reason)
             continue
+        if diagnostics is not None:
+            diagnostics.observe_signal(klines)
         hasil = detect_entry_setup(klines or [], config)
         cand.confirmed = hasil.ok
         cand.confirm_reason = hasil.reason
         cand.setup = hasil
         if not hasil.ok:
+            if diagnostics is not None:
+                if hasil.reason.startswith("rolling volume ditolak"):
+                    stage = "VOLUME_CONFIRM"
+                elif hasil.reason.startswith("zona demand ditolak"):
+                    stage = "DEMAND_CONFIRM"
+                elif hasil.reason.startswith("data candle kurang"):
+                    stage = "HISTORY_CONFIRM"
+                else:
+                    stage = "SETUP_CONFIRM"
+                diagnostics.reject(stage, cand.symbol, hasil.reason)
             continue
+        signal_close_time_ms = int(klines[-1].close_time)
         if bool(config.get("TREND_FILTER_ENABLED", False)):
             trend = trend_verdict(cand.symbol, config, trend_provider)
             cand.trend = trend
@@ -700,6 +804,8 @@ def find_best_candidate(
                 cand.confirm_reason = (
                     f"trend {trend.get('interval') or 'HTF'} ditolak: {trend['reason']}"
                 )
+                if diagnostics is not None:
+                    diagnostics.reject("TREND_HTF", cand.symbol, trend["reason"])
                 continue
             cand.confirm_reason = f"{hasil.reason} | {trend['reason']}"
         if bool(config.get("HTF_DEMAND_FILTER_ENABLED", False)):
@@ -711,30 +817,40 @@ def find_best_candidate(
                     f"demand {htf_demand.get('interval') or 'HTF'} ditolak: "
                     f"{htf_demand['reason']}"
                 )
+                if diagnostics is not None:
+                    diagnostics.reject("DEMAND_HTF", cand.symbol, htf_demand["reason"])
                 continue
             cand.confirm_reason = f"{cand.confirm_reason} | {htf_demand['reason']}"
-        if bool(config.get("DAILY_DEMAND_FILTER_ENABLED", False)):
-            daily_demand = daily_demand_verdict(cand.symbol, config, daily_provider)
-            cand.daily_demand = daily_demand
-            if not daily_demand["ok"]:
+        if bool(config.get("M15_DEMAND_FILTER_ENABLED", False)):
+            m15_demand = m15_demand_verdict(
+                cand.symbol, config, m15_provider, signal_close_time_ms
+            )
+            cand.m15_demand = m15_demand
+            if not m15_demand["ok"]:
                 cand.confirmed = False
                 cand.confirm_reason = (
-                    f"demand {daily_demand.get('interval') or 'D1'} ditolak: "
-                    f"{daily_demand['reason']}"
+                    f"demand {m15_demand.get('interval') or '15m'} ditolak: "
+                    f"{m15_demand['reason']}"
                 )
+                if diagnostics is not None:
+                    diagnostics.reject("DEMAND_M15", cand.symbol, m15_demand["reason"])
                 continue
-            cand.confirm_reason = f"{cand.confirm_reason} | {daily_demand['reason']}"
-        if bool(config.get("DAILY_TREND_FILTER_ENABLED", False)):
-            daily_trend = daily_trend_verdict(cand.symbol, config, daily_trend_provider)
-            cand.daily_trend = daily_trend
-            if not daily_trend["ok"]:
+            cand.confirm_reason = f"{cand.confirm_reason} | {m15_demand['reason']}"
+        if bool(config.get("M15_TREND_FILTER_ENABLED", False)):
+            m15_trend = m15_trend_verdict(
+                cand.symbol, config, m15_trend_provider, signal_close_time_ms
+            )
+            cand.m15_trend = m15_trend
+            if not m15_trend["ok"]:
                 cand.confirmed = False
                 cand.confirm_reason = (
-                    f"trend {daily_trend.get('interval') or '1d'} ditolak: "
-                    f"{daily_trend['reason']}"
+                    f"trend {m15_trend.get('interval') or '15m'} ditolak: "
+                    f"{m15_trend['reason']}"
                 )
+                if diagnostics is not None:
+                    diagnostics.reject("TREND_M15", cand.symbol, m15_trend["reason"])
                 continue
-            cand.confirm_reason = f"{cand.confirm_reason} | {daily_trend['reason']}"
+            cand.confirm_reason = f"{cand.confirm_reason} | {m15_trend['reason']}"
         lolos.append(cand)
 
     if not lolos:

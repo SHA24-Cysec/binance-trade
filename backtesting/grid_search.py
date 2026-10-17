@@ -8,7 +8,7 @@ from typing import Callable, Optional, Sequence
 
 from backtesting import backtest as bt
 from backtesting import parity
-from strategy.indicators import Kline
+from strategy.indicators import Kline, M15_INTERVAL
 
 
 def parity_trend_window(config: dict) -> int:
@@ -243,8 +243,8 @@ def run_grid_search(
     butuh_trend = bool(base_config.get("TREND_FILTER_ENABLED", False)) or bool(
         base_config.get("HTF_DEMAND_FILTER_ENABLED", False)
     )
-    butuh_harian = bool(base_config.get("DAILY_DEMAND_FILTER_ENABLED", False))
-    butuh_tren_harian = bool(base_config.get("DAILY_TREND_FILTER_ENABLED", False))
+    butuh_m15 = bool(base_config.get("M15_DEMAND_FILTER_ENABLED", False))
+    butuh_tren_m15 = bool(base_config.get("M15_TREND_FILTER_ENABLED", False))
     try:
         butuh_warmup = parity.htf_gate_warmup_bars(base_config, interval_sim)
     except ValueError as exc:
@@ -257,17 +257,17 @@ def run_grid_search(
                 f"(trend + zona demand) butuh {parity_trend_window(base_config)} candle "
                 "tertutup"
             )
-        if butuh_tren_harian:
+        if butuh_tren_m15:
             bagian.append(
-                f"gerbang EMA + ADX {base_config.get('DAILY_TREND_INTERVAL', '1d')} "
-                f"butuh {parity.daily_trend_window_bars(base_config)} candle "
-                f"{base_config.get('DAILY_TREND_INTERVAL', '1d')} tertutup"
+                f"gerbang EMA + ADX {M15_INTERVAL} "
+                f"butuh {parity.m15_trend_window_bars(base_config)} candle "
+                f"{M15_INTERVAL} tertutup"
             )
-        if butuh_harian:
+        if butuh_m15:
             bagian.append(
-                f"gerbang zona demand {base_config.get('DAILY_DEMAND_INTERVAL', '1d')} "
-                f"butuh {parity.daily_demand_window_bars(base_config)} candle "
-                f"{base_config.get('DAILY_DEMAND_INTERVAL', '1d')} tertutup"
+                f"gerbang zona demand {M15_INTERVAL} "
+                f"butuh {parity.m15_demand_window_bars(base_config)} candle "
+                f"{M15_INTERVAL} tertutup"
             )
         hasil_grid.peringatan.append(
             f"Warmup {warmup_bars} bar dinaikkan menjadi {butuh_warmup} bar karena "
@@ -299,11 +299,11 @@ def run_grid_search(
             if kl_uji
             else []
         )
-    daily_latih = daily_uji = None
-    if butuh_harian:
-        daily_latih = parity.build_daily_klines(kl_latih, base_config, interval_sim)
-        daily_uji = (
-            parity.build_daily_klines(kl_uji, base_config, interval_sim)
+    m15_latih = m15_uji = None
+    if butuh_m15:
+        m15_latih = parity.build_m15_klines(kl_latih, base_config, interval_sim)
+        m15_uji = (
+            parity.build_m15_klines(kl_uji, base_config, interval_sim)
             if kl_uji
             else []
         )
@@ -340,7 +340,7 @@ def run_grid_search(
                 warmup_bars,
                 btc_klines=btc_klines,
                 trend_klines=trend_latih,
-                daily_klines=daily_latih,
+                m15_klines=m15_latih,
             )
             s_latih = bt.summarize(r_latih)
         except Exception as exc:
@@ -379,7 +379,7 @@ def run_grid_search(
                     warmup_bars,
                     btc_klines=btc_klines,
                     trend_klines=trend_uji,
-                    daily_klines=daily_uji,
+                    m15_klines=m15_uji,
                 )
                 s_uji = bt.summarize(r_uji)
                 item.uji = s_uji
@@ -485,22 +485,22 @@ def run_portfolio_grid_search(
         )
 
     trend_of = pbt.build_trend_lookups(store, list(series_of), base_config, interval)
-    daily_of = pbt.build_daily_lookups(store, list(series_of), base_config, interval)
-    tren_harian_of = pbt.build_daily_trend_lookups(
+    m15_of = pbt.build_m15_lookups(store, list(series_of), base_config, interval)
+    tren_m15_of = pbt.build_m15_trend_lookups(
         store, list(series_of), base_config, interval
     )
-    if trend_of or daily_of or tren_harian_of:
+    if trend_of or base_config.get("M15_DEMAND_FILTER_ENABLED") or base_config.get("M15_TREND_FILTER_ENABLED"):
         butuh_warmup = parity.htf_gate_warmup_ms(base_config, interval)
         if int(warmup_ms) < butuh_warmup:
             hasil_grid.peringatan.append(
                 f"Warmup {warmup_ms} ms dinaikkan menjadi {butuh_warmup} ms karena gerbang "
-                f"timeframe tinggi yang aktif (trend + demand H1 + demand harian + EMA/ADX "
-                f"harian) butuh paling sedikit "
+                f"timeframe tinggi yang aktif (trend + demand H1 + demand M15 + EMA/ADX "
+                f"M15) butuh paling sedikit "
                 f"{parity.htf_gate_warmup_bars(base_config, interval)} "
                 f"candle {interval} sebagai pemanasan."
             )
             warmup_ms = butuh_warmup
-    prebuilt = (timeline, series_of, trend_of, daily_of, tren_harian_of)
+    prebuilt = (timeline, series_of, trend_of, m15_of, tren_m15_of)
     dilewati = 0
     total = len(kombinasi)
 

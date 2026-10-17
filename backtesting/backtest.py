@@ -58,9 +58,10 @@ class BacktestResult:
     chase_skips: int = 0
     trend_skips: int = 0
     htf_demand_skips: int = 0
-    daily_demand_skips: int = 0
-    daily_trend_skips: int = 0
-    daily_trend_scans: int = 0
+    m15_demand_skips: int = 0
+    m15_demand_scans: int = 0
+    m15_trend_skips: int = 0
+    m15_trend_scans: int = 0
     same_coin_skips: int = 0
     mark_to_market_open: bool = False
     mark_to_market_pnl_pct: float = 0.0
@@ -194,7 +195,7 @@ def run_backtest(
     progress_cb: Optional[Callable[[float], None]] = None,
     btc_klines: Optional[list[Kline]] = None,
     trend_klines: Optional[list[Kline]] = None,
-    daily_klines: Optional[list[Kline]] = None,
+    m15_klines: Optional[list[Kline]] = None,
 ) -> BacktestResult:
     interval = config.get("CONFIRM_INTERVAL", "5m")
     window = bars_per_day(interval)
@@ -210,10 +211,10 @@ def run_backtest(
     trend_skips = 0
     htf_demand_scans = 0
     htf_demand_skips = 0
-    daily_demand_scans = 0
-    daily_demand_skips = 0
-    daily_trend_scans = 0
-    daily_trend_skips = 0
+    m15_demand_scans = 0
+    m15_demand_skips = 0
+    m15_trend_scans = 0
+    m15_trend_skips = 0
 
     initial_equity = initial_backtest_equity(config)
     symbol = str(config.get("_symbol", "") or "")
@@ -278,14 +279,14 @@ def run_backtest(
         interval,
         sudah_dirangkai=trend_klines is not None,
     )
-    daily_lookup = parity.make_daily_lookup(
-        daily_klines if daily_klines is not None else klines,
+    m15_lookup = parity.make_m15_lookup(
+        m15_klines if m15_klines is not None else klines,
         config,
         interval,
-        sudah_dirangkai=daily_klines is not None,
+        sudah_dirangkai=m15_klines is not None,
     )
-    daily_trend_lookup = parity.make_daily_trend_lookup(klines, config, interval)
-    if trend_lookup is not None or daily_lookup is not None or daily_trend_lookup is not None:
+    m15_trend_lookup = parity.make_m15_trend_lookup(klines, config, interval)
+    if trend_lookup is not None or m15_lookup is not None or m15_trend_lookup is not None:
         butuh_warmup = strategy.htf_gate_warmup_bars(config, interval)
         if int(warmup_bars) < butuh_warmup:
             bagian = []
@@ -294,15 +295,15 @@ def run_backtest(
                     f"gerbang timeframe tinggi {config.get('TREND_INTERVAL', '1h')} "
                     f"(trend + zona demand) butuh {trend_lookup.window} candle tertutup"
                 )
-            if daily_lookup is not None:
+            if m15_lookup is not None:
                 bagian.append(
-                    f"gerbang zona demand {daily_lookup.interval} butuh "
-                    f"{daily_lookup.window} candle {daily_lookup.interval} tertutup"
+                    f"gerbang zona demand {m15_lookup.interval} butuh "
+                    f"{m15_lookup.window} candle {m15_lookup.interval} tertutup"
                 )
-            if daily_trend_lookup is not None:
+            if m15_trend_lookup is not None:
                 bagian.append(
-                    f"gerbang EMA + ADX {daily_trend_lookup.interval} butuh "
-                    f"{daily_trend_lookup.window} candle {daily_trend_lookup.interval} tertutup"
+                    f"gerbang EMA + ADX {m15_trend_lookup.interval} butuh "
+                    f"{m15_trend_lookup.window} candle {m15_trend_lookup.interval} tertutup"
                 )
             warnings.append(
                 f"Warmup {warmup_bars} bar {interval} dinaikkan menjadi {butuh_warmup} bar "
@@ -314,26 +315,24 @@ def run_backtest(
 
     i = max(warmup_bars, window - 1, lookback)
     start_idx = i
-    if daily_trend_lookup is not None:
-        hari_uji_tren = max(0.0, (n - start_idx) / float(bars_per_day(interval)))
-        butuh_hari_tren = strategy.daily_trend_required_bars(config)
-        if hari_uji_tren < float(butuh_hari_tren):
-            warnings.append(
-                f"Periode uji hanya {hari_uji_tren:.1f} hari, lebih pendek dari riwayat "
-                f"yang dibutuhkan EMA + ADX harian ({butuh_hari_tren} hari). Perpanjang "
-                "--days supaya gerbang harian benar-benar teruji."
-            )
-    if daily_lookup is not None:
-        hari_uji = max(0.0, (n - start_idx) / float(bars_per_day(interval)))
-        if hari_uji < float(strategy.daily_demand_lookback_bars(config)):
-            warnings.append(
-                f"Periode uji hanya {hari_uji:.1f} hari (bar {start_idx}..{n - 1}), lebih "
-                f"pendek dari jendela zona demand harian "
-                f"({strategy.daily_demand_lookback_bars(config)} hari lookback). Rentang "
-                "hari yang diuji terlalu pendek untuk menguji gerbang harian secara "
-                "berarti: perpanjang --days supaya mencakup beberapa kali rotasi zona "
-                "harian, atau kecilkan DAILY_DEMAND_LOOKBACK_BARS."
-            )
+    if m15_trend_lookup is not None or m15_lookup is not None:
+        bar_uji_m15 = max(0.0, (n - start_idx) / float(strategy.m15_ratio(interval)))
+        if m15_trend_lookup is not None:
+            butuh_tren = strategy.m15_trend_required_bars(config)
+            if bar_uji_m15 < butuh_tren:
+                warnings.append(
+                    f"Periode uji sekitar {bar_uji_m15:.1f} candle M15, lebih pendek "
+                    f"dari {butuh_tren} candle yang dibutuhkan EMA + ADX M15. "
+                    "Perpanjang rentang uji agar filter ini teruji di beberapa siklus."
+                )
+        if m15_lookup is not None:
+            lookback_m15 = strategy.m15_demand_lookback_bars(config)
+            if bar_uji_m15 < lookback_m15:
+                warnings.append(
+                    f"Periode uji sekitar {bar_uji_m15:.1f} candle M15, lebih pendek "
+                    f"dari {lookback_m15} candle lookback zona demand M15. "
+                    "Perpanjang rentang uji atau kecilkan M15_DEMAND_LOOKBACK_BARS."
+                )
 
     while i < n:
         if progress_cb and i % 200 == 0:
@@ -388,19 +387,19 @@ def run_backtest(
                         continue
                 if (
                     setup.ok
-                    and daily_lookup is not None
-                    and bool(config.get("DAILY_DEMAND_FILTER_ENABLED", False))
+                    and m15_lookup is not None
+                    and bool(config.get("M15_DEMAND_FILTER_ENABLED", False))
                 ):
-                    daily_demand_scans += 1
-                    verdict_daily = daily_lookup.daily_demand_at(candle.close_time)
-                    if not verdict_daily["ok"]:
-                        daily_demand_skips += 1
+                    m15_demand_scans += 1
+                    verdict_m15 = m15_lookup.m15_demand_at(candle.close_time)
+                    if not verdict_m15["ok"]:
+                        m15_demand_skips += 1
                         i += 1
                         continue
-                if setup.ok and daily_trend_lookup is not None:
-                    daily_trend_scans += 1
-                    if not daily_trend_lookup.verdict_at(candle.close_time)["ok"]:
-                        daily_trend_skips += 1
+                if setup.ok and m15_trend_lookup is not None:
+                    m15_trend_scans += 1
+                    if not m15_trend_lookup.verdict_at(candle.close_time)["ok"]:
+                        m15_trend_skips += 1
                         i += 1
                         continue
                 if setup.ok:
@@ -565,23 +564,23 @@ def run_backtest(
             f"{float(config.get('HTF_DEMAND_MAX_DISTANCE_PCT', 10.0) or 0.0):g}% dari atap "
             "zona), sama seperti bot live."
         )
-    if daily_lookup is not None and daily_demand_skips:
+    if m15_lookup is not None and m15_demand_skips:
         warnings.append(
-            f"{daily_demand_skips} dari {daily_demand_scans} sinyal konfirmasi dilewati "
-            f"oleh gerbang zona demand {daily_lookup.interval} "
-            f"(lookback {strategy.daily_demand_lookback_bars(config)} candle, "
+            f"{m15_demand_skips} dari {m15_demand_scans} sinyal konfirmasi dilewati "
+            f"oleh gerbang zona demand {m15_lookup.interval} "
+            f"(lookback {strategy.m15_demand_lookback_bars(config)} candle, "
             f"jarak maks "
-            f"{float(config.get('DAILY_DEMAND_MAX_DISTANCE_PCT', 12.0) or 0.0):g}% dari "
+            f"{float(config.get('M15_DEMAND_MAX_DISTANCE_PCT', 5.0) or 0.0):g}% dari "
             "atap zona), sama seperti bot live."
         )
-    if daily_trend_lookup is not None and daily_trend_skips:
+    if m15_trend_lookup is not None and m15_trend_skips:
         warnings.append(
-            f"{daily_trend_skips} dari {daily_trend_scans} sinyal konfirmasi dilewati oleh "
-            f"gerbang EMA{int(config.get('DAILY_TREND_EMA_FAST', 20) or 20)}/"
-            f"EMA{int(config.get('DAILY_TREND_EMA_SLOW', 50) or 50)} dan ADX"
-            f"{int(config.get('DAILY_TREND_ADX_PERIOD', 14) or 14)} >= "
-            f"{float(config.get('DAILY_TREND_ADX_MIN', 20.0) or 0.0):g} pada "
-            f"{daily_trend_lookup.interval}, sama seperti bot live."
+            f"{m15_trend_skips} dari {m15_trend_scans} sinyal konfirmasi dilewati oleh "
+            f"gerbang EMA{int(config.get('M15_TREND_EMA_FAST', 20) or 20)}/"
+            f"EMA{int(config.get('M15_TREND_EMA_SLOW', 50) or 50)} dan ADX"
+            f"{int(config.get('M15_TREND_ADX_PERIOD', 14) or 14)} >= "
+            f"{float(config.get('M15_TREND_ADX_MIN', 20.0) or 0.0):g} pada "
+            f"{m15_trend_lookup.interval}, sama seperti bot live."
         )
     result = BacktestResult(
         symbol=config.get("_symbol", "?"),
@@ -603,9 +602,10 @@ def run_backtest(
         chase_skips=chase_skips,
         trend_skips=trend_skips,
         htf_demand_skips=htf_demand_skips,
-        daily_demand_skips=daily_demand_skips,
-        daily_trend_skips=daily_trend_skips,
-        daily_trend_scans=daily_trend_scans,
+        m15_demand_skips=m15_demand_skips,
+        m15_demand_scans=m15_demand_scans,
+        m15_trend_skips=m15_trend_skips,
+        m15_trend_scans=m15_trend_scans,
         same_coin_skips=same_coin_skips,
         mark_to_market_open=mark_to_market_open,
         mark_to_market_pnl_pct=mark_to_market_pnl_pct,
@@ -729,9 +729,10 @@ def summarize(result: BacktestResult) -> dict:
         "chase_skips": int(result.chase_skips),
         "trend_skips": int(getattr(result, "trend_skips", 0)),
         "htf_demand_skips": int(getattr(result, "htf_demand_skips", 0)),
-        "daily_demand_skips": int(getattr(result, "daily_demand_skips", 0)),
-        "daily_trend_skips": int(getattr(result, "daily_trend_skips", 0)),
-        "daily_trend_scans": int(getattr(result, "daily_trend_scans", 0)),
+        "m15_demand_skips": int(getattr(result, "m15_demand_skips", 0)),
+        "m15_demand_scans": int(getattr(result, "m15_demand_scans", 0)),
+        "m15_trend_skips": int(getattr(result, "m15_trend_skips", 0)),
+        "m15_trend_scans": int(getattr(result, "m15_trend_scans", 0)),
         "same_coin_skips": int(getattr(result, "same_coin_skips", 0)),
         **parity.per_trade_metrics(trades),
     }
@@ -776,19 +777,17 @@ OVERRIDE_CASTERS = {
         "HTF_DEMAND_ZONE_BUFFER_PCT": float,
         "HTF_DEMAND_MAX_DISTANCE_PCT": float,
         "HTF_DEMAND_MIN_CLOSE_POSITION": float,
-        "DAILY_DEMAND_FILTER_ENABLED": _as_bool,
-        "DAILY_DEMAND_INTERVAL": str,
-        "DAILY_DEMAND_LOOKBACK_BARS": int,
-        "DAILY_DEMAND_ZONE_BUFFER_PCT": float,
-        "DAILY_DEMAND_MAX_DISTANCE_PCT": float,
-        "DAILY_DEMAND_MIN_CLOSE_POSITION": float,
-        "DAILY_TREND_FILTER_ENABLED": _as_bool,
-        "DAILY_TREND_INTERVAL": str,
-        "DAILY_TREND_EMA_FAST": int,
-        "DAILY_TREND_EMA_SLOW": int,
-        "DAILY_TREND_ADX_PERIOD": int,
-        "DAILY_TREND_ADX_MIN": float,
-        "DAILY_TREND_LOOKBACK_BARS": int,
+        "M15_DEMAND_FILTER_ENABLED": _as_bool,
+        "M15_DEMAND_LOOKBACK_BARS": int,
+        "M15_DEMAND_ZONE_BUFFER_PCT": float,
+        "M15_DEMAND_MAX_DISTANCE_PCT": float,
+        "M15_DEMAND_MIN_CLOSE_POSITION": float,
+        "M15_TREND_FILTER_ENABLED": _as_bool,
+        "M15_TREND_EMA_FAST": int,
+        "M15_TREND_EMA_SLOW": int,
+        "M15_TREND_ADX_PERIOD": int,
+        "M15_TREND_ADX_MIN": float,
+        "M15_TREND_LOOKBACK_BARS": int,
         "TREND_FILTER_ENABLED": _as_bool,
         "TREND_INTERVAL": str,
         "TREND_EMA_FAST": int,
@@ -890,14 +889,14 @@ def validate_params(cfg: dict) -> None:
                     f"Parameter '{key}'={val} di luar rentang wajar ({lo:g}..{hi:g})."
                 )
 
-    if bool(cfg.get("DAILY_DEMAND_FILTER_ENABLED", False)):
-        daily_demand_checks = [
-            ("DAILY_DEMAND_LOOKBACK_BARS", 3, 500),
-            ("DAILY_DEMAND_ZONE_BUFFER_PCT", 0.05, 20.0),
-            ("DAILY_DEMAND_MAX_DISTANCE_PCT", 0.1, 50.0),
-            ("DAILY_DEMAND_MIN_CLOSE_POSITION", 0.0, 1.0),
+    if bool(cfg.get("M15_DEMAND_FILTER_ENABLED", False)):
+        m15_demand_checks = [
+            ("M15_DEMAND_LOOKBACK_BARS", 3, 500),
+            ("M15_DEMAND_ZONE_BUFFER_PCT", 0.05, 20.0),
+            ("M15_DEMAND_MAX_DISTANCE_PCT", 0.1, 50.0),
+            ("M15_DEMAND_MIN_CLOSE_POSITION", 0.0, 1.0),
         ]
-        for key, lo, hi in daily_demand_checks:
+        for key, lo, hi in m15_demand_checks:
             lo, hi = _rentang_demand(key, lo, hi)
             val = cfg.get(key)
             if val is None or not (lo <= float(val) <= hi):
@@ -905,28 +904,26 @@ def validate_params(cfg: dict) -> None:
                     f"Parameter '{key}'={val} di luar rentang wajar ({lo:g}..{hi:g})."
                 )
         try:
-            strategy.daily_demand_interval(cfg)
-            strategy.daily_warmup_bars(cfg, cfg.get("CONFIRM_INTERVAL", "5m"))
+            strategy.m15_demand_warmup_bars(cfg, cfg.get("CONFIRM_INTERVAL", "5m"))
         except ValueError as exc:
             raise BacktestError(str(exc)) from exc
 
-    if bool(cfg.get("DAILY_TREND_FILTER_ENABLED", False)):
-        daily_trend_checks = [
-            ("DAILY_TREND_EMA_FAST", 2, 500),
-            ("DAILY_TREND_EMA_SLOW", 3, 1000),
-            ("DAILY_TREND_ADX_PERIOD", 2, 200),
-            ("DAILY_TREND_ADX_MIN", 0.0, 100.0),
-            ("DAILY_TREND_LOOKBACK_BARS", 20, strategy.TREND_KLINE_LIMIT - 1),
+    if bool(cfg.get("M15_TREND_FILTER_ENABLED", False)):
+        m15_trend_checks = [
+            ("M15_TREND_EMA_FAST", 2, 500),
+            ("M15_TREND_EMA_SLOW", 3, strategy.TREND_KLINE_LIMIT - 1),
+            ("M15_TREND_ADX_PERIOD", 2, 200),
+            ("M15_TREND_ADX_MIN", 0.0, 100.0),
+            ("M15_TREND_LOOKBACK_BARS", 20, strategy.TREND_KLINE_LIMIT - 1),
         ]
-        for key, lo, hi in daily_trend_checks:
+        for key, lo, hi in m15_trend_checks:
             val = cfg.get(key)
             if val is None or not (lo <= float(val) <= hi):
                 raise BacktestError(
                     f"Parameter '{key}'={val} di luar rentang wajar ({lo:g}..{hi:g})."
                 )
         try:
-            strategy.daily_trend_interval(cfg)
-            strategy.daily_trend_warmup_bars(cfg, cfg.get("CONFIRM_INTERVAL", "5m"))
+            strategy.m15_trend_warmup_bars(cfg, cfg.get("CONFIRM_INTERVAL", "5m"))
         except ValueError as exc:
             raise BacktestError(str(exc)) from exc
 
@@ -1057,15 +1054,15 @@ def print_single_result(result: BacktestResult) -> None:
         or summary.get("chase_skips")
         or summary.get("trend_skips")
         or summary.get("htf_demand_skips")
-        or summary.get("daily_demand_skips")
-        or summary.get("daily_trend_skips")
+        or summary.get("m15_demand_skips")
+        or summary.get("m15_trend_skips")
     ):
         print(
             f"Kontrol akun/filter: {risk_info}, chase dilewati {summary.get('chase_skips', 0)}, "
             f"trend dilewati {summary.get('trend_skips', 0)}, "
             f"demand H1 dilewati {summary.get('htf_demand_skips', 0)}, "
-            f"demand harian dilewati {summary.get('daily_demand_skips', 0)}, "
-            f"EMA+ADX harian dilewati {summary.get('daily_trend_skips', 0)}"
+            f"demand M15 dilewati {summary.get('m15_demand_skips', 0)}, "
+            f"EMA+ADX M15 dilewati {summary.get('m15_trend_skips', 0)}"
         )
     if result.warnings:
         print("Peringatan:")
@@ -1158,35 +1155,33 @@ def main():
         f"({args.days} hari + warmup {warmup} candle = "
         f"{warmup / bar_per_hari:.2f} hari)..."
     )
-    if strategy.daily_trend_enabled(cfg):
+    uji_bars_m15 = args.days * (1440 // strategy.INTERVAL_MINUTES[strategy.M15_INTERVAL])
+    if strategy.m15_trend_enabled(cfg):
         print(
-            f"  Gerbang EMA + ADX {strategy.daily_trend_interval(cfg)} aktif: "
-            f"jendela {strategy.daily_trend_window_bars(cfg)} candle harian (minimum "
-            f"{strategy.daily_trend_required_bars(cfg)} candle untuk EMA dan ADX). Koin "
-            "dengan riwayat harian lebih pendek ditolak sampai riwayatnya cukup."
+            f"  Gerbang EMA + ADX M15 aktif: jendela "
+            f"{strategy.m15_trend_window_bars(cfg)} candle M15 (minimum "
+            f"{strategy.m15_trend_required_bars(cfg)} candle untuk EMA dan ADX). "
+            "Koin dengan riwayat lebih pendek ditolak."
         )
-        if args.days < strategy.daily_trend_required_bars(cfg):
+        if uji_bars_m15 < strategy.m15_trend_required_bars(cfg):
             print(
-                f"PERINGATAN: --days {args.days} lebih pendek dari riwayat harian yang "
-                f"dibutuhkan EMA + ADX ({strategy.daily_trend_required_bars(cfg)} hari). "
-                "Gerbang harian belum teruji dengan layak."
+                f"PERINGATAN: --days {args.days} mencakup sekitar {uji_bars_m15} "
+                f"candle M15, lebih pendek dari kebutuhan EMA + ADX "
+                f"({strategy.m15_trend_required_bars(cfg)} candle)."
             )
-    if strategy.daily_demand_enabled(cfg):
-        harian_bars = strategy.daily_warmup_bars(cfg, interval)
+    if strategy.m15_demand_enabled(cfg):
+        pemanasan_m15 = strategy.m15_demand_warmup_bars(cfg, interval)
         print(
-            f"  Gerbang demand harian {strategy.daily_demand_interval(cfg)} aktif: "
-            f"{harian_bars} candle {interval} (~{harian_bars / bar_per_hari:.1f} hari) "
-            "dari warmup itu khusus untuk memetakan dasar harian. Rentang unduhan "
-            "diperpanjang otomatis supaya warmup ini TIDAK memakan periode uji."
+            f"  Gerbang demand M15 aktif: {pemanasan_m15} candle {interval} "
+            f"(sekitar {pemanasan_m15 / bar_per_hari:.2f} hari) diperlukan "
+            "untuk warmup. Rentang unduhan diperpanjang otomatis."
         )
-        lookback_hari = strategy.daily_demand_lookback_bars(cfg)
-        if args.days < lookback_hari:
+        lookback_m15 = strategy.m15_demand_lookback_bars(cfg)
+        if uji_bars_m15 < lookback_m15:
             print(
-                f"PERINGATAN: --days {args.days} lebih pendek dari jendela zona demand "
-                f"harian (lookback {lookback_hari} hari). Periode uji belum mencakup "
-                "satu putaran penuh dasar harian, jadi hasil gerbang harian belum layak "
-                "dinilai. Pakai --days minimal 60-90 supaya mencakup beberapa kali "
-                "rotasi zona harian."
+                f"PERINGATAN: --days {args.days} mencakup sekitar {uji_bars_m15} "
+                f"candle M15, lebih pendek dari lookback demand {lookback_m15} candle. "
+                "Perpanjang periode uji atau kecilkan M15_DEMAND_LOOKBACK_BARS."
             )
     client = BinanceSpotClient(
         "",

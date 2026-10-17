@@ -2435,7 +2435,7 @@
                 id="btDays"
                 min="2"
                 value="30"
-                title="Hari pertama dipakai sebagai warmup statistik 24 jam, jadi minimal 2 hari. Gerbang timeframe tinggi meminta rentang lebih panjang supaya masih ada bar yang bisa ditradingkan: sekitar 7 hari untuk simulasi 5m saat gerbang trend 1h aktif, sekitar 23 hari saat gerbang demand harian (1d, lookback 20) aktif, dan sekitar 121 hari saat gerbang EMA + ADX harian (1d, lookback 120) aktif, karena pemanasannya paling lama. Saat gerbang EMA + ADX harian aktif, batas hari minimal ikut naik. Data pemanasan itu otomatis ikut diunduh, dan kalau rentangnya lebih pendek dari lookback harian hasilnya tetap jalan tetapi diberi peringatan bahwa lapisan demand harian belum bisa dinilai."
+                title="Hari pertama dipakai sebagai warmup statistik 24 jam, jadi minimal 2 hari. Dengan setelan bawaan dan konfirmasi 5m, gerbang H1 dapat meminta sekitar 7 hari. Jika gerbang H1 dimatikan, EMA + ADX M15 dapat meminta sekitar 3 hari, sedangkan demand M15 default memakai lookback 20 candle (5 jam). Warmup ikut diunduh otomatis dan batas minimal hari disesuaikan oleh server."
                 oninput="btUpdateEstimate()"
               />
             </div>
@@ -4864,11 +4864,9 @@
         const days = parseInt(document.getElementById('btDays').value || '0', 10);
         const sym = parseInt(document.getElementById('btMaxSymbols').value || '0', 10);
         if(!(days >= 2) || !(sym >= 2)){ el.textContent = ''; return; }
-        // Pemanasan gerbang timeframe tinggi (trend, demand H1, demand harian)
-        // ikut diunduh, jadi angkanya datang dari server lewat /api/backtest/defaults
-        // supaya layar dan job yang benar-benar berjalan memakai hitungan yang sama.
         const warmupBars = (_btDefaults && _btDefaults.warmup_bars) || 0;
-        const barsPerSym = (days + 1) * 288 + warmupBars;
+        const barsPerDay = (_btDefaults && _btDefaults.bars_per_day) || 288;
+        const barsPerSym = (days + 1) * barsPerDay + warmupBars;
         const reqPerSym = Math.ceil(barsPerSym / 1000);
         const totalReq = sym * reqPerSym;
         const weight = totalReq * 2;
@@ -4878,7 +4876,7 @@
           : '';
         const warmupInfo = warmupBars > 0
           ? ' Sudah termasuk pemanasan gerbang timeframe tinggi (±'
-            + ((_btDefaults && _btDefaults.warmup_days) || (warmupBars / 288).toFixed(1))
+            + ((_btDefaults && _btDefaults.warmup_days) || (warmupBars / barsPerDay).toFixed(1))
             + ' hari data tambahan per simbol).'
           : '';
         el.innerHTML = 'Perkiraan beban: <b>' + sym.toLocaleString(LOCALE) + '</b> simbol x <b>'
@@ -5424,7 +5422,9 @@
         box.innerHTML = '<div class="logbox" style="max-height:220px">' + sk.map(x=>
           (x.reason==='FILTER_CHASE'
             ? `<div class="logline INFO">${symLabel(x.symbol, 16)} dilewati pada ${esc(x.time)} oleh filter MAX_CHASE_PCT (harga eksekusi terlalu jauh di atas close sinyal)</div>`
-            : `<div class="logline INFO">${symLabel(x.symbol, 16)} terlewat pada ${esc(x.time)}, bot sedang memegang ${esc(x.holding)}</div>`)
+            : String(x.reason||'').startsWith('FILTER_')
+              ? `<div class="logline INFO">${symLabel(x.symbol, 16)} dilewati pada ${esc(x.time)} oleh ${btReasonLabel(x.reason)}</div>`
+              : `<div class="logline INFO">${symLabel(x.symbol, 16)} terlewat pada ${esc(x.time)}, bot sedang memegang ${esc(x.holding)}</div>`)
         ).join('') + '</div>';
       }
 
@@ -5440,10 +5440,10 @@
         const map = {STOP_LOSS:'SL', TAKE_PROFIT:'TP', BREAKEVEN:'BE', TRAILING_STOP:'TRAIL',
                      TIME_STOP:'WAKTU',
                      END_OF_DATA:'DATA HABIS', RISK_LIMIT_TRIGGERED:'BATAS RISIKO',
-                     FILTER_HTF_DEMAND:'GERBANG DEMAND H1',
-                     FILTER_DAILY_DEMAND:'GERBANG DEMAND D1',
+                     FILTER_HTF_DEMAND:'GERBANG DEMAND TIMEFRAME TINGGI',
+                     FILTER_M15_DEMAND:'GERBANG DEMAND M15',
                      FILTER_TREND:'GERBANG TREND',
-                     FILTER_DAILY_TREND:'GERBANG EMA+ADX D1'};
+                     FILTER_M15_TREND:'GERBANG EMA+ADX M15'};
         return esc(map[key] || key);
       }
 
@@ -5459,7 +5459,9 @@
           ? (s.wins>0 && s.losses===0 ? '∞' : '-') : fmt(s.profit_factor,2);
         const cardTone = v => v>0?'good':(v<0?'bad':'');
         const re = s.risk_events || {};
-        const riskTotal = (re.dd_stop||0);
+        const riskTotal = (re.dd_stop||0) + (re.forced_close||0) + (s.chase_skips||0);
+        const gateSkips = (s.trend_skips||0) + (s.htf_demand_skips||0)
+          + (s.m15_demand_skips||0) + (s.m15_trend_skips||0);
         const cardsHtml = `
           <div class="card ${cardTone(s.total_return_pct)}">
             <div class="label">Return bersih</div>
@@ -5481,10 +5483,10 @@
             <div class="label">Rata-rata per trade</div>
             <div class="value mono ${cls(s.avg_trade_pct)}">${sign(s.avg_trade_pct)}${fmt(s.avg_trade_pct,3)}%</div>
             <div class="sub">median ${sign(s.median_trade_pct)}${fmt(s.median_trade_pct,3)}% · terbaik ${sign(s.best_trade_pct)}${fmt(s.best_trade_pct,2)}% · terburuk ${fmt(s.worst_trade_pct,2)}%. Tidak bergantung skala modal</div></div>
-          <div class="card ${riskTotal||s.chase_skips?'warn':''}">
+          <div class="card ${riskTotal||gateSkips?'warn':''}">
             <div class="label">Filter dan kontrol akun</div>
-            <div class="value mono">${fmt(riskTotal+(re.forced_close||0)+(s.chase_skips||0),0)}</div>
-            <div class="sub">DD stop ${fmt(re.dd_stop||0,0)} · tutup paksa ${fmt(re.forced_close||0,0)} · chase dilewati ${fmt(s.chase_skips||0,0)} · gerbang demand D1 ${fmt(((res.daily_demand||{}).skips)||0,0)} · gerbang trend ${fmt(((res.trend||{}).skips)||0,0)}</div></div>
+            <div class="value mono">${fmt(riskTotal+gateSkips,0)}</div>
+            <div class="sub">DD stop ${fmt(re.dd_stop||0,0)} · tutup paksa ${fmt(re.forced_close||0,0)} · chase dilewati ${fmt(s.chase_skips||0,0)} · trend ${esc(((res.trend||{}).interval)||'1h')} ${fmt(((res.trend||{}).skips)||0,0)} · demand ${esc(((res.htf_demand||{}).interval)||'1h')} ${fmt(((res.htf_demand||{}).skips)||0,0)} · demand M15 ${fmt(((res.m15_demand||{}).skips)||0,0)} · trend M15 ${fmt(((res.m15_trend||{}).skips)||0,0)}</div></div>
           <div class="card">
             <div class="label">Candle diproses</div>
             <div class="value mono">${fmt(res.bars_total,0)}</div>
@@ -5506,7 +5508,7 @@
              <div class="posrow"><span class="k">ATR multiplier Trail (start,step)</span><span class="v mono">${esc(p.ATR_MULT_TRAIL_START)},${esc(p.ATR_MULT_TRAIL)}</span></div>`
           : `<div class="posrow"><span class="k">Mode exit</span><span class="v mono">Persentase tetap</span></div>
              <div class="posrow"><span class="k">SL / TP / BE (trig,lock) / Trail (start,step)</span><span class="v mono" style="font-size:11.5px">${esc(p.SL_PCT)}% / ${esc(p.TP_PCT)}% / ${esc(p.BE_TRIGGER_PCT)}%,${esc(p.BE_LOCK_PCT)}% / ${esc(p.TRAILING_START_PCT)}%,${esc(p.TRAILING_STEP_PCT)}%</span></div>`;
-        const ddInfo = res.daily_demand || null;
+        const ddInfo = res.m15_demand || null;
         const hdInfo = res.htf_demand || null;
         const gateText = (g, labelInterval) => {
           if(!g || !g.enabled) return 'nonaktif';
@@ -5515,27 +5517,27 @@
             + ', jarak maks ' + fmt(g.max_distance_pct, 1) + '%'
             + ', disaring ' + fmt(g.skips, 0) + ' dari ' + fmt(g.scans, 0) + ' sinyal';
         };
-        const tdInfo = res.daily_trend || null;
-        const trendHarianText = (g) => {
+        const tdInfo = res.m15_trend || null;
+        const trendM15Text = (g) => {
           if(!g || !g.enabled) return 'nonaktif';
-          return 'aktif ' + esc(g.interval || '1d')
+          return 'aktif ' + esc(g.interval || '15m')
             + ', EMA ' + fmt(g.ema_fast, 0) + '/' + fmt(g.ema_slow, 0)
             + ', ADX ' + fmt(g.adx_period, 0) + ' >= ' + fmt(g.adx_min, 1)
             + ', lookback ' + fmt(g.lookback_bars, 0) + ' candle'
             + ', disaring ' + fmt(g.skips, 0) + ' dari ' + fmt(g.scans, 0) + ' sinyal';
         };
-        const trendHarianRow = tdInfo ? `
-          <div class="posrow"><span class="k">Gerbang EMA+ADX D1</span><span class="v mono" style="font-size:11.5px">${trendHarianText(tdInfo)}</span></div>` : '';
+        const trendM15Row = tdInfo ? `
+          <div class="posrow"><span class="k">Gerbang EMA+ADX M15</span><span class="v mono" style="font-size:11.5px">${trendM15Text(tdInfo)}</span></div>` : '';
         const demandRows = (ddInfo || hdInfo) ? `
-          <div class="posrow"><span class="k">Gerbang demand H1</span><span class="v mono" style="font-size:11.5px">${gateText(hdInfo, '1h')}</span></div>
-          <div class="posrow"><span class="k">Gerbang demand D1</span><span class="v mono" style="font-size:11.5px">${gateText(ddInfo, '1d')}</span></div>` : '';
+          <div class="posrow"><span class="k">Gerbang demand ${esc((hdInfo && hdInfo.interval) || '1h')}</span><span class="v mono" style="font-size:11.5px">${gateText(hdInfo, '1h')}</span></div>
+          <div class="posrow"><span class="k">Gerbang demand M15</span><span class="v mono" style="font-size:11.5px">${gateText(ddInfo, '15m')}</span></div>` : '';
         document.getElementById('btInfoBox').innerHTML = `
           <div class="posrow"><span class="k">Semesta simbol</span><span class="v mono">${fmt(res.universe_with_data,0)} berhasil / ${fmt(res.universe_requested,0)} diminta${res.symbols_failed_count? ' ('+fmt(res.symbols_failed_count,0)+' gagal)':''}</span></div>
           <div class="posrow"><span class="k">Rentang data</span><span class="v mono" style="font-size:11.5px">${esc(res.start_time||'-')} &rarr; ${esc(res.end_time||'-')}</span></div>
           <div class="posrow"><span class="k">Titik waktu diproses</span><span class="v mono">${fmt(res.bars_total,0)} bar ${esc(res.interval)}</span></div>
           ${exitRows}
           ${demandRows}
-          ${trendHarianRow}
+          ${trendM15Row}
           <div style="border-top:1px solid var(--border);margin:4px 0"></div>
           ${reasonRows || '<div class="posrow"><span class="k mut">Tidak ada trade terjadi pada rentang & parameter ini.</span></div>'}
           ${(res.warnings&&res.warnings.length)? '<div style="border-top:1px solid var(--border);margin:4px 0"></div>'+res.warnings.map(w=>`<div class="posrow"><span class="k" style="color:var(--amber)">⚠ ${esc(w)}</span></div>`).join('') : ''}

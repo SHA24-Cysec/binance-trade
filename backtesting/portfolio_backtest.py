@@ -83,10 +83,10 @@ class PortfolioResult:
     trend_scans: int = 0
     htf_demand_skips: int = 0
     htf_demand_scans: int = 0
-    daily_demand_skips: int = 0
-    daily_demand_scans: int = 0
-    daily_trend_skips: int = 0
-    daily_trend_scans: int = 0
+    m15_demand_skips: int = 0
+    m15_demand_scans: int = 0
+    m15_trend_skips: int = 0
+    m15_trend_scans: int = 0
     same_coin_skips: int = 0
     mark_to_market_open: bool = False
     mark_to_market_symbol: Optional[str] = None
@@ -287,12 +287,12 @@ class EntrySignalCache(dict):
         self.htf_demand_scans = 0
         self.htf_demand_skips = 0
         self.htf_demand_events: list = []
-        self.daily_demand_scans = 0
-        self.daily_demand_skips = 0
-        self.daily_demand_events: list = []
-        self.daily_trend_scans = 0
-        self.daily_trend_skips = 0
-        self.daily_trend_events: list = []
+        self.m15_demand_scans = 0
+        self.m15_demand_skips = 0
+        self.m15_demand_events: list = []
+        self.m15_trend_scans = 0
+        self.m15_trend_skips = 0
+        self.m15_trend_events: list = []
 
 
 def build_trend_lookups(
@@ -323,38 +323,38 @@ def build_trend_lookups(
     return lookups
 
 
-def build_daily_lookups(
+def build_m15_lookups(
     store: KlineStore, symbols: list, config: dict, interval: str
 ) -> dict:
     from strategy import indicators as strategy_mod
 
-    if not strategy_mod.daily_demand_enabled(config):
+    if not strategy_mod.m15_demand_enabled(config):
         return {}
     lookups: dict = {}
     for sym in symbols:
         klines = store.klines(sym)
         if not klines:
             continue
-        lookups[sym] = parity.DailyDemandLookup(
-            parity.build_daily_klines(klines, config, interval), config
+        lookups[sym] = parity.M15DemandLookup(
+            parity.build_m15_klines(klines, config, interval), config
         )
         del klines
     return lookups
 
 
-def build_daily_trend_lookups(
+def build_m15_trend_lookups(
     store: KlineStore, symbols: list, config: dict, interval: str
 ) -> dict:
     from strategy import indicators as strategy_mod
 
-    if not strategy_mod.daily_trend_enabled(config):
+    if not strategy_mod.m15_trend_enabled(config):
         return {}
     lookups: dict = {}
     for sym in symbols:
         klines = store.klines(sym)
         if not klines:
             continue
-        lookup = parity.make_daily_trend_lookup(klines, config, interval)
+        lookup = parity.make_m15_trend_lookup(klines, config, interval)
         if lookup is not None:
             lookups[sym] = lookup
         del klines
@@ -382,23 +382,23 @@ def _siapkan_trend(prebuilt, store, series_of, config, interval):
     return build_trend_lookups(store, list(series_of), config, interval)
 
 
-def _siapkan_harian(prebuilt, store, series_of, config, interval):
-    _, _, _, daily_of = unpack_prebuilt(prebuilt)
-    if daily_of is not None:
-        return daily_of
-    if not config.get("DAILY_DEMAND_FILTER_ENABLED", False):
+def _siapkan_m15(prebuilt, store, series_of, config, interval):
+    _, _, _, m15_of = unpack_prebuilt(prebuilt)
+    if m15_of is not None:
+        return m15_of
+    if not config.get("M15_DEMAND_FILTER_ENABLED", False):
         return {}
-    return build_daily_lookups(store, list(series_of), config, interval)
+    return build_m15_lookups(store, list(series_of), config, interval)
 
 
-def _siapkan_tren_harian(prebuilt, store, series_of, config, interval):
+def _siapkan_tren_m15(prebuilt, store, series_of, config, interval):
     from strategy import indicators as strategy_mod
 
     if prebuilt is not None and len(prebuilt) >= 5 and prebuilt[4] is not None:
         return prebuilt[4]
-    if not strategy_mod.daily_trend_enabled(config):
+    if not strategy_mod.m15_trend_enabled(config):
         return {}
-    return build_daily_trend_lookups(store, list(series_of), config, interval)
+    return build_m15_trend_lookups(store, list(series_of), config, interval)
 
 
 def precompute_entry_signals(
@@ -441,14 +441,14 @@ def precompute_entry_signals(
     btc_lookup = parity.make_btc_lookup(btc_klines, config, bar_ms)
     gate_cfg = parity.gate_config(config, btc_lookup)
     trend_of = _siapkan_trend(prebuilt, store, series_of, config, interval)
-    daily_of = _siapkan_harian(prebuilt, store, series_of, config, interval)
-    tren_harian_of = _siapkan_tren_harian(prebuilt, store, series_of, config, interval)
-    if trend_of or daily_of or tren_harian_of:
+    m15_of = _siapkan_m15(prebuilt, store, series_of, config, interval)
+    tren_m15_of = _siapkan_tren_m15(prebuilt, store, series_of, config, interval)
+    if trend_of or config.get("M15_DEMAND_FILTER_ENABLED") or config.get("M15_TREND_FILTER_ENABLED"):
         butuh_warmup = parity.htf_gate_warmup_ms(config, interval)
         if int(warmup_ms) < butuh_warmup:
             logger.warning(
                 "Warmup %d ms dinaikkan menjadi %d ms karena gerbang timeframe "
-                "tinggi yang aktif (trend + demand H1 + demand harian + EMA/ADX harian) "
+                "tinggi yang aktif (trend + demand H1 + demand M15 + EMA/ADX M15) "
                 "butuh paling sedikit %d candle %s sebagai pemanasan.",
                 warmup_ms,
                 butuh_warmup,
@@ -535,30 +535,29 @@ def precompute_entry_signals(
                         if len(signals.htf_demand_events) < max_skipped_records:
                             signals.htf_demand_events.append((int(t_now), sym))
                         continue
-            if (
-                setup.ok
-                and daily_of
-                and bool(config.get("DAILY_DEMAND_FILTER_ENABLED", False))
-            ):
-                lock = daily_of.get(sym)
-                if lock is not None and signal_candle is not None:
-                    signals.daily_demand_scans += 1
-                    if not lock.daily_demand_at(signal_candle.close_time)["ok"]:
-                        signals.daily_demand_skips += 1
-                        if len(signals.daily_demand_events) < max_skipped_records:
-                            signals.daily_demand_events.append((int(t_now), sym))
-                        continue
-            if setup.ok and bool(config.get("DAILY_TREND_FILTER_ENABLED", False)):
-                lock = tren_harian_of.get(sym)
-                signals.daily_trend_scans += 1
+            if setup.ok and bool(config.get("M15_DEMAND_FILTER_ENABLED", False)):
+                lock = m15_of.get(sym)
+                signals.m15_demand_scans += 1
+                if (
+                    lock is None
+                    or signal_candle is None
+                    or not lock.m15_demand_at(signal_candle.close_time)["ok"]
+                ):
+                    signals.m15_demand_skips += 1
+                    if len(signals.m15_demand_events) < max_skipped_records:
+                        signals.m15_demand_events.append((int(t_now), sym))
+                    continue
+            if setup.ok and bool(config.get("M15_TREND_FILTER_ENABLED", False)):
+                lock = tren_m15_of.get(sym)
+                signals.m15_trend_scans += 1
                 if (
                     lock is None
                     or signal_candle is None
                     or not lock.verdict_at(signal_candle.close_time)["ok"]
                 ):
-                    signals.daily_trend_skips += 1
-                    if len(signals.daily_trend_events) < max_skipped_records:
-                        signals.daily_trend_events.append((int(t_now), sym))
+                    signals.m15_trend_skips += 1
+                    if len(signals.m15_trend_events) < max_skipped_records:
+                        signals.m15_trend_events.append((int(t_now), sym))
                     continue
             if setup.ok:
                 lolos.append((rank, pct24, sym, index, vol24, setup))
@@ -625,7 +624,7 @@ def run_portfolio_backtest(
         raise BacktestError("Tidak ada data yang lolos policy semesta bersama.")
     lolos_policy = len(symbols)
 
-    timeline, series_of, _trend_prebuilt, _daily_prebuilt = unpack_prebuilt(prebuilt)
+    timeline, series_of, _trend_prebuilt, _m15_prebuilt = unpack_prebuilt(prebuilt)
     if timeline is None:
         timeline, series_of = build_timeline(store, interval, symbols)
     if not timeline:
@@ -663,9 +662,9 @@ def run_portfolio_backtest(
             "Status TRADING historis tidak tersedia dari candle Binance. Policy status hanya dapat diverifikasi dari metadata saat ini bila caller menyediakannya."
         )
     trend_of = _siapkan_trend(prebuilt, store, series_of, config, interval)
-    daily_of = _siapkan_harian(prebuilt, store, series_of, config, interval)
-    tren_harian_of = _siapkan_tren_harian(prebuilt, store, series_of, config, interval)
-    if trend_of or daily_of or tren_harian_of:
+    m15_of = _siapkan_m15(prebuilt, store, series_of, config, interval)
+    tren_m15_of = _siapkan_tren_m15(prebuilt, store, series_of, config, interval)
+    if trend_of or config.get("M15_DEMAND_FILTER_ENABLED") or config.get("M15_TREND_FILTER_ENABLED"):
         _butuh_gerbang = parity.htf_gate_warmup_ms(config, interval)
         if int(warmup_ms) < _butuh_gerbang:
             _bagian = []
@@ -675,17 +674,17 @@ def run_portfolio_backtest(
                     f"(trend + zona demand) butuh {strategy.htf_window_bars(config)} candle "
                     "tertutup"
                 )
-            if daily_of:
+            if config.get("M15_DEMAND_FILTER_ENABLED"):
                 _bagian.append(
-                    f"gerbang zona demand {strategy.daily_demand_interval(config)} butuh "
-                    f"{strategy.daily_demand_window_bars(config)} candle "
-                    f"{strategy.daily_demand_interval(config)} tertutup"
+                    f"gerbang zona demand {strategy.m15_demand_interval(config)} butuh "
+                    f"{strategy.m15_demand_window_bars(config)} candle "
+                    f"{strategy.m15_demand_interval(config)} tertutup"
                 )
-            if tren_harian_of:
+            if config.get("M15_TREND_FILTER_ENABLED"):
                 _bagian.append(
-                    f"gerbang EMA + ADX {strategy.daily_trend_interval(config)} butuh "
-                    f"{strategy.daily_trend_window_bars(config)} candle "
-                    f"{strategy.daily_trend_interval(config)} tertutup"
+                    f"gerbang EMA + ADX {strategy.m15_trend_interval(config)} butuh "
+                    f"{strategy.m15_trend_window_bars(config)} candle "
+                    f"{strategy.m15_trend_interval(config)} tertutup"
                 )
             _pre_warnings.append(
                 f"Warmup {warmup_ms} ms dinaikkan menjadi {_butuh_gerbang} ms karena "
@@ -739,10 +738,10 @@ def run_portfolio_backtest(
     trend_scans = 0
     htf_demand_skips = 0
     htf_demand_scans = 0
-    daily_demand_skips = 0
-    daily_demand_scans = 0
-    daily_trend_skips = 0
-    daily_trend_scans = 0
+    m15_demand_skips = 0
+    m15_demand_scans = 0
+    m15_trend_skips = 0
+    m15_trend_scans = 0
     symbol_blocks: dict = {}
     same_coin_skips = 0
     max_chase_pct = float(config.get("MAX_CHASE_PCT", 0) or 0)
@@ -758,29 +757,28 @@ def run_portfolio_backtest(
 
     first_allowed_time = timeline[0] + warmup_ms
     total_bars = len(timeline)
-    if tren_harian_of:
-        _hari_uji_tren = (int(timeline[-1]) - int(first_allowed_time)) / float(
-            MS_PER_MIN * 1440
+    if tren_m15_of or m15_of:
+        bar_uji_m15 = max(
+            0.0,
+            (int(timeline[-1]) - int(first_allowed_time) + bar_ms)
+            / float(strategy.INTERVAL_MINUTES[strategy.M15_INTERVAL] * MS_PER_MIN),
         )
-        _butuh_hari_tren = strategy.daily_trend_required_bars(config)
-        if _hari_uji_tren < float(_butuh_hari_tren):
-            _pre_warnings.append(
-                f"Periode uji hanya sekitar {_hari_uji_tren:.1f} hari, lebih pendek dari "
-                f"riwayat yang dibutuhkan EMA + ADX harian ({_butuh_hari_tren} hari). "
-                "Perpanjang rentang data supaya gerbang harian benar-benar teruji."
-            )
-    if daily_of:
-        _hari_uji = (int(timeline[-1]) - int(first_allowed_time)) / float(
-            MS_PER_MIN * 1440
-        )
-        if _hari_uji < float(strategy.daily_demand_lookback_bars(config)):
-            _pre_warnings.append(
-                f"Periode uji hanya sekitar {_hari_uji:.1f} hari, lebih pendek dari "
-                f"jendela zona demand harian "
-                f"({strategy.daily_demand_lookback_bars(config)} hari lookback). "
-                "Perpanjang rentang hari (atau kecilkan DAILY_DEMAND_LOOKBACK_BARS) "
-                "supaya gerbang harian benar-benar teruji."
-            )
+        if tren_m15_of:
+            butuh_tren = strategy.m15_trend_required_bars(config)
+            if bar_uji_m15 < butuh_tren:
+                _pre_warnings.append(
+                    f"Periode uji sekitar {bar_uji_m15:.1f} candle M15, lebih pendek "
+                    f"dari {butuh_tren} candle yang dibutuhkan EMA + ADX M15. "
+                    "Perpanjang rentang data agar filter teruji di beberapa siklus."
+                )
+        if m15_of:
+            lookback_m15 = strategy.m15_demand_lookback_bars(config)
+            if bar_uji_m15 < lookback_m15:
+                _pre_warnings.append(
+                    f"Periode uji sekitar {bar_uji_m15:.1f} candle M15, lebih pendek "
+                    f"dari {lookback_m15} candle lookback demand M15. "
+                    "Perpanjang rentang data atau kecilkan M15_DEMAND_LOOKBACK_BARS."
+                )
 
     papan_input = []
     for sym in symbols:
@@ -792,10 +790,10 @@ def run_portfolio_backtest(
         trend_skips += int(getattr(entry_signal_cache, "trend_skips", 0))
         htf_demand_scans += int(getattr(entry_signal_cache, "htf_demand_scans", 0))
         htf_demand_skips += int(getattr(entry_signal_cache, "htf_demand_skips", 0))
-        daily_demand_scans += int(getattr(entry_signal_cache, "daily_demand_scans", 0))
-        daily_demand_skips += int(getattr(entry_signal_cache, "daily_demand_skips", 0))
-        daily_trend_scans += int(getattr(entry_signal_cache, "daily_trend_scans", 0))
-        daily_trend_skips += int(getattr(entry_signal_cache, "daily_trend_skips", 0))
+        m15_demand_scans += int(getattr(entry_signal_cache, "m15_demand_scans", 0))
+        m15_demand_skips += int(getattr(entry_signal_cache, "m15_demand_skips", 0))
+        m15_trend_scans += int(getattr(entry_signal_cache, "m15_trend_scans", 0))
+        m15_trend_skips += int(getattr(entry_signal_cache, "m15_trend_skips", 0))
         for waktu_event, simbol_event in getattr(
             entry_signal_cache, "trend_events", []
         ):
@@ -823,7 +821,7 @@ def run_portfolio_backtest(
                 )
             )
         for waktu_event, simbol_event in getattr(
-            entry_signal_cache, "daily_demand_events", []
+            entry_signal_cache, "m15_demand_events", []
         ):
             if len(skipped) >= max_skipped_records:
                 break
@@ -831,12 +829,12 @@ def run_portfolio_backtest(
                 SkippedSignal(
                     time=waktu_event,
                     symbol=simbol_event,
-                    reason="FILTER_DAILY_DEMAND",
+                    reason="FILTER_M15_DEMAND",
                     holding=None,
                 )
             )
         for waktu_event, simbol_event in getattr(
-            entry_signal_cache, "daily_trend_events", []
+            entry_signal_cache, "m15_trend_events", []
         ):
             if len(skipped) >= max_skipped_records:
                 break
@@ -844,7 +842,7 @@ def run_portfolio_backtest(
                 SkippedSignal(
                     time=waktu_event,
                     symbol=simbol_event,
-                    reason="FILTER_DAILY_TREND",
+                    reason="FILTER_M15_TREND",
                     holding=None,
                 )
             )
@@ -1064,35 +1062,32 @@ def run_portfolio_backtest(
                                     )
                                 )
                             continue
-                if daily_of and bool(config.get("DAILY_DEMAND_FILTER_ENABLED", False)):
-                    lock = daily_of.get(sym)
-                    if lock is not None:
-                        daily_demand_scans += 1
-                        if not lock.daily_demand_at(kl[i].close_time)["ok"]:
-                            daily_demand_skips += 1
-                            if len(skipped) < max_skipped_records:
-                                skipped.append(
-                                    SkippedSignal(
-                                        time=t_now,
-                                        symbol=sym,
-                                        reason="FILTER_DAILY_DEMAND",
-                                        holding=None,
-                                    )
-                                )
-                            continue
-                if tren_harian_of and bool(
-                    config.get("DAILY_TREND_FILTER_ENABLED", False)
-                ):
-                    lock = tren_harian_of.get(sym)
-                    daily_trend_scans += 1
-                    if lock is None or not lock.verdict_at(kl[i].close_time)["ok"]:
-                        daily_trend_skips += 1
+                if bool(config.get("M15_DEMAND_FILTER_ENABLED", False)):
+                    lock = m15_of.get(sym)
+                    m15_demand_scans += 1
+                    if lock is None or not lock.m15_demand_at(kl[i].close_time)["ok"]:
+                        m15_demand_skips += 1
                         if len(skipped) < max_skipped_records:
                             skipped.append(
                                 SkippedSignal(
                                     time=t_now,
                                     symbol=sym,
-                                    reason="FILTER_DAILY_TREND",
+                                    reason="FILTER_M15_DEMAND",
+                                    holding=None,
+                                )
+                            )
+                        continue
+                if bool(config.get("M15_TREND_FILTER_ENABLED", False)):
+                    lock = tren_m15_of.get(sym)
+                    m15_trend_scans += 1
+                    if lock is None or not lock.verdict_at(kl[i].close_time)["ok"]:
+                        m15_trend_skips += 1
+                        if len(skipped) < max_skipped_records:
+                            skipped.append(
+                                SkippedSignal(
+                                    time=t_now,
+                                    symbol=sym,
+                                    reason="FILTER_M15_TREND",
                                     holding=None,
                                 )
                             )
@@ -1266,20 +1261,20 @@ def run_portfolio_backtest(
                 )
                 + (
                     [
-                        f"{daily_demand_skips} dari {daily_demand_scans} sinyal konfirmasi "
+                        f"{m15_demand_skips} dari {m15_demand_scans} sinyal konfirmasi "
                         f"dilewati oleh gerbang zona demand "
-                        f"{config.get('DAILY_DEMAND_INTERVAL', '1d')}, sama seperti bot live."
+                        f"{strategy.M15_INTERVAL}, sama seperti bot live."
                     ]
-                    if daily_of and daily_demand_skips
+                    if m15_of and m15_demand_skips
                     else []
                 )
                 + (
                     [
-                        f"{daily_trend_skips} dari {daily_trend_scans} sinyal konfirmasi "
+                        f"{m15_trend_skips} dari {m15_trend_scans} sinyal konfirmasi "
                         f"dilewati oleh gerbang EMA + ADX "
-                        f"{config.get('DAILY_TREND_INTERVAL', '1d')}, sama seperti bot live."
+                        f"{strategy.M15_INTERVAL}, sama seperti bot live."
                     ]
-                    if tren_harian_of and daily_trend_skips
+                    if tren_m15_of and m15_trend_skips
                     else []
                 )
                 + (
@@ -1301,10 +1296,10 @@ def run_portfolio_backtest(
         trend_scans=trend_scans,
         htf_demand_skips=htf_demand_skips,
         htf_demand_scans=htf_demand_scans,
-        daily_demand_skips=daily_demand_skips,
-        daily_demand_scans=daily_demand_scans,
-        daily_trend_skips=daily_trend_skips,
-        daily_trend_scans=daily_trend_scans,
+        m15_demand_skips=m15_demand_skips,
+        m15_demand_scans=m15_demand_scans,
+        m15_trend_skips=m15_trend_skips,
+        m15_trend_scans=m15_trend_scans,
         same_coin_skips=same_coin_skips,
         mark_to_market_open=mark_to_market_open,
         mark_to_market_symbol=mark_to_market_symbol,
@@ -1476,10 +1471,10 @@ def summarize_portfolio(result: PortfolioResult) -> dict:
         "trend_scans": int(getattr(result, "trend_scans", 0)),
         "htf_demand_skips": int(getattr(result, "htf_demand_skips", 0)),
         "htf_demand_scans": int(getattr(result, "htf_demand_scans", 0)),
-        "daily_demand_skips": int(getattr(result, "daily_demand_skips", 0)),
-        "daily_demand_scans": int(getattr(result, "daily_demand_scans", 0)),
-        "daily_trend_skips": int(getattr(result, "daily_trend_skips", 0)),
-        "daily_trend_scans": int(getattr(result, "daily_trend_scans", 0)),
+        "m15_demand_skips": int(getattr(result, "m15_demand_skips", 0)),
+        "m15_demand_scans": int(getattr(result, "m15_demand_scans", 0)),
+        "m15_trend_skips": int(getattr(result, "m15_trend_skips", 0)),
+        "m15_trend_scans": int(getattr(result, "m15_trend_scans", 0)),
         "same_coin_skips": int(getattr(result, "same_coin_skips", 0)),
         **parity.per_trade_metrics(trades),
     }

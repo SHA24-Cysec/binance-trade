@@ -29,6 +29,18 @@ INTERVAL_MINUTES = {
     "12h": 720,
     "1d": 1440,
 }
+M15_INTERVAL = "15m"
+
+
+def m15_ratio(interval: str) -> int:
+    source = INTERVAL_MINUTES.get(str(interval).strip().lower())
+    target = INTERVAL_MINUTES[M15_INTERVAL]
+    if source is None or target % source:
+        raise ValueError(
+            f"Interval konfirmasi '{interval}' tidak bisa dirangkai menjadi M15. "
+            "Gunakan 1m, 3m, 5m, atau 15m saat filter M15 aktif."
+        )
+    return target // source
 
 
 def interval_to_ms(interval: str, default_minutes: int = 5) -> int:
@@ -564,63 +576,53 @@ def evaluate_htf_demand(
     return hasil
 
 
-DAILY_DEMAND_DEFAULTS = {
-    "DAILY_DEMAND_INTERVAL": "1d",
-    "DAILY_DEMAND_LOOKBACK_BARS": 20,
-    "DAILY_DEMAND_ZONE_BUFFER_PCT": 2.0,
-    "DAILY_DEMAND_MAX_DISTANCE_PCT": 12.0,
-    "DAILY_DEMAND_MIN_CLOSE_POSITION": 0.40,
+M15_DEMAND_DEFAULTS = {
+    "M15_DEMAND_LOOKBACK_BARS": 20,
+    "M15_DEMAND_ZONE_BUFFER_PCT": 1.0,
+    "M15_DEMAND_MAX_DISTANCE_PCT": 5.0,
+    "M15_DEMAND_MIN_CLOSE_POSITION": 0.45,
 }
 
 
-def daily_demand_interval(config: dict) -> str:
-    raw = str(
-        config.get("DAILY_DEMAND_INTERVAL", DAILY_DEMAND_DEFAULTS["DAILY_DEMAND_INTERVAL"])
-        or DAILY_DEMAND_DEFAULTS["DAILY_DEMAND_INTERVAL"]
-    ).strip().lower()
-    if raw not in INTERVAL_MINUTES:
-        raise ValueError(
-            f"DAILY_DEMAND_INTERVAL '{raw}' tidak dikenal. Pilihan: "
-            + ", ".join(sorted(INTERVAL_MINUTES, key=INTERVAL_MINUTES.get))
-        )
-    return raw
+def m15_demand_interval(config: dict) -> str:
+    return M15_INTERVAL
 
 
-def daily_demand_interval_minutes(config: dict) -> int:
-    return int(INTERVAL_MINUTES[daily_demand_interval(config)])
+def m15_demand_interval_minutes(config: dict) -> int:
+    return INTERVAL_MINUTES[M15_INTERVAL]
 
 
-def daily_demand_enabled(config: dict) -> bool:
-    return bool(config.get("DAILY_DEMAND_FILTER_ENABLED", False))
+def m15_demand_enabled(config: dict) -> bool:
+    return bool(config.get("M15_DEMAND_FILTER_ENABLED", False))
 
 
-def daily_demand_lookback_bars(config: dict) -> int:
+def m15_demand_lookback_bars(config: dict) -> int:
     lookback = int(
         config.get(
-            "DAILY_DEMAND_LOOKBACK_BARS",
-            DAILY_DEMAND_DEFAULTS["DAILY_DEMAND_LOOKBACK_BARS"],
+            "M15_DEMAND_LOOKBACK_BARS",
+            M15_DEMAND_DEFAULTS["M15_DEMAND_LOOKBACK_BARS"],
         )
-        or DAILY_DEMAND_DEFAULTS["DAILY_DEMAND_LOOKBACK_BARS"]
+        or M15_DEMAND_DEFAULTS["M15_DEMAND_LOOKBACK_BARS"]
     )
     return max(3, min(TREND_KLINE_LIMIT - 2, lookback))
 
 
-def daily_demand_window_bars(config: dict) -> int:
-    if not daily_demand_enabled(config):
+def m15_demand_window_bars(config: dict) -> int:
+    if not m15_demand_enabled(config):
         return 0
-    return daily_demand_lookback_bars(config) + 1
+    return m15_demand_lookback_bars(config) + 1
 
 
-def daily_demand_gate_config(config: dict) -> dict:
+def m15_demand_gate_config(config: dict) -> dict:
     return {
-        "DEMAND_ZONE_FILTER_ENABLED": daily_demand_enabled(config),
-        "DEMAND_LOOKBACK_BARS": daily_demand_lookback_bars(config),
+        "DEMAND_ZONE_FILTER_ENABLED": m15_demand_enabled(config),
+        "DEMAND_LOOKBACK_BARS": m15_demand_lookback_bars(config),
         "DEMAND_ZONE_BUFFER_PCT": max(
             0.0,
             float(
                 config.get(
-                    "DAILY_DEMAND_ZONE_BUFFER_PCT",
-                    DAILY_DEMAND_DEFAULTS["DAILY_DEMAND_ZONE_BUFFER_PCT"],
+                    "M15_DEMAND_ZONE_BUFFER_PCT",
+                    M15_DEMAND_DEFAULTS["M15_DEMAND_ZONE_BUFFER_PCT"],
                 )
                 or 0.0
             ),
@@ -629,28 +631,28 @@ def daily_demand_gate_config(config: dict) -> dict:
             0.0,
             float(
                 config.get(
-                    "DAILY_DEMAND_MAX_DISTANCE_PCT",
-                    DAILY_DEMAND_DEFAULTS["DAILY_DEMAND_MAX_DISTANCE_PCT"],
+                    "M15_DEMAND_MAX_DISTANCE_PCT",
+                    M15_DEMAND_DEFAULTS["M15_DEMAND_MAX_DISTANCE_PCT"],
                 )
                 or 0.0
             ),
         ),
         "DEMAND_MIN_CLOSE_POSITION": float(
             config.get(
-                "DAILY_DEMAND_MIN_CLOSE_POSITION",
-                DAILY_DEMAND_DEFAULTS["DAILY_DEMAND_MIN_CLOSE_POSITION"],
+                "M15_DEMAND_MIN_CLOSE_POSITION",
+                M15_DEMAND_DEFAULTS["M15_DEMAND_MIN_CLOSE_POSITION"],
             )
             or 0.0
         ),
     }
 
 
-def evaluate_daily_demand(
+def evaluate_m15_demand(
     klines: list[Kline], config: dict, signal_close_time_ms: Optional[int] = None
 ) -> dict:
-    interval = daily_demand_interval(config)
-    wajib = daily_demand_window_bars(config)
-    if not daily_demand_enabled(config):
+    interval = m15_demand_interval(config)
+    wajib = m15_demand_window_bars(config)
+    if not m15_demand_enabled(config):
         return {
             "ok": True,
             "reason": f"filter demand {interval} nonaktif",
@@ -668,37 +670,28 @@ def evaluate_daily_demand(
         if signal_close_time_ms is None
         or int(k.close_time) <= int(signal_close_time_ms)
     ]
-    hasil = detect_demand_zone(siap, daily_demand_gate_config(config))
+    hasil = detect_demand_zone(siap, m15_demand_gate_config(config))
     hasil["interval"] = interval
     hasil["bars"] = len(siap)
     hasil["required"] = wajib
     return hasil
 
 
-def daily_warmup_bars(config: dict, interval: str) -> int:
-    if not daily_demand_enabled(config):
+def m15_demand_warmup_bars(config: dict, interval: str) -> int:
+    if not m15_demand_enabled(config):
         return 0
-    sim_minutes = int(INTERVAL_MINUTES.get(str(interval), 5))
-    daily_minutes = daily_demand_interval_minutes(config)
-    if daily_minutes % sim_minutes:
-        raise ValueError(
-            f"DAILY_DEMAND_INTERVAL '{daily_demand_interval(config)}' ({daily_minutes} "
-            f"menit) harus kelipatan bulat dari interval simulasi '{interval}' "
-            f"({sim_minutes} menit) supaya backtest bisa merangkai candle harian dari "
-            "data yang sudah diunduh."
-        )
-    rasio = daily_minutes // sim_minutes
-    return daily_demand_window_bars(config) * rasio + rasio
+    rasio = m15_ratio(interval)
+    return (m15_demand_window_bars(config) + 1) * rasio
 
 
 def htf_gate_warmup_bars(config: dict, interval: str) -> int:
     butuh = 0
     if bool(config.get("TREND_FILTER_ENABLED", False)) or htf_demand_enabled(config):
         butuh = max(butuh, trend_warmup_bars(config, interval))
-    if daily_demand_enabled(config):
-        butuh = max(butuh, daily_warmup_bars(config, interval))
-    if daily_trend_enabled(config):
-        butuh = max(butuh, daily_trend_warmup_bars(config, interval))
+    if m15_demand_enabled(config):
+        butuh = max(butuh, m15_demand_warmup_bars(config, interval))
+    if m15_trend_enabled(config):
+        butuh = max(butuh, m15_trend_warmup_bars(config, interval))
     return butuh
 
 
@@ -1049,88 +1042,68 @@ def evaluate_trend_filter(
 
 
 
-DAILY_TREND_DEFAULTS = {
-    "DAILY_TREND_FILTER_ENABLED": False,
-    "DAILY_TREND_INTERVAL": "1d",
-    "DAILY_TREND_EMA_FAST": 20,
-    "DAILY_TREND_EMA_SLOW": 50,
-    "DAILY_TREND_ADX_PERIOD": 14,
-    "DAILY_TREND_ADX_MIN": 20.0,
-    "DAILY_TREND_LOOKBACK_BARS": 120,
+M15_TREND_DEFAULTS = {
+    "M15_TREND_FILTER_ENABLED": True,
+    "M15_TREND_EMA_FAST": 20,
+    "M15_TREND_EMA_SLOW": 50,
+    "M15_TREND_ADX_PERIOD": 14,
+    "M15_TREND_ADX_MIN": 20.0,
+    "M15_TREND_LOOKBACK_BARS": 120,
 }
 
 
-def daily_trend_enabled(config: dict) -> bool:
-    return bool(config.get("DAILY_TREND_FILTER_ENABLED", False))
+def m15_trend_enabled(config: dict) -> bool:
+    return bool(config.get("M15_TREND_FILTER_ENABLED", False))
 
 
-def daily_trend_interval(config: dict) -> str:
-    raw = str(
-        config.get("DAILY_TREND_INTERVAL", DAILY_TREND_DEFAULTS["DAILY_TREND_INTERVAL"])
-        or DAILY_TREND_DEFAULTS["DAILY_TREND_INTERVAL"]
-    ).strip().lower()
-    if raw not in INTERVAL_MINUTES:
-        raise ValueError(
-            f"DAILY_TREND_INTERVAL '{raw}' tidak dikenal. Pilihan: "
-            + ", ".join(sorted(INTERVAL_MINUTES, key=INTERVAL_MINUTES.get))
-        )
-    return raw
+def m15_trend_interval(config: dict) -> str:
+    return M15_INTERVAL
 
 
-def daily_trend_interval_minutes(config: dict) -> int:
-    return int(INTERVAL_MINUTES[daily_trend_interval(config)])
+def m15_trend_interval_minutes(config: dict) -> int:
+    return INTERVAL_MINUTES[M15_INTERVAL]
 
 
-def daily_trend_gate_config(config: dict) -> dict:
-    d = DAILY_TREND_DEFAULTS
+def m15_trend_gate_config(config: dict) -> dict:
+    d = M15_TREND_DEFAULTS
     return {
-        "TREND_FILTER_ENABLED": daily_trend_enabled(config),
-        "TREND_INTERVAL": daily_trend_interval(config),
-        "TREND_EMA_FAST": int(config.get("DAILY_TREND_EMA_FAST", d["DAILY_TREND_EMA_FAST"]) or d["DAILY_TREND_EMA_FAST"]),
-        "TREND_EMA_SLOW": int(config.get("DAILY_TREND_EMA_SLOW", d["DAILY_TREND_EMA_SLOW"]) or d["DAILY_TREND_EMA_SLOW"]),
-        "TREND_ADX_PERIOD": int(config.get("DAILY_TREND_ADX_PERIOD", d["DAILY_TREND_ADX_PERIOD"]) or d["DAILY_TREND_ADX_PERIOD"]),
-        "TREND_ADX_MIN": float(config.get("DAILY_TREND_ADX_MIN", d["DAILY_TREND_ADX_MIN"]) or 0.0),
-        "TREND_LOOKBACK_BARS": int(config.get("DAILY_TREND_LOOKBACK_BARS", d["DAILY_TREND_LOOKBACK_BARS"]) or d["DAILY_TREND_LOOKBACK_BARS"]),
+        "TREND_FILTER_ENABLED": m15_trend_enabled(config),
+        "TREND_INTERVAL": m15_trend_interval(config),
+        "TREND_EMA_FAST": int(config.get("M15_TREND_EMA_FAST", d["M15_TREND_EMA_FAST"]) or d["M15_TREND_EMA_FAST"]),
+        "TREND_EMA_SLOW": int(config.get("M15_TREND_EMA_SLOW", d["M15_TREND_EMA_SLOW"]) or d["M15_TREND_EMA_SLOW"]),
+        "TREND_ADX_PERIOD": int(config.get("M15_TREND_ADX_PERIOD", d["M15_TREND_ADX_PERIOD"]) or d["M15_TREND_ADX_PERIOD"]),
+        "TREND_ADX_MIN": float(config.get("M15_TREND_ADX_MIN", d["M15_TREND_ADX_MIN"]) or 0.0),
+        "TREND_LOOKBACK_BARS": int(config.get("M15_TREND_LOOKBACK_BARS", d["M15_TREND_LOOKBACK_BARS"]) or d["M15_TREND_LOOKBACK_BARS"]),
     }
 
 
-def daily_trend_window_bars(config: dict) -> int:
-    if not daily_trend_enabled(config):
+def m15_trend_window_bars(config: dict) -> int:
+    if not m15_trend_enabled(config):
         return 0
-    return trend_window_bars(daily_trend_gate_config(config))
+    return trend_window_bars(m15_trend_gate_config(config))
 
 
-def daily_trend_required_bars(config: dict) -> int:
-    if not daily_trend_enabled(config):
+def m15_trend_required_bars(config: dict) -> int:
+    if not m15_trend_enabled(config):
         return 0
-    return trend_required_bars(daily_trend_gate_config(config))
+    return trend_required_bars(m15_trend_gate_config(config))
 
 
-def daily_trend_warmup_bars(config: dict, interval: str) -> int:
-    if not daily_trend_enabled(config):
+def m15_trend_warmup_bars(config: dict, interval: str) -> int:
+    if not m15_trend_enabled(config):
         return 0
-    sim_minutes = int(INTERVAL_MINUTES.get(str(interval), 5))
-    daily_minutes = daily_trend_interval_minutes(config)
-    if daily_minutes % sim_minutes:
-        raise ValueError(
-            f"DAILY_TREND_INTERVAL '{daily_trend_interval(config)}' ({daily_minutes} "
-            f"menit) harus kelipatan bulat dari interval simulasi '{interval}' "
-            f"({sim_minutes} menit) supaya backtest bisa merangkai candle harian dari "
-            "data yang sudah diunduh."
-        )
-    rasio = daily_minutes // sim_minutes
-    return daily_trend_window_bars(config) * rasio + rasio
+    rasio = m15_ratio(interval)
+    return (m15_trend_window_bars(config) + 1) * rasio
 
 
-def evaluate_daily_trend(
+def evaluate_m15_trend(
     klines: list[Kline], config: dict, signal_close_time_ms: Optional[int] = None
 ) -> dict:
-    if not daily_trend_enabled(config):
-        raw = str(config.get("DAILY_TREND_INTERVAL", "1d") or "1d").strip().lower()
+    if not m15_trend_enabled(config):
         return {
             "ok": True,
-            "reason": f"filter trend {raw} nonaktif",
-            "interval": raw,
+            "reason": f"filter trend {M15_INTERVAL} nonaktif",
+            "interval": M15_INTERVAL,
             "bars": 0,
             "required": 0,
             "window": 0,
@@ -1143,7 +1116,7 @@ def evaluate_daily_trend(
         }
     return evaluate_trend_filter(
         klines,
-        daily_trend_gate_config(config),
+        m15_trend_gate_config(config),
         signal_close_time_ms,
-        nama_kunci_jendela="DAILY_TREND_LOOKBACK_BARS",
+        nama_kunci_jendela="M15_TREND_LOOKBACK_BARS",
     )

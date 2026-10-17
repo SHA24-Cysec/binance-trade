@@ -698,7 +698,7 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "CONFIRM_INTERVAL": _field(
         "Scan",
         "Interval konfirmasi",
-        "Interval candle konfirmasi volume rolling.",
+        "Interval candle konfirmasi volume rolling. Saat Demand M15 atau Trend M15 aktif, pilih 1m, 3m, 5m, atau 15m agar backtest dapat merangkai candle M15.",
         "str",
         editor="select",
         options=[
@@ -1020,108 +1020,92 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         minimum=0.0,
         maximum=1.0,
     ),
-    "DAILY_DEMAND_FILTER_ENABLED": _field(
-        "Demand Daily",
-        "Filter zona demand harian",
-        "Wajibkan candle harian (DAILY_DEMAND_INTERVAL, default 1d) terakhir yang sudah tutup juga bereaksi di dekat zona demand harian, supaya entry M5 tidak terjadi saat harga sedang melayang jauh di atas dasar akumulasi harian. Ini lapisan KETIGA setelah zona demand M5 dan zona demand H1. Candle harian diambil langsung dari Binance dan disimpan sehari sekali per simbol; gagal ambil data berarti kandidat ditolak (fail closed).",
+    "M15_DEMAND_FILTER_ENABLED": _field(
+        "Demand M15",
+        "Filter zona demand M15",
+        "Wajibkan candle 15 menit terakhir yang sudah tutup bereaksi di dekat zona demand M15. Lapisan ini diperiksa setelah demand M5 dan H1. Bot mengambil candle asli dari Binance; backtest merangkainya dari candle konfirmasi. Data gagal atau kurang berarti kandidat ditolak.",
         "bool",
     ),
-    "DAILY_DEMAND_INTERVAL": _field(
-        "Demand Daily",
-        "Interval demand harian",
-        "Timeframe untuk gerbang demand harian. Wajib kelipatan bulat dari interval konfirmasi dan tidak lebih pendek, supaya backtest bisa merangkai candle ini dari data yang sama. Pilihan dibatasi pada interval yang dikenali aplikasi (12h atau 1d).",
-        "str",
-        editor="select",
-        options=["12h", "1d"],
-    ),
-    "DAILY_DEMAND_LOOKBACK_BARS": _field(
-        "Demand Daily",
-        "Lookback zona demand harian",
-        "Jumlah candle harian tertutup yang memetakan dasar zona demand harian. Default 20 hari struktur harga. Makin besar, makin jauh ke belakang dasarnya dicari dan makin ketat menolak entry yang sudah jauh dari dasar. Perlu diingat: backtest merangkai candle harian dari candle konfirmasi, jadi lookback besar menambah kebutuhan warmup sekitar (lookback + 1) hari data.",
+    "M15_DEMAND_LOOKBACK_BARS": _field(
+        "Demand M15",
+        "Lookback zona demand M15",
+        "Jumlah candle M15 sebelumnya untuk memetakan zona. Default 20 candle, setara 5 jam. Warmup backtest mengikuti panjang jendela ini.",
         "int",
         minimum=3,
         maximum=500,
         unit="candle",
     ),
-    "DAILY_DEMAND_ZONE_BUFFER_PCT": _field(
-        "Demand Daily",
-        "Tebal zona demand harian",
-        "Tebal minimum zona demand harian dalam persen di atas dasar zona. Candle harian paling lebar dari semua timeframe, jadi defaultnya paling tebal (2.0%, bandingkan 1.5% di H1 dan 0.8% di M5).",
+    "M15_DEMAND_ZONE_BUFFER_PCT": _field(
+        "Demand M15",
+        "Tebal zona demand M15",
+        "Tebal minimum zona demand M15 di atas dasar zona. Default awal 1,0%; angka ini belum dioptimasi pada data pasar.",
         "float",
         minimum=0.0,
         maximum=20.0,
         unit="%",
     ),
-    "DAILY_DEMAND_MAX_DISTANCE_PCT": _field(
-        "Demand Daily",
-        "Jarak maksimum dari zona harian",
-        "Jarak maksimum close candle harian di atas ATAP zona demand harian, dalam persen. Default 12%: memberi ruang untuk pump yang baru mulai dari dasar harian, tapi menolak entry yang sudah terbang jauh dari area demand hari-hari terakhir. Harus lebih besar atau sama dengan tebal zona.",
+    "M15_DEMAND_MAX_DISTANCE_PCT": _field(
+        "Demand M15",
+        "Jarak maksimum dari zona M15",
+        "Jarak maksimum close candle M15 di atas atap zona. Default awal 5,0%; harus tidak lebih kecil dari tebal zona dan belum dioptimasi pada data pasar.",
         "float",
         minimum=0.0,
         maximum=50.0,
         unit="%",
     ),
-    "DAILY_DEMAND_MIN_CLOSE_POSITION": _field(
-        "Demand Daily",
-        "Posisi close minimum candle harian",
-        "Posisi penutupan minimum di dalam rentang high-low candle harian sinyal (0.0 di low, 1.0 di high) sebagai bukti dorongan demand pembeli pada hari itu. Default 0.40, sama seperti H1.",
+    "M15_DEMAND_MIN_CLOSE_POSITION": _field(
+        "Demand M15",
+        "Posisi close minimum candle M15",
+        "Posisi close di rentang high-low candle M15 sinyal, dari 0 di low sampai 1 di high. Default awal 0,45; belum dioptimasi pada data pasar.",
         "float",
         minimum=0.0,
         maximum=1.0,
     ),
-    "DAILY_TREND_FILTER_ENABLED": _field(
-        "Trend Harian",
-        "Filter EMA + ADX harian",
-        "Wajibkan candle harian (DAILY_TREND_INTERVAL, default 1d) terakhir yang sudah tutup berada dalam trend naik dan kuat: close di atas EMA cepat, EMA cepat di atas EMA lambat, dan ADX minimum. Lapisan TAMBAHAN di atas gerbang trend H1 dan gerbang demand. Default nonaktif. Berlaku di LIVE, PAPER, dan backtest; data harian gagal diambil atau riwayatnya kurang berarti kandidat ditolak (fail closed).",
+    "M15_TREND_FILTER_ENABLED": _field(
+        "Trend M15",
+        "Filter EMA + ADX M15",
+        "Wajibkan candle M15 terakhir yang sudah tutup memenuhi close di atas EMA cepat, EMA cepat di atas EMA lambat, dan ADX minimum. Aktif secara default di LIVE, PAPER, dan backtest. Data gagal atau riwayat kurang berarti kandidat ditolak.",
         "bool",
     ),
-    "DAILY_TREND_INTERVAL": _field(
-        "Trend Harian",
-        "Interval trend harian",
-        "Timeframe gerbang EMA + ADX harian. Pilihan dibatasi pada 12h atau 1d. Wajib kelipatan bulat dari interval konfirmasi supaya backtest bisa merangkai candle ini dari data yang sama.",
-        "str",
-        editor="select",
-        options=["12h", "1d"],
-    ),
-    "DAILY_TREND_EMA_FAST": _field(
-        "Trend Harian",
-        "Periode EMA cepat harian",
-        "EMA cepat pada candle harian. Default 20. Wajib lebih kecil dari EMA lambat harian.",
+    "M15_TREND_EMA_FAST": _field(
+        "Trend M15",
+        "Periode EMA cepat M15",
+        "EMA cepat pada candle M15. Default 20, harus lebih kecil dari EMA lambat.",
         "int",
         minimum=2,
         maximum=500,
         unit="candle",
     ),
-    "DAILY_TREND_EMA_SLOW": _field(
-        "Trend Harian",
-        "Periode EMA lambat harian",
-        "EMA lambat pada candle harian. Default 50. Dipakai juga sebagai penentu panjang riwayat minimum; koin yang riwayat hariannya lebih pendek dari ini ditolak.",
+    "M15_TREND_EMA_SLOW": _field(
+        "Trend M15",
+        "Periode EMA lambat M15",
+        "EMA lambat pada candle M15. Default 50; riwayat yang lebih pendek ditolak.",
         "int",
         minimum=3,
-        maximum=1000,
+        maximum=999,
         unit="candle",
     ),
-    "DAILY_TREND_ADX_PERIOD": _field(
-        "Trend Harian",
-        "Periode ADX harian",
-        "Periode ADX Wilder pada candle harian. Default 14. Butuh sekitar dua kali periode ini candle agar nilainya terdefinisi.",
+    "M15_TREND_ADX_PERIOD": _field(
+        "Trend M15",
+        "Periode ADX M15",
+        "Periode ADX Wilder pada candle M15. Default 14.",
         "int",
         minimum=2,
         maximum=200,
         unit="candle",
     ),
-    "DAILY_TREND_ADX_MIN": _field(
-        "Trend Harian",
-        "Ambang ADX harian",
-        "ADX minimum agar trend harian dianggap kuat. Default 20. Isi 0 untuk mematikan cek kekuatan trend dan hanya memakai susunan EMA.",
+    "M15_TREND_ADX_MIN": _field(
+        "Trend M15",
+        "Ambang ADX M15",
+        "ADX minimum agar trend M15 dianggap kuat. Default 20. Isi 0 untuk melewati cek kekuatan dan hanya memakai susunan EMA.",
         "float",
         minimum=0,
         maximum=100,
     ),
-    "DAILY_TREND_LOOKBACK_BARS": _field(
-        "Trend Harian",
-        "Jendela candle trend harian",
-        "Jumlah candle harian tertutup yang dipakai menghitung EMA dan ADX harian. Default 120. Nilai ini dipakai sama persis oleh bot live dan backtest; endpoint klines Binance membatasi 1000 candle per panggilan.",
+    "M15_TREND_LOOKBACK_BARS": _field(
+        "Trend M15",
+        "Jendela candle trend M15",
+        "Jumlah candle M15 tertutup untuk EMA dan ADX. Default 120 candle atau 30 jam; Binance membatasi 1000 candle per permintaan.",
         "int",
         minimum=20,
         maximum=999,
@@ -1344,6 +1328,19 @@ REMOVED_PARAMETERS = frozenset(
         "DETECTOR_WEIGHT_VOLUME24",
         "DETECTOR_TOP_N",
         "DAILY_KLINE_CACHE_TTL_SECONDS",
+        "DAILY_DEMAND_FILTER_ENABLED",
+        "DAILY_DEMAND_INTERVAL",
+        "DAILY_DEMAND_LOOKBACK_BARS",
+        "DAILY_DEMAND_ZONE_BUFFER_PCT",
+        "DAILY_DEMAND_MAX_DISTANCE_PCT",
+        "DAILY_DEMAND_MIN_CLOSE_POSITION",
+        "DAILY_TREND_FILTER_ENABLED",
+        "DAILY_TREND_INTERVAL",
+        "DAILY_TREND_EMA_FAST",
+        "DAILY_TREND_EMA_SLOW",
+        "DAILY_TREND_ADX_PERIOD",
+        "DAILY_TREND_ADX_MIN",
+        "DAILY_TREND_LOOKBACK_BARS",
         "USE_DAILY_STOP",
         "MAX_DAILY_LOSS_PERCENT",
         "DAILY_PROFIT_TARGET_PERCENT",
@@ -1601,24 +1598,13 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
                 "supaya backtest bisa merangkai candle trend dari candle konfirmasi"
             )
 
-    try:
-        from strategy.indicators import INTERVAL_MINUTES as _INTERVAL_MINUTES_HARIAN
-
-        menit_harian = _INTERVAL_MINUTES_HARIAN.get(
-            str(cfg.get("DAILY_DEMAND_INTERVAL", "")).lower()
-        )
-        menit_konfirmasi_harian = _INTERVAL_MINUTES_HARIAN.get(
-            str(cfg.get("CONFIRM_INTERVAL", "")).lower()
-        )
-    except ImportError:
-        menit_harian = menit_konfirmasi_harian = None
-    if menit_harian and menit_konfirmasi_harian:
-        if menit_harian % menit_konfirmasi_harian != 0 or (
-            menit_harian < menit_konfirmasi_harian
-        ):
-            keluar["DAILY_DEMAND_INTERVAL"] = (
-                "harus kelipatan bulat dari CONFIRM_INTERVAL dan tidak lebih pendek, "
-                "supaya backtest bisa merangkai candle harian dari candle konfirmasi"
+    if _flag_untuk_relasi(cfg, "M15_DEMAND_FILTER_ENABLED", False) or _flag_untuk_relasi(
+        cfg, "M15_TREND_FILTER_ENABLED", False
+    ):
+        if menit_konfirmasi and 15 % menit_konfirmasi:
+            keluar["CONFIRM_INTERVAL"] = (
+                "harus 1m, 3m, 5m, atau 15m saat filter M15 aktif supaya "
+                "backtest dapat merangkai candle M15 dari candle konfirmasi"
             )
 
     saring_demand = mode_aware is False or _flag_untuk_relasi(
@@ -1641,43 +1627,24 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
                 "harus lebih besar atau sama dengan HTF_DEMAND_ZONE_BUFFER_PCT"
             )
 
-    saring_daily_trend = mode_aware is False or _flag_untuk_relasi(
-        cfg, "DAILY_TREND_FILTER_ENABLED", False
+    saring_m15_trend = mode_aware is False or _flag_untuk_relasi(
+        cfg, "M15_TREND_FILTER_ENABLED", False
     )
-    if saring_daily_trend:
-        nilai = pasangan("DAILY_TREND_EMA_SLOW", "DAILY_TREND_EMA_FAST")
+    if saring_m15_trend:
+        nilai = pasangan("M15_TREND_EMA_SLOW", "M15_TREND_EMA_FAST")
         if nilai is not None and nilai[0] <= nilai[1]:
-            keluar["DAILY_TREND_EMA_SLOW"] = (
-                "harus lebih besar dari DAILY_TREND_EMA_FAST agar susunan EMA harian tidak terbalik"
+            keluar["M15_TREND_EMA_SLOW"] = (
+                "harus lebih besar dari M15_TREND_EMA_FAST agar susunan EMA M15 tidak terbalik"
             )
-        try:
-            from strategy.indicators import INTERVAL_MINUTES as _INTERVAL_MINUTES_TREN_HARIAN
 
-            menit_tren_harian = _INTERVAL_MINUTES_TREN_HARIAN.get(
-                str(cfg.get("DAILY_TREND_INTERVAL", "")).lower()
-            )
-            menit_konfirmasi_tren_harian = _INTERVAL_MINUTES_TREN_HARIAN.get(
-                str(cfg.get("CONFIRM_INTERVAL", "")).lower()
-            )
-        except ImportError:
-            menit_tren_harian = menit_konfirmasi_tren_harian = None
-        if menit_tren_harian and menit_konfirmasi_tren_harian:
-            if menit_tren_harian % menit_konfirmasi_tren_harian != 0 or (
-                menit_tren_harian < menit_konfirmasi_tren_harian
-            ):
-                keluar["DAILY_TREND_INTERVAL"] = (
-                    "harus kelipatan bulat dari CONFIRM_INTERVAL dan tidak lebih pendek, "
-                    "supaya backtest bisa merangkai candle harian dari candle konfirmasi"
-                )
-
-    saring_daily_demand = mode_aware is False or _flag_untuk_relasi(
-        cfg, "DAILY_DEMAND_FILTER_ENABLED", False
+    saring_m15_demand = mode_aware is False or _flag_untuk_relasi(
+        cfg, "M15_DEMAND_FILTER_ENABLED", False
     )
-    if saring_daily_demand:
-        nilai = pasangan("DAILY_DEMAND_MAX_DISTANCE_PCT", "DAILY_DEMAND_ZONE_BUFFER_PCT")
+    if saring_m15_demand:
+        nilai = pasangan("M15_DEMAND_MAX_DISTANCE_PCT", "M15_DEMAND_ZONE_BUFFER_PCT")
         if nilai is not None and nilai[0] < nilai[1]:
-            keluar["DAILY_DEMAND_MAX_DISTANCE_PCT"] = (
-                "harus lebih besar atau sama dengan DAILY_DEMAND_ZONE_BUFFER_PCT"
+            keluar["M15_DEMAND_MAX_DISTANCE_PCT"] = (
+                "harus lebih besar atau sama dengan M15_DEMAND_ZONE_BUFFER_PCT"
             )
 
     batas_tahan = _angka_untuk_relasi(cfg, "MAX_HOLD_HOURS")
@@ -1751,26 +1718,26 @@ def validate_candidate(
                     "TREND_ADX_MIN nol: cek kekuatan trend mati, hanya susunan EMA yang "
                     "menyaring entry sehingga pasar sideways lebih mudah diloloskan."
                 )
-        if cleaned.get("DAILY_TREND_FILTER_ENABLED"):
-            _minimal_harian = max(
-                int(cleaned["DAILY_TREND_EMA_SLOW"]),
-                2 * int(cleaned["DAILY_TREND_ADX_PERIOD"]) + 1,
+        if cleaned.get("M15_TREND_FILTER_ENABLED"):
+            minimal_m15 = max(
+                int(cleaned["M15_TREND_EMA_SLOW"]),
+                2 * int(cleaned["M15_TREND_ADX_PERIOD"]) + 1,
             )
-            if int(cleaned["DAILY_TREND_LOOKBACK_BARS"]) < _minimal_harian:
+            if int(cleaned["M15_TREND_LOOKBACK_BARS"]) < minimal_m15:
                 warnings.append(
-                    f"DAILY_TREND_LOOKBACK_BARS {cleaned['DAILY_TREND_LOOKBACK_BARS']} lebih "
-                    f"kecil dari {_minimal_harian} candle yang dibutuhkan EMA dan ADX harian. "
-                    "Gerbang akan memakai nilai minimum itu dan menolak entry selama riwayat belum cukup."
+                    f"M15_TREND_LOOKBACK_BARS {cleaned['M15_TREND_LOOKBACK_BARS']} lebih "
+                    f"kecil dari {minimal_m15} candle M15 yang dibutuhkan EMA dan ADX. "
+                    "Gerbang memakai minimum itu dan menolak entry selama riwayat belum cukup."
                 )
             warnings.append(
-                f"Filter EMA + ADX harian aktif: koin yang riwayat harian tertutupnya kurang dari "
-                f"{max(int(cleaned['DAILY_TREND_EMA_SLOW']), 2 * int(cleaned['DAILY_TREND_ADX_PERIOD']) + 1)} "
-                "hari (termasuk koin baru listing) akan ditolak sampai riwayatnya cukup."
+                f"Filter EMA + ADX M15 aktif: minimal {minimal_m15} candle M15 "
+                f"tertutup (sekitar {minimal_m15 * 15 / 60:g} jam) dibutuhkan "
+                "sebelum koin dapat dinilai."
             )
-            if cleaned["DAILY_TREND_ADX_MIN"] == 0:
+            if cleaned["M15_TREND_ADX_MIN"] == 0:
                 warnings.append(
-                    "DAILY_TREND_ADX_MIN nol: cek kekuatan trend harian mati, hanya susunan EMA "
-                    "yang menyaring entry."
+                    "M15_TREND_ADX_MIN nol: cek kekuatan trend M15 mati, hanya "
+                    "susunan EMA yang menyaring entry."
                 )
         if cleaned["PUMP_MIN_24H_CHANGE_PCT"] == 0:
             warnings.append(

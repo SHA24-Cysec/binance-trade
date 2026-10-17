@@ -47,6 +47,7 @@ from trading.equity import (
     load_equity,
 )
 from trading import strategy_drawdown as strategy_dd
+from strategy.indicators import M15_INTERVAL, interval_to_ms, m15_demand_warmup_bars
 from infrastructure.process.runtime_control import BotModeLock, BotAlreadyRunningError
 from market import coin_icons
 from market.fx_rate import IdrRateProvider
@@ -829,19 +830,18 @@ BT_PARAM_KEYS = (
     "TREND_ADX_PERIOD",
     "TREND_ADX_MIN",
     "TREND_LOOKBACK_BARS",
-    "DAILY_TREND_FILTER_ENABLED",
-    "DAILY_TREND_INTERVAL",
-    "DAILY_TREND_EMA_FAST",
-    "DAILY_TREND_EMA_SLOW",
-    "DAILY_TREND_ADX_PERIOD",
-    "DAILY_TREND_ADX_MIN",
-    "DAILY_TREND_LOOKBACK_BARS",
+    "M15_TREND_FILTER_ENABLED",
+    "M15_TREND_EMA_FAST",
+    "M15_TREND_EMA_SLOW",
+    "M15_TREND_ADX_PERIOD",
+    "M15_TREND_ADX_MIN",
+    "M15_TREND_LOOKBACK_BARS",
 )
 
 GRID_PARAM_KEYS = tuple(
     k
     for k in BT_PARAM_KEYS
-    if k != "USE_ATR_EXIT" and not k.startswith(("TREND_", "DAILY_TREND_"))
+    if k != "USE_ATR_EXIT" and not k.startswith(("TREND_", "M15_TREND_"))
 )
 
 _bt_jobs: dict = {}
@@ -899,65 +899,47 @@ def _bt_trend_warmup_note(cfg: dict, interval: str) -> str:
     )
 
 
-def _bt_demand_harian_note(cfg: dict, interval: str) -> str:
-    if not bool(cfg.get("DAILY_DEMAND_FILTER_ENABLED", False)):
-        return (
-            "Gerbang demand harian sedang NONAKTIF, jadi tidak ada candle harian yang "
-            "dirangkai dan tidak ada sinyal yang disaring olehnya."
-        )
+def _bt_demand_m15_note(cfg: dict, interval: str) -> str:
+    if not bool(cfg.get("M15_DEMAND_FILTER_ENABLED", False)):
+        return "Gerbang demand M15 nonaktif; tidak ada sinyal yang disaring olehnya."
     try:
-        hari = pbt.parity.htf_gate_warmup_ms(cfg, interval) / float(bt.MS_PER_DAY)
-    except ValueError:
-        return (
-            "Gerbang demand harian aktif, tetapi intervalnya tidak sepadan dengan "
-            "interval simulasi sehingga backtest ini akan menolak berjalan."
-        )
+        jam = m15_demand_warmup_bars(cfg, interval) * interval_to_ms(interval) / 3_600_000
+    except ValueError as exc:
+        return f"Gerbang demand M15 tidak bisa disimulasikan: {exc}"
     return (
-        f"Gerbang demand harian {cfg.get('DAILY_DEMAND_INTERVAL', '1d')} aktif dan "
-        "dihitung terpisah dari lapisan H1. Candle hariannya dirangkai dari candle "
-        f"{interval} yang diunduh dari Binance, jadi tidak ada permintaan data "
-        f"terpisah, tetapi rentang unduhan ditarik sekitar {hari:.1f} hari lebih awal "
-        f"sebagai pemanasan ({hari:.1f} hari pertama rentang itu tidak menghasilkan "
-        "bar yang bisa ditradingkan). Candle harian yang jamnya bolong sebagian "
-        "dibuang di backtest, sedangkan bot live memakai candle harian asli dari "
-        "bursa. Lihat penghitung sinyal yang disaring gerbang demand harian pada "
-        "ringkasan di atas."
+        f"Gerbang demand M15 memakai candle {M15_INTERVAL} tertutup yang dirangkai "
+        f"dari candle {interval} unduhan Binance. Warmup lapisan ini sekitar "
+        f"{jam:.2f} jam dan otomatis ikut diunduh. Candle M15 dengan data sumber "
+        "yang bolong dibuang di backtest, sedangkan bot live memakai candle M15 asli "
+        "dari bursa. Lihat penghitung sinyal yang disaring pada hasil."
     )
 
 
-def _bt_tren_harian_note(cfg: dict, interval: str) -> str:
-    if not bool(cfg.get("DAILY_TREND_FILTER_ENABLED", False)):
-        return (
-            "Gerbang EMA + ADX harian sedang NONAKTIF, jadi tidak ada candle harian yang "
-            "dirangkai untuk gerbang ini dan tidak ada sinyal yang disaring olehnya."
-        )
+def _bt_tren_m15_note(cfg: dict, interval: str) -> str:
+    if not bool(cfg.get("M15_TREND_FILTER_ENABLED", False)):
+        return "Gerbang EMA + ADX M15 nonaktif; tidak ada sinyal yang disaring olehnya."
     try:
-        hari = pbt.parity.daily_trend_warmup_ms(cfg, interval) / float(bt.MS_PER_DAY)
-    except ValueError:
-        return (
-            "Gerbang EMA + ADX harian aktif, tetapi intervalnya tidak sepadan dengan "
-            "interval simulasi sehingga backtest ini akan menolak berjalan."
-        )
+        jam = pbt.parity.m15_trend_warmup_ms(cfg, interval) / 3_600_000
+    except ValueError as exc:
+        return f"Gerbang EMA + ADX M15 tidak bisa disimulasikan: {exc}"
     return (
-        f"Gerbang EMA + ADX harian {cfg.get('DAILY_TREND_INTERVAL', '1d')} aktif dan "
-        f"butuh sekitar {hari:.1f} hari pemanasan (jendela "
-        f"{pbt.parity.daily_trend_window_bars(cfg)} candle harian ditambah satu candle "
-        "penyangga). Rentang itu otomatis ikut diunduh, dan batas hari minimal pada form "
-        "ikut naik. Lihat penghitung sinyal yang disaring gerbang EMA + ADX harian pada hasil."
+        f"Gerbang EMA + ADX M15 membutuhkan sekitar {jam:.2f} jam warmup "
+        f"({pbt.parity.m15_trend_window_bars(cfg)} candle M15 tertutup ditambah "
+        "satu candle penyangga). Data warmup otomatis ikut diunduh; batas minimal "
+        "rentang hari pada form juga disesuaikan."
     )
 
 
-def _bt_tren_harian_limitations(cfg: dict, interval: str) -> str:
-    if not bool(cfg.get("DAILY_TREND_FILTER_ENABLED", False)):
+def _bt_tren_m15_limitations(cfg: dict, interval: str) -> str:
+    if not bool(cfg.get("M15_TREND_FILTER_ENABLED", False)):
         return ""
     return (
-        " Gerbang EMA + ADX harian (DAILY_TREND_*) SUDAH disimulasikan dengan aturan yang "
-        "sama seperti bot live: DAILY_TREND_LOOKBACK_BARS candle harian terakhir yang sudah "
-        "tutup pada saat candle sinyal ditutup, lalu close > EMA cepat, EMA cepat > EMA "
-        "lambat, dan ADX >= DAILY_TREND_ADX_MIN. Koin yang candle hariannya belum cukup "
-        "ditolak, sama seperti di live. Candle harian dirangkai dari candle "
-        f"{interval} yang diunduh, jadi tidak ada unduhan tambahan. "
-        + _bt_tren_harian_note(cfg, interval)
+        " Gerbang EMA + ADX M15 (M15_TREND_*) disimulasikan dengan candle M15 "
+        "yang sudah tutup saat candle sinyal ditutup: close > EMA cepat, EMA cepat "
+        " > EMA lambat, dan ADX >= M15_TREND_ADX_MIN. Riwayat kurang ditolak. "
+        f"Candle M15 dirangkai dari candle {interval} yang diunduh, sedangkan bot "
+        "live memakai candle M15 asli dari bursa. "
+        + _bt_tren_m15_note(cfg, interval)
     )
 
 
@@ -975,13 +957,13 @@ def _bt_prepare_universe(
     if butuh_gerbang_ms > warmup_ms:
         logger.info(
             "Warmup backtest dinaikkan dari %.1f jam menjadi %.1f jam karena "
-            "gerbang trend/demand pada %s, gerbang demand harian %s, dan gerbang EMA + ADX "
-            "harian %s butuh paling sedikit %d candle %s sebagai pemanasan.",
+            "gerbang trend/demand pada %s, gerbang demand M15 %s, dan gerbang EMA + ADX "
+            "M15 %s butuh paling sedikit %d candle %s sebagai pemanasan.",
             warmup_ms / 3_600_000.0,
             butuh_gerbang_ms / 3_600_000.0,
             cfg.get("TREND_INTERVAL", "1h"),
-            cfg.get("DAILY_DEMAND_INTERVAL", "1d"),
-            cfg.get("DAILY_TREND_INTERVAL", "1d"),
+            M15_INTERVAL,
+            M15_INTERVAL,
             pbt.parity.htf_gate_warmup_bars(cfg, interval),
             interval,
         )
@@ -1263,32 +1245,32 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "skips": int(getattr(result, "htf_demand_skips", 0)),
                 "scans": int(getattr(result, "htf_demand_scans", 0)),
             },
-            "daily_demand": {
-                "enabled": bool(cfg.get("DAILY_DEMAND_FILTER_ENABLED", False)),
-                "interval": cfg.get("DAILY_DEMAND_INTERVAL", "1d"),
-                "lookback_bars": int(cfg.get("DAILY_DEMAND_LOOKBACK_BARS", 20) or 20),
-                "zone_buffer_pct": float(cfg.get("DAILY_DEMAND_ZONE_BUFFER_PCT", 2.0) or 0.0),
-                "max_distance_pct": float(cfg.get("DAILY_DEMAND_MAX_DISTANCE_PCT", 12.0) or 0.0),
-                "min_close_position": float(cfg.get("DAILY_DEMAND_MIN_CLOSE_POSITION", 0.4) or 0.0),
-                "skips": int(getattr(result, "daily_demand_skips", 0)),
-                "scans": int(getattr(result, "daily_demand_scans", 0)),
+            "m15_demand": {
+                "enabled": bool(cfg.get("M15_DEMAND_FILTER_ENABLED", False)),
+                "interval": M15_INTERVAL,
+                "lookback_bars": int(cfg.get("M15_DEMAND_LOOKBACK_BARS", 20) or 20),
+                "zone_buffer_pct": float(cfg.get("M15_DEMAND_ZONE_BUFFER_PCT", 1.0) or 0.0),
+                "max_distance_pct": float(cfg.get("M15_DEMAND_MAX_DISTANCE_PCT", 5.0) or 0.0),
+                "min_close_position": float(cfg.get("M15_DEMAND_MIN_CLOSE_POSITION", 0.45) or 0.0),
+                "skips": int(getattr(result, "m15_demand_skips", 0)),
+                "scans": int(getattr(result, "m15_demand_scans", 0)),
             },
-            "daily_trend": {
-                "enabled": bool(cfg.get("DAILY_TREND_FILTER_ENABLED", False)),
-                "interval": cfg.get("DAILY_TREND_INTERVAL", "1d"),
-                "ema_fast": int(cfg.get("DAILY_TREND_EMA_FAST", 20) or 20),
-                "ema_slow": int(cfg.get("DAILY_TREND_EMA_SLOW", 50) or 50),
-                "adx_period": int(cfg.get("DAILY_TREND_ADX_PERIOD", 14) or 14),
-                "adx_min": float(cfg.get("DAILY_TREND_ADX_MIN", 0.0) or 0.0),
-                "lookback_bars": int(cfg.get("DAILY_TREND_LOOKBACK_BARS", 120) or 120),
-                "skips": int(getattr(result, "daily_trend_skips", 0)),
-                "scans": int(getattr(result, "daily_trend_scans", 0)),
+            "m15_trend": {
+                "enabled": bool(cfg.get("M15_TREND_FILTER_ENABLED", False)),
+                "interval": M15_INTERVAL,
+                "ema_fast": int(cfg.get("M15_TREND_EMA_FAST", 20) or 20),
+                "ema_slow": int(cfg.get("M15_TREND_EMA_SLOW", 50) or 50),
+                "adx_period": int(cfg.get("M15_TREND_ADX_PERIOD", 14) or 14),
+                "adx_min": float(cfg.get("M15_TREND_ADX_MIN", 0.0) or 0.0),
+                "lookback_bars": int(cfg.get("M15_TREND_LOOKBACK_BARS", 120) or 120),
+                "skips": int(getattr(result, "m15_trend_skips", 0)),
+                "scans": int(getattr(result, "m15_trend_scans", 0)),
             },
             "trades": trades_out,
             "skipped": skipped_out,
             "warnings": (
                 list(result.warnings)
-                + _bt_peringatan_harian(cfg, days)
+                + _bt_peringatan_m15(cfg, days)
                 + (
                     [
                         f"Data BTC gagal diunduh ({prep.get('btc_error')}) sehingga filter BTC "
@@ -1346,7 +1328,7 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "backtest dimulai dari awal rentang data yang diunduh, bukan riwayat penuh simbol. "
                 + _bt_trend_warmup_note(cfg, prep["interval"])
                 + _bt_demand_limitations(cfg, prep["interval"])
-                + _bt_tren_harian_limitations(cfg, prep["interval"])
+                + _bt_tren_m15_limitations(cfg, prep["interval"])
                 + " Filter live yang SUDAH disimulasikan dari candle: filter BTC (BTC_MAX_DROP_PCT, "
                 "memakai candle BTC historis), MAX_CHASE_PCT, MIN_SECONDS_BETWEEN_TRADES, "
                 "COOLDOWN_MINUTES_AFTER_CLOSE, equity stop (drawdown), dan "
@@ -1520,7 +1502,7 @@ def _bt_run_grid_job(
                 "walk-forward bergulir). Untuk keyakinan lebih, ulangi dengan beberapa "
                 "rasio dan rentang hari yang berbeda.",
                 "Yang disapu grid hanya parameter EXIT. Gerbang trend (TREND_*), gerbang "
-                "EMA + ADX harian (DAILY_TREND_*), dan USE_ATR_EXIT tidak ikut disapu: nilainya diambil dari form backtest karena "
+                "EMA + ADX M15 (M15_TREND_*), dan USE_ATR_EXIT tidak ikut disapu: nilainya diambil dari form backtest karena "
                 "sinyal entry dihitung sekali lalu dipakai ulang oleh semua kombinasi. Untuk "
                 "membandingkan setelan trend, jalankan backtest portofolio terpisah per setelan.",
                 "Statistik 24 jam DIREKONSTRUKSI dari candle, bukan snapshot "
@@ -1581,8 +1563,8 @@ def _bt_demand_limitations(cfg: dict, interval: str) -> str:
         "Gerbang zona demand timeframe tinggi juga SUDAH disimulasikan dengan aturan "
         "yang sama seperti bot live: lapisan H1 (HTF_DEMAND_*, memakai candle "
         + str(cfg.get("TREND_INTERVAL", "1h"))
-        + " yang sudah tutup) dan lapisan harian (DAILY_DEMAND_*, candle "
-        + str(cfg.get("DAILY_DEMAND_INTERVAL", "1d"))
+        + " yang sudah tutup) dan lapisan M15 (M15_DEMAND_*, candle "
+        + str(M15_INTERVAL)
         + " yang sudah tutup). Keduanya memakai mesin zona yang sama dengan filter "
         "demand M5, hanya parameternya berbeda, keduanya diperiksa SETELAH gerbang "
         "tren, dan keduanya fail closed bila candle tidak cukup. Penghitung "
@@ -1590,7 +1572,7 @@ def _bt_demand_limitations(cfg: dict, interval: str) -> str:
         "SUDAH lolos gerbang sebelumnya: angka 0 berarti lapisan itu tidak pernah "
         "diperiksa (karena gerbang di atasnya menolak lebih dulu), bukan berarti "
         "lapisan itu meloloskan semuanya. "
-        + _bt_demand_harian_note(cfg, interval)
+        + _bt_demand_m15_note(cfg, interval)
     )
 
 
@@ -1599,9 +1581,9 @@ def _bt_min_days_note(cfg: dict, interval: str) -> tuple[int, str]:
     tren_h1_aktif = bool(cfg.get("TREND_FILTER_ENABLED", False)) or bool(
         cfg.get("HTF_DEMAND_FILTER_ENABLED", False)
     )
-    tren_harian_aktif = bool(cfg.get("DAILY_TREND_FILTER_ENABLED", False))
-    if not tren_h1_aktif and not tren_harian_aktif:
-        return dasar, _bt_catatan_harian_min(cfg, interval)
+    tren_m15_aktif = bool(cfg.get("M15_TREND_FILTER_ENABLED", False))
+    if not tren_h1_aktif and not tren_m15_aktif:
+        return dasar, _bt_catatan_m15_min(cfg, interval)
 
     minimal = dasar
     catatan = ""
@@ -1617,48 +1599,48 @@ def _bt_min_days_note(cfg: dict, interval: str) -> tuple[int, str]:
             f"Gerbang timeframe tinggi {cfg.get('TREND_INTERVAL', '1h')} butuh sekitar "
             f"{hari_warmup:.1f} hari riwayat sebelum bar pertama bisa dievaluasi."
         )
-    if tren_harian_aktif:
+    if tren_m15_aktif:
         try:
-            hari_tren_harian = pbt.parity.daily_trend_warmup_ms(
+            hari_tren_m15 = pbt.parity.m15_trend_warmup_ms(
                 cfg, interval
             ) / float(bt.MS_PER_DAY)
         except ValueError as exc:
             return dasar, str(exc)
-        minimal = max(minimal, int(math.ceil(hari_tren_harian)) + 1)
+        minimal = max(minimal, int(math.ceil(hari_tren_m15)) + 1)
         catatan += (
-            f" Gerbang EMA + ADX {cfg.get('DAILY_TREND_INTERVAL', '1d')} butuh sekitar "
-            f"{hari_tren_harian:.1f} hari riwayat sebelum bar pertama bisa dievaluasi."
+            f" Gerbang EMA + ADX {M15_INTERVAL} butuh sekitar "
+            f"{hari_tren_m15:.1f} hari riwayat sebelum bar pertama bisa dievaluasi."
         )
-    return minimal, catatan.strip() + _bt_catatan_harian_min(cfg, interval)
+    return minimal, catatan.strip() + _bt_catatan_m15_min(cfg, interval)
 
-def _bt_catatan_harian_min(cfg: dict, interval: str) -> str:
-    if not bool(cfg.get("DAILY_DEMAND_FILTER_ENABLED", False)):
+
+def _bt_catatan_m15_min(cfg: dict, interval: str) -> str:
+    if not bool(cfg.get("M15_DEMAND_FILTER_ENABLED", False)):
         return ""
     try:
-        hari_harian = pbt.parity.htf_gate_warmup_ms(cfg, interval) / float(bt.MS_PER_DAY)
+        jam = m15_demand_warmup_bars(cfg, interval) * interval_to_ms(interval) / 3_600_000
     except ValueError as exc:
-        return f" Gerbang demand harian: {exc}"
+        return f" Gerbang demand M15: {exc}"
+    lookback = pbt.parity.m15_demand_lookback_bars(cfg)
     return (
-        f" Gerbang demand {cfg.get('DAILY_DEMAND_INTERVAL', '1d')} sendiri butuh "
-        f"sekitar {hari_harian:.1f} hari pemanasan (rentang itu otomatis ikut "
-        "diunduh), dan periode uji di bawah "
-        f"{pbt.parity.daily_demand_lookback_bars(cfg)} hari ditandai belum cukup "
-        "untuk menilai lapisan ini."
+        f" Gerbang demand M15 butuh sekitar {jam:.2f} jam warmup "
+        f"(otomatis diunduh). Periode uji di bawah {lookback} candle M15 "
+        f"({lookback * 0.25:g} jam) ditandai belum cukup untuk menilai lapisan ini."
     )
 
 
-def _bt_peringatan_harian(cfg: dict, days: int) -> list:
-    if not bool(cfg.get("DAILY_DEMAND_FILTER_ENABLED", False)):
+def _bt_peringatan_m15(cfg: dict, days: int) -> list:
+    if not bool(cfg.get("M15_DEMAND_FILTER_ENABLED", False)):
         return []
-    lookback = pbt.parity.daily_demand_lookback_bars(cfg)
-    if int(days) >= int(lookback):
+    lookback = pbt.parity.m15_demand_lookback_bars(cfg)
+    bar_uji_m15 = int(days) * 1440 // 15
+    if bar_uji_m15 >= lookback:
         return []
     return [
-        f"Rentang uji {int(days)} hari lebih pendek dari jendela zona demand "
-        f"{cfg.get('DAILY_DEMAND_INTERVAL', '1d')} (lookback {lookback} hari). "
-        "Gerbang demand harian tetap dijalankan, tetapi hasilnya belum bisa "
-        "dinilai dari rentang sesingkat ini: perpanjang rentang hari atau "
-        "kecilkan DAILY_DEMAND_LOOKBACK_BARS."
+        f"Rentang uji {int(days)} hari mencakup sekitar {bar_uji_m15} candle M15, "
+        f"lebih pendek dari lookback zona demand M15 ({lookback} candle). "
+        "Gerbang tetap dijalankan, tetapi hasilnya kurang representatif; "
+        "perpanjang rentang uji atau kecilkan M15_DEMAND_LOOKBACK_BARS."
     ]
 
 
@@ -2091,6 +2073,7 @@ def api_backtest_defaults():
     out["quote_asset"] = QUOTE
     out["default_days"] = 30
     out["default_max_symbols"] = 150
+    out["bars_per_day"] = bt.bars_per_day(_bt_simulation_interval(PUMP_CONFIG))
     out["mode"] = "portfolio"
     out["min_quote_volume"] = PUMP_CONFIG.get("MIN_QUOTE_VOLUME_USDT_24H", 0)
     out["grid_max_kombinasi"] = gs.MAX_KOMBINASI_PORTFOLIO
@@ -2108,19 +2091,19 @@ def api_backtest_defaults():
         out["warmup_bars"] / float(bt.bars_per_day(_bt_simulation_interval(PUMP_CONFIG))),
         1,
     )
-    out["daily_demand_enabled"] = bool(
-        PUMP_CONFIG.get("DAILY_DEMAND_FILTER_ENABLED", False)
+    out["m15_demand_enabled"] = bool(
+        PUMP_CONFIG.get("M15_DEMAND_FILTER_ENABLED", False)
     )
-    out["daily_demand_interval"] = PUMP_CONFIG.get("DAILY_DEMAND_INTERVAL", "1d")
-    out["daily_demand_lookback_bars"] = int(
-        PUMP_CONFIG.get("DAILY_DEMAND_LOOKBACK_BARS", 20) or 20
+    out["m15_demand_interval"] = M15_INTERVAL
+    out["m15_demand_lookback_bars"] = int(
+        PUMP_CONFIG.get("M15_DEMAND_LOOKBACK_BARS", 20) or 20
     )
-    out["daily_trend_enabled"] = bool(
-        PUMP_CONFIG.get("DAILY_TREND_FILTER_ENABLED", False)
+    out["m15_trend_enabled"] = bool(
+        PUMP_CONFIG.get("M15_TREND_FILTER_ENABLED", False)
     )
-    out["daily_trend_interval"] = PUMP_CONFIG.get("DAILY_TREND_INTERVAL", "1d")
-    out["daily_trend_lookback_bars"] = int(
-        PUMP_CONFIG.get("DAILY_TREND_LOOKBACK_BARS", 120) or 120
+    out["m15_trend_interval"] = M15_INTERVAL
+    out["m15_trend_lookback_bars"] = int(
+        PUMP_CONFIG.get("M15_TREND_LOOKBACK_BARS", 120) or 120
     )
     return jsonify(out)
 

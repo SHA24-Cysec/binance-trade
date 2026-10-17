@@ -133,32 +133,30 @@ class TrendCache(HtfKlineCache):
         )
 
 
-class DailyDemandCache(HtfKlineCache):
+class M15KlineCache(HtfKlineCache):
 
     def interval(self) -> str:
-        return strategy.daily_demand_interval(self._config)
+        return strategy.M15_INTERVAL
 
     def window_bars(self) -> int:
-        return strategy.daily_demand_window_bars(self._config)
+        needed = max(
+            strategy.m15_demand_window_bars(self._config),
+            strategy.m15_trend_window_bars(self._config),
+        )
+        return needed + 1 if needed else 0
+
+    def window_klines(self, symbol: str, now_ms: int) -> list:
+        klines = super().window_klines(symbol, now_ms)
+        if not klines or int(klines[-1].open_time) < self._last_closed_open_time(now_ms):
+            return []
+        return klines
 
     def verdict(self, symbol: str, now_ms: int) -> dict:
-        return strategy.evaluate_daily_demand(
-            self.window_klines(symbol, now_ms), self._config
-        )
-
-
-class DailyTrendCache(HtfKlineCache):
-
-    def interval(self) -> str:
-        return strategy.daily_trend_interval(self._config)
-
-    def window_bars(self) -> int:
-        return strategy.daily_trend_window_bars(self._config)
-
-    def verdict(self, symbol: str, now_ms: int) -> dict:
-        return strategy.evaluate_daily_trend(
-            self.window_klines(symbol, now_ms), self._config
-        )
+        klines = self.window_klines(symbol, now_ms)
+        return {
+            "demand": strategy.evaluate_m15_demand(klines, self._config),
+            "trend": strategy.evaluate_m15_trend(klines, self._config),
+        }
 
 
 DEFAULT_STATE = {
@@ -4489,6 +4487,22 @@ def manage_exit(
         )
 
 
+def should_log_scan_diagnostics(
+    diagnostics: scanner.ScanDiagnostics,
+    previous_signature: tuple | None,
+    last_logged_ms: int,
+    now_ms: int,
+) -> bool:
+    return bool(
+        diagnostics.checked_candidates
+        and (
+            previous_signature != diagnostics.signature()
+            or int(now_ms) < int(last_logged_ms)
+            or int(now_ms) - int(last_logged_ms) >= 300_000
+        )
+    )
+
+
 def run(
     config: dict,
     lifecycle=None,
@@ -4615,9 +4629,11 @@ def run(
             logger.warning(
                 "%s Backtest akan menolak kombinasi ini sampai diperbaiki.", exc
             )
-    if config.get("DAILY_TREND_FILTER_ENABLED", False):
+    if config.get("M15_DEMAND_FILTER_ENABLED", False) or config.get(
+        "M15_TREND_FILTER_ENABLED", False
+    ):
         try:
-            strategy.daily_trend_warmup_bars(config, config["CONFIRM_INTERVAL"])
+            strategy.m15_ratio(config["CONFIRM_INTERVAL"])
         except ValueError as exc:
             logger.warning(
                 "%s Backtest akan menolak kombinasi ini sampai diperbaiki.", exc
@@ -4660,26 +4676,25 @@ def run(
             "Gerbang demand %s NONAKTIF.",
             config.get("TREND_INTERVAL", "1h"),
         )
-    if config.get("DAILY_DEMAND_FILTER_ENABLED", False):
+    if config.get("M15_DEMAND_FILTER_ENABLED", False):
         logger.info(
-            "Gerbang demand harian AKTIF (%s): entry lolos hanya kalau candle %s terakhir "
+            "Gerbang demand M15 AKTIF (%s): entry lolos hanya kalau candle %s terakhir "
             "yang sudah tutup bereaksi di dekat zona demand %s (lookback %d candle, jarak "
             "maks %.2f%% dari atap zona, tebal zona min %.2f%%, close_pos min %.2f). "
-            "Candle harian diambil langsung dari Binance (tanpa menumpang cache trend) dan "
-            "disimpan sekali sehari per simbol. Kalau candle gagal diambil atau riwayatnya "
-            "kurang, kandidat DITOLAK (fail closed).",
-            config.get("DAILY_DEMAND_INTERVAL", "1d"),
-            config.get("DAILY_DEMAND_INTERVAL", "1d"),
-            config.get("DAILY_DEMAND_INTERVAL", "1d"),
-            strategy.daily_demand_lookback_bars(config),
-            float(config.get("DAILY_DEMAND_MAX_DISTANCE_PCT", 12.0) or 0.0),
-            float(config.get("DAILY_DEMAND_ZONE_BUFFER_PCT", 2.0) or 0.0),
-            float(config.get("DAILY_DEMAND_MIN_CLOSE_POSITION", 0.4) or 0.0),
+            "Candle M15 diambil langsung dari Binance dan cache diperbarui setiap "
+            "candle tertutup. Data gagal atau kurang berarti kandidat DITOLAK.",
+            strategy.M15_INTERVAL,
+            strategy.M15_INTERVAL,
+            strategy.M15_INTERVAL,
+            strategy.m15_demand_lookback_bars(config),
+            float(config.get("M15_DEMAND_MAX_DISTANCE_PCT", 5.0) or 0.0),
+            float(config.get("M15_DEMAND_ZONE_BUFFER_PCT", 1.0) or 0.0),
+            float(config.get("M15_DEMAND_MIN_CLOSE_POSITION", 0.45) or 0.0),
         )
     else:
         logger.info(
             "Gerbang demand %s NONAKTIF.",
-            config.get("DAILY_DEMAND_INTERVAL", "1d"),
+            strategy.M15_INTERVAL,
         )
     logger.info("=" * 70)
 
@@ -4776,6 +4791,8 @@ def run(
     last_heartbeat = 0.0
     last_strategy_init_warning = (None, 0.0)
     last_reconciliation = time.time()
+    last_scan_diagnostic_signature = None
+    last_scan_diagnostic_logged_ms = 0
     TIME_SYNC_INTERVAL_SECONDS = 15 * 60
     FILTERS_REFRESH_INTERVAL_SECONDS = 6 * 3600
     RECONCILIATION_INTERVAL_SECONDS = 60
@@ -4805,18 +4822,15 @@ def run(
         }
 
     trend_cache = TrendCache(client, config)
-    daily_cache = DailyDemandCache(client, config)
-    daily_trend_cache = DailyTrendCache(client, config)
+    m15_cache = M15KlineCache(client, config)
     butuh_candle_htf = bool(config.get("TREND_FILTER_ENABLED", False)) or bool(
         config.get("HTF_DEMAND_FILTER_ENABLED", False)
     )
-    butuh_candle_harian = bool(config.get("DAILY_DEMAND_FILTER_ENABLED", False))
+    butuh_candle_m15_demand = bool(config.get("M15_DEMAND_FILTER_ENABLED", False))
+    butuh_candle_m15_trend = bool(config.get("M15_TREND_FILTER_ENABLED", False))
     trend_provider = trend_cache.provider if butuh_candle_htf else None
-    daily_provider = daily_cache.provider if butuh_candle_harian else None
-    butuh_candle_tren_harian = bool(config.get("DAILY_TREND_FILTER_ENABLED", False))
-    daily_trend_provider = (
-        daily_trend_cache.provider if butuh_candle_tren_harian else None
-    )
+    m15_provider = m15_cache.provider if butuh_candle_m15_demand else None
+    m15_trend_provider = m15_cache.provider if butuh_candle_m15_trend else None
     if trend_provider is None:
         logger.warning(
             "Gerbang timeframe tinggi NONAKTIF (TREND_FILTER_ENABLED=False dan "
@@ -4834,36 +4848,36 @@ def run(
             float(config.get("TREND_ADX_MIN", 20.0) or 0.0),
             strategy.trend_window_bars(config),
         )
-    if daily_trend_provider is None:
+    if m15_trend_provider is None:
         logger.info(
-            "Gerbang EMA + ADX %s NONAKTIF: tidak ada permintaan candle harian tambahan.",
-            config.get("DAILY_TREND_INTERVAL", "1d"),
+            "Gerbang EMA + ADX %s NONAKTIF: tidak ada pemeriksaan trend M15.",
+            strategy.M15_INTERVAL,
         )
     else:
         logger.info(
             "Gerbang EMA + ADX %s AKTIF: close > EMA%d > EMA%d dan ADX%d >= %g "
-            "(jendela %d candle tertutup per simbol, di-cache sampai candle harian "
-            "berganti, fail closed bila data gagal diambil).",
-            strategy.daily_trend_interval(config),
-            int(config.get("DAILY_TREND_EMA_FAST", 20)),
-            int(config.get("DAILY_TREND_EMA_SLOW", 50)),
-            int(config.get("DAILY_TREND_ADX_PERIOD", 14)),
-            float(config.get("DAILY_TREND_ADX_MIN", 20.0) or 0.0),
-            strategy.daily_trend_window_bars(config),
+            "(jendela %d candle tertutup per simbol, memakai cache M15 bersama "
+            "demand; fail closed bila data gagal diambil).",
+            strategy.m15_trend_interval(config),
+            int(config.get("M15_TREND_EMA_FAST", 20)),
+            int(config.get("M15_TREND_EMA_SLOW", 50)),
+            int(config.get("M15_TREND_ADX_PERIOD", 14)),
+            float(config.get("M15_TREND_ADX_MIN", 20.0) or 0.0),
+            strategy.m15_trend_window_bars(config),
         )
-    if daily_provider is None:
+    if m15_provider is None:
         logger.info(
-            "Gerbang demand %s NONAKTIF: tidak ada permintaan candle harian ke Binance.",
-            config.get("DAILY_DEMAND_INTERVAL", "1d"),
+            "Gerbang demand %s NONAKTIF: tidak ada pemeriksaan demand M15.",
+            strategy.M15_INTERVAL,
         )
     else:
         logger.info(
             "Gerbang demand %s AKTIF: jendela %d candle %s tertutup per simbol, "
-            "di-cache sampai candle harian berganti (fail closed bila data gagal "
+            "cache diperbarui setelah candle M15 tutup (fail closed bila data gagal "
             "diambil).",
-            strategy.daily_demand_interval(config),
-            strategy.daily_demand_window_bars(config),
-            strategy.daily_demand_interval(config),
+            strategy.m15_demand_interval(config),
+            strategy.m15_demand_window_bars(config),
+            strategy.m15_demand_interval(config),
         )
 
     exit_code = 0
@@ -5073,6 +5087,7 @@ def run(
                                 "Filter BTC tidak dapat dihitung; kandidat ditolak: %s",
                                 exc,
                             )
+                    scan_diagnostics = scanner.ScanDiagnostics()
                     best = scanner.find_best_candidate(
                         tickers,
                         klines_fetcher,
@@ -5081,8 +5096,9 @@ def run(
                         klines_fetcher_many=klines_fetcher_many,
                         prewarm_fn=client.prewarm_book_ticker,
                         trend_provider=trend_provider,
-                        daily_provider=daily_provider,
-                        daily_trend_provider=daily_trend_provider,
+                        m15_provider=m15_provider,
+                        m15_trend_provider=m15_trend_provider,
+                        diagnostics=scan_diagnostics,
                     )
                     if best:
                         book = client.get_book_ticker(best.symbol)
@@ -5127,17 +5143,17 @@ def run(
                                     or strategy.trend_interval(config),
                                     best.htf_demand.get("reason"),
                                 )
-                            if best.daily_demand is not None:
+                            if best.m15_demand is not None:
                                 trend_info += " | demand %s: %s" % (
-                                    best.daily_demand.get("interval")
-                                    or strategy.daily_demand_interval(config),
-                                    best.daily_demand.get("reason"),
+                                    best.m15_demand.get("interval")
+                                    or strategy.m15_demand_interval(config),
+                                    best.m15_demand.get("reason"),
                                 )
-                            if best.daily_trend is not None:
+                            if best.m15_trend is not None:
                                 trend_info += " | trend %s: %s" % (
-                                    best.daily_trend.get("interval")
-                                    or strategy.daily_trend_interval(config),
-                                    best.daily_trend.get("reason"),
+                                    best.m15_trend.get("interval")
+                                    or strategy.m15_trend_interval(config),
+                                    best.m15_trend.get("reason"),
                                 )
                             logger.info(
                                 "Kandidat terpilih: %s (vol24h=%.0f, 24h=%.2f%%, spread=%.3f%%) | %s%s",
@@ -5193,38 +5209,23 @@ def run(
                                 config["MAX_SPREAD_PCT"],
                             )
                     else:
-                        gerbang_aktif = []
-                        if bool(config.get("TREND_FILTER_ENABLED", False)):
-                            gerbang_aktif.append(
-                                f"gerbang trend {strategy.trend_interval(config)}"
-                            )
-                        if bool(config.get("HTF_DEMAND_FILTER_ENABLED", False)):
-                            gerbang_aktif.append(
-                                "gerbang zona demand "
-                                f"{strategy.trend_interval(config)}"
-                            )
-                        if bool(config.get("DAILY_DEMAND_FILTER_ENABLED", False)):
-                            gerbang_aktif.append(
-                                "gerbang zona demand "
-                                f"{strategy.daily_demand_interval(config)}"
-                            )
-                        if bool(config.get("DAILY_TREND_FILTER_ENABLED", False)):
-                            gerbang_aktif.append(
-                                "gerbang EMA + ADX "
-                                f"{strategy.daily_trend_interval(config)}"
-                            )
-                        if gerbang_aktif:
-                            logger.info(
-                                "Tidak ada kandidat yang lolos konfirmasi %s dan %s pada "
-                                "scan ini.",
-                                config["CONFIRM_INTERVAL"],
-                                " serta ".join(gerbang_aktif),
-                            )
-                        else:
-                            logger.info(
-                                "Tidak ada kandidat yang lolos konfirmasi volume rolling "
-                                "pada scan ini."
-                            )
+                        logger.info(
+                            "Tidak ada kandidat entry pada scan ini (%d diperiksa dari "
+                            "%d yang lolos filter pasar).",
+                            scan_diagnostics.checked_candidates,
+                            scan_diagnostics.market_candidates,
+                        )
+                        diagnostic_now_ms = state_mod.now_ms()
+                        if should_log_scan_diagnostics(
+                            scan_diagnostics,
+                            last_scan_diagnostic_signature,
+                            last_scan_diagnostic_logged_ms,
+                            diagnostic_now_ms,
+                        ):
+                            for line in scan_diagnostics.log_lines(scan_config):
+                                logger.info("%s", line)
+                            last_scan_diagnostic_signature = scan_diagnostics.signature()
+                            last_scan_diagnostic_logged_ms = diagnostic_now_ms
 
             if time.time() - last_heartbeat >= config["HEARTBEAT_INTERVAL_SECONDS"]:
                 last_heartbeat = time.time()

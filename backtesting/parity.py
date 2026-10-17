@@ -397,34 +397,34 @@ def trend_warmup_ms(config: dict, interval: str) -> int:
     ) * strategy_mod.interval_to_ms(interval)
 
 
-def daily_demand_enabled(config: dict) -> bool:
+def m15_demand_enabled(config: dict) -> bool:
     from strategy import indicators as strategy_mod
 
-    return strategy_mod.daily_demand_enabled(config)
+    return strategy_mod.m15_demand_enabled(config)
 
 
-def daily_demand_window_bars(config: dict) -> int:
+def m15_demand_window_bars(config: dict) -> int:
     from strategy import indicators as strategy_mod
 
-    return strategy_mod.daily_demand_window_bars(config)
+    return strategy_mod.m15_demand_window_bars(config)
 
 
-def daily_demand_lookback_bars(config: dict) -> int:
+def m15_demand_lookback_bars(config: dict) -> int:
     from strategy import indicators as strategy_mod
 
-    return strategy_mod.daily_demand_lookback_bars(config)
+    return strategy_mod.m15_demand_lookback_bars(config)
 
 
-def daily_trend_window_bars(config: dict) -> int:
+def m15_trend_window_bars(config: dict) -> int:
     from strategy import indicators as strategy_mod
 
-    return strategy_mod.daily_trend_window_bars(config)
+    return strategy_mod.m15_trend_window_bars(config)
 
 
-def daily_trend_warmup_ms(config: dict, interval: str) -> int:
+def m15_trend_warmup_ms(config: dict, interval: str) -> int:
     from strategy import indicators as strategy_mod
 
-    return strategy_mod.daily_trend_warmup_bars(
+    return strategy_mod.m15_trend_warmup_bars(
         config, interval
     ) * strategy_mod.interval_to_ms(interval)
 
@@ -449,47 +449,47 @@ def evaluate_trend(klines: Sequence[Kline], config: dict) -> dict:
     return strategy_mod.evaluate_trend_filter(list(klines), config)
 
 
-class DailyDemandLookup:
+class M15DemandLookup:
 
-    def __init__(self, daily_klines: Sequence[Kline], config: dict) -> None:
+    def __init__(self, m15_klines: Sequence[Kline], config: dict) -> None:
         from strategy import indicators as strategy_mod
 
         self.config = config
-        self.interval = strategy_mod.daily_demand_interval(config)
-        self.window = strategy_mod.daily_demand_window_bars(config)
-        self.klines = list(daily_klines)
+        self.interval = strategy_mod.m15_demand_interval(config)
+        self.window = strategy_mod.m15_demand_window_bars(config)
+        self.klines = list(m15_klines)
         self.close_times = [int(k.close_time) for k in self.klines]
 
     def window_at(self, signal_close_time_ms: int) -> list:
         idx = bisect_right(self.close_times, int(signal_close_time_ms))
         return self.klines[max(0, idx - self.window) : idx]
 
-    def daily_demand_at(self, signal_close_time_ms: int) -> dict:
+    def m15_demand_at(self, signal_close_time_ms: int) -> dict:
         from strategy import indicators as strategy_mod
 
-        return strategy_mod.evaluate_daily_demand(
+        return strategy_mod.evaluate_m15_demand(
             self.window_at(signal_close_time_ms), self.config
         )
 
 
-def make_daily_lookup(
+def make_m15_lookup(
     klines: Sequence[Kline],
     config: dict,
     interval: str,
     *,
     sudah_dirangkai: bool = False,
-) -> Optional[DailyDemandLookup]:
+) -> Optional[M15DemandLookup]:
     from strategy import indicators as strategy_mod
 
-    if not strategy_mod.daily_demand_enabled(config):
+    if not strategy_mod.m15_demand_enabled(config):
         return None
     bars = (
-        list(klines) if sudah_dirangkai else build_daily_klines(klines, config, interval)
+        list(klines) if sudah_dirangkai else build_m15_klines(klines, config, interval)
     )
-    return DailyDemandLookup(bars, config)
+    return M15DemandLookup(bars, config)
 
 
-def build_daily_klines(
+def build_m15_klines(
     klines: Sequence[Kline], config: dict, interval: str
 ) -> list[Kline]:
     from strategy import indicators as strategy_mod
@@ -498,24 +498,24 @@ def build_daily_klines(
     if source_minutes is None:
         raise ValueError(
             f"Interval simulasi '{interval}' tidak dikenal sehingga candle "
-            f"'{strategy_mod.daily_demand_interval(config)}' tidak bisa dirangkai."
+            f"'{strategy_mod.m15_demand_interval(config)}' tidak bisa dirangkai."
         )
     return strategy_mod.aggregate_klines(
         list(klines),
-        strategy_mod.daily_demand_interval_minutes(config),
+        strategy_mod.m15_demand_interval_minutes(config),
         source_minutes,
     )
 
 
-class DailyTrendLookup:
+class M15TrendLookup:
 
-    def __init__(self, daily_klines: Sequence[Kline], config: dict) -> None:
+    def __init__(self, m15_klines: Sequence[Kline], config: dict) -> None:
         from strategy import indicators as strategy_mod
 
         self.config = config
-        self.interval = strategy_mod.daily_trend_interval(config)
-        self.window = strategy_mod.daily_trend_window_bars(config)
-        self.klines = list(daily_klines)
+        self.interval = strategy_mod.m15_trend_interval(config)
+        self.window = strategy_mod.m15_trend_window_bars(config)
+        self.klines = list(m15_klines)
         self.close_times = [int(k.close_time) for k in self.klines]
 
     def window_at(self, signal_close_time_ms: int) -> list:
@@ -525,12 +525,12 @@ class DailyTrendLookup:
     def verdict_at(self, signal_close_time_ms: int) -> dict:
         from strategy import indicators as strategy_mod
 
-        return strategy_mod.evaluate_daily_trend(
+        return strategy_mod.evaluate_m15_trend(
             self.window_at(signal_close_time_ms), self.config
         )
 
 
-def build_daily_trend_klines(
+def build_m15_trend_klines(
     klines: Sequence[Kline], config: dict, interval: str
 ) -> list[Kline]:
     from strategy import indicators as strategy_mod
@@ -539,32 +539,32 @@ def build_daily_trend_klines(
     if source_minutes is None:
         raise ValueError(
             f"Interval simulasi '{interval}' tidak dikenal sehingga candle "
-            f"'{strategy_mod.daily_trend_interval(config)}' tidak bisa dirangkai."
+            f"'{strategy_mod.m15_trend_interval(config)}' tidak bisa dirangkai."
         )
     return strategy_mod.aggregate_klines(
         list(klines),
-        strategy_mod.daily_trend_interval_minutes(config),
+        strategy_mod.m15_trend_interval_minutes(config),
         source_minutes,
     )
 
 
-def make_daily_trend_lookup(
+def make_m15_trend_lookup(
     klines: Sequence[Kline],
     config: dict,
     interval: str,
     *,
     sudah_dirangkai: bool = False,
-) -> Optional[DailyTrendLookup]:
+) -> Optional[M15TrendLookup]:
     from strategy import indicators as strategy_mod
 
-    if not strategy_mod.daily_trend_enabled(config):
+    if not strategy_mod.m15_trend_enabled(config):
         return None
     bars = (
         list(klines)
         if sudah_dirangkai
-        else build_daily_trend_klines(klines, config, interval)
+        else build_m15_trend_klines(klines, config, interval)
     )
-    return DailyTrendLookup(bars, config)
+    return M15TrendLookup(bars, config)
 
 
 def per_trade_metrics(trades: Sequence) -> dict:
