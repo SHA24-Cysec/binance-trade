@@ -37,9 +37,9 @@ HARGA_AWAL = 100.0
 
 
 def config_dasar(cap_jam: float | None = CAP_CONTOH, ekor: str = "datar") -> dict:
-    """Config backtest satu simbol dengan semua gerbang HTF dimatikan.
+    """Config backtest satu simbol dengan semua gerbang timeframe dimatikan.
 
-    Gerbang trend, demand H1, demand M15, EMA+ADX M15, filter BTC, dan
+    Layer arah Daily, layer zona H1, layer timing M5, filter BTC, dan
     filter volume dimatikan supaya rangkaian candle sintetis pasti menghasilkan
     entry. Yang diuji di sini adalah aturan EXIT, bukan aturan entry.
     """
@@ -49,10 +49,9 @@ def config_dasar(cap_jam: float | None = CAP_CONTOH, ekor: str = "datar") -> dic
             "_symbol": "",
             "MODE": "PAPER",
             "CONFIG_UPDATE_MODE": "test",
-            "TREND_FILTER_ENABLED": False,
-            "HTF_DEMAND_FILTER_ENABLED": False,
-            "M15_DEMAND_FILTER_ENABLED": False,
-            "M15_TREND_FILTER_ENABLED": False,
+            "DIRECTION_FILTER_ENABLED": False,
+            "ZONE_FILTER_ENABLED": False,
+            "TIMING_FILTER_ENABLED": False,
             "BTC_FILTER_ENABLED": False,
             "ROLLING_VOLUME_FILTER_ENABLED": False,
             "DEMAND_ZONE_FILTER_ENABLED": False,

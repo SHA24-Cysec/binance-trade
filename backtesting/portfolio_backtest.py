@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from bisect import bisect_left
 from dataclasses import dataclass, field
 from typing import Callable, Optional
@@ -79,14 +79,12 @@ class PortfolioResult:
     final_equity: float = 0.0
     risk_events: dict = field(default_factory=dict)
     chase_skips: int = 0
-    trend_skips: int = 0
-    trend_scans: int = 0
-    htf_demand_skips: int = 0
-    htf_demand_scans: int = 0
-    m15_demand_skips: int = 0
-    m15_demand_scans: int = 0
-    m15_trend_skips: int = 0
-    m15_trend_scans: int = 0
+    direction_skips: int = 0
+    direction_scans: int = 0
+    zone_skips: int = 0
+    zone_scans: int = 0
+    timing_skips: int = 0
+    timing_scans: int = 0
     same_coin_skips: int = 0
     mark_to_market_open: bool = False
     mark_to_market_symbol: Optional[str] = None
@@ -248,6 +246,150 @@ def _klines_untuk_simbol(
     return cache.read(symbol, interval, start_ms, end_ms)
 
 
+def fetch_native_klines(
+    client,
+    symbols: list[str],
+    interval: str,
+    start_ms: int,
+    end_ms: int,
+    cache: Optional[KlineCache] = None,
+    max_workers: int = 1,
+    progress_cb: Optional[Callable[[float, str], None]] = None,
+) -> dict[str, list[Kline]]:
+    """Ambil candle timeframe tinggi langsung dari bursa.
+
+    Layer arah (Daily) dan layer zona (H1) memakai candle asli bursa, sama
+    seperti bot live. Backtest yang merangkai candle dari M5 akan butuh
+    warmup 288 kali lebih panjang untuk layer Daily, jadi jalur native ini
+    dipakai sebagai jalur utama.
+    """
+    unique = [str(sym) for sym in dict.fromkeys(symbols or ())]
+    if not unique:
+        return {}
+    out: dict[str, list[Kline]] = {}
+    workers = max(1, int(max_workers or 1))
+    done = 0
+    total = max(1, len(unique))
+
+    def _one(sym: str) -> list[Kline]:
+        return _klines_untuk_simbol(client, sym, interval, start_ms, end_ms, cache)
+
+    if workers == 1 or len(unique) == 1:
+        for sym in unique:
+            try:
+                out[sym] = _one(sym)
+            except Exception:
+                out[sym] = []
+            done += 1
+            if progress_cb is not None:
+                progress_cb(done / total, sym)
+        return out
+
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="backtest-htf") as pool:
+        futures = {pool.submit(_one, sym): sym for sym in unique}
+        for future in as_completed(futures):
+            sym = futures[future]
+            try:
+                out[sym] = future.result()
+            except Exception:
+                out[sym] = []
+            done += 1
+            if progress_cb is not None:
+                progress_cb(done / total, sym)
+    return out
+
+
+def build_native_lookups(
+    series_by_symbol: dict[str, list],
+    config: dict,
+    factory,
+) -> dict:
+    """Bangun objek lookup dari candle timeframe tinggi native."""
+    lookups: dict = {}
+    for sym, klines in (series_by_symbol or {}).items():
+        if not klines:
+            continue
+        lookup = factory(klines, config)
+        if lookup is not None:
+            lookups[sym] = lookup
+    return lookups
+
+
+def fetch_native_lookups(
+    client,
+    symbols: list[str],
+    config: dict,
+    start_ms: int,
+    end_ms: int,
+    cache: Optional[KlineCache] = None,
+    max_workers: int = 1,
+    progress_cb: Optional[Callable[[float, str], None]] = None,
+) -> tuple[dict, dict]:
+    """Ambil candle Daily dan H1 langsung dari bursa lalu bangun lookup-nya.
+
+    Layer arah dan layer zona di bot live memakai candle asli bursa. Backtest
+    memakai jalur yang sama supaya hasil simulasi tidak bergantung pada
+    agregasi M5 yang butuh warmup sangat panjang.
+    """
+    arah_of: dict = {}
+    zona_of: dict = {}
+    unique = [str(sym) for sym in dict.fromkeys(symbols or ())]
+    if not unique:
+        return arah_of, zona_of
+
+    if strategy.direction_enabled(config):
+        itv = strategy.direction_interval(config)
+        need_ms = (
+            strategy.direction_window_bars(config)
+            * strategy.INTERVAL_MINUTES.get(itv, 1440)
+            * 60_000
+        )
+        series = fetch_native_klines(
+            client,
+            unique,
+            itv,
+            int(start_ms) - int(need_ms),
+            int(end_ms),
+            cache,
+            max_workers,
+            progress_cb,
+        )
+        arah_of = build_native_lookups(
+            series,
+            config,
+            lambda klines, cfg: parity.make_direction_lookup(
+                klines, cfg, itv, sudah_dirangkai=True
+            ),
+        )
+
+    if strategy.zone_enabled(config):
+        itv = strategy.zone_interval(config)
+        need_ms = (
+            strategy.zone_window_bars(config)
+            * strategy.INTERVAL_MINUTES.get(itv, 60)
+            * 60_000
+        )
+        series = fetch_native_klines(
+            client,
+            unique,
+            itv,
+            int(start_ms) - int(need_ms),
+            int(end_ms),
+            cache,
+            max_workers,
+            progress_cb,
+        )
+        zona_of = build_native_lookups(
+            series,
+            config,
+            lambda klines, cfg: parity.make_zone_lookup(
+                klines, cfg, itv, sudah_dirangkai=True
+            ),
+        )
+
+    return arah_of, zona_of
+
+
 def build_timeline(
     store: KlineStore,
     interval: str,
@@ -281,80 +423,82 @@ class EntrySignalCache(dict):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.trend_scans = 0
-        self.trend_skips = 0
-        self.trend_events: list = []
-        self.htf_demand_scans = 0
-        self.htf_demand_skips = 0
-        self.htf_demand_events: list = []
-        self.m15_demand_scans = 0
-        self.m15_demand_skips = 0
-        self.m15_demand_events: list = []
-        self.m15_trend_scans = 0
-        self.m15_trend_skips = 0
-        self.m15_trend_events: list = []
+        self.direction_scans = 0
+        self.direction_skips = 0
+        self.direction_events: list = []
+        self.zone_scans = 0
+        self.zone_skips = 0
+        self.zone_events: list = []
+        self.timing_scans = 0
+        self.timing_skips = 0
+        self.timing_events: list = []
 
 
-def build_trend_lookups(
+def build_direction_lookups(
     store: KlineStore, symbols: list, config: dict, interval: str
 ) -> dict:
     from strategy import indicators as strategy_mod
 
-    if not config.get("TREND_FILTER_ENABLED", False) and not config.get(
-        "HTF_DEMAND_FILTER_ENABLED", False
-    ):
+    if not strategy_mod.direction_enabled(config):
         return {}
-    target = strategy_mod.trend_interval_minutes(config)
+    target = strategy_mod.direction_interval_minutes(config)
     source = strategy_mod.INTERVAL_MINUTES.get(str(interval))
     if source is None:
         raise BacktestError(
-            f"Interval simulasi '{interval}' tidak dikenal sehingga candle trend "
-            f"'{strategy_mod.trend_interval(config)}' tidak bisa dirangkai."
+            f"Interval simulasi '{interval}' tidak dikenal sehingga candle arah "
+            f"'{strategy_mod.direction_interval(config)}' tidak bisa dirangkai."
         )
     lookups: dict = {}
     for sym in symbols:
         klines = store.klines(sym)
         if not klines:
             continue
-        lookups[sym] = parity.TrendLookup(
+        lookups[sym] = parity.DirectionLookup(
             strategy_mod.aggregate_klines(klines, target, source), config
         )
         del klines
     return lookups
 
 
-def build_m15_lookups(
+def build_zone_lookups(
     store: KlineStore, symbols: list, config: dict, interval: str
 ) -> dict:
     from strategy import indicators as strategy_mod
 
-    if not strategy_mod.m15_demand_enabled(config):
+    if not strategy_mod.zone_enabled(config):
         return {}
+    target = strategy_mod.zone_interval_minutes(config)
+    source = strategy_mod.INTERVAL_MINUTES.get(str(interval))
+    if source is None:
+        raise BacktestError(
+            f"Interval simulasi '{interval}' tidak dikenal sehingga candle zona "
+            f"'{strategy_mod.zone_interval(config)}' tidak bisa dirangkai."
+        )
     lookups: dict = {}
     for sym in symbols:
         klines = store.klines(sym)
         if not klines:
             continue
-        lookups[sym] = parity.M15DemandLookup(
-            parity.build_m15_klines(klines, config, interval), config
+        lookups[sym] = parity.ZoneLookup(
+            strategy_mod.aggregate_klines(klines, target, source), config
         )
         del klines
     return lookups
 
 
-def build_m15_trend_lookups(
+def build_timing_lookups(
     store: KlineStore, symbols: list, config: dict, interval: str
 ) -> dict:
     from strategy import indicators as strategy_mod
 
-    if not strategy_mod.m15_trend_enabled(config):
+    if not strategy_mod.timing_enabled(config):
         return {}
     lookups: dict = {}
     for sym in symbols:
         klines = store.klines(sym)
         if not klines:
             continue
-        lookup = parity.make_m15_trend_lookup(klines, config, interval)
+        lookup = parity.make_timing_lookup(klines, config)
         if lookup is not None:
             lookups[sym] = lookup
         del klines
@@ -363,42 +507,41 @@ def build_m15_trend_lookups(
 
 def unpack_prebuilt(prebuilt: Optional[tuple]):
     if prebuilt is None:
-        return None, None, None, None
-    if len(prebuilt) >= 4:
-        return prebuilt[0], prebuilt[1], prebuilt[2], prebuilt[3]
+        return None, None, None, None, None
+    if len(prebuilt) >= 5:
+        return prebuilt[0], prebuilt[1], prebuilt[2], prebuilt[3], prebuilt[4]
+    if len(prebuilt) == 4:
+        return prebuilt[0], prebuilt[1], prebuilt[2], prebuilt[3], None
     if len(prebuilt) == 3:
-        return prebuilt[0], prebuilt[1], prebuilt[2], None
-    return prebuilt[0], prebuilt[1], None, None
+        return prebuilt[0], prebuilt[1], prebuilt[2], None, None
+    return prebuilt[0], prebuilt[1], None, None, None
 
 
-def _siapkan_trend(prebuilt, store, series_of, config, interval):
-    _, _, trend_of, _ = unpack_prebuilt(prebuilt)
-    if trend_of is not None:
-        return trend_of
-    if not config.get("TREND_FILTER_ENABLED", False) and not config.get(
-        "HTF_DEMAND_FILTER_ENABLED", False
-    ):
+def _siapkan_arah(prebuilt, store, series_of, config, interval):
+    _, _, arah_of, _, _ = unpack_prebuilt(prebuilt)
+    if arah_of is not None:
+        return arah_of
+    if not config.get("DIRECTION_FILTER_ENABLED", False):
         return {}
-    return build_trend_lookups(store, list(series_of), config, interval)
+    return build_direction_lookups(store, list(series_of), config, interval)
 
 
-def _siapkan_m15(prebuilt, store, series_of, config, interval):
-    _, _, _, m15_of = unpack_prebuilt(prebuilt)
-    if m15_of is not None:
-        return m15_of
-    if not config.get("M15_DEMAND_FILTER_ENABLED", False):
+def _siapkan_zona(prebuilt, store, series_of, config, interval):
+    _, _, _, zona_of, _ = unpack_prebuilt(prebuilt)
+    if zona_of is not None:
+        return zona_of
+    if not config.get("ZONE_FILTER_ENABLED", False):
         return {}
-    return build_m15_lookups(store, list(series_of), config, interval)
+    return build_zone_lookups(store, list(series_of), config, interval)
 
 
-def _siapkan_tren_m15(prebuilt, store, series_of, config, interval):
-    from strategy import indicators as strategy_mod
-
-    if prebuilt is not None and len(prebuilt) >= 5 and prebuilt[4] is not None:
-        return prebuilt[4]
-    if not strategy_mod.m15_trend_enabled(config):
+def _siapkan_timing(prebuilt, store, series_of, config, interval):
+    _, _, _, _, timing_of = unpack_prebuilt(prebuilt)
+    if timing_of is not None:
+        return timing_of
+    if not config.get("TIMING_FILTER_ENABLED", False):
         return {}
-    return build_m15_trend_lookups(store, list(series_of), config, interval)
+    return build_timing_lookups(store, list(series_of), config, interval)
 
 
 def precompute_entry_signals(
@@ -426,10 +569,11 @@ def precompute_entry_signals(
     if not symbols:
         raise BacktestError("Tidak ada data yang lolos policy semesta bersama.")
 
-    if prebuilt is not None:
-        timeline, series_of = prebuilt
-    else:
+    _pb_timeline, _pb_series, arah_of, zona_of, timing_of = unpack_prebuilt(prebuilt)
+    if _pb_timeline is None or _pb_series is None:
         timeline, series_of = build_timeline(store, interval, symbols)
+    else:
+        timeline, series_of = _pb_timeline, _pb_series
     if not timeline:
         raise BacktestError("Garis waktu kosong, tidak ada candle yang bisa diproses.")
     symbols = [sym for sym in symbols if sym in series_of]
@@ -440,19 +584,22 @@ def precompute_entry_signals(
     bar_ms = INTERVAL_MINUTES.get(interval, 5) * MS_PER_MIN
     btc_lookup = parity.make_btc_lookup(btc_klines, config, bar_ms)
     gate_cfg = parity.gate_config(config, btc_lookup)
-    trend_of = _siapkan_trend(prebuilt, store, series_of, config, interval)
-    m15_of = _siapkan_m15(prebuilt, store, series_of, config, interval)
-    tren_m15_of = _siapkan_tren_m15(prebuilt, store, series_of, config, interval)
-    if trend_of or config.get("M15_DEMAND_FILTER_ENABLED") or config.get("M15_TREND_FILTER_ENABLED"):
-        butuh_warmup = parity.htf_gate_warmup_ms(config, interval)
+    native_htf = prebuilt is not None and (arah_of is not None or zona_of is not None)
+    if not native_htf:
+        arah_of = _siapkan_arah(prebuilt, store, series_of, config, interval)
+        zona_of = _siapkan_zona(prebuilt, store, series_of, config, interval)
+    if not timing_of:
+        timing_of = _siapkan_timing(prebuilt, store, series_of, config, interval)
+    if (arah_of or zona_of) and not native_htf:
+        butuh_warmup = parity.gate_warmup_ms(config, interval)
         if int(warmup_ms) < butuh_warmup:
             logger.warning(
-                "Warmup %d ms dinaikkan menjadi %d ms karena gerbang timeframe "
-                "tinggi yang aktif (trend + demand H1 + demand M15 + EMA/ADX M15) "
-                "butuh paling sedikit %d candle %s sebagai pemanasan.",
+                "Warmup %d ms dinaikkan menjadi %d ms karena layer timeframe tinggi "
+                "yang aktif (arah + zona) butuh paling sedikit %d candle %s "
+                "sebagai pemanasan.",
                 warmup_ms,
                 butuh_warmup,
-                strategy.htf_gate_warmup_bars(config, interval),
+                strategy.gate_warmup_bars(config, interval),
                 interval,
             )
             warmup_ms = butuh_warmup
@@ -513,51 +660,41 @@ def precompute_entry_signals(
                     f"Evaluasi sinyal {sym} pada waktu {int(t_now)} "
                     f"(bar {index}) gagal: {type(exc).__name__}: {str(exc)[:160]}"
                 ) from exc
-            if setup.ok and trend_of:
-                lock = trend_of.get(sym)
-                if lock is not None and signal_candle is not None:
-                    signals.trend_scans += 1
-                    if not lock.verdict_at(signal_candle.close_time)["ok"]:
-                        signals.trend_skips += 1
-                        if len(signals.trend_events) < max_skipped_records:
-                            signals.trend_events.append((int(t_now), sym))
-                        continue
-            if (
-                setup.ok
-                and trend_of
-                and bool(config.get("HTF_DEMAND_FILTER_ENABLED", False))
-            ):
-                lock = trend_of.get(sym)
-                if lock is not None and signal_candle is not None:
-                    signals.htf_demand_scans += 1
-                    if not lock.htf_demand_at(signal_candle.close_time)["ok"]:
-                        signals.htf_demand_skips += 1
-                        if len(signals.htf_demand_events) < max_skipped_records:
-                            signals.htf_demand_events.append((int(t_now), sym))
-                        continue
-            if setup.ok and bool(config.get("M15_DEMAND_FILTER_ENABLED", False)):
-                lock = m15_of.get(sym)
-                signals.m15_demand_scans += 1
-                if (
-                    lock is None
-                    or signal_candle is None
-                    or not lock.m15_demand_at(signal_candle.close_time)["ok"]
-                ):
-                    signals.m15_demand_skips += 1
-                    if len(signals.m15_demand_events) < max_skipped_records:
-                        signals.m15_demand_events.append((int(t_now), sym))
-                    continue
-            if setup.ok and bool(config.get("M15_TREND_FILTER_ENABLED", False)):
-                lock = tren_m15_of.get(sym)
-                signals.m15_trend_scans += 1
+            if setup.ok and bool(config.get("DIRECTION_FILTER_ENABLED", False)):
+                lock = arah_of.get(sym) if arah_of else None
+                signals.direction_scans += 1
                 if (
                     lock is None
                     or signal_candle is None
                     or not lock.verdict_at(signal_candle.close_time)["ok"]
                 ):
-                    signals.m15_trend_skips += 1
-                    if len(signals.m15_trend_events) < max_skipped_records:
-                        signals.m15_trend_events.append((int(t_now), sym))
+                    signals.direction_skips += 1
+                    if len(signals.direction_events) < max_skipped_records:
+                        signals.direction_events.append((int(t_now), sym))
+                    continue
+            if setup.ok and bool(config.get("ZONE_FILTER_ENABLED", False)):
+                lock = zona_of.get(sym) if zona_of else None
+                signals.zone_scans += 1
+                if (
+                    lock is None
+                    or signal_candle is None
+                    or not lock.zone_at(signal_candle.close_time)["ok"]
+                ):
+                    signals.zone_skips += 1
+                    if len(signals.zone_events) < max_skipped_records:
+                        signals.zone_events.append((int(t_now), sym))
+                    continue
+            if setup.ok and bool(config.get("TIMING_FILTER_ENABLED", False)):
+                lock = timing_of.get(sym) if timing_of else None
+                signals.timing_scans += 1
+                if (
+                    lock is None
+                    or signal_candle is None
+                    or not lock.verdict_at(signal_candle.close_time)["ok"]
+                ):
+                    signals.timing_skips += 1
+                    if len(signals.timing_events) < max_skipped_records:
+                        signals.timing_events.append((int(t_now), sym))
                     continue
             if setup.ok:
                 lolos.append((rank, pct24, sym, index, vol24, setup))
@@ -624,7 +761,7 @@ def run_portfolio_backtest(
         raise BacktestError("Tidak ada data yang lolos policy semesta bersama.")
     lolos_policy = len(symbols)
 
-    timeline, series_of, _trend_prebuilt, _m15_prebuilt = unpack_prebuilt(prebuilt)
+    timeline, series_of, arah_of, zona_of, timing_of = unpack_prebuilt(prebuilt)
     if timeline is None:
         timeline, series_of = build_timeline(store, interval, symbols)
     if not timeline:
@@ -661,30 +798,26 @@ def run_portfolio_backtest(
         _pre_warnings.append(
             "Status TRADING historis tidak tersedia dari candle Binance. Policy status hanya dapat diverifikasi dari metadata saat ini bila caller menyediakannya."
         )
-    trend_of = _siapkan_trend(prebuilt, store, series_of, config, interval)
-    m15_of = _siapkan_m15(prebuilt, store, series_of, config, interval)
-    tren_m15_of = _siapkan_tren_m15(prebuilt, store, series_of, config, interval)
-    if trend_of or config.get("M15_DEMAND_FILTER_ENABLED") or config.get("M15_TREND_FILTER_ENABLED"):
-        _butuh_gerbang = parity.htf_gate_warmup_ms(config, interval)
+    native_htf = prebuilt is not None and (arah_of is not None or zona_of is not None)
+    if not native_htf:
+        arah_of = _siapkan_arah(prebuilt, store, series_of, config, interval)
+        zona_of = _siapkan_zona(prebuilt, store, series_of, config, interval)
+    if not timing_of:
+        timing_of = _siapkan_timing(prebuilt, store, series_of, config, interval)
+    if (arah_of or zona_of) and not native_htf:
+        _butuh_gerbang = parity.gate_warmup_ms(config, interval)
         if int(warmup_ms) < _butuh_gerbang:
             _bagian = []
-            if trend_of:
+            if arah_of:
                 _bagian.append(
-                    f"gerbang timeframe tinggi {config.get('TREND_INTERVAL', '1h')} "
-                    f"(trend + zona demand) butuh {strategy.htf_window_bars(config)} candle "
-                    "tertutup"
+                    f"layer arah {config.get('DIRECTION_INTERVAL', '1d')} butuh "
+                    f"{strategy.direction_window_bars(config)} candle tertutup"
                 )
-            if config.get("M15_DEMAND_FILTER_ENABLED"):
+            if zona_of:
                 _bagian.append(
-                    f"gerbang zona demand {strategy.m15_demand_interval(config)} butuh "
-                    f"{strategy.m15_demand_window_bars(config)} candle "
-                    f"{strategy.m15_demand_interval(config)} tertutup"
-                )
-            if config.get("M15_TREND_FILTER_ENABLED"):
-                _bagian.append(
-                    f"gerbang EMA + ADX {strategy.m15_trend_interval(config)} butuh "
-                    f"{strategy.m15_trend_window_bars(config)} candle "
-                    f"{strategy.m15_trend_interval(config)} tertutup"
+                    f"layer zona {config.get('ZONE_INTERVAL', '1h')} butuh "
+                    f"{strategy.zone_window_bars(config)} candle "
+                    f"{config.get('ZONE_INTERVAL', '1h')} tertutup"
                 )
             _pre_warnings.append(
                 f"Warmup {warmup_ms} ms dinaikkan menjadi {_butuh_gerbang} ms karena "
@@ -734,14 +867,12 @@ def run_portfolio_backtest(
     cands_at_entry = 0
     next_entry_allowed_at = 0
     chase_skips = 0
-    trend_skips = 0
-    trend_scans = 0
-    htf_demand_skips = 0
-    htf_demand_scans = 0
-    m15_demand_skips = 0
-    m15_demand_scans = 0
-    m15_trend_skips = 0
-    m15_trend_scans = 0
+    direction_skips = 0
+    direction_scans = 0
+    zone_skips = 0
+    zone_scans = 0
+    timing_skips = 0
+    timing_scans = 0
     symbol_blocks: dict = {}
     same_coin_skips = 0
     max_chase_pct = float(config.get("MAX_CHASE_PCT", 0) or 0)
@@ -757,28 +888,20 @@ def run_portfolio_backtest(
 
     first_allowed_time = timeline[0] + warmup_ms
     total_bars = len(timeline)
-    if tren_m15_of or m15_of:
-        bar_uji_m15 = max(
+    if timing_of:
+        bar_uji_timing = max(
             0.0,
             (int(timeline[-1]) - int(first_allowed_time) + bar_ms)
-            / float(strategy.INTERVAL_MINUTES[strategy.M15_INTERVAL] * MS_PER_MIN),
+            / float(strategy.INTERVAL_MINUTES[strategy.timing_interval(config)] * MS_PER_MIN),
         )
-        if tren_m15_of:
-            butuh_tren = strategy.m15_trend_required_bars(config)
-            if bar_uji_m15 < butuh_tren:
-                _pre_warnings.append(
-                    f"Periode uji sekitar {bar_uji_m15:.1f} candle M15, lebih pendek "
-                    f"dari {butuh_tren} candle yang dibutuhkan EMA + ADX M15. "
-                    "Perpanjang rentang data agar filter teruji di beberapa siklus."
-                )
-        if m15_of:
-            lookback_m15 = strategy.m15_demand_lookback_bars(config)
-            if bar_uji_m15 < lookback_m15:
-                _pre_warnings.append(
-                    f"Periode uji sekitar {bar_uji_m15:.1f} candle M15, lebih pendek "
-                    f"dari {lookback_m15} candle lookback demand M15. "
-                    "Perpanjang rentang data atau kecilkan M15_DEMAND_LOOKBACK_BARS."
-                )
+        butuh_timing = strategy.timing_required_bars(config)
+        if bar_uji_timing < butuh_timing:
+            _pre_warnings.append(
+                f"Periode uji sekitar {bar_uji_timing:.0f} candle "
+                f"{strategy.timing_interval(config)}, lebih pendek dari {butuh_timing} "
+                "candle yang dibutuhkan EMA + ADX di layer timing. Perpanjang rentang "
+                "data agar filter teruji di beberapa siklus."
+            )
 
     papan_input = []
     for sym in symbols:
@@ -786,14 +909,14 @@ def run_portfolio_backtest(
         papan_input.append((sym, ot, ct, pct_arr, vol_arr, ready_arr, len(ot)))
 
     if entry_signal_cache is not None:
-        trend_scans += int(getattr(entry_signal_cache, "trend_scans", 0))
-        trend_skips += int(getattr(entry_signal_cache, "trend_skips", 0))
-        htf_demand_scans += int(getattr(entry_signal_cache, "htf_demand_scans", 0))
-        htf_demand_skips += int(getattr(entry_signal_cache, "htf_demand_skips", 0))
-        m15_demand_scans += int(getattr(entry_signal_cache, "m15_demand_scans", 0))
-        m15_demand_skips += int(getattr(entry_signal_cache, "m15_demand_skips", 0))
-        m15_trend_scans += int(getattr(entry_signal_cache, "m15_trend_scans", 0))
-        m15_trend_skips += int(getattr(entry_signal_cache, "m15_trend_skips", 0))
+        direction_scans += int(getattr(entry_signal_cache, "direction_scans", 0))
+        direction_skips += int(getattr(entry_signal_cache, "direction_skips", 0))
+        direction_scans += int(getattr(entry_signal_cache, "direction_scans", 0))
+        direction_skips += int(getattr(entry_signal_cache, "direction_skips", 0))
+        zone_scans += int(getattr(entry_signal_cache, "zone_scans", 0))
+        zone_skips += int(getattr(entry_signal_cache, "zone_skips", 0))
+        timing_scans += int(getattr(entry_signal_cache, "timing_scans", 0))
+        timing_skips += int(getattr(entry_signal_cache, "timing_skips", 0))
         for waktu_event, simbol_event in getattr(
             entry_signal_cache, "trend_events", []
         ):
@@ -803,12 +926,12 @@ def run_portfolio_backtest(
                 SkippedSignal(
                     time=waktu_event,
                     symbol=simbol_event,
-                    reason="FILTER_TREND",
+                    reason="FILTER_DIRECTION",
                     holding=None,
                 )
             )
         for waktu_event, simbol_event in getattr(
-            entry_signal_cache, "htf_demand_events", []
+            entry_signal_cache, "direction_events", []
         ):
             if len(skipped) >= max_skipped_records:
                 break
@@ -816,12 +939,12 @@ def run_portfolio_backtest(
                 SkippedSignal(
                     time=waktu_event,
                     symbol=simbol_event,
-                    reason="FILTER_HTF_DEMAND",
+                    reason="FILTER_DIRECTION",
                     holding=None,
                 )
             )
         for waktu_event, simbol_event in getattr(
-            entry_signal_cache, "m15_demand_events", []
+            entry_signal_cache, "zone_events", []
         ):
             if len(skipped) >= max_skipped_records:
                 break
@@ -829,12 +952,12 @@ def run_portfolio_backtest(
                 SkippedSignal(
                     time=waktu_event,
                     symbol=simbol_event,
-                    reason="FILTER_M15_DEMAND",
+                    reason="FILTER_ZONE",
                     holding=None,
                 )
             )
         for waktu_event, simbol_event in getattr(
-            entry_signal_cache, "m15_trend_events", []
+            entry_signal_cache, "timing_events", []
         ):
             if len(skipped) >= max_skipped_records:
                 break
@@ -842,7 +965,7 @@ def run_portfolio_backtest(
                 SkippedSignal(
                     time=waktu_event,
                     symbol=simbol_event,
-                    reason="FILTER_M15_TREND",
+                    reason="FILTER_TIMING",
                     holding=None,
                 )
             )
@@ -1030,64 +1153,50 @@ def run_portfolio_backtest(
                     ) from exc
                 if not setup.ok:
                     continue
-                if trend_of:
-                    lock = trend_of.get(sym)
-                    if lock is not None:
-                        trend_scans += 1
-                        if not lock.verdict_at(kl[i].close_time)["ok"]:
-                            trend_skips += 1
-                            if len(skipped) < max_skipped_records:
-                                skipped.append(
-                                    SkippedSignal(
-                                        time=t_now,
-                                        symbol=sym,
-                                        reason="FILTER_TREND",
-                                        holding=None,
-                                    )
-                                )
-                            continue
-                if trend_of and bool(config.get("HTF_DEMAND_FILTER_ENABLED", False)):
-                    lock = trend_of.get(sym)
-                    if lock is not None:
-                        htf_demand_scans += 1
-                        if not lock.htf_demand_at(kl[i].close_time)["ok"]:
-                            htf_demand_skips += 1
-                            if len(skipped) < max_skipped_records:
-                                skipped.append(
-                                    SkippedSignal(
-                                        time=t_now,
-                                        symbol=sym,
-                                        reason="FILTER_HTF_DEMAND",
-                                        holding=None,
-                                    )
-                                )
-                            continue
-                if bool(config.get("M15_DEMAND_FILTER_ENABLED", False)):
-                    lock = m15_of.get(sym)
-                    m15_demand_scans += 1
-                    if lock is None or not lock.m15_demand_at(kl[i].close_time)["ok"]:
-                        m15_demand_skips += 1
+                if bool(config.get("DIRECTION_FILTER_ENABLED", False)):
+                    lock = arah_of.get(sym) if arah_of else None
+                    direction_scans += 1
+                    if (
+                        lock is None
+                        or not lock.verdict_at(kl[i].close_time)["ok"]
+                    ):
+                        direction_skips += 1
                         if len(skipped) < max_skipped_records:
                             skipped.append(
                                 SkippedSignal(
                                     time=t_now,
                                     symbol=sym,
-                                    reason="FILTER_M15_DEMAND",
+                                    reason="FILTER_DIRECTION",
                                     holding=None,
                                 )
                             )
                         continue
-                if bool(config.get("M15_TREND_FILTER_ENABLED", False)):
-                    lock = tren_m15_of.get(sym)
-                    m15_trend_scans += 1
-                    if lock is None or not lock.verdict_at(kl[i].close_time)["ok"]:
-                        m15_trend_skips += 1
+                if bool(config.get("ZONE_FILTER_ENABLED", False)):
+                    lock = zona_of.get(sym) if zona_of else None
+                    zone_scans += 1
+                    if lock is None or not lock.zone_at(kl[i].close_time)["ok"]:
+                        zone_skips += 1
                         if len(skipped) < max_skipped_records:
                             skipped.append(
                                 SkippedSignal(
                                     time=t_now,
                                     symbol=sym,
-                                    reason="FILTER_M15_TREND",
+                                    reason="FILTER_ZONE",
+                                    holding=None,
+                                )
+                            )
+                        continue
+                if bool(config.get("TIMING_FILTER_ENABLED", False)):
+                    lock = timing_of.get(sym) if timing_of else None
+                    timing_scans += 1
+                    if lock is None or not lock.verdict_at(kl[i].close_time)["ok"]:
+                        timing_skips += 1
+                        if len(skipped) < max_skipped_records:
+                            skipped.append(
+                                SkippedSignal(
+                                    time=t_now,
+                                    symbol=sym,
+                                    reason="FILTER_TIMING",
                                     holding=None,
                                 )
                             )
@@ -1243,38 +1352,29 @@ def run_portfolio_backtest(
                 warnings
                 + (
                     [
-                        f"{trend_skips} dari {trend_scans} sinyal konfirmasi dilewati oleh "
-                        f"gerbang trend {config.get('TREND_INTERVAL', '1h')}, sama seperti "
-                        f"bot live."
+                        f"{direction_skips} dari {direction_scans} sinyal konfirmasi "
+                        f"dilewati oleh layer arah "
+                        f"{config.get('DIRECTION_INTERVAL', '1d')}, sama seperti bot live."
                     ]
-                    if trend_of and trend_skips
+                    if arah_of and direction_skips
                     else []
                 )
                 + (
                     [
-                        f"{htf_demand_skips} dari {htf_demand_scans} sinyal konfirmasi "
-                        f"dilewati oleh gerbang zona demand "
-                        f"{config.get('TREND_INTERVAL', '1h')}, sama seperti bot live."
+                        f"{zone_skips} dari {zone_scans} sinyal konfirmasi "
+                        f"dilewati oleh layer zona "
+                        f"{config.get('ZONE_INTERVAL', '1h')}, sama seperti bot live."
                     ]
-                    if trend_of and htf_demand_skips
+                    if zona_of and zone_skips
                     else []
                 )
                 + (
                     [
-                        f"{m15_demand_skips} dari {m15_demand_scans} sinyal konfirmasi "
-                        f"dilewati oleh gerbang zona demand "
-                        f"{strategy.M15_INTERVAL}, sama seperti bot live."
+                        f"{timing_skips} dari {timing_scans} sinyal konfirmasi "
+                        f"dilewati oleh layer timing "
+                        f"{strategy.timing_interval(config)}, sama seperti bot live."
                     ]
-                    if m15_of and m15_demand_skips
-                    else []
-                )
-                + (
-                    [
-                        f"{m15_trend_skips} dari {m15_trend_scans} sinyal konfirmasi "
-                        f"dilewati oleh gerbang EMA + ADX "
-                        f"{strategy.M15_INTERVAL}, sama seperti bot live."
-                    ]
-                    if tren_m15_of and m15_trend_skips
+                    if timing_of and timing_skips
                     else []
                 )
                 + (
@@ -1292,14 +1392,12 @@ def run_portfolio_backtest(
         final_equity=equity + mark_to_market_pnl_quote,
         risk_events=dict(controls.events),
         chase_skips=chase_skips,
-        trend_skips=trend_skips,
-        trend_scans=trend_scans,
-        htf_demand_skips=htf_demand_skips,
-        htf_demand_scans=htf_demand_scans,
-        m15_demand_skips=m15_demand_skips,
-        m15_demand_scans=m15_demand_scans,
-        m15_trend_skips=m15_trend_skips,
-        m15_trend_scans=m15_trend_scans,
+        direction_skips=direction_skips,
+        direction_scans=direction_scans,
+        zone_skips=zone_skips,
+        zone_scans=zone_scans,
+        timing_skips=timing_skips,
+        timing_scans=timing_scans,
         same_coin_skips=same_coin_skips,
         mark_to_market_open=mark_to_market_open,
         mark_to_market_symbol=mark_to_market_symbol,
@@ -1467,14 +1565,12 @@ def summarize_portfolio(result: PortfolioResult) -> dict:
         "trades_per_day": (total / span_days) if span_days > 0 else 0.0,
         "risk_events": dict(result.risk_events),
         "chase_skips": int(result.chase_skips),
-        "trend_skips": int(getattr(result, "trend_skips", 0)),
-        "trend_scans": int(getattr(result, "trend_scans", 0)),
-        "htf_demand_skips": int(getattr(result, "htf_demand_skips", 0)),
-        "htf_demand_scans": int(getattr(result, "htf_demand_scans", 0)),
-        "m15_demand_skips": int(getattr(result, "m15_demand_skips", 0)),
-        "m15_demand_scans": int(getattr(result, "m15_demand_scans", 0)),
-        "m15_trend_skips": int(getattr(result, "m15_trend_skips", 0)),
-        "m15_trend_scans": int(getattr(result, "m15_trend_scans", 0)),
+        "direction_skips": int(getattr(result, "direction_skips", 0)),
+        "direction_scans": int(getattr(result, "direction_scans", 0)),
+        "zone_skips": int(getattr(result, "zone_skips", 0)),
+        "zone_scans": int(getattr(result, "zone_scans", 0)),
+        "timing_skips": int(getattr(result, "timing_skips", 0)),
+        "timing_scans": int(getattr(result, "timing_scans", 0)),
         "same_coin_skips": int(getattr(result, "same_coin_skips", 0)),
         **parity.per_trade_metrics(trades),
     }

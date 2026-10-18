@@ -315,207 +315,17 @@ def same_coin_block_record(
     blocks[str(symbol).upper()] = until
 
 
-class TrendLookup:
+class DirectionLookup:
+    """Layer arah: candle Daily."""
 
-    def __init__(self, trend_klines: Sequence[Kline], config: dict) -> None:
+    def __init__(self, direction_klines: Sequence[Kline], config: dict) -> None:
         from strategy import indicators as strategy_mod
 
         self.config = config
-        self.interval = (
-            strategy_mod.trend_interval(config) if _interval_ok(config) else None
-        )
-        self.window = strategy_mod.htf_window_bars(config)
-        self.required = strategy_mod.trend_required_bars(config)
-        self.klines = list(trend_klines)
-        self.close_times = [int(k.close_time) for k in self.klines]
-
-    def window_at(self, signal_close_time_ms: int) -> list:
-        idx = bisect_right(self.close_times, int(signal_close_time_ms))
-        return self.klines[max(0, idx - self.window) : idx]
-
-    def verdict_at(self, signal_close_time_ms: int) -> dict:
-        return evaluate_trend(self.window_at(signal_close_time_ms), self.config)
-
-    def htf_demand_at(self, signal_close_time_ms: int) -> dict:
-        from strategy import indicators as strategy_mod
-
-        return strategy_mod.evaluate_htf_demand(
-            self.window_at(signal_close_time_ms), self.config
-        )
-
-
-def _interval_ok(config: dict) -> bool:
-    from strategy import indicators as strategy_mod
-
-    raw = str(config.get("TREND_INTERVAL", "1h") or "1h").strip().lower()
-    return raw in strategy_mod.INTERVAL_MINUTES
-
-
-def build_trend_klines(klines: Sequence[Kline], config: dict, interval: str) -> list:
-    from strategy import indicators as strategy_mod
-
-    trend_minutes = strategy_mod.trend_interval_minutes(config)
-    source_minutes = strategy_mod.INTERVAL_MINUTES.get(str(interval))
-    if source_minutes is None:
-        raise ValueError(
-            f"Interval simulasi '{interval}' tidak dikenal sehingga candle trend "
-            f"'{strategy_mod.trend_interval(config)}' tidak bisa dirangkai."
-        )
-    return strategy_mod.aggregate_klines(list(klines), trend_minutes, source_minutes)
-
-
-def make_trend_lookup(
-    klines: Sequence[Kline],
-    config: dict,
-    interval: str,
-    *,
-    sudah_dirangkai: bool = False,
-) -> Optional[TrendLookup]:
-    if not config.get("TREND_FILTER_ENABLED", False) and not config.get(
-        "HTF_DEMAND_FILTER_ENABLED", False
-    ):
-        return None
-    bars = (
-        list(klines)
-        if sudah_dirangkai
-        else build_trend_klines(klines, config, interval)
-    )
-    return TrendLookup(bars, config)
-
-
-def trend_warmup_bars(config: dict, interval: str) -> int:
-    from strategy import indicators as strategy_mod
-
-    return strategy_mod.trend_warmup_bars(config, interval)
-
-
-def trend_warmup_ms(config: dict, interval: str) -> int:
-    from strategy import indicators as strategy_mod
-
-    return strategy_mod.trend_warmup_bars(
-        config, interval
-    ) * strategy_mod.interval_to_ms(interval)
-
-
-def m15_demand_enabled(config: dict) -> bool:
-    from strategy import indicators as strategy_mod
-
-    return strategy_mod.m15_demand_enabled(config)
-
-
-def m15_demand_window_bars(config: dict) -> int:
-    from strategy import indicators as strategy_mod
-
-    return strategy_mod.m15_demand_window_bars(config)
-
-
-def m15_demand_lookback_bars(config: dict) -> int:
-    from strategy import indicators as strategy_mod
-
-    return strategy_mod.m15_demand_lookback_bars(config)
-
-
-def m15_trend_window_bars(config: dict) -> int:
-    from strategy import indicators as strategy_mod
-
-    return strategy_mod.m15_trend_window_bars(config)
-
-
-def m15_trend_warmup_ms(config: dict, interval: str) -> int:
-    from strategy import indicators as strategy_mod
-
-    return strategy_mod.m15_trend_warmup_bars(
-        config, interval
-    ) * strategy_mod.interval_to_ms(interval)
-
-
-def htf_gate_warmup_bars(config: dict, interval: str) -> int:
-    from strategy import indicators as strategy_mod
-
-    return strategy_mod.htf_gate_warmup_bars(config, interval)
-
-
-def htf_gate_warmup_ms(config: dict, interval: str) -> int:
-    from strategy import indicators as strategy_mod
-
-    return strategy_mod.htf_gate_warmup_bars(
-        config, interval
-    ) * strategy_mod.interval_to_ms(interval)
-
-
-def evaluate_trend(klines: Sequence[Kline], config: dict) -> dict:
-    from strategy import indicators as strategy_mod
-
-    return strategy_mod.evaluate_trend_filter(list(klines), config)
-
-
-class M15DemandLookup:
-
-    def __init__(self, m15_klines: Sequence[Kline], config: dict) -> None:
-        from strategy import indicators as strategy_mod
-
-        self.config = config
-        self.interval = strategy_mod.m15_demand_interval(config)
-        self.window = strategy_mod.m15_demand_window_bars(config)
-        self.klines = list(m15_klines)
-        self.close_times = [int(k.close_time) for k in self.klines]
-
-    def window_at(self, signal_close_time_ms: int) -> list:
-        idx = bisect_right(self.close_times, int(signal_close_time_ms))
-        return self.klines[max(0, idx - self.window) : idx]
-
-    def m15_demand_at(self, signal_close_time_ms: int) -> dict:
-        from strategy import indicators as strategy_mod
-
-        return strategy_mod.evaluate_m15_demand(
-            self.window_at(signal_close_time_ms), self.config
-        )
-
-
-def make_m15_lookup(
-    klines: Sequence[Kline],
-    config: dict,
-    interval: str,
-    *,
-    sudah_dirangkai: bool = False,
-) -> Optional[M15DemandLookup]:
-    from strategy import indicators as strategy_mod
-
-    if not strategy_mod.m15_demand_enabled(config):
-        return None
-    bars = (
-        list(klines) if sudah_dirangkai else build_m15_klines(klines, config, interval)
-    )
-    return M15DemandLookup(bars, config)
-
-
-def build_m15_klines(
-    klines: Sequence[Kline], config: dict, interval: str
-) -> list[Kline]:
-    from strategy import indicators as strategy_mod
-
-    source_minutes = strategy_mod.INTERVAL_MINUTES.get(str(interval))
-    if source_minutes is None:
-        raise ValueError(
-            f"Interval simulasi '{interval}' tidak dikenal sehingga candle "
-            f"'{strategy_mod.m15_demand_interval(config)}' tidak bisa dirangkai."
-        )
-    return strategy_mod.aggregate_klines(
-        list(klines),
-        strategy_mod.m15_demand_interval_minutes(config),
-        source_minutes,
-    )
-
-
-class M15TrendLookup:
-
-    def __init__(self, m15_klines: Sequence[Kline], config: dict) -> None:
-        from strategy import indicators as strategy_mod
-
-        self.config = config
-        self.interval = strategy_mod.m15_trend_interval(config)
-        self.window = strategy_mod.m15_trend_window_bars(config)
-        self.klines = list(m15_klines)
+        self.interval = strategy_mod.direction_interval(config)
+        self.window = strategy_mod.direction_window_bars(config)
+        self.required = strategy_mod.direction_required_bars(config)
+        self.klines = list(direction_klines)
         self.close_times = [int(k.close_time) for k in self.klines]
 
     def window_at(self, signal_close_time_ms: int) -> list:
@@ -525,46 +335,165 @@ class M15TrendLookup:
     def verdict_at(self, signal_close_time_ms: int) -> dict:
         from strategy import indicators as strategy_mod
 
-        return strategy_mod.evaluate_m15_trend(
+        return strategy_mod.evaluate_direction(
             self.window_at(signal_close_time_ms), self.config
         )
 
 
-def build_m15_trend_klines(
-    klines: Sequence[Kline], config: dict, interval: str
-) -> list[Kline]:
+class ZoneLookup:
+    """Layer zona: candle H1."""
+
+    def __init__(self, zone_klines: Sequence[Kline], config: dict) -> None:
+        from strategy import indicators as strategy_mod
+
+        self.config = config
+        self.interval = strategy_mod.zone_interval(config)
+        self.window = strategy_mod.zone_window_bars(config)
+        self.klines = list(zone_klines)
+        self.close_times = [int(k.close_time) for k in self.klines]
+
+    def window_at(self, signal_close_time_ms: int) -> list:
+        idx = bisect_right(self.close_times, int(signal_close_time_ms))
+        return self.klines[max(0, idx - self.window) : idx]
+
+    def zone_at(self, signal_close_time_ms: int) -> dict:
+        from strategy import indicators as strategy_mod
+
+        return strategy_mod.evaluate_zone(
+            self.window_at(signal_close_time_ms), self.config
+        )
+
+
+class TimingLookup:
+    """Layer timing: seri candle konfirmasi (M5) yang sama dengan simulasi."""
+
+    def __init__(self, timing_klines: Sequence[Kline], config: dict) -> None:
+        from strategy import indicators as strategy_mod
+
+        self.config = config
+        self.interval = strategy_mod.timing_interval(config)
+        self.window = strategy_mod.timing_window_bars(config)
+        self.required = strategy_mod.timing_required_bars(config)
+        self.klines = list(timing_klines)
+        self.close_times = [int(k.close_time) for k in self.klines]
+
+    def window_at(self, signal_close_time_ms: int) -> list:
+        idx = bisect_right(self.close_times, int(signal_close_time_ms))
+        return self.klines[max(0, idx - self.window) : idx]
+
+    def verdict_at(self, signal_close_time_ms: int) -> dict:
+        from strategy import indicators as strategy_mod
+
+        return strategy_mod.evaluate_timing(
+            self.window_at(signal_close_time_ms), self.config
+        )
+
+
+def _source_minutes(interval: str, purpose: str) -> int:
     from strategy import indicators as strategy_mod
 
     source_minutes = strategy_mod.INTERVAL_MINUTES.get(str(interval))
     if source_minutes is None:
         raise ValueError(
-            f"Interval simulasi '{interval}' tidak dikenal sehingga candle "
-            f"'{strategy_mod.m15_trend_interval(config)}' tidak bisa dirangkai."
+            f"Interval simulasi '{interval}' tidak dikenal sehingga candle {purpose} "
+            "tidak bisa dirangkai."
         )
-    return strategy_mod.aggregate_klines(
-        list(klines),
-        strategy_mod.m15_trend_interval_minutes(config),
-        source_minutes,
-    )
+    return source_minutes
 
 
-def make_m15_trend_lookup(
+def build_direction_klines(
+    klines: Sequence[Kline], config: dict, interval: str
+) -> list[Kline]:
+    from strategy import indicators as strategy_mod
+
+    target = strategy_mod.direction_interval_minutes(config)
+    source = _source_minutes(interval, "arah")
+    return strategy_mod.aggregate_klines(list(klines), target, source)
+
+
+def build_zone_klines(klines: Sequence[Kline], config: dict, interval: str) -> list[Kline]:
+    from strategy import indicators as strategy_mod
+
+    target = strategy_mod.zone_interval_minutes(config)
+    source = _source_minutes(interval, "zona")
+    return strategy_mod.aggregate_klines(list(klines), target, source)
+
+
+def make_direction_lookup(
     klines: Sequence[Kline],
     config: dict,
     interval: str,
     *,
     sudah_dirangkai: bool = False,
-) -> Optional[M15TrendLookup]:
+) -> Optional[DirectionLookup]:
     from strategy import indicators as strategy_mod
 
-    if not strategy_mod.m15_trend_enabled(config):
+    if not strategy_mod.direction_enabled(config):
         return None
     bars = (
         list(klines)
         if sudah_dirangkai
-        else build_m15_trend_klines(klines, config, interval)
+        else build_direction_klines(klines, config, interval)
     )
-    return M15TrendLookup(bars, config)
+    return DirectionLookup(bars, config)
+
+
+def make_zone_lookup(
+    klines: Sequence[Kline],
+    config: dict,
+    interval: str,
+    *,
+    sudah_dirangkai: bool = False,
+) -> Optional[ZoneLookup]:
+    from strategy import indicators as strategy_mod
+
+    if not strategy_mod.zone_enabled(config):
+        return None
+    bars = (
+        list(klines) if sudah_dirangkai else build_zone_klines(klines, config, interval)
+    )
+    return ZoneLookup(bars, config)
+
+
+def make_timing_lookup(
+    klines: Sequence[Kline],
+    config: dict,
+) -> Optional[TimingLookup]:
+    from strategy import indicators as strategy_mod
+
+    if not strategy_mod.timing_enabled(config):
+        return None
+    return TimingLookup(klines, config)
+
+
+def gate_warmup_bars(config: dict, interval: str) -> int:
+    from strategy import indicators as strategy_mod
+
+    return strategy_mod.gate_warmup_bars(config, interval)
+
+
+def gate_warmup_ms(config: dict, interval: str) -> int:
+    from strategy import indicators as strategy_mod
+
+    return strategy_mod.gate_warmup_bars(
+        config, interval
+    ) * strategy_mod.interval_to_ms(interval)
+
+
+def direction_warmup_ms(config: dict, interval: str) -> int:
+    from strategy import indicators as strategy_mod
+
+    return strategy_mod.direction_warmup_bars(
+        config, interval
+    ) * strategy_mod.interval_to_ms(interval)
+
+
+def zone_warmup_ms(config: dict, interval: str) -> int:
+    from strategy import indicators as strategy_mod
+
+    return strategy_mod.zone_warmup_bars(
+        config, interval
+    ) * strategy_mod.interval_to_ms(interval)
 
 
 def per_trade_metrics(trades: Sequence) -> dict:

@@ -119,44 +119,32 @@ class HtfKlineCache:
         return self.window_klines(symbol, state_mod.now_ms())
 
 
-class TrendCache(HtfKlineCache):
+class DirectionCache(HtfKlineCache):
+    """Cache candle Daily untuk layer arah."""
 
     def interval(self) -> str:
-        return strategy.trend_interval(self._config)
+        return strategy.direction_interval(self._config)
 
     def window_bars(self) -> int:
-        return strategy.htf_window_bars(self._config)
+        return strategy.direction_window_bars(self._config)
 
     def verdict(self, symbol: str, now_ms: int) -> dict:
-        return strategy.evaluate_trend_filter(
+        return strategy.evaluate_direction(
             self.window_klines(symbol, now_ms), self._config
         )
 
 
-class M15KlineCache(HtfKlineCache):
+class ZoneCache(HtfKlineCache):
+    """Cache candle H1 untuk layer zona."""
 
     def interval(self) -> str:
-        return strategy.M15_INTERVAL
+        return strategy.zone_interval(self._config)
 
     def window_bars(self) -> int:
-        needed = max(
-            strategy.m15_demand_window_bars(self._config),
-            strategy.m15_trend_window_bars(self._config),
-        )
-        return needed + 1 if needed else 0
-
-    def window_klines(self, symbol: str, now_ms: int) -> list:
-        klines = super().window_klines(symbol, now_ms)
-        if not klines or int(klines[-1].open_time) < self._last_closed_open_time(now_ms):
-            return []
-        return klines
+        return strategy.zone_window_bars(self._config)
 
     def verdict(self, symbol: str, now_ms: int) -> dict:
-        klines = self.window_klines(symbol, now_ms)
-        return {
-            "demand": strategy.evaluate_m15_demand(klines, self._config),
-            "trend": strategy.evaluate_m15_trend(klines, self._config),
-        }
+        return strategy.evaluate_zone(self.window_klines(symbol, now_ms), self._config)
 
 
 DEFAULT_STATE = {
@@ -4606,95 +4594,90 @@ def run(
             need_setup,
             strategy.confirm_window_bars(config),
         )
-    if config.get("TREND_FILTER_ENABLED", False):
-        butuh_trend = strategy.trend_required_bars(config)
-        jendela_trend = strategy.trend_window_bars(config)
-        if int(config.get("TREND_LOOKBACK_BARS", 0) or 0) < butuh_trend:
+    if config.get("DIRECTION_FILTER_ENABLED", False):
+        butuh_arah = strategy.direction_required_bars(config)
+        jendela_arah = strategy.direction_window_bars(config)
+        if int(config.get("DIRECTION_LOOKBACK_BARS", 0) or 0) < butuh_arah:
             logger.warning(
-                "TREND_LOOKBACK_BARS=%s lebih kecil dari %d candle yang dibutuhkan EMA "
-                "dan ADX pada %s. Gerbang trend otomatis memakai %d candle, dan kandidat "
+                "DIRECTION_LOOKBACK_BARS=%s lebih kecil dari %d candle yang dibutuhkan EMA "
+                "dan ADX pada %s. Gerbang arah otomatis memakai %d candle, dan kandidat "
                 "tetap ditolak selama riwayat belum cukup. Perbaiki nilai config ini "
                 "supaya live dan backtest memakai jendela yang sama.",
-                config.get("TREND_LOOKBACK_BARS"),
-                butuh_trend,
-                strategy.trend_interval(config),
-                jendela_trend,
+                config.get("DIRECTION_LOOKBACK_BARS"),
+                butuh_arah,
+                strategy.direction_interval(config),
+                jendela_arah,
             )
-    if config.get("TREND_FILTER_ENABLED", False) or config.get(
-        "HTF_DEMAND_FILTER_ENABLED", False
+        if int(config.get("DIRECTION_LOOKBACK_BARS", 0) or 0) < 30:
+            logger.warning(
+                "DIRECTION_LOOKBACK_BARS=%s: koin yang baru listing belum punya riwayat "
+                "harian yang cukup untuk diuji arah, jadi gerbang arah akan menolaknya "
+                "(fail closed).",
+                config.get("DIRECTION_LOOKBACK_BARS"),
+            )
+    if config.get("DIRECTION_FILTER_ENABLED", False) or config.get(
+        "ZONE_FILTER_ENABLED", False
     ):
         try:
-            strategy.trend_warmup_bars(config, config["CONFIRM_INTERVAL"])
+            strategy.gate_warmup_bars(config, config["CONFIRM_INTERVAL"])
         except ValueError as exc:
             logger.warning(
                 "%s Backtest akan menolak kombinasi ini sampai diperbaiki.", exc
             )
-    if config.get("M15_DEMAND_FILTER_ENABLED", False) or config.get(
-        "M15_TREND_FILTER_ENABLED", False
-    ):
-        try:
-            strategy.m15_ratio(config["CONFIRM_INTERVAL"])
-        except ValueError as exc:
-            logger.warning(
-                "%s Backtest akan menolak kombinasi ini sampai diperbaiki.", exc
-            )
-    if config.get("TREND_FILTER_ENABLED", False):
+    if config.get("DIRECTION_FILTER_ENABLED", False):
         logger.info(
-            "Gerbang trend AKTIF (%s): entry lolos hanya kalau candle %s terakhir yang sudah "
-            "tutup memenuhi close > EMA%d, EMA%d > EMA%d, dan ADX%d >= %g. Kalau candle trend "
+            "Layer arah AKTIF (%s): entry lolos hanya kalau candle %s terakhir yang sudah "
+            "tutup memenuhi close > EMA%d, EMA%d > EMA%d, dan ADX%d >= %g. Kalau candle arah "
             "gagal diambil atau riwayatnya kurang, kandidat DITOLAK (fail closed).",
-            config.get("TREND_INTERVAL", "1h"),
-            config.get("TREND_INTERVAL", "1h"),
-            int(config.get("TREND_EMA_FAST", 20) or 20),
-            int(config.get("TREND_EMA_FAST", 20) or 20),
-            int(config.get("TREND_EMA_SLOW", 50) or 50),
-            int(config.get("TREND_ADX_PERIOD", 14) or 14),
-            float(config.get("TREND_ADX_MIN", 0.0) or 0.0),
+            config.get("DIRECTION_INTERVAL", "1d"),
+            config.get("DIRECTION_INTERVAL", "1d"),
+            int(config.get("DIRECTION_EMA_FAST", 10) or 10),
+            int(config.get("DIRECTION_EMA_FAST", 10) or 10),
+            int(config.get("DIRECTION_EMA_SLOW", 20) or 20),
+            int(config.get("DIRECTION_ADX_PERIOD", 14) or 14),
+            float(config.get("DIRECTION_ADX_MIN", 0.0) or 0.0),
         )
     else:
         logger.info(
-            "Gerbang trend NONAKTIF: entry hanya memakai konfirmasi %s.",
+            "Layer arah NONAKTIF: entry tidak memakai arah Daily sebagai penyaring.",
+        )
+    if config.get("ZONE_FILTER_ENABLED", False):
+        logger.info(
+            "Layer zona AKTIF (%s): entry lolos hanya kalau candle %s terakhir yang "
+            "sudah tutup bereaksi di dekat zona demand %s (lookback %d candle, jarak maks "
+            "%.2f%% dari atap zona, tebal zona min %.2f%%, close_pos min %.2f). Kalau "
+            "candle gagal diambil atau riwayatnya kurang, kandidat DITOLAK (fail closed).",
+            config.get("ZONE_INTERVAL", "1h"),
+            config.get("ZONE_INTERVAL", "1h"),
+            config.get("ZONE_INTERVAL", "1h"),
+            strategy.zone_lookback_bars(config),
+            float(config.get("ZONE_MAX_DISTANCE_PCT", 25.0) or 0.0),
+            float(config.get("ZONE_BUFFER_PCT", 1.5) or 0.0),
+            float(config.get("ZONE_MIN_CLOSE_POSITION", 0.35) or 0.0),
+        )
+    else:
+        logger.info(
+            "Layer zona %s NONAKTIF.",
+            config.get("ZONE_INTERVAL", "1h"),
+        )
+    if config.get("TIMING_FILTER_ENABLED", False):
+        logger.info(
+            "Layer timing AKTIF (%s): entry lolos hanya kalau candle %s terakhir yang sudah "
+            "tutup memenuhi close > EMA%d, EMA%d > EMA%d, dan ADX%d >= %g. Memakai seri "
+            "konfirmasi yang sama dengan volume rolling dan zona demand %s.",
+            config.get("CONFIRM_INTERVAL", "5m"),
+            config.get("CONFIRM_INTERVAL", "5m"),
+            int(config.get("TIMING_EMA_FAST", 20) or 20),
+            int(config.get("TIMING_EMA_FAST", 20) or 20),
+            int(config.get("TIMING_EMA_SLOW", 50) or 50),
+            int(config.get("TIMING_ADX_PERIOD", 14) or 14),
+            float(config.get("TIMING_ADX_MIN", 0.0) or 0.0),
             config.get("CONFIRM_INTERVAL", "5m"),
         )
-    if config.get("HTF_DEMAND_FILTER_ENABLED", False):
-        logger.info(
-            "Gerbang demand AKTIF (%s): entry lolos hanya kalau candle %s terakhir yang "
-            "sudah tutup bereaksi di dekat zona demand %s (lookback %d candle, jarak maks "
-            "%.2f%% dari atap zona, tebal zona min %.2f%%, close_pos min %.2f). Memakai "
-            "cache candle yang sama dengan gerbang trend. Kalau candle gagal diambil atau "
-            "riwayatnya kurang, kandidat DITOLAK (fail closed).",
-            config.get("TREND_INTERVAL", "1h"),
-            config.get("TREND_INTERVAL", "1h"),
-            config.get("TREND_INTERVAL", "1h"),
-            strategy.htf_demand_lookback_bars(config),
-            float(config.get("HTF_DEMAND_MAX_DISTANCE_PCT", 10.0) or 0.0),
-            float(config.get("HTF_DEMAND_ZONE_BUFFER_PCT", 1.5) or 0.0),
-            float(config.get("HTF_DEMAND_MIN_CLOSE_POSITION", 0.4) or 0.0),
-        )
     else:
         logger.info(
-            "Gerbang demand %s NONAKTIF.",
-            config.get("TREND_INTERVAL", "1h"),
-        )
-    if config.get("M15_DEMAND_FILTER_ENABLED", False):
-        logger.info(
-            "Gerbang demand M15 AKTIF (%s): entry lolos hanya kalau candle %s terakhir "
-            "yang sudah tutup bereaksi di dekat zona demand %s (lookback %d candle, jarak "
-            "maks %.2f%% dari atap zona, tebal zona min %.2f%%, close_pos min %.2f). "
-            "Candle M15 diambil langsung dari Binance dan cache diperbarui setiap "
-            "candle tertutup. Data gagal atau kurang berarti kandidat DITOLAK.",
-            strategy.M15_INTERVAL,
-            strategy.M15_INTERVAL,
-            strategy.M15_INTERVAL,
-            strategy.m15_demand_lookback_bars(config),
-            float(config.get("M15_DEMAND_MAX_DISTANCE_PCT", 5.0) or 0.0),
-            float(config.get("M15_DEMAND_ZONE_BUFFER_PCT", 1.0) or 0.0),
-            float(config.get("M15_DEMAND_MIN_CLOSE_POSITION", 0.45) or 0.0),
-        )
-    else:
-        logger.info(
-            "Gerbang demand %s NONAKTIF.",
-            strategy.M15_INTERVAL,
+            "Layer timing %s NONAKTIF: tidak ada pemeriksaan tren mikro.",
+            config.get("CONFIRM_INTERVAL", "5m"),
         )
     logger.info("=" * 70)
 
@@ -4821,63 +4804,57 @@ def run(
             for simbol, raw in raw_map.items()
         }
 
-    trend_cache = TrendCache(client, config)
-    m15_cache = M15KlineCache(client, config)
-    butuh_candle_htf = bool(config.get("TREND_FILTER_ENABLED", False)) or bool(
-        config.get("HTF_DEMAND_FILTER_ENABLED", False)
-    )
-    butuh_candle_m15_demand = bool(config.get("M15_DEMAND_FILTER_ENABLED", False))
-    butuh_candle_m15_trend = bool(config.get("M15_TREND_FILTER_ENABLED", False))
-    trend_provider = trend_cache.provider if butuh_candle_htf else None
-    m15_provider = m15_cache.provider if butuh_candle_m15_demand else None
-    m15_trend_provider = m15_cache.provider if butuh_candle_m15_trend else None
-    if trend_provider is None:
+    direction_cache = DirectionCache(client, config)
+    zone_cache = ZoneCache(client, config)
+    butuh_candle_arah = bool(config.get("DIRECTION_FILTER_ENABLED", False))
+    butuh_candle_zona = bool(config.get("ZONE_FILTER_ENABLED", False))
+    direction_provider = direction_cache.provider if butuh_candle_arah else None
+    zone_provider = zone_cache.provider if butuh_candle_zona else None
+    if direction_provider is None:
         logger.warning(
-            "Gerbang timeframe tinggi NONAKTIF (TREND_FILTER_ENABLED=False dan "
-            "HTF_DEMAND_FILTER_ENABLED=False). Entry hanya memakai konfirmasi %s.",
-            config["CONFIRM_INTERVAL"],
+            "Layer arah NONAKTIF (DIRECTION_FILTER_ENABLED=False). "
+            "Entry tidak pernah memakai arah Daily sebagai penyaring.",
         )
     else:
         logger.info(
-            "Gerbang trend %s AKTIF: close > EMA%d > EMA%d dan ADX%d >= %g "
-            "(jendela %d candle tertutup, fail closed bila data trend gagal diambil).",
-            strategy.trend_interval(config),
-            int(config.get("TREND_EMA_FAST", 20)),
-            int(config.get("TREND_EMA_SLOW", 50)),
-            int(config.get("TREND_ADX_PERIOD", 14)),
-            float(config.get("TREND_ADX_MIN", 20.0) or 0.0),
-            strategy.trend_window_bars(config),
+            "Layer arah %s AKTIF: close > EMA%d > EMA%d dan ADX%d >= %g "
+            "(jendela %d candle tertutup, fail closed bila data gagal diambil).",
+            strategy.direction_interval(config),
+            int(config.get("DIRECTION_EMA_FAST", 10)),
+            int(config.get("DIRECTION_EMA_SLOW", 20)),
+            int(config.get("DIRECTION_ADX_PERIOD", 14)),
+            float(config.get("DIRECTION_ADX_MIN", 20.0) or 0.0),
+            strategy.direction_window_bars(config),
         )
-    if m15_trend_provider is None:
-        logger.info(
-            "Gerbang EMA + ADX %s NONAKTIF: tidak ada pemeriksaan trend M15.",
-            strategy.M15_INTERVAL,
-        )
-    else:
-        logger.info(
-            "Gerbang EMA + ADX %s AKTIF: close > EMA%d > EMA%d dan ADX%d >= %g "
-            "(jendela %d candle tertutup per simbol, memakai cache M15 bersama "
-            "demand; fail closed bila data gagal diambil).",
-            strategy.m15_trend_interval(config),
-            int(config.get("M15_TREND_EMA_FAST", 20)),
-            int(config.get("M15_TREND_EMA_SLOW", 50)),
-            int(config.get("M15_TREND_ADX_PERIOD", 14)),
-            float(config.get("M15_TREND_ADX_MIN", 20.0) or 0.0),
-            strategy.m15_trend_window_bars(config),
-        )
-    if m15_provider is None:
-        logger.info(
-            "Gerbang demand %s NONAKTIF: tidak ada pemeriksaan demand M15.",
-            strategy.M15_INTERVAL,
+    if zone_provider is None:
+        logger.warning(
+            "Layer zona NONAKTIF (ZONE_FILTER_ENABLED=False). "
+            "Entry tidak pernah memakai zona demand H1 sebagai penyaring.",
         )
     else:
         logger.info(
-            "Gerbang demand %s AKTIF: jendela %d candle %s tertutup per simbol, "
-            "cache diperbarui setelah candle M15 tutup (fail closed bila data gagal "
-            "diambil).",
-            strategy.m15_demand_interval(config),
-            strategy.m15_demand_window_bars(config),
-            strategy.m15_demand_interval(config),
+            "Layer zona %s AKTIF: jendela %d candle %s tertutup per simbol "
+            "(fail closed bila data gagal diambil).",
+            strategy.zone_interval(config),
+            strategy.zone_window_bars(config),
+            strategy.zone_interval(config),
+        )
+    if not bool(config.get("TIMING_FILTER_ENABLED", False)):
+        logger.info(
+            "Layer timing %s NONAKTIF: tidak ada pemeriksaan tren mikro M5.",
+            strategy.timing_interval(config),
+        )
+    else:
+        logger.info(
+            "Layer timing %s AKTIF: close > EMA%d > EMA%d dan ADX%d >= %g "
+            "(jendela %d candle tertutup; memakai seri konfirmasi yang sama "
+            "dengan volume rolling dan zona demand M5).",
+            strategy.timing_interval(config),
+            int(config.get("TIMING_EMA_FAST", 20)),
+            int(config.get("TIMING_EMA_SLOW", 50)),
+            int(config.get("TIMING_ADX_PERIOD", 14)),
+            float(config.get("TIMING_ADX_MIN", 20.0) or 0.0),
+            strategy.timing_window_bars(config),
         )
 
     exit_code = 0
@@ -5095,9 +5072,8 @@ def run(
                         tradable_symbols,
                         klines_fetcher_many=klines_fetcher_many,
                         prewarm_fn=client.prewarm_book_ticker,
-                        trend_provider=trend_provider,
-                        m15_provider=m15_provider,
-                        m15_trend_provider=m15_trend_provider,
+                        direction_provider=direction_provider,
+                        zone_provider=zone_provider,
                         diagnostics=scan_diagnostics,
                     )
                     if best:
@@ -5128,33 +5104,30 @@ def run(
                             )
                         if spread_pct <= config["MAX_SPREAD_PCT"] and chase_ok:
                             trend_info = ""
-                            if best.trend is not None:
-                                nilai = best.trend.get("values") or {}
-                                trend_info = " | trend %s: %s" % (
-                                    best.trend.get("interval")
-                                    or strategy.trend_interval(config),
-                                    best.trend.get("reason"),
+                            if best.direction is not None:
+                                nilai = best.direction.get("values") or {}
+                                trend_info = " | arah %s: %s" % (
+                                    best.direction.get("interval")
+                                    or strategy.direction_interval(config),
+                                    best.direction.get("reason"),
                                 )
                                 if nilai.get("adx") is not None:
                                     trend_info += " (ADX %.1f)" % float(nilai["adx"])
-                            if best.htf_demand is not None:
-                                trend_info += " | demand %s: %s" % (
-                                    best.htf_demand.get("interval")
-                                    or strategy.trend_interval(config),
-                                    best.htf_demand.get("reason"),
+                            if best.zone is not None:
+                                trend_info += " | zona %s: %s" % (
+                                    best.zone.get("interval")
+                                    or strategy.zone_interval(config),
+                                    best.zone.get("reason"),
                                 )
-                            if best.m15_demand is not None:
-                                trend_info += " | demand %s: %s" % (
-                                    best.m15_demand.get("interval")
-                                    or strategy.m15_demand_interval(config),
-                                    best.m15_demand.get("reason"),
+                            if best.timing is not None:
+                                nilai = best.timing.get("values") or {}
+                                trend_info += " | timing %s: %s" % (
+                                    best.timing.get("interval")
+                                    or strategy.timing_interval(config),
+                                    best.timing.get("reason"),
                                 )
-                            if best.m15_trend is not None:
-                                trend_info += " | trend %s: %s" % (
-                                    best.m15_trend.get("interval")
-                                    or strategy.m15_trend_interval(config),
-                                    best.m15_trend.get("reason"),
-                                )
+                                if nilai.get("adx") is not None:
+                                    trend_info += " (ADX %.1f)" % float(nilai["adx"])
                             logger.info(
                                 "Kandidat terpilih: %s (vol24h=%.0f, 24h=%.2f%%, spread=%.3f%%) | %s%s",
                                 best.symbol,

@@ -56,12 +56,12 @@ class BacktestResult:
     final_equity: float = 0.0
     risk_events: dict = field(default_factory=dict)
     chase_skips: int = 0
-    trend_skips: int = 0
-    htf_demand_skips: int = 0
-    m15_demand_skips: int = 0
-    m15_demand_scans: int = 0
-    m15_trend_skips: int = 0
-    m15_trend_scans: int = 0
+    direction_scans: int = 0
+    direction_skips: int = 0
+    zone_scans: int = 0
+    zone_skips: int = 0
+    timing_scans: int = 0
+    timing_skips: int = 0
     same_coin_skips: int = 0
     mark_to_market_open: bool = False
     mark_to_market_pnl_pct: float = 0.0
@@ -194,8 +194,8 @@ def run_backtest(
     warmup_bars: int,
     progress_cb: Optional[Callable[[float], None]] = None,
     btc_klines: Optional[list[Kline]] = None,
-    trend_klines: Optional[list[Kline]] = None,
-    m15_klines: Optional[list[Kline]] = None,
+    direction_klines: Optional[list[Kline]] = None,
+    zone_klines: Optional[list[Kline]] = None,
 ) -> BacktestResult:
     interval = config.get("CONFIRM_INTERVAL", "5m")
     window = bars_per_day(interval)
@@ -207,14 +207,12 @@ def run_backtest(
     n = len(klines)
     trades: list[BacktestTrade] = []
     warnings: list[str] = []
-    trend_scans = 0
-    trend_skips = 0
-    htf_demand_scans = 0
-    htf_demand_skips = 0
-    m15_demand_scans = 0
-    m15_demand_skips = 0
-    m15_trend_scans = 0
-    m15_trend_skips = 0
+    direction_scans = 0
+    direction_skips = 0
+    zone_scans = 0
+    zone_skips = 0
+    timing_scans = 0
+    timing_skips = 0
 
     initial_equity = initial_backtest_equity(config)
     symbol = str(config.get("_symbol", "") or "")
@@ -273,37 +271,32 @@ def run_backtest(
     if btc_warning:
         warnings.append(btc_warning)
 
-    trend_lookup = parity.make_trend_lookup(
-        trend_klines if trend_klines is not None else klines,
+    direction_lookup = parity.make_direction_lookup(
+        direction_klines if direction_klines is not None else klines,
         config,
         interval,
-        sudah_dirangkai=trend_klines is not None,
+        sudah_dirangkai=direction_klines is not None,
     )
-    m15_lookup = parity.make_m15_lookup(
-        m15_klines if m15_klines is not None else klines,
+    zone_lookup = parity.make_zone_lookup(
+        zone_klines if zone_klines is not None else klines,
         config,
         interval,
-        sudah_dirangkai=m15_klines is not None,
+        sudah_dirangkai=zone_klines is not None,
     )
-    m15_trend_lookup = parity.make_m15_trend_lookup(klines, config, interval)
-    if trend_lookup is not None or m15_lookup is not None or m15_trend_lookup is not None:
-        butuh_warmup = strategy.htf_gate_warmup_bars(config, interval)
+    timing_lookup = parity.make_timing_lookup(klines, config)
+    if direction_lookup is not None or zone_lookup is not None:
+        butuh_warmup = strategy.gate_warmup_bars(config, interval)
         if int(warmup_bars) < butuh_warmup:
             bagian = []
-            if trend_lookup is not None:
+            if direction_lookup is not None:
                 bagian.append(
-                    f"gerbang timeframe tinggi {config.get('TREND_INTERVAL', '1h')} "
-                    f"(trend + zona demand) butuh {trend_lookup.window} candle tertutup"
+                    f"layer arah {direction_lookup.interval} butuh "
+                    f"{direction_lookup.window} candle tertutup"
                 )
-            if m15_lookup is not None:
+            if zone_lookup is not None:
                 bagian.append(
-                    f"gerbang zona demand {m15_lookup.interval} butuh "
-                    f"{m15_lookup.window} candle {m15_lookup.interval} tertutup"
-                )
-            if m15_trend_lookup is not None:
-                bagian.append(
-                    f"gerbang EMA + ADX {m15_trend_lookup.interval} butuh "
-                    f"{m15_trend_lookup.window} candle {m15_trend_lookup.interval} tertutup"
+                    f"layer zona {zone_lookup.interval} butuh "
+                    f"{zone_lookup.window} candle {zone_lookup.interval} tertutup"
                 )
             warnings.append(
                 f"Warmup {warmup_bars} bar {interval} dinaikkan menjadi {butuh_warmup} bar "
@@ -315,24 +308,15 @@ def run_backtest(
 
     i = max(warmup_bars, window - 1, lookback)
     start_idx = i
-    if m15_trend_lookup is not None or m15_lookup is not None:
-        bar_uji_m15 = max(0.0, (n - start_idx) / float(strategy.m15_ratio(interval)))
-        if m15_trend_lookup is not None:
-            butuh_tren = strategy.m15_trend_required_bars(config)
-            if bar_uji_m15 < butuh_tren:
-                warnings.append(
-                    f"Periode uji sekitar {bar_uji_m15:.1f} candle M15, lebih pendek "
-                    f"dari {butuh_tren} candle yang dibutuhkan EMA + ADX M15. "
-                    "Perpanjang rentang uji agar filter ini teruji di beberapa siklus."
-                )
-        if m15_lookup is not None:
-            lookback_m15 = strategy.m15_demand_lookback_bars(config)
-            if bar_uji_m15 < lookback_m15:
-                warnings.append(
-                    f"Periode uji sekitar {bar_uji_m15:.1f} candle M15, lebih pendek "
-                    f"dari {lookback_m15} candle lookback zona demand M15. "
-                    "Perpanjang rentang uji atau kecilkan M15_DEMAND_LOOKBACK_BARS."
-                )
+    if timing_lookup is not None:
+        butuh_timing = timing_lookup.required
+        bar_uji = max(0.0, float(n - start_idx))
+        if bar_uji < butuh_timing:
+            warnings.append(
+                f"Periode uji sekitar {bar_uji:.0f} candle {interval}, lebih pendek "
+                f"dari {butuh_timing} candle yang dibutuhkan EMA + ADX di layer timing. "
+                "Perpanjang rentang uji agar filter ini teruji di beberapa siklus."
+            )
 
     while i < n:
         if progress_cb and i % 200 == 0:
@@ -367,39 +351,35 @@ def run_backtest(
                     same_coin_skips += 1
                     i += 1
                     continue
-                if setup.ok and trend_lookup is not None:
-                    trend_scans += 1
-                    verdict = trend_lookup.verdict_at(candle.close_time)
+                if setup.ok and bool(config.get("DIRECTION_FILTER_ENABLED", False)):
+                    direction_scans += 1
+                    verdict = (
+                        direction_lookup.verdict_at(candle.close_time)
+                        if direction_lookup is not None
+                        else {"ok": False}
+                    )
                     if not verdict["ok"]:
-                        trend_skips += 1
+                        direction_skips += 1
                         i += 1
                         continue
-                if (
-                    setup.ok
-                    and trend_lookup is not None
-                    and bool(config.get("HTF_DEMAND_FILTER_ENABLED", False))
-                ):
-                    htf_demand_scans += 1
-                    verdict_htf = trend_lookup.htf_demand_at(candle.close_time)
-                    if not verdict_htf["ok"]:
-                        htf_demand_skips += 1
+                if setup.ok and bool(config.get("ZONE_FILTER_ENABLED", False)):
+                    zone_scans += 1
+                    verdict_zona = (
+                        zone_lookup.zone_at(candle.close_time)
+                        if zone_lookup is not None
+                        else {"ok": False}
+                    )
+                    if not verdict_zona["ok"]:
+                        zone_skips += 1
                         i += 1
                         continue
-                if (
-                    setup.ok
-                    and m15_lookup is not None
-                    and bool(config.get("M15_DEMAND_FILTER_ENABLED", False))
-                ):
-                    m15_demand_scans += 1
-                    verdict_m15 = m15_lookup.m15_demand_at(candle.close_time)
-                    if not verdict_m15["ok"]:
-                        m15_demand_skips += 1
-                        i += 1
-                        continue
-                if setup.ok and m15_trend_lookup is not None:
-                    m15_trend_scans += 1
-                    if not m15_trend_lookup.verdict_at(candle.close_time)["ok"]:
-                        m15_trend_skips += 1
+                if setup.ok and bool(config.get("TIMING_FILTER_ENABLED", False)):
+                    timing_scans += 1
+                    if (
+                        timing_lookup is None
+                        or not timing_lookup.verdict_at(candle.close_time)["ok"]
+                    ):
+                        timing_skips += 1
                         i += 1
                         continue
                 if setup.ok:
@@ -546,41 +526,34 @@ def run_backtest(
             f"{chase_skips} sinyal dilewati oleh filter MAX_CHASE_PCT "
             f"({max_chase_pct:g}%), sama seperti bot live."
         )
-    if trend_lookup is not None and trend_skips:
+    if direction_skips:
         warnings.append(
-            f"{trend_skips} dari {trend_scans} sinyal konfirmasi dilewati oleh gerbang "
-            f"trend {config.get('TREND_INTERVAL', '1h')} "
-            f"(EMA{int(config.get('TREND_EMA_FAST', 20))}/"
-            f"EMA{int(config.get('TREND_EMA_SLOW', 50))} dan ADX"
-            f"{int(config.get('TREND_ADX_PERIOD', 14))} >= "
-            f"{float(config.get('TREND_ADX_MIN', 20.0) or 0.0):g}), sama seperti bot live."
+            f"{direction_skips} dari {direction_scans} sinyal konfirmasi dilewati oleh "
+            f"layer arah {str(config.get('DIRECTION_INTERVAL', '1d'))} "
+            f"(EMA{int(config.get('DIRECTION_EMA_FAST', 10))}/"
+            f"EMA{int(config.get('DIRECTION_EMA_SLOW', 20))} dan ADX"
+            f"{int(config.get('DIRECTION_ADX_PERIOD', 14))} >= "
+            f"{float(config.get('DIRECTION_ADX_MIN', 20.0) or 0.0):g}), sama seperti bot live."
         )
-    if trend_lookup is not None and htf_demand_skips:
+    if zone_skips:
         warnings.append(
-            f"{htf_demand_skips} dari {htf_demand_scans} sinyal konfirmasi dilewati oleh "
-            f"gerbang zona demand {config.get('TREND_INTERVAL', '1h')} "
-            f"(lookback {int(config.get('HTF_DEMAND_LOOKBACK_BARS', 72) or 72)} candle, "
-            f"jarak maks "
-            f"{float(config.get('HTF_DEMAND_MAX_DISTANCE_PCT', 10.0) or 0.0):g}% dari atap "
-            "zona), sama seperti bot live."
+            f"{zone_skips} dari {zone_scans} sinyal konfirmasi dilewati oleh "
+            f"layer zona {str(config.get('ZONE_INTERVAL', '1h'))} "
+            f"(lookback {int(config.get('ZONE_LOOKBACK_BARS', 72) or 72)} candle, "
+            f"jarak maksimum "
+            f"{float(config.get('ZONE_MAX_DISTANCE_PCT', 25.0) or 0.0):g}% dari atap "
+            f"zona, tebal zona minimum "
+            f"{float(config.get('ZONE_BUFFER_PCT', 1.5) or 0.0):g}%), sama seperti bot live."
         )
-    if m15_lookup is not None and m15_demand_skips:
+    if timing_skips:
         warnings.append(
-            f"{m15_demand_skips} dari {m15_demand_scans} sinyal konfirmasi dilewati "
-            f"oleh gerbang zona demand {m15_lookup.interval} "
-            f"(lookback {strategy.m15_demand_lookback_bars(config)} candle, "
-            f"jarak maks "
-            f"{float(config.get('M15_DEMAND_MAX_DISTANCE_PCT', 5.0) or 0.0):g}% dari "
-            "atap zona), sama seperti bot live."
-        )
-    if m15_trend_lookup is not None and m15_trend_skips:
-        warnings.append(
-            f"{m15_trend_skips} dari {m15_trend_scans} sinyal konfirmasi dilewati oleh "
-            f"gerbang EMA{int(config.get('M15_TREND_EMA_FAST', 20) or 20)}/"
-            f"EMA{int(config.get('M15_TREND_EMA_SLOW', 50) or 50)} dan ADX"
-            f"{int(config.get('M15_TREND_ADX_PERIOD', 14) or 14)} >= "
-            f"{float(config.get('M15_TREND_ADX_MIN', 20.0) or 0.0):g} pada "
-            f"{m15_trend_lookup.interval}, sama seperti bot live."
+            f"{timing_skips} dari {timing_scans} sinyal konfirmasi dilewati oleh "
+            f"layer timing {str(config.get('CONFIRM_INTERVAL', '5m'))} "
+            f"(EMA{int(config.get('TIMING_EMA_FAST', 20) or 20)}/"
+            f"EMA{int(config.get('TIMING_EMA_SLOW', 50) or 50)} dan ADX"
+            f"{int(config.get('TIMING_ADX_PERIOD', 14) or 14)} >= "
+            f"{float(config.get('TIMING_ADX_MIN', 20.0) or 0.0):g} pada "
+            f"{timing_lookup.interval}, sama seperti bot live."
         )
     result = BacktestResult(
         symbol=config.get("_symbol", "?"),
@@ -600,12 +573,12 @@ def run_backtest(
         final_equity=equity + mark_to_market_pnl_quote,
         risk_events=dict(controls.events),
         chase_skips=chase_skips,
-        trend_skips=trend_skips,
-        htf_demand_skips=htf_demand_skips,
-        m15_demand_skips=m15_demand_skips,
-        m15_demand_scans=m15_demand_scans,
-        m15_trend_skips=m15_trend_skips,
-        m15_trend_scans=m15_trend_scans,
+        direction_scans=direction_scans,
+        direction_skips=direction_skips,
+        zone_scans=zone_scans,
+        zone_skips=zone_skips,
+        timing_scans=timing_scans,
+        timing_skips=timing_skips,
         same_coin_skips=same_coin_skips,
         mark_to_market_open=mark_to_market_open,
         mark_to_market_pnl_pct=mark_to_market_pnl_pct,
@@ -727,12 +700,12 @@ def summarize(result: BacktestResult) -> dict:
         "total_fee_pct": sum(t.fee_pct for t in trades),
         "risk_events": dict(result.risk_events),
         "chase_skips": int(result.chase_skips),
-        "trend_skips": int(getattr(result, "trend_skips", 0)),
-        "htf_demand_skips": int(getattr(result, "htf_demand_skips", 0)),
-        "m15_demand_skips": int(getattr(result, "m15_demand_skips", 0)),
-        "m15_demand_scans": int(getattr(result, "m15_demand_scans", 0)),
-        "m15_trend_skips": int(getattr(result, "m15_trend_skips", 0)),
-        "m15_trend_scans": int(getattr(result, "m15_trend_scans", 0)),
+        "direction_scans": int(getattr(result, "direction_scans", 0)),
+        "direction_skips": int(getattr(result, "direction_skips", 0)),
+        "zone_scans": int(getattr(result, "zone_scans", 0)),
+        "zone_skips": int(getattr(result, "zone_skips", 0)),
+        "timing_scans": int(getattr(result, "timing_scans", 0)),
+        "timing_skips": int(getattr(result, "timing_skips", 0)),
         "same_coin_skips": int(getattr(result, "same_coin_skips", 0)),
         **parity.per_trade_metrics(trades),
     }
@@ -772,29 +745,25 @@ OVERRIDE_CASTERS = {
         "DEMAND_ZONE_BUFFER_PCT": float,
         "DEMAND_MAX_DISTANCE_PCT": float,
         "DEMAND_MIN_CLOSE_POSITION": float,
-        "HTF_DEMAND_FILTER_ENABLED": _as_bool,
-        "HTF_DEMAND_LOOKBACK_BARS": int,
-        "HTF_DEMAND_ZONE_BUFFER_PCT": float,
-        "HTF_DEMAND_MAX_DISTANCE_PCT": float,
-        "HTF_DEMAND_MIN_CLOSE_POSITION": float,
-        "M15_DEMAND_FILTER_ENABLED": _as_bool,
-        "M15_DEMAND_LOOKBACK_BARS": int,
-        "M15_DEMAND_ZONE_BUFFER_PCT": float,
-        "M15_DEMAND_MAX_DISTANCE_PCT": float,
-        "M15_DEMAND_MIN_CLOSE_POSITION": float,
-        "M15_TREND_FILTER_ENABLED": _as_bool,
-        "M15_TREND_EMA_FAST": int,
-        "M15_TREND_EMA_SLOW": int,
-        "M15_TREND_ADX_PERIOD": int,
-        "M15_TREND_ADX_MIN": float,
-        "M15_TREND_LOOKBACK_BARS": int,
-        "TREND_FILTER_ENABLED": _as_bool,
-        "TREND_INTERVAL": str,
-        "TREND_EMA_FAST": int,
-        "TREND_EMA_SLOW": int,
-        "TREND_ADX_PERIOD": int,
-        "TREND_ADX_MIN": float,
-        "TREND_LOOKBACK_BARS": int,
+        "DIRECTION_FILTER_ENABLED": _as_bool,
+        "DIRECTION_INTERVAL": str,
+        "DIRECTION_EMA_FAST": int,
+        "DIRECTION_EMA_SLOW": int,
+        "DIRECTION_ADX_PERIOD": int,
+        "DIRECTION_ADX_MIN": float,
+        "DIRECTION_LOOKBACK_BARS": int,
+        "ZONE_FILTER_ENABLED": _as_bool,
+        "ZONE_INTERVAL": str,
+        "ZONE_LOOKBACK_BARS": int,
+        "ZONE_BUFFER_PCT": float,
+        "ZONE_MAX_DISTANCE_PCT": float,
+        "ZONE_MIN_CLOSE_POSITION": float,
+        "TIMING_FILTER_ENABLED": _as_bool,
+        "TIMING_EMA_FAST": int,
+        "TIMING_EMA_SLOW": int,
+        "TIMING_ADX_PERIOD": int,
+        "TIMING_ADX_MIN": float,
+        "TIMING_LOOKBACK_BARS": int,
         "PUMP_MIN_24H_CHANGE_PCT": float,
         "MIN_QUOTE_VOLUME_USDT_24H": float,
         "ROLLING_VOLUME_FILTER_ENABLED": _as_bool,
@@ -874,59 +843,6 @@ def validate_params(cfg: dict) -> None:
                     f"Parameter '{key}'={val} di luar rentang wajar ({lo:g}..{hi:g})."
                 )
 
-    if bool(cfg.get("HTF_DEMAND_FILTER_ENABLED", False)):
-        htf_demand_checks = [
-            ("HTF_DEMAND_LOOKBACK_BARS", 3, 500),
-            ("HTF_DEMAND_ZONE_BUFFER_PCT", 0.05, 20.0),
-            ("HTF_DEMAND_MAX_DISTANCE_PCT", 0.1, 50.0),
-            ("HTF_DEMAND_MIN_CLOSE_POSITION", 0.0, 1.0),
-        ]
-        for key, lo, hi in htf_demand_checks:
-            lo, hi = _rentang_demand(key, lo, hi)
-            val = cfg.get(key)
-            if val is None or not (lo <= float(val) <= hi):
-                raise BacktestError(
-                    f"Parameter '{key}'={val} di luar rentang wajar ({lo:g}..{hi:g})."
-                )
-
-    if bool(cfg.get("M15_DEMAND_FILTER_ENABLED", False)):
-        m15_demand_checks = [
-            ("M15_DEMAND_LOOKBACK_BARS", 3, 500),
-            ("M15_DEMAND_ZONE_BUFFER_PCT", 0.05, 20.0),
-            ("M15_DEMAND_MAX_DISTANCE_PCT", 0.1, 50.0),
-            ("M15_DEMAND_MIN_CLOSE_POSITION", 0.0, 1.0),
-        ]
-        for key, lo, hi in m15_demand_checks:
-            lo, hi = _rentang_demand(key, lo, hi)
-            val = cfg.get(key)
-            if val is None or not (lo <= float(val) <= hi):
-                raise BacktestError(
-                    f"Parameter '{key}'={val} di luar rentang wajar ({lo:g}..{hi:g})."
-                )
-        try:
-            strategy.m15_demand_warmup_bars(cfg, cfg.get("CONFIRM_INTERVAL", "5m"))
-        except ValueError as exc:
-            raise BacktestError(str(exc)) from exc
-
-    if bool(cfg.get("M15_TREND_FILTER_ENABLED", False)):
-        m15_trend_checks = [
-            ("M15_TREND_EMA_FAST", 2, 500),
-            ("M15_TREND_EMA_SLOW", 3, strategy.TREND_KLINE_LIMIT - 1),
-            ("M15_TREND_ADX_PERIOD", 2, 200),
-            ("M15_TREND_ADX_MIN", 0.0, 100.0),
-            ("M15_TREND_LOOKBACK_BARS", 20, strategy.TREND_KLINE_LIMIT - 1),
-        ]
-        for key, lo, hi in m15_trend_checks:
-            val = cfg.get(key)
-            if val is None or not (lo <= float(val) <= hi):
-                raise BacktestError(
-                    f"Parameter '{key}'={val} di luar rentang wajar ({lo:g}..{hi:g})."
-                )
-        try:
-            strategy.m15_trend_warmup_bars(cfg, cfg.get("CONFIRM_INTERVAL", "5m"))
-        except ValueError as exc:
-            raise BacktestError(str(exc)) from exc
-
     from config.settings_schema import relation_violations
 
     pelanggaran = relation_violations(cfg, mode_aware=True)
@@ -934,15 +850,15 @@ def validate_params(cfg: dict) -> None:
         daftar = "; ".join(f"{kunci}: {pesan}" for kunci, pesan in pelanggaran.items())
         raise BacktestError(f"Kombinasi parameter tidak konsisten: {daftar}")
 
-    if bool(cfg.get("TREND_FILTER_ENABLED", False)):
-        trend_checks = [
-            ("TREND_EMA_FAST", 2, 500),
-            ("TREND_EMA_SLOW", 3, 1000),
-            ("TREND_ADX_PERIOD", 2, 200),
-            ("TREND_ADX_MIN", 0.0, 100.0),
-            ("TREND_LOOKBACK_BARS", 20, strategy.TREND_KLINE_LIMIT - 1),
+    if bool(cfg.get("DIRECTION_FILTER_ENABLED", False)):
+        arah_checks = [
+            ("DIRECTION_EMA_FAST", 2, 500),
+            ("DIRECTION_EMA_SLOW", 3, strategy.TREND_KLINE_LIMIT - 1),
+            ("DIRECTION_ADX_PERIOD", 2, 200),
+            ("DIRECTION_ADX_MIN", 0.0, 100.0),
+            ("DIRECTION_LOOKBACK_BARS", 20, strategy.TREND_KLINE_LIMIT - 1),
         ]
-        for key, lo, hi in trend_checks:
+        for key, lo, hi in arah_checks:
             val = cfg.get(key)
             if val is None or not (lo <= float(val) <= hi):
                 raise BacktestError(
@@ -950,17 +866,52 @@ def validate_params(cfg: dict) -> None:
                 )
         interval = cfg.get("CONFIRM_INTERVAL", "5m")
         try:
-            butuh_trend = strategy.trend_required_bars(cfg)
-            strategy.trend_warmup_bars(cfg, interval)
+            butuh_arah = strategy.direction_required_bars(cfg)
+            strategy.direction_warmup_bars(cfg, interval)
         except ValueError as exc:
             raise BacktestError(str(exc)) from exc
-        if int(cfg.get("TREND_LOOKBACK_BARS", 0)) < butuh_trend:
+        if int(cfg.get("DIRECTION_LOOKBACK_BARS", 0)) < butuh_arah:
             raise BacktestError(
-                f"TREND_LOOKBACK_BARS={cfg.get('TREND_LOOKBACK_BARS')} lebih kecil dari "
-                f"{butuh_trend} candle yang dibutuhkan EMA dan ADX pada "
-                f"{cfg.get('TREND_INTERVAL', '1h')}. Naikkan nilainya supaya backtest "
-                "dan bot live memakai jendela trend yang sama."
+                f"DIRECTION_LOOKBACK_BARS={cfg.get('DIRECTION_LOOKBACK_BARS')} lebih kecil "
+                f"dari {butuh_arah} candle yang dibutuhkan EMA dan ADX pada "
+                f"{cfg.get('DIRECTION_INTERVAL', '1d')}. Naikkan nilainya supaya backtest "
+                "dan bot live memakai jendela arah yang sama."
             )
+
+    if bool(cfg.get("ZONE_FILTER_ENABLED", False)):
+        zona_checks = [
+            ("ZONE_LOOKBACK_BARS", 3, 500),
+            ("ZONE_BUFFER_PCT", 0.05, 20.0),
+            ("ZONE_MAX_DISTANCE_PCT", 0.1, 50.0),
+            ("ZONE_MIN_CLOSE_POSITION", 0.0, 1.0),
+        ]
+        for key, lo, hi in zona_checks:
+            lo, hi = _rentang_demand(key, lo, hi)
+            val = cfg.get(key)
+            if val is None or not (lo <= float(val) <= hi):
+                raise BacktestError(
+                    f"Parameter '{key}'={val} di luar rentang wajar ({lo:g}..{hi:g})."
+                )
+        interval = cfg.get("CONFIRM_INTERVAL", "5m")
+        try:
+            strategy.zone_warmup_bars(cfg, interval)
+        except ValueError as exc:
+            raise BacktestError(str(exc)) from exc
+
+    if bool(cfg.get("TIMING_FILTER_ENABLED", False)):
+        timing_checks = [
+            ("TIMING_EMA_FAST", 2, 500),
+            ("TIMING_EMA_SLOW", 3, strategy.TREND_KLINE_LIMIT - 1),
+            ("TIMING_ADX_PERIOD", 2, 200),
+            ("TIMING_ADX_MIN", 0.0, 100.0),
+            ("TIMING_LOOKBACK_BARS", 20, strategy.TREND_KLINE_LIMIT - 1),
+        ]
+        for key, lo, hi in timing_checks:
+            val = cfg.get(key)
+            if val is None or not (lo <= float(val) <= hi):
+                raise BacktestError(
+                    f"Parameter '{key}'={val} di luar rentang wajar ({lo}..{hi})."
+                )
 
     butuh = strategy.required_lookback_bars(cfg)
     if int(cfg.get("CONFIRM_LOOKBACK_BARS", 0)) < butuh:
@@ -1052,17 +1003,15 @@ def print_single_result(result: BacktestResult) -> None:
     if (
         risk_info
         or summary.get("chase_skips")
-        or summary.get("trend_skips")
-        or summary.get("htf_demand_skips")
-        or summary.get("m15_demand_skips")
-        or summary.get("m15_trend_skips")
+        or summary.get("direction_skips")
+        or summary.get("zone_skips")
+        or summary.get("timing_skips")
     ):
         print(
             f"Kontrol akun/filter: {risk_info}, chase dilewati {summary.get('chase_skips', 0)}, "
-            f"trend dilewati {summary.get('trend_skips', 0)}, "
-            f"demand H1 dilewati {summary.get('htf_demand_skips', 0)}, "
-            f"demand M15 dilewati {summary.get('m15_demand_skips', 0)}, "
-            f"EMA+ADX M15 dilewati {summary.get('m15_trend_skips', 0)}"
+            f"arah dilewati {summary.get('direction_skips', 0)}, "
+            f"zona dilewati {summary.get('zone_skips', 0)}, "
+            f"timing dilewati {summary.get('timing_skips', 0)}"
         )
     if result.warnings:
         print("Peringatan:")
@@ -1143,7 +1092,7 @@ def main():
     interval = cfg["CONFIRM_INTERVAL"]
     warmup = bars_per_day(interval)
     try:
-        butuh_gerbang = strategy.htf_gate_warmup_bars(cfg, interval)
+        butuh_gerbang = strategy.gate_warmup_bars(cfg, interval)
     except ValueError as exc:
         raise BacktestError(str(exc)) from exc
     warmup = max(warmup, butuh_gerbang)
@@ -1155,34 +1104,31 @@ def main():
         f"({args.days} hari + warmup {warmup} candle = "
         f"{warmup / bar_per_hari:.2f} hari)..."
     )
-    uji_bars_m15 = args.days * (1440 // strategy.INTERVAL_MINUTES[strategy.M15_INTERVAL])
-    if strategy.m15_trend_enabled(cfg):
+    if strategy.direction_enabled(cfg):
         print(
-            f"  Gerbang EMA + ADX M15 aktif: jendela "
-            f"{strategy.m15_trend_window_bars(cfg)} candle M15 (minimum "
-            f"{strategy.m15_trend_required_bars(cfg)} candle untuk EMA dan ADX). "
-            "Koin dengan riwayat lebih pendek ditolak."
+            f"  Layer arah {strategy.direction_interval(cfg)} aktif: jendela "
+            f"{strategy.direction_window_bars(cfg)} candle (minimum "
+            f"{strategy.direction_required_bars(cfg)} candle untuk EMA dan ADX). "
+            "Koin dengan riwayat harian lebih pendek ditolak."
         )
-        if uji_bars_m15 < strategy.m15_trend_required_bars(cfg):
+        if args.days < strategy.direction_required_bars(cfg):
             print(
-                f"PERINGATAN: --days {args.days} mencakup sekitar {uji_bars_m15} "
-                f"candle M15, lebih pendek dari kebutuhan EMA + ADX "
-                f"({strategy.m15_trend_required_bars(cfg)} candle)."
+                f"PERINGATAN: --days {args.days} lebih pendek dari kebutuhan EMA + ADX "
+                f"harian ({strategy.direction_required_bars(cfg)} candle)."
             )
-    if strategy.m15_demand_enabled(cfg):
-        pemanasan_m15 = strategy.m15_demand_warmup_bars(cfg, interval)
+    if strategy.zone_enabled(cfg):
+        pemanasan_zona = strategy.zone_warmup_bars(cfg, interval)
         print(
-            f"  Gerbang demand M15 aktif: {pemanasan_m15} candle {interval} "
-            f"(sekitar {pemanasan_m15 / bar_per_hari:.2f} hari) diperlukan "
+            f"  Layer zona {strategy.zone_interval(cfg)} aktif: {pemanasan_zona} candle "
+            f"{interval} (sekitar {pemanasan_zona / bar_per_hari:.2f} hari) diperlukan "
             "untuk warmup. Rentang unduhan diperpanjang otomatis."
         )
-        lookback_m15 = strategy.m15_demand_lookback_bars(cfg)
-        if uji_bars_m15 < lookback_m15:
-            print(
-                f"PERINGATAN: --days {args.days} mencakup sekitar {uji_bars_m15} "
-                f"candle M15, lebih pendek dari lookback demand {lookback_m15} candle. "
-                "Perpanjang periode uji atau kecilkan M15_DEMAND_LOOKBACK_BARS."
-            )
+    if strategy.timing_enabled(cfg):
+        print(
+            f"  Layer timing {strategy.timing_interval(cfg)} aktif: jendela "
+            f"{strategy.timing_window_bars(cfg)} candle (minimum "
+            f"{strategy.timing_required_bars(cfg)} candle untuk EMA dan ADX)."
+        )
     client = BinanceSpotClient(
         "",
         "",

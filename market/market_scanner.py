@@ -45,10 +45,9 @@ class Candidate:
     confirmed: bool = False
     confirm_reason: str = ""
     setup: "Optional[SetupResult]" = None
-    trend: "Optional[dict]" = None
-    htf_demand: "Optional[dict]" = None
-    m15_demand: "Optional[dict]" = None
-    m15_trend: "Optional[dict]" = None
+    direction: "Optional[dict]" = None
+    zone: "Optional[dict]" = None
+    timing: "Optional[dict]" = None
 
 
 @dataclass
@@ -93,17 +92,17 @@ class ScanDiagnostics:
         if not self.checked_candidates:
             return []
         interval = str(config.get("CONFIRM_INTERVAL", "5m"))
-        htf_interval = str(config.get("TREND_INTERVAL", "1h"))
+        arah_interval = str(config.get("DIRECTION_INTERVAL", "1d"))
+        zona_interval = str(config.get("ZONE_INTERVAL", "1h"))
         labels = {
             "CANDLE_CONFIRM": f"candle {interval} gagal diambil",
             "HISTORY_CONFIRM": f"riwayat {interval} kurang",
             "VOLUME_CONFIRM": f"volume rolling {interval}",
             "DEMAND_CONFIRM": f"demand {interval}",
             "SETUP_CONFIRM": f"konfirmasi {interval}",
-            "TREND_HTF": f"trend {htf_interval}",
-            "DEMAND_HTF": f"demand {htf_interval}",
-            "DEMAND_M15": "demand M15",
-            "TREND_M15": "EMA + ADX M15",
+            "DIRECTION": f"arah {arah_interval}",
+            "ZONE": f"zona {zona_interval}",
+            "TIMING": f"timing {interval}",
         }
         candle = "belum tersedia"
         if self.latest_signal_close_ms > 0:
@@ -547,15 +546,20 @@ def setup_quality_key(setup: SetupResult, candidate: Candidate) -> tuple:
     return (-float(candidate.quote_volume),)
 
 
-def trend_verdict(symbol: str, config: dict, trend_provider) -> dict:
+def direction_verdict(
+    symbol: str,
+    config: dict,
+    direction_provider,
+    signal_close_time_ms: int | None = None,
+) -> dict:
     from strategy import indicators as strategy_mod
 
-    interval = str(config.get("TREND_INTERVAL", "1h") or "1h")
+    interval = str(config.get("DIRECTION_INTERVAL", "1d") or "1d")
     kosong = {
         "interval": interval,
         "bars": 0,
-        "required": strategy_mod.trend_required_bars(config),
-        "window": strategy_mod.trend_window_bars(config),
+        "required": strategy_mod.direction_required_bars(config),
+        "window": strategy_mod.direction_window_bars(config),
         "close": None,
         "ema_fast": None,
         "ema_slow": None,
@@ -563,131 +567,100 @@ def trend_verdict(symbol: str, config: dict, trend_provider) -> dict:
         "checks": {},
         "values": {},
     }
-    if not bool(config.get("TREND_FILTER_ENABLED", False)):
-        return {"ok": True, "reason": "filter trend nonaktif", **kosong}
-    if trend_provider is None:
+    if not bool(config.get("DIRECTION_FILTER_ENABLED", False)):
+        return {"ok": True, "reason": "filter arah nonaktif", **kosong}
+    if direction_provider is None:
         return {
             "ok": False,
             "reason": (
-                f"filter trend {interval} aktif tetapi penyedia candle trend "
+                f"filter arah {interval} aktif tetapi penyedia candle arah "
                 "tidak tersedia (fail closed)"
             ),
             **kosong,
         }
     try:
-        klines = trend_provider(symbol)
+        klines = direction_provider(symbol)
     except Exception as exc:
         return {
             "ok": False,
-            "reason": f"candle trend {interval} {symbol} gagal diambil: {exc}",
+            "reason": f"candle arah {interval} {symbol} gagal diambil: {exc}",
             **kosong,
         }
     if not klines:
         return {
             "ok": False,
-            "reason": f"candle trend {interval} {symbol} kosong",
+            "reason": f"candle arah {interval} {symbol} kosong",
             **kosong,
         }
-    return strategy_mod.evaluate_trend_filter(list(klines), config)
-
-
-def htf_demand_verdict(symbol: str, config: dict, trend_provider) -> dict:
-    from strategy import indicators as strategy_mod
-
-    interval = str(config.get("TREND_INTERVAL", "1h") or "1h")
-    kosong = {
-        "interval": interval,
-        "bars": 0,
-        "required": strategy_mod.htf_demand_window_bars(config),
-        "zone_low": None,
-        "zone_high": None,
-        "distance_pct": None,
-        "close_position": None,
-    }
-    if not bool(config.get("HTF_DEMAND_FILTER_ENABLED", False)):
-        return {"ok": True, "reason": f"filter demand {interval} nonaktif", **kosong}
-    if trend_provider is None:
-        return {
-            "ok": False,
-            "reason": (
-                f"filter demand {interval} aktif tetapi penyedia candle timeframe "
-                "tinggi tidak tersedia (fail closed)"
-            ),
-            **kosong,
-        }
-    try:
-        klines = trend_provider(symbol)
-    except Exception as exc:
-        return {
-            "ok": False,
-            "reason": f"candle demand {interval} {symbol} gagal diambil: {exc}",
-            **kosong,
-        }
-    if not klines:
-        return {
-            "ok": False,
-            "reason": f"candle demand {interval} {symbol} kosong",
-            **kosong,
-        }
-    return strategy_mod.evaluate_htf_demand(list(klines), config)
-
-
-def m15_demand_verdict(
-    symbol: str, config: dict, m15_provider, signal_close_time_ms: int | None = None
-) -> dict:
-    from strategy import indicators as strategy_mod
-
-    interval = strategy_mod.M15_INTERVAL
-    kosong = {
-        "interval": interval,
-        "bars": 0,
-        "required": strategy_mod.m15_demand_window_bars(config),
-        "zone_low": None,
-        "zone_high": None,
-        "distance_pct": None,
-        "close_position": None,
-    }
-    if not bool(config.get("M15_DEMAND_FILTER_ENABLED", False)):
-        return {"ok": True, "reason": f"filter demand {interval} nonaktif", **kosong}
-    if m15_provider is None:
-        return {
-            "ok": False,
-            "reason": (
-                f"filter demand {interval} aktif tetapi penyedia candle M15 "
-                "tidak tersedia (fail closed)"
-            ),
-            **kosong,
-        }
-    try:
-        klines = m15_provider(symbol)
-    except Exception as exc:
-        return {
-            "ok": False,
-            "reason": f"candle demand {interval} {symbol} gagal diambil: {exc}",
-            **kosong,
-        }
-    if not klines:
-        return {
-            "ok": False,
-            "reason": f"candle demand {interval} {symbol} kosong",
-            **kosong,
-        }
-    return strategy_mod.evaluate_m15_demand(
+    return strategy_mod.evaluate_direction(
         list(klines), config, signal_close_time_ms
     )
 
 
-def m15_trend_verdict(
-    symbol: str, config: dict, m15_trend_provider, signal_close_time_ms: int | None = None
+def zone_verdict(
+    symbol: str,
+    config: dict,
+    zone_provider,
+    signal_close_time_ms: int | None = None,
 ) -> dict:
     from strategy import indicators as strategy_mod
 
-    interval = strategy_mod.M15_INTERVAL
+    interval = str(config.get("ZONE_INTERVAL", "1h") or "1h")
     kosong = {
         "interval": interval,
         "bars": 0,
-        "required": strategy_mod.m15_trend_required_bars(config),
-        "window": strategy_mod.m15_trend_window_bars(config),
+        "required": strategy_mod.zone_window_bars(config),
+        "zone_low": None,
+        "zone_high": None,
+        "distance_pct": None,
+        "close_position": None,
+    }
+    if not bool(config.get("ZONE_FILTER_ENABLED", False)):
+        return {"ok": True, "reason": f"filter zona {interval} nonaktif", **kosong}
+    if zone_provider is None:
+        return {
+            "ok": False,
+            "reason": (
+                f"filter zona {interval} aktif tetapi penyedia candle zona "
+                "tidak tersedia (fail closed)"
+            ),
+            **kosong,
+        }
+    try:
+        klines = zone_provider(symbol)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "reason": f"candle zona {interval} {symbol} gagal diambil: {exc}",
+            **kosong,
+        }
+    if not klines:
+        return {
+            "ok": False,
+            "reason": f"candle zona {interval} {symbol} kosong",
+            **kosong,
+        }
+    return strategy_mod.evaluate_zone(
+        list(klines), config, signal_close_time_ms
+    )
+
+
+def timing_verdict(
+    config: dict, klines: list, signal_close_time_ms: int | None = None
+) -> dict:
+    """Verdict layer timing, dibaca dari seri candle konfirmasi yang sama.
+
+    Layer timing memakai seri konfirmasi (M5) yang sudah diunduh untuk
+    konfirmasi entry, jadi tidak perlu pengambilan candle tambahan.
+    """
+    from strategy import indicators as strategy_mod
+
+    interval = strategy_mod.timing_interval(config)
+    kosong = {
+        "interval": interval,
+        "bars": 0,
+        "required": strategy_mod.timing_required_bars(config),
+        "window": strategy_mod.timing_window_bars(config),
         "close": None,
         "ema_fast": None,
         "ema_slow": None,
@@ -695,34 +668,15 @@ def m15_trend_verdict(
         "checks": {},
         "values": {},
     }
-    if not strategy_mod.m15_trend_enabled(config):
-        return {"ok": True, "reason": f"filter trend {interval} nonaktif", **kosong}
-    if m15_trend_provider is None:
-        return {
-            "ok": False,
-            "reason": (
-                f"filter trend {interval} aktif tetapi penyedia candle M15 "
-                "tidak tersedia (fail closed)"
-            ),
-            **kosong,
-        }
-    try:
-        klines = m15_trend_provider(symbol)
-    except Exception as exc:
-        return {
-            "ok": False,
-            "reason": f"candle trend {interval} {symbol} gagal diambil: {exc}",
-            **kosong,
-        }
+    if not strategy_mod.timing_enabled(config):
+        return {"ok": True, "reason": f"filter timing {interval} nonaktif", **kosong}
     if not klines:
         return {
             "ok": False,
-            "reason": f"candle trend {interval} {symbol} kosong",
+            "reason": f"candle timing {interval} kosong (fail closed)",
             **kosong,
         }
-    return strategy_mod.evaluate_m15_trend(
-        list(klines), config, signal_close_time_ms
-    )
+    return strategy_mod.evaluate_timing(list(klines), config, signal_close_time_ms)
 
 
 def find_best_candidate(
@@ -732,9 +686,8 @@ def find_best_candidate(
     tradable_symbols: "set | None" = None,
     klines_fetcher_many: "Optional[Callable[[list], dict]]" = None,
     prewarm_fn: "Optional[Callable[[list], None]]" = None,
-    trend_provider: "Optional[Callable[[str], list]]" = None,
-    m15_provider: "Optional[Callable[[str], list]]" = None,
-    m15_trend_provider: "Optional[Callable[[str], list]]" = None,
+    direction_provider: "Optional[Callable[[str], list]]" = None,
+    zone_provider: "Optional[Callable[[str], list]]" = None,
     diagnostics: Optional[ScanDiagnostics] = None,
 ) -> Optional[Candidate]:
     ranked = filter_and_rank_candidates(tickers, config, tradable_symbols)
@@ -796,61 +749,46 @@ def find_best_candidate(
                 diagnostics.reject(stage, cand.symbol, hasil.reason)
             continue
         signal_close_time_ms = int(klines[-1].close_time)
-        if bool(config.get("TREND_FILTER_ENABLED", False)):
-            trend = trend_verdict(cand.symbol, config, trend_provider)
-            cand.trend = trend
-            if not trend["ok"]:
-                cand.confirmed = False
-                cand.confirm_reason = (
-                    f"trend {trend.get('interval') or 'HTF'} ditolak: {trend['reason']}"
-                )
-                if diagnostics is not None:
-                    diagnostics.reject("TREND_HTF", cand.symbol, trend["reason"])
-                continue
-            cand.confirm_reason = f"{hasil.reason} | {trend['reason']}"
-        if bool(config.get("HTF_DEMAND_FILTER_ENABLED", False)):
-            htf_demand = htf_demand_verdict(cand.symbol, config, trend_provider)
-            cand.htf_demand = htf_demand
-            if not htf_demand["ok"]:
-                cand.confirmed = False
-                cand.confirm_reason = (
-                    f"demand {htf_demand.get('interval') or 'HTF'} ditolak: "
-                    f"{htf_demand['reason']}"
-                )
-                if diagnostics is not None:
-                    diagnostics.reject("DEMAND_HTF", cand.symbol, htf_demand["reason"])
-                continue
-            cand.confirm_reason = f"{cand.confirm_reason} | {htf_demand['reason']}"
-        if bool(config.get("M15_DEMAND_FILTER_ENABLED", False)):
-            m15_demand = m15_demand_verdict(
-                cand.symbol, config, m15_provider, signal_close_time_ms
+        if bool(config.get("DIRECTION_FILTER_ENABLED", False)):
+            arah = direction_verdict(
+                cand.symbol, config, direction_provider, signal_close_time_ms
             )
-            cand.m15_demand = m15_demand
-            if not m15_demand["ok"]:
+            cand.direction = arah
+            if not arah["ok"]:
                 cand.confirmed = False
                 cand.confirm_reason = (
-                    f"demand {m15_demand.get('interval') or '15m'} ditolak: "
-                    f"{m15_demand['reason']}"
+                    f"arah {arah.get('interval') or '1d'} ditolak: {arah['reason']}"
                 )
                 if diagnostics is not None:
-                    diagnostics.reject("DEMAND_M15", cand.symbol, m15_demand["reason"])
+                    diagnostics.reject("DIRECTION", cand.symbol, arah["reason"])
                 continue
-            cand.confirm_reason = f"{cand.confirm_reason} | {m15_demand['reason']}"
-        if bool(config.get("M15_TREND_FILTER_ENABLED", False)):
-            m15_trend = m15_trend_verdict(
-                cand.symbol, config, m15_trend_provider, signal_close_time_ms
+            cand.confirm_reason = f"{hasil.reason} | {arah['reason']}"
+        if bool(config.get("ZONE_FILTER_ENABLED", False)):
+            zona = zone_verdict(
+                cand.symbol, config, zone_provider, signal_close_time_ms
             )
-            cand.m15_trend = m15_trend
-            if not m15_trend["ok"]:
+            cand.zone = zona
+            if not zona["ok"]:
                 cand.confirmed = False
                 cand.confirm_reason = (
-                    f"trend {m15_trend.get('interval') or '15m'} ditolak: "
-                    f"{m15_trend['reason']}"
+                    f"zona {zona.get('interval') or '1h'} ditolak: {zona['reason']}"
                 )
                 if diagnostics is not None:
-                    diagnostics.reject("TREND_M15", cand.symbol, m15_trend["reason"])
+                    diagnostics.reject("ZONE", cand.symbol, zona["reason"])
                 continue
-            cand.confirm_reason = f"{cand.confirm_reason} | {m15_trend['reason']}"
+            cand.confirm_reason = f"{cand.confirm_reason} | {zona['reason']}"
+        if bool(config.get("TIMING_FILTER_ENABLED", False)):
+            timing = timing_verdict(config, klines, signal_close_time_ms)
+            cand.timing = timing
+            if not timing["ok"]:
+                cand.confirmed = False
+                cand.confirm_reason = (
+                    f"timing {timing.get('interval') or '5m'} ditolak: {timing['reason']}"
+                )
+                if diagnostics is not None:
+                    diagnostics.reject("TIMING", cand.symbol, timing["reason"])
+                continue
+            cand.confirm_reason = f"{cand.confirm_reason} | {timing['reason']}"
         lolos.append(cand)
 
     if not lolos:

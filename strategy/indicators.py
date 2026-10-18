@@ -29,18 +29,30 @@ INTERVAL_MINUTES = {
     "12h": 720,
     "1d": 1440,
 }
-M15_INTERVAL = "15m"
+DIRECTION_DEFAULT_INTERVAL = "1d"
+ZONE_DEFAULT_INTERVAL = "1h"
+TIMING_DEFAULT_INTERVAL = "5m"
 
 
-def m15_ratio(interval: str) -> int:
-    source = INTERVAL_MINUTES.get(str(interval).strip().lower())
-    target = INTERVAL_MINUTES[M15_INTERVAL]
-    if source is None or target % source:
+def interval_ratio(target: str, source: str) -> int:
+    """Jumlah candle sumber yang dirangkai menjadi satu candle target.
+
+    Dipakai backtest untuk menyamakan candle timeframe tinggi (Daily, H1)
+    dengan cara merangkai candle sumber. Live memakai candle asli dari bursa.
+    """
+    source_minutes = INTERVAL_MINUTES.get(str(source).strip().lower())
+    target_minutes = INTERVAL_MINUTES.get(str(target).strip().lower())
+    if source_minutes is None:
+        raise ValueError(f"Interval sumber '{source}' tidak dikenal.")
+    if target_minutes is None:
+        raise ValueError(f"Interval target '{target}' tidak dikenal.")
+    if target_minutes % source_minutes:
         raise ValueError(
-            f"Interval konfirmasi '{interval}' tidak bisa dirangkai menjadi M15. "
-            "Gunakan 1m, 3m, 5m, atau 15m saat filter M15 aktif."
+            f"Interval target '{target}' ({target_minutes} menit) harus kelipatan "
+            f"bulat dari interval sumber '{source}' ({source_minutes} menit) "
+            "supaya candle bisa dirangkai dari data yang sudah diunduh."
         )
-    return target // source
+    return target_minutes // source_minutes
 
 
 def interval_to_ms(interval: str, default_minutes: int = 5) -> int:
@@ -101,8 +113,16 @@ def required_lookback_bars(config: dict) -> int:
         else 0
     )
     atr_period = max(1, int(config.get("ATR_PERIOD", 14) or 14))
+    timing_lookback = (
+        timing_window_bars(config)
+        if bool(config.get("TIMING_FILTER_ENABLED", False))
+        else 0
+    )
     return max(
-        atr_period, rolling_lookback + max(1, confirmation_bars), demand_lookback
+        atr_period,
+        rolling_lookback + max(1, confirmation_bars),
+        demand_lookback,
+        timing_lookback,
     )
 
 
@@ -451,261 +471,146 @@ def time_stop_due(entry_time: int, now_ms: int, cap_ms: int, bar_ms: int) -> boo
 
 TREND_KLINE_LIMIT = 1000
 
+DIRECTION_DEFAULTS = {
+    "DIRECTION_FILTER_ENABLED": True,
+    "DIRECTION_INTERVAL": DIRECTION_DEFAULT_INTERVAL,
+    "DIRECTION_EMA_FAST": 10,
+    "DIRECTION_EMA_SLOW": 20,
+    "DIRECTION_ADX_PERIOD": 14,
+    "DIRECTION_ADX_MIN": 20.0,
+    "DIRECTION_LOOKBACK_BARS": 60,
+}
 
-def trend_interval(config: dict) -> str:
-    raw = str(config.get("TREND_INTERVAL", "1h") or "1h").strip().lower()
+ZONE_DEFAULTS = {
+    "ZONE_FILTER_ENABLED": True,
+    "ZONE_INTERVAL": ZONE_DEFAULT_INTERVAL,
+    "ZONE_LOOKBACK_BARS": 72,
+    "ZONE_BUFFER_PCT": 1.5,
+    "ZONE_MAX_DISTANCE_PCT": 25.0,
+    "ZONE_MIN_CLOSE_POSITION": 0.35,
+}
+
+TIMING_DEFAULTS = {
+    "TIMING_FILTER_ENABLED": True,
+    "TIMING_EMA_FAST": 20,
+    "TIMING_EMA_SLOW": 50,
+    "TIMING_ADX_PERIOD": 14,
+    "TIMING_ADX_MIN": 20.0,
+    "TIMING_LOOKBACK_BARS": 60,
+}
+
+
+def _interval_from_config(config: dict, key: str, default: str) -> str:
+    raw = str(config.get(key, default) or default).strip().lower()
     if raw not in INTERVAL_MINUTES:
         raise ValueError(
-            f"TREND_INTERVAL '{raw}' tidak dikenal. Pilihan: "
+            f"{key} '{raw}' tidak dikenal. Pilihan: "
             + ", ".join(sorted(INTERVAL_MINUTES, key=INTERVAL_MINUTES.get))
         )
     return raw
 
 
-def trend_interval_minutes(config: dict) -> int:
-    return int(INTERVAL_MINUTES[trend_interval(config)])
+def _ema_adx_params(config: dict, prefix: str, default_fast: int, default_slow: int) -> tuple:
+    fast = max(2, int(config.get(f"{prefix}_EMA_FAST", default_fast) or default_fast))
+    slow = max(3, int(config.get(f"{prefix}_EMA_SLOW", default_slow) or default_slow))
+    adx_period = max(2, int(config.get(f"{prefix}_ADX_PERIOD", 14) or 14))
+    adx_min = float(config.get(f"{prefix}_ADX_MIN", 20.0) or 0.0)
+    if adx_min < 0:
+        adx_min = 0.0
+    return fast, slow, adx_period, adx_min
 
 
-def trend_required_bars(config: dict) -> int:
-    fast = max(2, int(config.get("TREND_EMA_FAST", 20) or 20))
-    slow = max(3, int(config.get("TREND_EMA_SLOW", 50) or 50))
-    adx_period = max(2, int(config.get("TREND_ADX_PERIOD", 14) or 14))
+def direction_interval(config: dict) -> str:
+    return _interval_from_config(
+        config, "DIRECTION_INTERVAL", DIRECTION_DEFAULT_INTERVAL
+    )
+
+
+def direction_interval_minutes(config: dict) -> int:
+    return int(INTERVAL_MINUTES[direction_interval(config)])
+
+
+def direction_enabled(config: dict) -> bool:
+    return bool(config.get("DIRECTION_FILTER_ENABLED", False))
+
+
+def direction_required_bars(config: dict) -> int:
+    fast, slow, adx_period, _ = _ema_adx_params(config, "DIRECTION", 10, 20)
     return max(fast, slow, 2 * adx_period + 1)
 
 
-def trend_window_bars(config: dict) -> int:
-    diminta = int(config.get("TREND_LOOKBACK_BARS", 120) or 120)
+def direction_window_bars(config: dict) -> int:
+    if not direction_enabled(config):
+        return 0
+    diminta = int(config.get("DIRECTION_LOOKBACK_BARS", 60) or 60)
     diminta = max(1, min(TREND_KLINE_LIMIT - 1, diminta))
-    return max(trend_required_bars(config), diminta)
+    return max(direction_required_bars(config), diminta)
 
 
-HTF_DEMAND_DEFAULTS = {
-    "HTF_DEMAND_LOOKBACK_BARS": 72,
-    "HTF_DEMAND_ZONE_BUFFER_PCT": 1.5,
-    "HTF_DEMAND_MAX_DISTANCE_PCT": 10.0,
-    "HTF_DEMAND_MIN_CLOSE_POSITION": 0.40,
-}
+def zone_interval(config: dict) -> str:
+    return _interval_from_config(config, "ZONE_INTERVAL", ZONE_DEFAULT_INTERVAL)
 
 
-def htf_demand_enabled(config: dict) -> bool:
-    return bool(config.get("HTF_DEMAND_FILTER_ENABLED", False))
+def zone_interval_minutes(config: dict) -> int:
+    return int(INTERVAL_MINUTES[zone_interval(config)])
 
 
-def htf_demand_lookback_bars(config: dict) -> int:
-    lookback = int(
-        config.get(
-            "HTF_DEMAND_LOOKBACK_BARS",
-            HTF_DEMAND_DEFAULTS["HTF_DEMAND_LOOKBACK_BARS"],
-        )
-        or HTF_DEMAND_DEFAULTS["HTF_DEMAND_LOOKBACK_BARS"]
-    )
+def zone_enabled(config: dict) -> bool:
+    return bool(config.get("ZONE_FILTER_ENABLED", False))
+
+
+def zone_lookback_bars(config: dict) -> int:
+    lookback = int(config.get("ZONE_LOOKBACK_BARS", 72) or 72)
     return max(3, min(TREND_KLINE_LIMIT - 2, lookback))
 
 
-def htf_demand_window_bars(config: dict) -> int:
-    if not htf_demand_enabled(config):
+def zone_window_bars(config: dict) -> int:
+    if not zone_enabled(config):
         return 0
-    return htf_demand_lookback_bars(config) + 1
+    return zone_lookback_bars(config) + 1
 
 
-def htf_window_bars(config: dict) -> int:
-    return max(trend_window_bars(config), htf_demand_window_bars(config))
-
-
-def htf_demand_gate_config(config: dict) -> dict:
+def zone_gate_config(config: dict) -> dict:
     return {
-        "DEMAND_ZONE_FILTER_ENABLED": htf_demand_enabled(config),
-        "DEMAND_LOOKBACK_BARS": htf_demand_lookback_bars(config),
+        "DEMAND_ZONE_FILTER_ENABLED": zone_enabled(config),
+        "DEMAND_LOOKBACK_BARS": zone_lookback_bars(config),
         "DEMAND_ZONE_BUFFER_PCT": max(
-            0.0,
-            float(
-                config.get(
-                    "HTF_DEMAND_ZONE_BUFFER_PCT",
-                    HTF_DEMAND_DEFAULTS["HTF_DEMAND_ZONE_BUFFER_PCT"],
-                )
-                or 0.0
-            ),
+            0.0, float(config.get("ZONE_BUFFER_PCT", 1.5) or 0.0)
         ),
         "DEMAND_MAX_DISTANCE_PCT": max(
-            0.0,
-            float(
-                config.get(
-                    "HTF_DEMAND_MAX_DISTANCE_PCT",
-                    HTF_DEMAND_DEFAULTS["HTF_DEMAND_MAX_DISTANCE_PCT"],
-                )
-                or 0.0
-            ),
+            0.0, float(config.get("ZONE_MAX_DISTANCE_PCT", 25.0) or 0.0)
         ),
         "DEMAND_MIN_CLOSE_POSITION": float(
-            config.get(
-                "HTF_DEMAND_MIN_CLOSE_POSITION",
-                HTF_DEMAND_DEFAULTS["HTF_DEMAND_MIN_CLOSE_POSITION"],
-            )
-            or 0.0
+            config.get("ZONE_MIN_CLOSE_POSITION", 0.35) or 0.0
         ),
     }
 
 
-def evaluate_htf_demand(
-    klines: list[Kline], config: dict, signal_close_time_ms: Optional[int] = None
-) -> dict:
-    interval = str(config.get("TREND_INTERVAL", "1h") or "1h").strip().lower()
-    wajib = htf_demand_window_bars(config)
-    if not htf_demand_enabled(config):
-        return {
-            "ok": True,
-            "reason": f"filter demand {interval} nonaktif",
-            "interval": interval,
-            "bars": 0,
-            "required": 0,
-            "zone_low": None,
-            "zone_high": None,
-            "distance_pct": None,
-            "close_position": None,
-        }
-    siap = [
-        k
-        for k in (klines or [])
-        if signal_close_time_ms is None
-        or int(k.close_time) <= int(signal_close_time_ms)
-    ]
-    hasil = detect_demand_zone(siap, htf_demand_gate_config(config))
-    hasil["interval"] = interval
-    hasil["bars"] = len(siap)
-    hasil["required"] = wajib
-    return hasil
+def timing_interval(config: dict) -> str:
+    return _interval_from_config(config, "CONFIRM_INTERVAL", TIMING_DEFAULT_INTERVAL)
 
 
-M15_DEMAND_DEFAULTS = {
-    "M15_DEMAND_LOOKBACK_BARS": 20,
-    "M15_DEMAND_ZONE_BUFFER_PCT": 1.0,
-    "M15_DEMAND_MAX_DISTANCE_PCT": 5.0,
-    "M15_DEMAND_MIN_CLOSE_POSITION": 0.45,
-}
+def timing_interval_minutes(config: dict) -> int:
+    return int(INTERVAL_MINUTES[timing_interval(config)])
 
 
-def m15_demand_interval(config: dict) -> str:
-    return M15_INTERVAL
+def timing_enabled(config: dict) -> bool:
+    return bool(config.get("TIMING_FILTER_ENABLED", False))
 
 
-def m15_demand_interval_minutes(config: dict) -> int:
-    return INTERVAL_MINUTES[M15_INTERVAL]
-
-
-def m15_demand_enabled(config: dict) -> bool:
-    return bool(config.get("M15_DEMAND_FILTER_ENABLED", False))
-
-
-def m15_demand_lookback_bars(config: dict) -> int:
-    lookback = int(
-        config.get(
-            "M15_DEMAND_LOOKBACK_BARS",
-            M15_DEMAND_DEFAULTS["M15_DEMAND_LOOKBACK_BARS"],
-        )
-        or M15_DEMAND_DEFAULTS["M15_DEMAND_LOOKBACK_BARS"]
-    )
-    return max(3, min(TREND_KLINE_LIMIT - 2, lookback))
-
-
-def m15_demand_window_bars(config: dict) -> int:
-    if not m15_demand_enabled(config):
+def timing_required_bars(config: dict) -> int:
+    if not timing_enabled(config):
         return 0
-    return m15_demand_lookback_bars(config) + 1
+    fast, slow, adx_period, _ = _ema_adx_params(config, "TIMING", 20, 50)
+    return max(fast, slow, 2 * adx_period + 1)
 
 
-def m15_demand_gate_config(config: dict) -> dict:
-    return {
-        "DEMAND_ZONE_FILTER_ENABLED": m15_demand_enabled(config),
-        "DEMAND_LOOKBACK_BARS": m15_demand_lookback_bars(config),
-        "DEMAND_ZONE_BUFFER_PCT": max(
-            0.0,
-            float(
-                config.get(
-                    "M15_DEMAND_ZONE_BUFFER_PCT",
-                    M15_DEMAND_DEFAULTS["M15_DEMAND_ZONE_BUFFER_PCT"],
-                )
-                or 0.0
-            ),
-        ),
-        "DEMAND_MAX_DISTANCE_PCT": max(
-            0.0,
-            float(
-                config.get(
-                    "M15_DEMAND_MAX_DISTANCE_PCT",
-                    M15_DEMAND_DEFAULTS["M15_DEMAND_MAX_DISTANCE_PCT"],
-                )
-                or 0.0
-            ),
-        ),
-        "DEMAND_MIN_CLOSE_POSITION": float(
-            config.get(
-                "M15_DEMAND_MIN_CLOSE_POSITION",
-                M15_DEMAND_DEFAULTS["M15_DEMAND_MIN_CLOSE_POSITION"],
-            )
-            or 0.0
-        ),
-    }
-
-
-def evaluate_m15_demand(
-    klines: list[Kline], config: dict, signal_close_time_ms: Optional[int] = None
-) -> dict:
-    interval = m15_demand_interval(config)
-    wajib = m15_demand_window_bars(config)
-    if not m15_demand_enabled(config):
-        return {
-            "ok": True,
-            "reason": f"filter demand {interval} nonaktif",
-            "interval": interval,
-            "bars": 0,
-            "required": 0,
-            "zone_low": None,
-            "zone_high": None,
-            "distance_pct": None,
-            "close_position": None,
-        }
-    siap = [
-        k
-        for k in (klines or [])
-        if signal_close_time_ms is None
-        or int(k.close_time) <= int(signal_close_time_ms)
-    ]
-    hasil = detect_demand_zone(siap, m15_demand_gate_config(config))
-    hasil["interval"] = interval
-    hasil["bars"] = len(siap)
-    hasil["required"] = wajib
-    return hasil
-
-
-def m15_demand_warmup_bars(config: dict, interval: str) -> int:
-    if not m15_demand_enabled(config):
+def timing_window_bars(config: dict) -> int:
+    if not timing_enabled(config):
         return 0
-    rasio = m15_ratio(interval)
-    return (m15_demand_window_bars(config) + 1) * rasio
-
-
-def htf_gate_warmup_bars(config: dict, interval: str) -> int:
-    butuh = 0
-    if bool(config.get("TREND_FILTER_ENABLED", False)) or htf_demand_enabled(config):
-        butuh = max(butuh, trend_warmup_bars(config, interval))
-    if m15_demand_enabled(config):
-        butuh = max(butuh, m15_demand_warmup_bars(config, interval))
-    if m15_trend_enabled(config):
-        butuh = max(butuh, m15_trend_warmup_bars(config, interval))
-    return butuh
-
-
-def trend_warmup_bars(config: dict, interval: str) -> int:
-    sim_minutes = int(INTERVAL_MINUTES.get(str(interval), 5))
-    trend_minutes = trend_interval_minutes(config)
-    if trend_minutes % sim_minutes:
-        raise ValueError(
-            f"TREND_INTERVAL '{trend_interval(config)}' ({trend_minutes} menit) harus "
-            f"kelipatan bulat dari interval simulasi '{interval}' ({sim_minutes} menit) "
-            "supaya backtest bisa merangkai candle trend dari data yang sudah diunduh."
-        )
-    rasio = trend_minutes // sim_minutes
-    return htf_window_bars(config) * rasio + rasio
+    diminta = int(config.get("TIMING_LOOKBACK_BARS", 60) or 60)
+    diminta = max(1, min(TREND_KLINE_LIMIT - 1, diminta))
+    return max(timing_required_bars(config), diminta)
 
 
 def aggregate_klines(
@@ -852,38 +757,37 @@ def adx_series(klines: list[Kline], period: int = 14) -> list[Optional[float]]:
     return out
 
 
-def evaluate_trend_filter(
+def evaluate_ema_adx(
     klines: list[Kline],
-    config: dict,
+    *,
+    interval: str,
+    fast: int,
+    slow: int,
+    adx_period: int,
+    adx_min: float,
+    window: int,
+    required: int,
+    label: str,
+    nama_kunci_jendela: str,
     signal_close_time_ms: Optional[int] = None,
-    nama_kunci_jendela: str = "TREND_LOOKBACK_BARS",
 ) -> dict:
-    interval = str(config.get("TREND_INTERVAL", "1h") or "1h").strip().lower()
+    """Cek EMA cepat/lambat plus ADX pada satu timeframe.
+
+    Dipakai dua kali: layer arah (Daily) dan layer timing (M5). Keduanya
+    menolak kalau close tidak di atas EMA cepat, susunan EMA terbalik, atau
+    ADX di bawah ambang.
+    """
     if interval not in INTERVAL_MINUTES:
         return {
             "ok": False,
             "reason": (
-                f"TREND_INTERVAL '{interval}' tidak dikenal; pilihan: "
+                f"Interval '{interval}' tidak dikenal; pilihan: "
                 + ", ".join(sorted(INTERVAL_MINUTES, key=INTERVAL_MINUTES.get))
             ),
             "interval": interval,
             "bars": 0,
-            "required": 0,
-            "window": 0,
-            "close": None,
-            "ema_fast": None,
-            "ema_slow": None,
-            "adx": None,
-            "checks": {},
-            "values": {},
-        }
-    if not bool(config.get("TREND_FILTER_ENABLED", False)):
-        return {
-            "ok": True,
-            "reason": f"filter trend {interval} nonaktif",
-            "interval": interval,
-            "bars": 0,
-            "required": 0,
+            "required": required,
+            "window": window,
             "close": None,
             "ema_fast": None,
             "ema_slow": None,
@@ -892,14 +796,8 @@ def evaluate_trend_filter(
             "values": {},
         }
 
-    fast = max(2, int(config.get("TREND_EMA_FAST", 20) or 20))
-    slow = max(3, int(config.get("TREND_EMA_SLOW", 50) or 50))
-    adx_period = max(2, int(config.get("TREND_ADX_PERIOD", 14) or 14))
-    adx_min = float(config.get("TREND_ADX_MIN", 20.0) or 0.0)
-    if adx_min < 0:
-        adx_min = 0.0
-    jendela_penuh = trend_window_bars(config)
-    minimum = trend_required_bars(config)
+    jendela_penuh = max(1, int(window))
+    minimum = max(1, int(required))
 
     siap = [
         k
@@ -1009,7 +907,7 @@ def evaluate_trend_filter(
         return {
             "ok": False,
             "reason": (
-                f"trend {interval} turun: close {close_now:.6g} di bawah "
+                f"{label} {interval} turun: close {close_now:.6g} di bawah "
                 f"EMA{fast} {float(ema_fast):.6g} ({ringkas})"
             ),
             **{**terisi, "checks": checks},
@@ -1018,7 +916,7 @@ def evaluate_trend_filter(
         return {
             "ok": False,
             "reason": (
-                f"struktur {interval} belum naik: EMA{fast} "
+                f"struktur {label} {interval} belum naik: EMA{fast} "
                 f"{float(ema_fast):.6g} di bawah EMA{slow} "
                 f"{float(ema_slow):.6g} ({ringkas})"
             ),
@@ -1028,7 +926,7 @@ def evaluate_trend_filter(
         return {
             "ok": False,
             "reason": (
-                f"trend {interval} lemah: ADX{adx_period} "
+                f"{label} {interval} lemah: ADX{adx_period} "
                 f"{float(adx_now):.1f} di bawah ambang {adx_min:g} ({ringkas})"
             ),
             **{**terisi, "checks": checks},
@@ -1036,74 +934,23 @@ def evaluate_trend_filter(
 
     return {
         "ok": True,
-        "reason": f"trend {interval} naik dan kuat ({ringkas})",
+        "reason": f"{label} {interval} naik dan kuat ({ringkas})",
         **{**terisi, "checks": checks},
     }
 
 
-
-M15_TREND_DEFAULTS = {
-    "M15_TREND_FILTER_ENABLED": True,
-    "M15_TREND_EMA_FAST": 20,
-    "M15_TREND_EMA_SLOW": 50,
-    "M15_TREND_ADX_PERIOD": 14,
-    "M15_TREND_ADX_MIN": 20.0,
-    "M15_TREND_LOOKBACK_BARS": 120,
-}
-
-
-def m15_trend_enabled(config: dict) -> bool:
-    return bool(config.get("M15_TREND_FILTER_ENABLED", False))
-
-
-def m15_trend_interval(config: dict) -> str:
-    return M15_INTERVAL
-
-
-def m15_trend_interval_minutes(config: dict) -> int:
-    return INTERVAL_MINUTES[M15_INTERVAL]
-
-
-def m15_trend_gate_config(config: dict) -> dict:
-    d = M15_TREND_DEFAULTS
-    return {
-        "TREND_FILTER_ENABLED": m15_trend_enabled(config),
-        "TREND_INTERVAL": m15_trend_interval(config),
-        "TREND_EMA_FAST": int(config.get("M15_TREND_EMA_FAST", d["M15_TREND_EMA_FAST"]) or d["M15_TREND_EMA_FAST"]),
-        "TREND_EMA_SLOW": int(config.get("M15_TREND_EMA_SLOW", d["M15_TREND_EMA_SLOW"]) or d["M15_TREND_EMA_SLOW"]),
-        "TREND_ADX_PERIOD": int(config.get("M15_TREND_ADX_PERIOD", d["M15_TREND_ADX_PERIOD"]) or d["M15_TREND_ADX_PERIOD"]),
-        "TREND_ADX_MIN": float(config.get("M15_TREND_ADX_MIN", d["M15_TREND_ADX_MIN"]) or 0.0),
-        "TREND_LOOKBACK_BARS": int(config.get("M15_TREND_LOOKBACK_BARS", d["M15_TREND_LOOKBACK_BARS"]) or d["M15_TREND_LOOKBACK_BARS"]),
-    }
-
-
-def m15_trend_window_bars(config: dict) -> int:
-    if not m15_trend_enabled(config):
-        return 0
-    return trend_window_bars(m15_trend_gate_config(config))
-
-
-def m15_trend_required_bars(config: dict) -> int:
-    if not m15_trend_enabled(config):
-        return 0
-    return trend_required_bars(m15_trend_gate_config(config))
-
-
-def m15_trend_warmup_bars(config: dict, interval: str) -> int:
-    if not m15_trend_enabled(config):
-        return 0
-    rasio = m15_ratio(interval)
-    return (m15_trend_window_bars(config) + 1) * rasio
-
-
-def evaluate_m15_trend(
-    klines: list[Kline], config: dict, signal_close_time_ms: Optional[int] = None
+def evaluate_direction(
+    klines: list[Kline],
+    config: dict,
+    signal_close_time_ms: Optional[int] = None,
 ) -> dict:
-    if not m15_trend_enabled(config):
+    """Layer arah: tren utama dibaca dari candle Daily."""
+    interval = direction_interval(config)
+    if not direction_enabled(config):
         return {
             "ok": True,
-            "reason": f"filter trend {M15_INTERVAL} nonaktif",
-            "interval": M15_INTERVAL,
+            "reason": f"filter arah {interval} nonaktif",
+            "interval": interval,
             "bars": 0,
             "required": 0,
             "window": 0,
@@ -1114,9 +961,154 @@ def evaluate_m15_trend(
             "checks": {},
             "values": {},
         }
-    return evaluate_trend_filter(
+    fast, slow, adx_period, adx_min = _ema_adx_params(config, "DIRECTION", 10, 20)
+    return evaluate_ema_adx(
         klines,
-        m15_trend_gate_config(config),
-        signal_close_time_ms,
-        nama_kunci_jendela="M15_TREND_LOOKBACK_BARS",
+        interval=interval,
+        fast=fast,
+        slow=slow,
+        adx_period=adx_period,
+        adx_min=adx_min,
+        window=direction_window_bars(config),
+        required=direction_required_bars(config),
+        label="arah",
+        nama_kunci_jendela="DIRECTION_LOOKBACK_BARS",
+        signal_close_time_ms=signal_close_time_ms,
     )
+
+
+def evaluate_zone(
+    klines: list[Kline],
+    config: dict,
+    signal_close_time_ms: Optional[int] = None,
+) -> dict:
+    """Layer zona: posisi harga dibanding zona demand H1."""
+    interval = zone_interval(config)
+    wajib = zone_window_bars(config)
+    if not zone_enabled(config):
+        return {
+            "ok": True,
+            "reason": f"filter zona {interval} nonaktif",
+            "interval": interval,
+            "bars": 0,
+            "required": 0,
+            "zone_low": None,
+            "zone_high": None,
+            "distance_pct": None,
+            "close_position": None,
+        }
+    siap = [
+        k
+        for k in (klines or [])
+        if signal_close_time_ms is None
+        or int(k.close_time) <= int(signal_close_time_ms)
+    ]
+    jendela = siap[-wajib:] if wajib > 0 else siap
+    hasil = detect_demand_zone(jendela, zone_gate_config(config))
+    hasil["interval"] = interval
+    hasil["bars"] = len(jendela)
+    hasil["required"] = wajib
+    return hasil
+
+
+def evaluate_timing(
+    klines: list[Kline],
+    config: dict,
+    signal_close_time_ms: Optional[int] = None,
+) -> dict:
+    """Layer timing: tren mikro dibaca dari candle konfirmasi (M5)."""
+    interval = timing_interval(config)
+    if not timing_enabled(config):
+        return {
+            "ok": True,
+            "reason": f"filter timing {interval} nonaktif",
+            "interval": interval,
+            "bars": 0,
+            "required": 0,
+            "window": 0,
+            "close": None,
+            "ema_fast": None,
+            "ema_slow": None,
+            "adx": None,
+            "checks": {},
+            "values": {},
+        }
+    fast, slow, adx_period, adx_min = _ema_adx_params(config, "TIMING", 20, 50)
+    return evaluate_ema_adx(
+        klines,
+        interval=interval,
+        fast=fast,
+        slow=slow,
+        adx_period=adx_period,
+        adx_min=adx_min,
+        window=timing_window_bars(config),
+        required=timing_required_bars(config),
+        label="timing",
+        nama_kunci_jendela="TIMING_LOOKBACK_BARS",
+        signal_close_time_ms=signal_close_time_ms,
+    )
+
+
+def direction_warmup_bars(config: dict, interval: str) -> int:
+    """Bar sumber yang perlu dirangkai jadi candle Daily saat agregasi.
+
+    Jalur native (candle harian diambil langsung dari bursa) tidak memakai
+    angka ini karena candle harian tidak bergantung pada bar simulasi.
+    """
+    if not direction_enabled(config):
+        return 0
+    source_minutes = int(INTERVAL_MINUTES.get(str(interval), 5))
+    target_minutes = direction_interval_minutes(config)
+    if target_minutes % source_minutes:
+        raise ValueError(
+            f"DIRECTION_INTERVAL '{direction_interval(config)}' ({target_minutes} "
+            f"menit) harus kelipatan bulat dari interval simulasi '{interval}' "
+            f"({source_minutes} menit) supaya backtest bisa merangkai candle "
+            "harian dari data yang sudah diunduh."
+        )
+    rasio = target_minutes // source_minutes
+    return (direction_window_bars(config) + 1) * rasio + rasio
+
+
+def zone_warmup_bars(config: dict, interval: str) -> int:
+    """Bar sumber yang perlu dirangkai jadi candle H1 saat agregasi."""
+    if not zone_enabled(config):
+        return 0
+    source_minutes = int(INTERVAL_MINUTES.get(str(interval), 5))
+    target_minutes = zone_interval_minutes(config)
+    if target_minutes % source_minutes:
+        raise ValueError(
+            f"ZONE_INTERVAL '{zone_interval(config)}' ({target_minutes} menit) "
+            f"harus kelipatan bulat dari interval simulasi '{interval}' "
+            f"({source_minutes} menit) supaya backtest bisa merangkai candle "
+            "H1 dari data yang sudah diunduh."
+        )
+    rasio = target_minutes // source_minutes
+    return (zone_window_bars(config) + 1) * rasio + rasio
+
+
+def gate_warmup_bars(config: dict, interval: str) -> int:
+    """Total warmup gerbang timeframe tinggi pada jalur agregasi."""
+    return max(direction_warmup_bars(config, interval), zone_warmup_bars(config, interval))
+
+
+def native_history_ms(config: dict) -> int:
+    """Riwayat tambahan yang perlu diambil untuk candle timeframe tinggi native.
+
+    Backtest yang mengambil candle Daily dan H1 langsung dari bursa memakai
+    angka ini untuk menarik cukup candle historis sebelum rentang uji.
+    """
+    besoin = 0
+    if direction_enabled(config):
+        besoin = max(
+            besoin,
+            direction_window_bars(config)
+            * INTERVAL_MINUTES[direction_interval(config)]
+            * 60_000,
+        )
+    if zone_enabled(config):
+        besoin = max(
+            besoin,
+            zone_window_bars(config) * INTERVAL_MINUTES[zone_interval(config)] * 60_000,
+        )
+    return int(besoin)

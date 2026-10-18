@@ -59,10 +59,10 @@ def test_four_candidates_from_sixty_seven_are_expected_without_entry():
     assert second.signature() == diag.signature()
 
 
-@pytest.mark.parametrize("stage", [
-    "TREND_HTF", "DEMAND_HTF", "DEMAND_M15", "TREND_M15",
+@pytest.mark.parametrize("stage,interval", [
+    ("DIRECTION", "1d"), ("ZONE", "1h"), ("TIMING", "5m"),
 ])
-def test_downstream_gate_rejection_has_its_own_reason(monkeypatch, stage):
+def test_downstream_gate_rejection_has_its_own_reason(monkeypatch, stage, interval):
     candidate = sample_candidate()
     monkeypatch.setattr(market, "filter_and_rank_candidates", lambda *args: [candidate])
     monkeypatch.setattr(
@@ -73,17 +73,18 @@ def test_downstream_gate_rejection_has_its_own_reason(monkeypatch, stage):
     def verdict(name):
         return lambda *args: {
             "ok": stage != name,
-            "interval": "1h" if name.endswith("HTF") else "15m",
+            "interval": interval,
             "reason": f"alasan {name}",
         }
 
-    monkeypatch.setattr(market, "trend_verdict", verdict("TREND_HTF"))
-    monkeypatch.setattr(market, "htf_demand_verdict", verdict("DEMAND_HTF"))
-    monkeypatch.setattr(market, "m15_demand_verdict", verdict("DEMAND_M15"))
-    monkeypatch.setattr(market, "m15_trend_verdict", verdict("TREND_M15"))
+    monkeypatch.setattr(market, "direction_verdict", verdict("DIRECTION"))
+    monkeypatch.setattr(market, "zone_verdict", verdict("ZONE"))
+    monkeypatch.setattr(market, "timing_verdict", verdict("TIMING"))
     diag = market.ScanDiagnostics()
     result = market.find_best_candidate(
         [], lambda symbol: [sample_candle()], PUMP_CONFIG,
+        direction_provider=lambda symbol: [sample_candle()],
+        zone_provider=lambda symbol: [sample_candle()],
         diagnostics=diag,
     )
     assert result is None
@@ -136,9 +137,8 @@ def test_diagnostics_do_not_change_entry_decision(monkeypatch):
         market, "detect_entry_setup",
         lambda *args: market.SetupResult(True, "entry valid", 100.5, .2),
     )
-    good = lambda *args: {"ok": True, "interval": "15m", "reason": "lolos"}
-    for name in ("trend_verdict", "htf_demand_verdict",
-                 "m15_demand_verdict", "m15_trend_verdict"):
+    good = lambda *args: {"ok": True, "interval": "5m", "reason": "lolos"}
+    for name in ("direction_verdict", "zone_verdict", "timing_verdict"):
         monkeypatch.setattr(market, name, good)
     baseline = market.find_best_candidate([], lambda symbol: [sample_candle()],
                                           PUMP_CONFIG)
@@ -157,8 +157,8 @@ def test_bounded_log_lines_and_five_minute_throttle():
     diag.observe_signal([sample_candle()])
     diag.reject("VOLUME_CONFIRM", "SOLUSDT", "  volume\n" + "s" * 300)
     diag.reject("VOLUME_CONFIRM", "ADAUSDT", "alasan lain")
-    diag.reject("TREND_HTF", "BNBUSDT", "EMA turun")
-    assert diag.rejection_counts == {"VOLUME_CONFIRM": 2, "TREND_HTF": 1}
+    diag.reject("DIRECTION", "BNBUSDT", "EMA turun")
+    assert diag.rejection_counts == {"VOLUME_CONFIRM": 2, "DIRECTION": 1}
     assert diag.examples["VOLUME_CONFIRM"][0] == "SOLUSDT"
     assert "\n" not in diag.examples["VOLUME_CONFIRM"][1]
     assert len(diag.examples["VOLUME_CONFIRM"][1]) <= 140
@@ -218,28 +218,35 @@ def test_mixed_rejections_count_first_failed_gate_only(monkeypatch):
         return market.SetupResult(True, "entry valid", klines[-1].close, .2)
 
     def passed(symbol, rejected):
-        return {"ok": symbol != rejected, "interval": "15m",
+        return {"ok": symbol != rejected, "interval": "5m",
                 "reason": f"{symbol} ditolak" if symbol == rejected else "lolos"}
 
     monkeypatch.setattr(market, "detect_entry_setup", setup)
-    monkeypatch.setattr(market, "trend_verdict",
+    monkeypatch.setattr(market, "direction_verdict",
                         lambda symbol, *args: passed(symbol, "BBBUSDT"))
-    monkeypatch.setattr(market, "htf_demand_verdict",
-                        lambda symbol, *args: passed(symbol, ""))
-    monkeypatch.setattr(market, "m15_demand_verdict",
-                        lambda symbol, *args: passed(symbol, "CCCUSDT"))
-    monkeypatch.setattr(market, "m15_trend_verdict",
+    monkeypatch.setattr(market, "zone_verdict",
                         lambda symbol, *args: passed(symbol, "DDDUSDT"))
+    monkeypatch.setattr(
+        market, "timing_verdict",
+        lambda config, klines, *args: {
+            "ok": klines[-1].close != closes["CCCUSDT"],
+            "interval": "5m",
+            "reason": (
+                "CCCUSDT ditolak"
+                if klines[-1].close == closes["CCCUSDT"]
+                else "lolos"
+            ),
+        },
+    )
     diag = market.ScanDiagnostics()
     assert market.find_best_candidate([], fetch, PUMP_CONFIG,
                                       diagnostics=diag) is None
     assert diag.market_candidates == diag.checked_candidates == 4
     assert diag.rejection_counts == {
-        "VOLUME_CONFIRM": 1, "TREND_HTF": 1,
-        "DEMAND_M15": 1, "TREND_M15": 1,
+        "VOLUME_CONFIRM": 1, "DIRECTION": 1, "ZONE": 1, "TIMING": 1,
     }
     assert sum(diag.rejection_counts.values()) == diag.checked_candidates
     assert [diag.examples[stage][0] for stage in (
-        "VOLUME_CONFIRM", "TREND_HTF", "DEMAND_M15", "TREND_M15",
-    )] == list(names)
+        "VOLUME_CONFIRM", "DIRECTION", "ZONE", "TIMING",
+    )] == ["AAAUSDT", "BBBUSDT", "DDDUSDT", "CCCUSDT"]
     assert len(diag.log_lines(PUMP_CONFIG)) == 6
