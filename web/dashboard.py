@@ -831,6 +831,14 @@ BT_PARAM_KEYS = (
     "DIRECTION_ADX_PERIOD",
     "DIRECTION_ADX_MIN",
     "DIRECTION_LOOKBACK_BARS",
+    "DIRECTION_ZONE_FILTER_ENABLED",
+    "DIRECTION_ZONE_LOOKBACK_BARS",
+    "DIRECTION_ZONE_BUFFER_PCT",
+    "DIRECTION_ZONE_MAX_DISTANCE_PCT",
+    "DIRECTION_ZONE_MIN_CLOSE_POSITION",
+    "DIRECTION_ZONE_REQUIRE_INSIDE_ZONE",
+    "ZONE_REQUIRE_INSIDE_ZONE",
+    "DEMAND_REQUIRE_INSIDE_ZONE",
     "ZONE_FILTER_ENABLED",
     "ZONE_INTERVAL",
     "ZONE_LOOKBACK_BARS",
@@ -1291,20 +1299,42 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
             "direction": {
                 "enabled": bool(cfg.get("DIRECTION_FILTER_ENABLED", False)),
                 "interval": cfg.get("DIRECTION_INTERVAL", "1d"),
-                "ema_fast": int(cfg.get("DIRECTION_EMA_FAST", 10) or 10),
-                "ema_slow": int(cfg.get("DIRECTION_EMA_SLOW", 20) or 20),
+                "ema_fast": int(cfg.get("DIRECTION_EMA_FAST", 20) or 20),
+                "ema_slow": int(cfg.get("DIRECTION_EMA_SLOW", 50) or 50),
                 "adx_period": int(cfg.get("DIRECTION_ADX_PERIOD", 14) or 14),
                 "adx_min": float(cfg.get("DIRECTION_ADX_MIN", 0.0) or 0.0),
                 "lookback_bars": int(cfg.get("DIRECTION_LOOKBACK_BARS", 60) or 60),
                 "skips": int(getattr(result, "direction_skips", 0)),
                 "scans": int(getattr(result, "direction_scans", 0)),
             },
+            "daily_zone": {
+                "enabled": bool(cfg.get("DIRECTION_ZONE_FILTER_ENABLED", False)),
+                "interval": cfg.get("DIRECTION_INTERVAL", "1d"),
+                "lookback_bars": int(
+                    cfg.get("DIRECTION_ZONE_LOOKBACK_BARS", 20) or 20
+                ),
+                "zone_buffer_pct": float(
+                    cfg.get("DIRECTION_ZONE_BUFFER_PCT", 2.0) or 0.0
+                ),
+                "max_distance_pct": float(
+                    cfg.get("DIRECTION_ZONE_MAX_DISTANCE_PCT", 5.0) or 0.0
+                ),
+                "min_close_position": float(
+                    cfg.get("DIRECTION_ZONE_MIN_CLOSE_POSITION", 0.35) or 0.0
+                ),
+                "require_inside": bool(
+                    cfg.get("DIRECTION_ZONE_REQUIRE_INSIDE_ZONE", False)
+                ),
+                "skips": int(getattr(result, "daily_zone_skips", 0)),
+                "scans": int(getattr(result, "daily_zone_scans", 0)),
+            },
             "zone": {
                 "enabled": bool(cfg.get("ZONE_FILTER_ENABLED", False)),
                 "interval": cfg.get("ZONE_INTERVAL", "1h"),
                 "lookback_bars": int(cfg.get("ZONE_LOOKBACK_BARS", 72) or 72),
                 "zone_buffer_pct": float(cfg.get("ZONE_BUFFER_PCT", 1.5) or 0.0),
-                "max_distance_pct": float(cfg.get("ZONE_MAX_DISTANCE_PCT", 25.0) or 0.0),
+                "max_distance_pct": float(cfg.get("ZONE_MAX_DISTANCE_PCT", 4.0) or 0.0),
+                "require_inside": bool(cfg.get("ZONE_REQUIRE_INSIDE_ZONE", False)),
                 "min_close_position": float(cfg.get("ZONE_MIN_CLOSE_POSITION", 0.35) or 0.0),
                 "skips": int(getattr(result, "zone_skips", 0)),
                 "scans": int(getattr(result, "zone_scans", 0)),
@@ -2127,6 +2157,25 @@ def api_backtest_defaults():
     out["direction_interval"] = str(PUMP_CONFIG.get("DIRECTION_INTERVAL", "1d"))
     out["direction_lookback_bars"] = int(
         PUMP_CONFIG.get("DIRECTION_LOOKBACK_BARS", 60) or 60
+    )
+    out["direction_zone_enabled"] = bool(
+        PUMP_CONFIG.get("DIRECTION_ZONE_FILTER_ENABLED", False)
+    )
+    out["direction_zone_interval"] = str(PUMP_CONFIG.get("DIRECTION_INTERVAL", "1d"))
+    out["direction_zone_lookback_bars"] = int(
+        PUMP_CONFIG.get("DIRECTION_ZONE_LOOKBACK_BARS", 20) or 20
+    )
+    out["direction_zone_max_distance_pct"] = float(
+        PUMP_CONFIG.get("DIRECTION_ZONE_MAX_DISTANCE_PCT", 5.0) or 0.0
+    )
+    out["direction_zone_require_inside"] = bool(
+        PUMP_CONFIG.get("DIRECTION_ZONE_REQUIRE_INSIDE_ZONE", False)
+    )
+    out["zone_require_inside"] = bool(
+        PUMP_CONFIG.get("ZONE_REQUIRE_INSIDE_ZONE", False)
+    )
+    out["demand_require_inside"] = bool(
+        PUMP_CONFIG.get("DEMAND_REQUIRE_INSIDE_ZONE", False)
     )
     out["zone_enabled"] = bool(PUMP_CONFIG.get("ZONE_FILTER_ENABLED", False))
     out["zone_interval"] = str(PUMP_CONFIG.get("ZONE_INTERVAL", "1h"))

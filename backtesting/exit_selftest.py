@@ -50,6 +50,7 @@ def config_dasar(cap_jam: float | None = CAP_CONTOH, ekor: str = "datar") -> dic
             "MODE": "PAPER",
             "CONFIG_UPDATE_MODE": "test",
             "DIRECTION_FILTER_ENABLED": False,
+            "DIRECTION_ZONE_FILTER_ENABLED": False,
             "ZONE_FILTER_ENABLED": False,
             "TIMING_FILTER_ENABLED": False,
             "BTC_FILTER_ENABLED": False,

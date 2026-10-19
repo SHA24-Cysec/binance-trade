@@ -58,6 +58,8 @@ class BacktestResult:
     chase_skips: int = 0
     direction_scans: int = 0
     direction_skips: int = 0
+    daily_zone_scans: int = 0
+    daily_zone_skips: int = 0
     zone_scans: int = 0
     zone_skips: int = 0
     timing_scans: int = 0
@@ -209,6 +211,8 @@ def run_backtest(
     warnings: list[str] = []
     direction_scans = 0
     direction_skips = 0
+    daily_zone_scans = 0
+    daily_zone_skips = 0
     zone_scans = 0
     zone_skips = 0
     timing_scans = 0
@@ -343,15 +347,7 @@ def run_backtest(
                     ),
                 )
             ):
-                window_klines = klines[max(0, i - lookback + 1) : i + 1]
-                setup = scanner.detect_entry_setup(window_klines, config)
-                if setup.ok and parity.same_coin_blocked(
-                    symbol, candle.open_time, symbol_blocks
-                ):
-                    same_coin_skips += 1
-                    i += 1
-                    continue
-                if setup.ok and bool(config.get("DIRECTION_FILTER_ENABLED", False)):
+                if bool(config.get("DIRECTION_FILTER_ENABLED", False)):
                     direction_scans += 1
                     verdict = (
                         direction_lookup.verdict_at(candle.close_time)
@@ -362,7 +358,18 @@ def run_backtest(
                         direction_skips += 1
                         i += 1
                         continue
-                if setup.ok and bool(config.get("ZONE_FILTER_ENABLED", False)):
+                if bool(config.get("DIRECTION_ZONE_FILTER_ENABLED", False)):
+                    daily_zone_scans += 1
+                    verdict_harian = (
+                        direction_lookup.zone_at(candle.close_time)
+                        if direction_lookup is not None
+                        else {"ok": False}
+                    )
+                    if not verdict_harian["ok"]:
+                        daily_zone_skips += 1
+                        i += 1
+                        continue
+                if bool(config.get("ZONE_FILTER_ENABLED", False)):
                     zone_scans += 1
                     verdict_zona = (
                         zone_lookup.zone_at(candle.close_time)
@@ -373,7 +380,16 @@ def run_backtest(
                         zone_skips += 1
                         i += 1
                         continue
-                if setup.ok and bool(config.get("TIMING_FILTER_ENABLED", False)):
+                window_klines = klines[max(0, i - lookback + 1) : i + 1]
+                setup = scanner.detect_entry_setup(window_klines, config)
+                if not setup.ok:
+                    i += 1
+                    continue
+                if parity.same_coin_blocked(symbol, candle.open_time, symbol_blocks):
+                    same_coin_skips += 1
+                    i += 1
+                    continue
+                if bool(config.get("TIMING_FILTER_ENABLED", False)):
                     timing_scans += 1
                     if (
                         timing_lookup is None
@@ -530,19 +546,45 @@ def run_backtest(
         warnings.append(
             f"{direction_skips} dari {direction_scans} sinyal konfirmasi dilewati oleh "
             f"layer arah {str(config.get('DIRECTION_INTERVAL', '1d'))} "
-            f"(EMA{int(config.get('DIRECTION_EMA_FAST', 10))}/"
-            f"EMA{int(config.get('DIRECTION_EMA_SLOW', 20))} dan ADX"
+            f"(EMA{int(config.get('DIRECTION_EMA_FAST', 20) or 20)}/"
+            f"EMA{int(config.get('DIRECTION_EMA_SLOW', 50) or 50)} dan ADX"
             f"{int(config.get('DIRECTION_ADX_PERIOD', 14))} >= "
             f"{float(config.get('DIRECTION_ADX_MIN', 20.0) or 0.0):g}), sama seperti bot live."
+        )
+    if daily_zone_skips:
+        warnings.append(
+            f"{daily_zone_skips} dari {daily_zone_scans} sinyal konfirmasi dilewati "
+            f"oleh zona demand {str(config.get('DIRECTION_INTERVAL', '1d'))} "
+            f"(lookback {int(config.get('DIRECTION_ZONE_LOOKBACK_BARS', 20) or 20)} "
+            f"candle, "
+            + (
+                "wajib di dalam zona"
+                if config.get("DIRECTION_ZONE_REQUIRE_INSIDE_ZONE", False)
+                else (
+                    "jarak maksimum "
+                    f"{float(config.get('DIRECTION_ZONE_MAX_DISTANCE_PCT', 5.0) or 0.0):g}% "
+                    "dari atap zona"
+                )
+            )
+            + f", tebal zona minimum "
+            f"{float(config.get('DIRECTION_ZONE_BUFFER_PCT', 2.0) or 0.0):g}%). "
+            f"Gerbang ini memakai candle arah yang sama, bukan candle {interval}."
         )
     if zone_skips:
         warnings.append(
             f"{zone_skips} dari {zone_scans} sinyal konfirmasi dilewati oleh "
             f"layer zona {str(config.get('ZONE_INTERVAL', '1h'))} "
             f"(lookback {int(config.get('ZONE_LOOKBACK_BARS', 72) or 72)} candle, "
-            f"jarak maksimum "
-            f"{float(config.get('ZONE_MAX_DISTANCE_PCT', 25.0) or 0.0):g}% dari atap "
-            f"zona, tebal zona minimum "
+            + (
+                "wajib di dalam zona"
+                if config.get("ZONE_REQUIRE_INSIDE_ZONE", False)
+                else (
+                    "jarak maksimum "
+                    f"{float(config.get('ZONE_MAX_DISTANCE_PCT', 4.0) or 0.0):g}% dari "
+                    "atap zona"
+                )
+            )
+            + f", tebal zona minimum "
             f"{float(config.get('ZONE_BUFFER_PCT', 1.5) or 0.0):g}%), sama seperti bot live."
         )
     if timing_skips:
@@ -575,6 +617,8 @@ def run_backtest(
         chase_skips=chase_skips,
         direction_scans=direction_scans,
         direction_skips=direction_skips,
+        daily_zone_scans=daily_zone_scans,
+        daily_zone_skips=daily_zone_skips,
         zone_scans=zone_scans,
         zone_skips=zone_skips,
         timing_scans=timing_scans,
@@ -745,6 +789,7 @@ OVERRIDE_CASTERS = {
         "DEMAND_ZONE_BUFFER_PCT": float,
         "DEMAND_MAX_DISTANCE_PCT": float,
         "DEMAND_MIN_CLOSE_POSITION": float,
+        "DEMAND_REQUIRE_INSIDE_ZONE": _as_bool,
         "DIRECTION_FILTER_ENABLED": _as_bool,
         "DIRECTION_INTERVAL": str,
         "DIRECTION_EMA_FAST": int,
@@ -752,12 +797,19 @@ OVERRIDE_CASTERS = {
         "DIRECTION_ADX_PERIOD": int,
         "DIRECTION_ADX_MIN": float,
         "DIRECTION_LOOKBACK_BARS": int,
+        "DIRECTION_ZONE_FILTER_ENABLED": _as_bool,
+        "DIRECTION_ZONE_LOOKBACK_BARS": int,
+        "DIRECTION_ZONE_BUFFER_PCT": float,
+        "DIRECTION_ZONE_MAX_DISTANCE_PCT": float,
+        "DIRECTION_ZONE_MIN_CLOSE_POSITION": float,
+        "DIRECTION_ZONE_REQUIRE_INSIDE_ZONE": _as_bool,
         "ZONE_FILTER_ENABLED": _as_bool,
         "ZONE_INTERVAL": str,
         "ZONE_LOOKBACK_BARS": int,
         "ZONE_BUFFER_PCT": float,
         "ZONE_MAX_DISTANCE_PCT": float,
         "ZONE_MIN_CLOSE_POSITION": float,
+        "ZONE_REQUIRE_INSIDE_ZONE": _as_bool,
         "TIMING_FILTER_ENABLED": _as_bool,
         "TIMING_EMA_FAST": int,
         "TIMING_EMA_SLOW": int,
@@ -877,6 +929,27 @@ def validate_params(cfg: dict) -> None:
                 f"{cfg.get('DIRECTION_INTERVAL', '1d')}. Naikkan nilainya supaya backtest "
                 "dan bot live memakai jendela arah yang sama."
             )
+
+    if bool(cfg.get("DIRECTION_ZONE_FILTER_ENABLED", False)):
+        zona_harian_checks = [
+            ("DIRECTION_ZONE_LOOKBACK_BARS", 3, 500),
+            ("DIRECTION_ZONE_BUFFER_PCT", 0.05, 20.0),
+            ("DIRECTION_ZONE_MAX_DISTANCE_PCT", 0.0, 50.0),
+            ("DIRECTION_ZONE_MIN_CLOSE_POSITION", 0.0, 1.0),
+        ]
+        for key, lo, hi in zona_harian_checks:
+            lo, hi = _rentang_demand(key, lo, hi)
+            val = cfg.get(key)
+            if val is None or not (lo <= float(val) <= hi):
+                raise BacktestError(
+                    f"Parameter '{key}'={val} di luar rentang wajar ({lo:g}..{hi:g})."
+                )
+        try:
+            strategy.direction_warmup_bars(
+                cfg, cfg.get("CONFIRM_INTERVAL", "5m")
+            )
+        except ValueError as exc:
+            raise BacktestError(str(exc)) from exc
 
     if bool(cfg.get("ZONE_FILTER_ENABLED", False)):
         zona_checks = [
@@ -1115,6 +1188,17 @@ def main():
             print(
                 f"PERINGATAN: --days {args.days} lebih pendek dari kebutuhan EMA + ADX "
                 f"harian ({strategy.direction_required_bars(cfg)} candle)."
+            )
+    if strategy.direction_zone_enabled(cfg) and not strategy.direction_enabled(cfg):
+        print(
+            f"  Layer zona demand {strategy.direction_interval(cfg)} aktif: jendela "
+            f"{strategy.direction_zone_window_bars(cfg)} candle. Koin dengan riwayat "
+            "harian lebih pendek ditolak."
+        )
+        if args.days < strategy.direction_zone_window_bars(cfg):
+            print(
+                f"PERINGATAN: --days {args.days} lebih pendek dari kebutuhan zona "
+                f"demand harian ({strategy.direction_zone_window_bars(cfg)} candle)."
             )
     if strategy.zone_enabled(cfg):
         pemanasan_zona = strategy.zone_warmup_bars(cfg, interval)

@@ -5448,6 +5448,7 @@
                      TIME_STOP:'WAKTU',
                      END_OF_DATA:'DATA HABIS', RISK_LIMIT_TRIGGERED:'BATAS RISIKO',
                      FILTER_DIRECTION:'GERBANG ARAH DAILY',
+                     FILTER_DAILY_ZONE:'GERBANG ZONA DEMAND DAILY',
                      FILTER_ZONE:'GERBANG ZONA H1',
                      FILTER_TIMING:'GERBANG TIMING M5'};
         return esc(map[key] || key);
@@ -5492,7 +5493,7 @@
           <div class="card ${riskTotal||gateSkips?'warn':''}">
             <div class="label">Filter dan kontrol akun</div>
             <div class="value mono">${fmt(riskTotal+gateSkips,0)}</div>
-            <div class="sub">DD stop ${fmt(re.dd_stop||0,0)} · tutup paksa ${fmt(re.forced_close||0,0)} · chase dilewati ${fmt(s.chase_skips||0,0)} · arah ${esc(((res.direction||{}).interval)||'1d')} ${fmt(((res.direction||{}).skips)||0,0)} · zona ${esc(((res.zone||{}).interval)||'1h')} ${fmt(((res.zone||{}).skips)||0,0)} · timing ${esc(((res.timing||{}).interval)||'5m')} ${fmt(((res.timing||{}).skips)||0,0)}</div></div>
+            <div class="sub">DD stop ${fmt(re.dd_stop||0,0)} · tutup paksa ${fmt(re.forced_close||0,0)} · chase dilewati ${fmt(s.chase_skips||0,0)} · arah ${esc(((res.direction||{}).interval)||'1d')} ${fmt(((res.direction||{}).skips)||0,0)} · zona harian ${esc(((res.daily_zone||{}).interval)||'1d')} ${fmt(((res.daily_zone||{}).skips)||0,0)} · zona ${esc(((res.zone||{}).interval)||'1h')} ${fmt(((res.zone||{}).skips)||0,0)} · timing ${esc(((res.timing||{}).interval)||'5m')} ${fmt(((res.timing||{}).skips)||0,0)}</div></div>
           <div class="card">
             <div class="label">Candle diproses</div>
             <div class="value mono">${fmt(res.bars_total,0)}</div>
@@ -5529,11 +5530,14 @@
           if(!g || !g.enabled) return 'nonaktif';
           return 'aktif ' + esc(g.interval || labelInterval)
             + ', lookback ' + fmt(g.lookback_bars, 0) + ' candle'
-            + ', jarak maks ' + fmt(g.max_distance_pct, 1) + '%'
+            + (g.require_inside ? ', wajib di dalam zona' : ', jarak maks ' + fmt(g.max_distance_pct, 1) + '%')
             + ', disaring ' + fmt(g.skips, 0) + ' dari ' + fmt(g.scans, 0) + ' sinyal';
         };
+        const zonaHarianInfo = res.daily_zone || null;
         const arahRow = arahInfo ? `
           <div class="posrow"><span class="k">Layer arah ${esc(arahInfo.interval || '1d')}</span><span class="v mono" style="font-size:11.5px">${emaAdxText(arahInfo, '1d')}</span></div>` : '';
+        const zonaHarianRow = zonaHarianInfo ? `
+          <div class="posrow"><span class="k">Layer zona demand ${esc(zonaHarianInfo.interval || '1d')}</span><span class="v mono" style="font-size:11.5px">${zoneText(zonaHarianInfo, '1d')}</span></div>` : '';
         const zonaRow = zonaInfo ? `
           <div class="posrow"><span class="k">Layer zona ${esc(zonaInfo.interval || '1h')}</span><span class="v mono" style="font-size:11.5px">${zoneText(zonaInfo, '1h')}</span></div>` : '';
         const timingRow = timingInfo ? `
@@ -5544,6 +5548,7 @@
           <div class="posrow"><span class="k">Titik waktu diproses</span><span class="v mono">${fmt(res.bars_total,0)} bar ${esc(res.interval)}</span></div>
           ${exitRows}
           ${arahRow}
+          ${zonaHarianRow}
           ${zonaRow}
           ${timingRow}
           <div style="border-top:1px solid var(--border);margin:4px 0"></div>

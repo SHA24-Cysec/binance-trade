@@ -81,6 +81,8 @@ class PortfolioResult:
     chase_skips: int = 0
     direction_skips: int = 0
     direction_scans: int = 0
+    daily_zone_skips: int = 0
+    daily_zone_scans: int = 0
     zone_skips: int = 0
     zone_scans: int = 0
     timing_skips: int = 0
@@ -337,7 +339,9 @@ def fetch_native_lookups(
     if not unique:
         return arah_of, zona_of
 
-    if strategy.direction_enabled(config):
+    if strategy.direction_enabled(config) or strategy.direction_zone_enabled(
+        config
+    ):
         itv = strategy.direction_interval(config)
         need_ms = (
             strategy.direction_window_bars(config)
@@ -426,6 +430,9 @@ class EntrySignalCache(dict):
         self.direction_scans = 0
         self.direction_skips = 0
         self.direction_events: list = []
+        self.daily_zone_scans = 0
+        self.daily_zone_skips = 0
+        self.daily_zone_events: list = []
         self.zone_scans = 0
         self.zone_skips = 0
         self.zone_events: list = []
@@ -439,7 +446,10 @@ def build_direction_lookups(
 ) -> dict:
     from strategy import indicators as strategy_mod
 
-    if not strategy_mod.direction_enabled(config):
+    if not (
+        strategy_mod.direction_enabled(config)
+        or strategy_mod.direction_zone_enabled(config)
+    ):
         return {}
     target = strategy_mod.direction_interval_minutes(config)
     source = strategy_mod.INTERVAL_MINUTES.get(str(interval))
@@ -521,7 +531,10 @@ def _siapkan_arah(prebuilt, store, series_of, config, interval):
     _, _, arah_of, _, _ = unpack_prebuilt(prebuilt)
     if arah_of is not None:
         return arah_of
-    if not config.get("DIRECTION_FILTER_ENABLED", False):
+    if not (
+        config.get("DIRECTION_FILTER_ENABLED", False)
+        or config.get("DIRECTION_ZONE_FILTER_ENABLED", False)
+    ):
         return {}
     return build_direction_lookups(store, list(series_of), config, interval)
 
@@ -654,13 +667,12 @@ def precompute_entry_signals(
                     klines = store.klines(sym)
                     window_klines = klines[max(0, index - lookback + 1) : index + 1]
                     signal_candle = window_klines[-1]
-                setup = scanner.detect_entry_setup(window_klines, config)
             except Exception as exc:
                 raise BacktestError(
                     f"Evaluasi sinyal {sym} pada waktu {int(t_now)} "
                     f"(bar {index}) gagal: {type(exc).__name__}: {str(exc)[:160]}"
                 ) from exc
-            if setup.ok and bool(config.get("DIRECTION_FILTER_ENABLED", False)):
+            if bool(config.get("DIRECTION_FILTER_ENABLED", False)):
                 lock = arah_of.get(sym) if arah_of else None
                 signals.direction_scans += 1
                 if (
@@ -672,7 +684,19 @@ def precompute_entry_signals(
                     if len(signals.direction_events) < max_skipped_records:
                         signals.direction_events.append((int(t_now), sym))
                     continue
-            if setup.ok and bool(config.get("ZONE_FILTER_ENABLED", False)):
+            if bool(config.get("DIRECTION_ZONE_FILTER_ENABLED", False)):
+                lock = arah_of.get(sym) if arah_of else None
+                signals.daily_zone_scans += 1
+                if (
+                    lock is None
+                    or signal_candle is None
+                    or not lock.zone_at(signal_candle.close_time)["ok"]
+                ):
+                    signals.daily_zone_skips += 1
+                    if len(signals.daily_zone_events) < max_skipped_records:
+                        signals.daily_zone_events.append((int(t_now), sym))
+                    continue
+            if bool(config.get("ZONE_FILTER_ENABLED", False)):
                 lock = zona_of.get(sym) if zona_of else None
                 signals.zone_scans += 1
                 if (
@@ -684,7 +708,16 @@ def precompute_entry_signals(
                     if len(signals.zone_events) < max_skipped_records:
                         signals.zone_events.append((int(t_now), sym))
                     continue
-            if setup.ok and bool(config.get("TIMING_FILTER_ENABLED", False)):
+            try:
+                setup = scanner.detect_entry_setup(window_klines, config)
+            except Exception as exc:
+                raise BacktestError(
+                    f"Evaluasi sinyal {sym} pada waktu {int(t_now)} "
+                    f"(bar {index}) gagal: {type(exc).__name__}: {str(exc)[:160]}"
+                ) from exc
+            if not setup.ok:
+                continue
+            if bool(config.get("TIMING_FILTER_ENABLED", False)):
                 lock = timing_of.get(sym) if timing_of else None
                 signals.timing_scans += 1
                 if (
@@ -696,8 +729,7 @@ def precompute_entry_signals(
                     if len(signals.timing_events) < max_skipped_records:
                         signals.timing_events.append((int(t_now), sym))
                     continue
-            if setup.ok:
-                lolos.append((rank, pct24, sym, index, vol24, setup))
+            lolos.append((rank, pct24, sym, index, vol24, setup))
 
         if not lolos:
             continue
@@ -811,7 +843,8 @@ def run_portfolio_backtest(
             if arah_of:
                 _bagian.append(
                     f"layer arah {config.get('DIRECTION_INTERVAL', '1d')} butuh "
-                    f"{strategy.direction_window_bars(config)} candle tertutup"
+                    f"{strategy.direction_window_bars(config)} candle tertutup "
+                    "(termasuk jendela zona demand harian)"
                 )
             if zona_of:
                 _bagian.append(
@@ -869,6 +902,8 @@ def run_portfolio_backtest(
     chase_skips = 0
     direction_skips = 0
     direction_scans = 0
+    daily_zone_skips = 0
+    daily_zone_scans = 0
     zone_skips = 0
     zone_scans = 0
     timing_skips = 0
@@ -911,14 +946,18 @@ def run_portfolio_backtest(
     if entry_signal_cache is not None:
         direction_scans += int(getattr(entry_signal_cache, "direction_scans", 0))
         direction_skips += int(getattr(entry_signal_cache, "direction_skips", 0))
-        direction_scans += int(getattr(entry_signal_cache, "direction_scans", 0))
-        direction_skips += int(getattr(entry_signal_cache, "direction_skips", 0))
+        daily_zone_scans += int(
+            getattr(entry_signal_cache, "daily_zone_scans", 0)
+        )
+        daily_zone_skips += int(
+            getattr(entry_signal_cache, "daily_zone_skips", 0)
+        )
         zone_scans += int(getattr(entry_signal_cache, "zone_scans", 0))
         zone_skips += int(getattr(entry_signal_cache, "zone_skips", 0))
         timing_scans += int(getattr(entry_signal_cache, "timing_scans", 0))
         timing_skips += int(getattr(entry_signal_cache, "timing_skips", 0))
         for waktu_event, simbol_event in getattr(
-            entry_signal_cache, "trend_events", []
+            entry_signal_cache, "daily_zone_events", []
         ):
             if len(skipped) >= max_skipped_records:
                 break
@@ -926,7 +965,7 @@ def run_portfolio_backtest(
                 SkippedSignal(
                     time=waktu_event,
                     symbol=simbol_event,
-                    reason="FILTER_DIRECTION",
+                    reason="FILTER_DAILY_ZONE",
                     holding=None,
                 )
             )
@@ -1144,15 +1183,6 @@ def run_portfolio_backtest(
                 if i + 1 < lookback:
                     continue
                 window_kl = kl[max(0, i - lookback + 1) : i + 1]
-                try:
-                    setup = scanner.detect_entry_setup(window_kl, config)
-                except Exception as exc:
-                    raise BacktestError(
-                        f"Evaluasi sinyal {sym} pada waktu {int(t_now)} "
-                        f"(bar {i}) gagal: {type(exc).__name__}: {str(exc)[:160]}"
-                    ) from exc
-                if not setup.ok:
-                    continue
                 if bool(config.get("DIRECTION_FILTER_ENABLED", False)):
                     lock = arah_of.get(sym) if arah_of else None
                     direction_scans += 1
@@ -1167,6 +1197,24 @@ def run_portfolio_backtest(
                                     time=t_now,
                                     symbol=sym,
                                     reason="FILTER_DIRECTION",
+                                    holding=None,
+                                )
+                            )
+                        continue
+                if bool(config.get("DIRECTION_ZONE_FILTER_ENABLED", False)):
+                    lock = arah_of.get(sym) if arah_of else None
+                    daily_zone_scans += 1
+                    if (
+                        lock is None
+                        or not lock.zone_at(kl[i].close_time)["ok"]
+                    ):
+                        daily_zone_skips += 1
+                        if len(skipped) < max_skipped_records:
+                            skipped.append(
+                                SkippedSignal(
+                                    time=t_now,
+                                    symbol=sym,
+                                    reason="FILTER_DAILY_ZONE",
                                     holding=None,
                                 )
                             )
@@ -1186,6 +1234,15 @@ def run_portfolio_backtest(
                                 )
                             )
                         continue
+                try:
+                    setup = scanner.detect_entry_setup(window_kl, config)
+                except Exception as exc:
+                    raise BacktestError(
+                        f"Evaluasi sinyal {sym} pada waktu {int(t_now)} "
+                        f"(bar {i}) gagal: {type(exc).__name__}: {str(exc)[:160]}"
+                    ) from exc
+                if not setup.ok:
+                    continue
                 if bool(config.get("TIMING_FILTER_ENABLED", False)):
                     lock = timing_of.get(sym) if timing_of else None
                     timing_scans += 1
@@ -1361,6 +1418,16 @@ def run_portfolio_backtest(
                 )
                 + (
                     [
+                        f"{daily_zone_skips} dari {daily_zone_scans} sinyal konfirmasi "
+                        f"dilewati zona demand "
+                        f"{config.get('DIRECTION_INTERVAL', '1d')}, memakai candle "
+                        "arah yang sama, bukan candle konfirmasi."
+                    ]
+                    if arah_of and daily_zone_skips
+                    else []
+                )
+                + (
+                    [
                         f"{zone_skips} dari {zone_scans} sinyal konfirmasi "
                         f"dilewati oleh layer zona "
                         f"{config.get('ZONE_INTERVAL', '1h')}, sama seperti bot live."
@@ -1394,6 +1461,8 @@ def run_portfolio_backtest(
         chase_skips=chase_skips,
         direction_skips=direction_skips,
         direction_scans=direction_scans,
+        daily_zone_skips=daily_zone_skips,
+        daily_zone_scans=daily_zone_scans,
         zone_skips=zone_skips,
         zone_scans=zone_scans,
         timing_skips=timing_skips,
@@ -1567,6 +1636,8 @@ def summarize_portfolio(result: PortfolioResult) -> dict:
         "chase_skips": int(result.chase_skips),
         "direction_skips": int(getattr(result, "direction_skips", 0)),
         "direction_scans": int(getattr(result, "direction_scans", 0)),
+        "daily_zone_skips": int(getattr(result, "daily_zone_skips", 0)),
+        "daily_zone_scans": int(getattr(result, "daily_zone_scans", 0)),
         "zone_skips": int(getattr(result, "zone_skips", 0)),
         "zone_scans": int(getattr(result, "zone_scans", 0)),
         "timing_skips": int(getattr(result, "timing_skips", 0)),

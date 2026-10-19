@@ -325,6 +325,7 @@ class DirectionLookup:
         self.interval = strategy_mod.direction_interval(config)
         self.window = strategy_mod.direction_window_bars(config)
         self.required = strategy_mod.direction_required_bars(config)
+        self.zone_window = strategy_mod.direction_zone_window_bars(config)
         self.klines = list(direction_klines)
         self.close_times = [int(k.close_time) for k in self.klines]
 
@@ -337,6 +338,19 @@ class DirectionLookup:
 
         return strategy_mod.evaluate_direction(
             self.window_at(signal_close_time_ms), self.config
+        )
+
+    def zone_window_at(self, signal_close_time_ms: int) -> list:
+        if self.zone_window <= 0:
+            return []
+        idx = bisect_right(self.close_times, int(signal_close_time_ms))
+        return self.klines[max(0, idx - self.zone_window) : idx]
+
+    def zone_at(self, signal_close_time_ms: int) -> dict:
+        from strategy import indicators as strategy_mod
+
+        return strategy_mod.evaluate_direction_zone(
+            self.zone_window_at(signal_close_time_ms), self.config
         )
 
 
@@ -428,7 +442,10 @@ def make_direction_lookup(
 ) -> Optional[DirectionLookup]:
     from strategy import indicators as strategy_mod
 
-    if not strategy_mod.direction_enabled(config):
+    if not (
+        strategy_mod.direction_enabled(config)
+        or strategy_mod.direction_zone_enabled(config)
+    ):
         return None
     bars = (
         list(klines)

@@ -4615,8 +4615,10 @@ def run(
                 "(fail closed).",
                 config.get("DIRECTION_LOOKBACK_BARS"),
             )
-    if config.get("DIRECTION_FILTER_ENABLED", False) or config.get(
-        "ZONE_FILTER_ENABLED", False
+    if (
+        config.get("DIRECTION_FILTER_ENABLED", False)
+        or config.get("DIRECTION_ZONE_FILTER_ENABLED", False)
+        or config.get("ZONE_FILTER_ENABLED", False)
     ):
         try:
             strategy.gate_warmup_bars(config, config["CONFIRM_INTERVAL"])
@@ -4631,9 +4633,9 @@ def run(
             "gagal diambil atau riwayatnya kurang, kandidat DITOLAK (fail closed).",
             config.get("DIRECTION_INTERVAL", "1d"),
             config.get("DIRECTION_INTERVAL", "1d"),
-            int(config.get("DIRECTION_EMA_FAST", 10) or 10),
-            int(config.get("DIRECTION_EMA_FAST", 10) or 10),
-            int(config.get("DIRECTION_EMA_SLOW", 20) or 20),
+            int(config.get("DIRECTION_EMA_FAST", 20) or 20),
+            int(config.get("DIRECTION_EMA_FAST", 20) or 20),
+            int(config.get("DIRECTION_EMA_SLOW", 50) or 50),
             int(config.get("DIRECTION_ADX_PERIOD", 14) or 14),
             float(config.get("DIRECTION_ADX_MIN", 0.0) or 0.0),
         )
@@ -4641,17 +4643,40 @@ def run(
         logger.info(
             "Layer arah NONAKTIF: entry tidak memakai arah Daily sebagai penyaring.",
         )
+    if config.get("DIRECTION_ZONE_FILTER_ENABLED", False):
+        logger.info(
+            "Layer zona demand %s AKTIF: entry hanya boleh kalau harga %s zona demand "
+            "harian (lookback %d candle, tebal zona min %.2f%%, %s, close_pos min %.2f). "
+            "Memakai seri candle arah yang sama, tanpa unduhan tambahan.",
+            config.get("DIRECTION_INTERVAL", "1d"),
+            "wajib berada di dalam"
+            if config.get("DIRECTION_ZONE_REQUIRE_INSIDE_ZONE", False)
+            else "masih di dalam atau dekat",
+            strategy.direction_zone_lookback_bars(config),
+            float(config.get("DIRECTION_ZONE_BUFFER_PCT", 2.0) or 0.0),
+            "jarak maks %.2f%% di atas atap zona"
+            % float(config.get("DIRECTION_ZONE_MAX_DISTANCE_PCT", 5.0) or 0.0),
+            float(config.get("DIRECTION_ZONE_MIN_CLOSE_POSITION", 0.35) or 0.0),
+        )
     if config.get("ZONE_FILTER_ENABLED", False):
         logger.info(
             "Layer zona AKTIF (%s): entry lolos hanya kalau candle %s terakhir yang "
-            "sudah tutup bereaksi di dekat zona demand %s (lookback %d candle, jarak maks "
-            "%.2f%% dari atap zona, tebal zona min %.2f%%, close_pos min %.2f). Kalau "
-            "candle gagal diambil atau riwayatnya kurang, kandidat DITOLAK (fail closed).",
+            "sudah tutup bereaksi %s zona demand %s (lookback %d candle, %s, tebal zona "
+            "min %.2f%%, close_pos min %.2f). Kalau candle gagal diambil atau riwayatnya "
+            "kurang, kandidat DITOLAK (fail closed).",
             config.get("ZONE_INTERVAL", "1h"),
             config.get("ZONE_INTERVAL", "1h"),
+            "di dalam"
+            if config.get("ZONE_REQUIRE_INSIDE_ZONE", False)
+            else "di dekat",
             config.get("ZONE_INTERVAL", "1h"),
             strategy.zone_lookback_bars(config),
-            float(config.get("ZONE_MAX_DISTANCE_PCT", 25.0) or 0.0),
+            "harga wajib berada di antara dasar dan atap zona"
+            if config.get("ZONE_REQUIRE_INSIDE_ZONE", False)
+            else (
+                "jarak maks %.2f%% dari atap zona"
+                % float(config.get("ZONE_MAX_DISTANCE_PCT", 4.0) or 0.0)
+            ),
             float(config.get("ZONE_BUFFER_PCT", 1.5) or 0.0),
             float(config.get("ZONE_MIN_CLOSE_POSITION", 0.35) or 0.0),
         )
@@ -4806,7 +4831,9 @@ def run(
 
     direction_cache = DirectionCache(client, config)
     zone_cache = ZoneCache(client, config)
-    butuh_candle_arah = bool(config.get("DIRECTION_FILTER_ENABLED", False))
+    butuh_candle_arah = bool(
+        config.get("DIRECTION_FILTER_ENABLED", False)
+    ) or bool(config.get("DIRECTION_ZONE_FILTER_ENABLED", False))
     butuh_candle_zona = bool(config.get("ZONE_FILTER_ENABLED", False))
     direction_provider = direction_cache.provider if butuh_candle_arah else None
     zone_provider = zone_cache.provider if butuh_candle_zona else None
@@ -4820,11 +4847,30 @@ def run(
             "Layer arah %s AKTIF: close > EMA%d > EMA%d dan ADX%d >= %g "
             "(jendela %d candle tertutup, fail closed bila data gagal diambil).",
             strategy.direction_interval(config),
-            int(config.get("DIRECTION_EMA_FAST", 10)),
-            int(config.get("DIRECTION_EMA_SLOW", 20)),
+            int(config.get("DIRECTION_EMA_FAST", 20)),
+            int(config.get("DIRECTION_EMA_SLOW", 50)),
             int(config.get("DIRECTION_ADX_PERIOD", 14)),
             float(config.get("DIRECTION_ADX_MIN", 20.0) or 0.0),
             strategy.direction_window_bars(config),
+        )
+    if bool(config.get("DIRECTION_ZONE_FILTER_ENABLED", False)):
+        logger.info(
+            "Layer zona demand %s AKTIF: close wajib di atas dasar zona%s, candle sinyal "
+            "bullish, close_pos >= %.2f, %s yang dipetakan dari %d candle %s tertutup "
+            "(fail closed bila data gagal diambil).",
+            strategy.direction_interval(config),
+            " dan tidak boleh di atas atap zona"
+            if config.get("DIRECTION_ZONE_REQUIRE_INSIDE_ZONE", False)
+            else "",
+            float(config.get("DIRECTION_ZONE_MIN_CLOSE_POSITION", 0.35) or 0.0),
+            "tanpa toleransi jarak"
+            if config.get("DIRECTION_ZONE_REQUIRE_INSIDE_ZONE", False)
+            else (
+                "jarak maks %.2f%% di atas atap zona"
+                % float(config.get("DIRECTION_ZONE_MAX_DISTANCE_PCT", 5.0) or 0.0)
+            ),
+            strategy.direction_zone_lookback_bars(config),
+            strategy.direction_interval(config),
         )
     if zone_provider is None:
         logger.warning(
@@ -5064,6 +5110,13 @@ def run(
                                 "Filter BTC tidak dapat dihitung; kandidat ditolak: %s",
                                 exc,
                             )
+                    try:
+                        batas_konfirmasi = strategy.last_closed_bar_close_ms(
+                            str(scan_config.get("CONFIRM_INTERVAL", "5m")),
+                            state_mod.now_ms(),
+                        )
+                    except (KeyError, ValueError):
+                        batas_konfirmasi = None
                     scan_diagnostics = scanner.ScanDiagnostics()
                     best = scanner.find_best_candidate(
                         tickers,
@@ -5075,6 +5128,7 @@ def run(
                         direction_provider=direction_provider,
                         zone_provider=zone_provider,
                         diagnostics=scan_diagnostics,
+                        confirm_close_time_ms=batas_konfirmasi,
                     )
                     if best:
                         book = client.get_book_ticker(best.symbol)

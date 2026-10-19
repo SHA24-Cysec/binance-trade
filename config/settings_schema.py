@@ -698,7 +698,7 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "CONFIRM_INTERVAL": _field(
         "Scan",
         "Interval konfirmasi",
-        "Interval candle konfirmasi volume rolling. Saat Demand M15 atau Trend M15 aktif, pilih 1m, 3m, 5m, atau 15m agar backtest dapat merangkai candle M15.",
+        "Interval candle konfirmasi volume rolling dan candle layer timing. ZONE_INTERVAL dan DIRECTION_INTERVAL wajib kelipatan bulat dari nilai ini, 1m sampai 15m paling aman, supaya backtest bisa merangkai candle zona dan arah dari candle konfirmasi.",
         "str",
         editor="select",
         options=[
@@ -959,6 +959,12 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         maximum=20,
         unit="%",
     ),
+    "DEMAND_REQUIRE_INSIDE_ZONE": _field(
+        "Konfirmasi Demand",
+        "Wajib di dalam zona demand M5",
+        "True berarti close candle konfirmasi harus berada di antara dasar dan atap zona demand M5, dan DEMAND_MAX_DISTANCE_PCT tidak dipakai lagi. Ini yang membuat bot hanya entry di dalam area demand, bukan di atasnya.",
+        "bool",
+    ),
     "DEMAND_MAX_DISTANCE_PCT": _field(
         "Konfirmasi Demand",
         "Jarak maksimum dari zona demand",
@@ -1004,7 +1010,7 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "DIRECTION_EMA_FAST": _field(
         "Arah Daily",
         "Periode EMA cepat arah",
-        "EMA cepat pada candle arah. Wajib lebih kecil dari EMA lambat.",
+        "EMA cepat pada candle arah. Default 20, sejajar dengan EMA cepat layer timing. Wajib lebih kecil dari EMA lambat.",
         "int",
         minimum=2,
         maximum=500,
@@ -1013,7 +1019,7 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "DIRECTION_EMA_SLOW": _field(
         "Arah Daily",
         "Periode EMA lambat arah",
-        "EMA lambat pada candle arah; dipakai juga sebagai penentu panjang riwayat minimum. Maksimal 999 candle karena endpoint klines Binance membatasi 1000 candle per panggilan.",
+        "EMA lambat pada candle arah. Default 50, sejajar dengan EMA lambat layer timing; dipakai juga sebagai penentu panjang riwayat minimum sehingga koin butuh sekitar 50 candle harian sebelum bisa di-entry. Maksimal 999 candle karena endpoint klines Binance membatasi 1000 candle per panggilan.",
         "int",
         minimum=3,
         maximum=999,
@@ -1044,6 +1050,53 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         minimum=20,
         maximum=999,
         unit="candle",
+    ),
+    "DIRECTION_ZONE_FILTER_ENABLED": _field(
+        "Arah Daily",
+        "Filter zona demand Daily",
+        "Dijalankan tepat setelah arah, di candle yang sama, tanpa unduhan tambahan. Entry hanya boleh kalau harga masih berada di dalam atau dekat zona demand yang dipetakan dari candle harian: close di atas dasar zona, candle sinyal bullish, close_pos di atas ambang, dan jarak dari atap zona tidak melewati batas. Candle gagal diambil atau riwayat kurang berarti kandidat ditolak (fail closed).",
+        "bool",
+    ),
+    "DIRECTION_ZONE_LOOKBACK_BARS": _field(
+        "Arah Daily",
+        "Lookback zona demand Daily",
+        "Jumlah candle harian tertutup yang memetakan dasar zona demand. Default 20 candle = sekitar satu bulan struktur harga harian.",
+        "int",
+        minimum=3,
+        maximum=997,
+        unit="candle",
+    ),
+    "DIRECTION_ZONE_BUFFER_PCT": _field(
+        "Arah Daily",
+        "Tebal zona demand Daily",
+        "Tebal minimum zona demand harian di atas level dasarnya, dalam persen. Candle harian lebih lebar daripada H1, jadi defaultnya lebih tebal. Nilai ini juga menentukan candle mana yang dihitung sebagai dasar zona.",
+        "float",
+        minimum=0.0,
+        maximum=20.0,
+        unit="%",
+    ),
+    "DIRECTION_ZONE_MAX_DISTANCE_PCT": _field(
+        "Arah Daily",
+        "Jarak maksimum dari zona Daily",
+        "Jarak maksimum close candle harian di atas ATAP zona demand, dalam persen. Harus lebih besar atau sama dengan tebal zona. Makin kecil, makin paksa entry terjadi di area demand dan bukan di tengah jalan naik.",
+        "float",
+        minimum=0.0,
+        maximum=50.0,
+        unit="%",
+    ),
+    "DIRECTION_ZONE_MIN_CLOSE_POSITION": _field(
+        "Arah Daily",
+        "Posisi close minimum candle Daily",
+        "Posisi penutupan minimum di dalam rentang high-low candle sinyal harian (0.0 di low, 1.0 di high) sebagai bukti dorongan pembeli di zona.",
+        "float",
+        minimum=0.0,
+        maximum=1.0,
+    ),
+    "DIRECTION_ZONE_REQUIRE_INSIDE_ZONE": _field(
+        "Arah Daily",
+        "Wajib di dalam zona demand Daily",
+        "True berarti close candle harian harus benar-benar berada di antara dasar dan atap zona demand; DIRECTION_ZONE_MAX_DISTANCE_PCT tidak dipakai lagi. False membuka toleransi di atas atap zona sebesar nilai kunci jarak itu.",
+        "bool",
     ),
     "ZONE_FILTER_ENABLED": _field(
         "Zona H1",
@@ -1085,6 +1138,12 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         minimum=0.0,
         maximum=50.0,
         unit="%",
+    ),
+    "ZONE_REQUIRE_INSIDE_ZONE": _field(
+        "Zona H1",
+        "Wajib di dalam zona demand H1",
+        "True berarti close candle H1 harus berada di antara dasar dan atap zona demand, dan ZONE_MAX_DISTANCE_PCT tidak dipakai lagi. False memperbolehkan harga melayang di atas atap zona sejauh nilai kunci jarak. Nilai 0 pada kunci jarak hanya berarti toleransi nol kalau mode wajib-di-dalam ini aktif.",
+        "bool",
     ),
     "ZONE_MIN_CLOSE_POSITION": _field(
         "Zona H1",
@@ -1665,17 +1724,40 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
     saring_demand = mode_aware is False or _flag_untuk_relasi(
         cfg, "DEMAND_ZONE_FILTER_ENABLED", False
     )
-    if saring_demand:
+    if saring_demand and not _flag_untuk_relasi(
+        cfg, "DEMAND_REQUIRE_INSIDE_ZONE", False
+    ):
         nilai = pasangan("DEMAND_MAX_DISTANCE_PCT", "DEMAND_ZONE_BUFFER_PCT")
         if nilai is not None and nilai[0] < nilai[1]:
             keluar["DEMAND_MAX_DISTANCE_PCT"] = (
                 "harus lebih besar atau sama dengan DEMAND_ZONE_BUFFER_PCT"
             )
 
+    saring_zona_harian = mode_aware is False or _flag_untuk_relasi(
+        cfg, "DIRECTION_ZONE_FILTER_ENABLED", False
+    )
+    if saring_zona_harian and not _flag_untuk_relasi(
+        cfg, "DIRECTION_ZONE_REQUIRE_INSIDE_ZONE", False
+    ):
+        nilai = pasangan(
+            "DIRECTION_ZONE_MAX_DISTANCE_PCT", "DIRECTION_ZONE_BUFFER_PCT"
+        )
+        if nilai is not None and nilai[0] < nilai[1]:
+            keluar["DIRECTION_ZONE_MAX_DISTANCE_PCT"] = (
+                "harus lebih besar atau sama dengan DIRECTION_ZONE_BUFFER_PCT"
+            )
+        jendela = _angka_untuk_relasi(cfg, "DIRECTION_LOOKBACK_BARS")
+        butuh = _angka_untuk_relasi(cfg, "DIRECTION_ZONE_LOOKBACK_BARS")
+        if jendela is not None and butuh is not None and jendela < butuh + 1:
+            keluar["DIRECTION_LOOKBACK_BARS"] = (
+                f"minimal {int(butuh) + 1} candle supaya zona demand harian punya "
+                "riwayat yang cukup pada jendela yang sama"
+            )
+
     saring_zona = mode_aware is False or _flag_untuk_relasi(
         cfg, "ZONE_FILTER_ENABLED", False
     )
-    if saring_zona:
+    if saring_zona and not _flag_untuk_relasi(cfg, "ZONE_REQUIRE_INSIDE_ZONE", False):
         nilai = pasangan("ZONE_MAX_DISTANCE_PCT", "ZONE_BUFFER_PCT")
         if nilai is not None and nilai[0] < nilai[1]:
             keluar["ZONE_MAX_DISTANCE_PCT"] = (
@@ -1789,6 +1871,30 @@ def validate_candidate(
                     "DIRECTION_ADX_MIN nol: cek kekuatan arah mati, hanya susunan EMA "
                     "yang menyaring entry sehingga pasar sideways lebih mudah diloloskan."
                 )
+        for kunci_zona, kunci_ketat, label in (
+            ("DEMAND_ZONE_FILTER_ENABLED", "DEMAND_REQUIRE_INSIDE_ZONE", "M5"),
+            ("ZONE_FILTER_ENABLED", "ZONE_REQUIRE_INSIDE_ZONE", "H1"),
+            (
+                "DIRECTION_ZONE_FILTER_ENABLED",
+                "DIRECTION_ZONE_REQUIRE_INSIDE_ZONE",
+                "harian",
+            ),
+        ):
+            if cleaned.get(kunci_zona) and cleaned.get(kunci_ketat):
+                warnings.append(
+                    f"{kunci_ketat} aktif: close wajib berada di antara dasar dan atap "
+                    f"zona demand {label}, jadi kunci jarak maksimum gerbang itu tidak "
+                    "dipakai."
+                )
+        if cleaned.get("DIRECTION_ZONE_FILTER_ENABLED") and int(
+            cleaned["DIRECTION_LOOKBACK_BARS"]
+        ) < int(cleaned["DIRECTION_ZONE_LOOKBACK_BARS"]) + 1:
+            warnings.append(
+                f"DIRECTION_LOOKBACK_BARS {cleaned['DIRECTION_LOOKBACK_BARS']} lebih "
+                f"kecil dari {int(cleaned['DIRECTION_ZONE_LOOKBACK_BARS']) + 1} candle "
+                "yang dibutuhkan zona demand harian. Gerbang zona memakai jendela "
+                "terbesar agar tetap terisi, dan live serta backtest ikut memakainya."
+            )
         if cleaned.get("TIMING_FILTER_ENABLED"):
             minimal_timing = max(
                 int(cleaned["TIMING_EMA_SLOW"]),

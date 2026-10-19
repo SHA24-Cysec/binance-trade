@@ -27,6 +27,18 @@ def sample_candidate():
     return market.Candidate("SOLUSDT", "SOL", 12.0, 10_000_000.0, 100.5)
 
 
+def cfg_tanpa_timeframe_besar(**tambahan):
+    cfg = {
+        **PUMP_CONFIG,
+        "DIRECTION_FILTER_ENABLED": False,
+        "DIRECTION_ZONE_FILTER_ENABLED": False,
+        "ZONE_FILTER_ENABLED": False,
+    }
+    cfg.update(tambahan)
+    return cfg
+
+
+
 def test_four_candidates_from_sixty_seven_are_expected_without_entry():
     tickers = [
         {
@@ -38,29 +50,30 @@ def test_four_candidates_from_sixty_seven_are_expected_without_entry():
         for i in range(67)
     ]
     diag = market.ScanDiagnostics()
+    cfg = cfg_tanpa_timeframe_besar()
     result = market.find_best_candidate(
-        tickers, lambda symbol: [sample_candle()], PUMP_CONFIG,
+        tickers, lambda symbol: [sample_candle()], cfg,
         diagnostics=diag,
     )
     assert result is None
     assert diag.market_candidates == 4
     assert diag.checked_candidates == 4
     assert diag.rejection_counts == {"HISTORY_CONFIRM": 4}
-    assert diag.log_lines(PUMP_CONFIG)[0].startswith(
+    assert diag.log_lines(cfg)[0].startswith(
         "Diagnostik entry: 4 dari 4 kandidat pasar diperiksa"
     )
-    assert "gerbang pertama" in diag.log_lines(PUMP_CONFIG)[1]
-    assert "riwayat 5m kurang: 4 kandidat" in diag.log_lines(PUMP_CONFIG)[2]
+    assert "gerbang pertama" in diag.log_lines(cfg)[1]
+    assert "riwayat 5m kurang: 4 kandidat" in diag.log_lines(cfg)[2]
     second = market.ScanDiagnostics()
     assert market.find_best_candidate(
-        tickers, lambda symbol: [sample_candle()], PUMP_CONFIG,
+        tickers, lambda symbol: [sample_candle()], cfg,
         diagnostics=second,
     ) is None
     assert second.signature() == diag.signature()
 
 
 @pytest.mark.parametrize("stage,interval", [
-    ("DIRECTION", "1d"), ("ZONE", "1h"), ("TIMING", "5m"),
+    ("DIRECTION", "1d"), ("DAILY_ZONE", "1d"), ("ZONE", "1h"), ("TIMING", "5m"),
 ])
 def test_downstream_gate_rejection_has_its_own_reason(monkeypatch, stage, interval):
     candidate = sample_candidate()
@@ -78,6 +91,7 @@ def test_downstream_gate_rejection_has_its_own_reason(monkeypatch, stage, interv
         }
 
     monkeypatch.setattr(market, "direction_verdict", verdict("DIRECTION"))
+    monkeypatch.setattr(market, "daily_zone_verdict", verdict("DAILY_ZONE"))
     monkeypatch.setattr(market, "zone_verdict", verdict("ZONE"))
     monkeypatch.setattr(market, "timing_verdict", verdict("TIMING"))
     diag = market.ScanDiagnostics()
@@ -108,7 +122,7 @@ def test_confirmation_rejection_is_classified(monkeypatch, reason, stage):
                         lambda *args: market.SetupResult(False, reason))
     diag = market.ScanDiagnostics()
     assert market.find_best_candidate(
-        [], lambda symbol: [sample_candle()], PUMP_CONFIG,
+        [], lambda symbol: [sample_candle()], cfg_tanpa_timeframe_besar(),
         diagnostics=diag,
     ) is None
     assert diag.rejection_counts == {stage: 1}
@@ -123,7 +137,7 @@ def test_failed_candle_download_is_distinct_and_fails_closed(monkeypatch):
         raise OSError("timeout")
 
     diag = market.ScanDiagnostics()
-    assert market.find_best_candidate([], broken, PUMP_CONFIG,
+    assert market.find_best_candidate([], broken, cfg_tanpa_timeframe_besar(),
                                       diagnostics=diag) is None
     assert diag.rejection_counts == {"CANDLE_CONFIRM": 1}
     assert "timeout" in diag.examples["CANDLE_CONFIRM"][1]
@@ -138,7 +152,9 @@ def test_diagnostics_do_not_change_entry_decision(monkeypatch):
         lambda *args: market.SetupResult(True, "entry valid", 100.5, .2),
     )
     good = lambda *args: {"ok": True, "interval": "5m", "reason": "lolos"}
-    for name in ("direction_verdict", "zone_verdict", "timing_verdict"):
+    for name in (
+        "direction_verdict", "daily_zone_verdict", "zone_verdict", "timing_verdict",
+    ):
         monkeypatch.setattr(market, name, good)
     baseline = market.find_best_candidate([], lambda symbol: [sample_candle()],
                                           PUMP_CONFIG)
@@ -186,14 +202,15 @@ def test_bounded_log_lines_and_five_minute_throttle():
 def test_reused_diagnostics_are_reset_between_scans(monkeypatch):
     monkeypatch.setattr(market, "filter_and_rank_candidates",
                         lambda *args: [sample_candidate()])
+    cfg = cfg_tanpa_timeframe_besar()
     diag = market.ScanDiagnostics()
     assert market.find_best_candidate(
-        [], lambda symbol: [sample_candle()], PUMP_CONFIG,
+        [], lambda symbol: [sample_candle()], cfg,
         diagnostics=diag,
     ) is None
     assert diag.rejection_counts == {"HISTORY_CONFIRM": 1}
     assert market.find_best_candidate(
-        [], lambda symbol: [sample_candle()], PUMP_CONFIG,
+        [], lambda symbol: [sample_candle()], cfg,
         diagnostics=diag,
     ) is None
     assert diag.rejection_counts == {"HISTORY_CONFIRM": 1}
@@ -224,6 +241,8 @@ def test_mixed_rejections_count_first_failed_gate_only(monkeypatch):
     monkeypatch.setattr(market, "detect_entry_setup", setup)
     monkeypatch.setattr(market, "direction_verdict",
                         lambda symbol, *args: passed(symbol, "BBBUSDT"))
+    monkeypatch.setattr(market, "daily_zone_verdict",
+                        lambda *args: {"ok": True, "interval": "1d", "reason": "lolos"})
     monkeypatch.setattr(market, "zone_verdict",
                         lambda symbol, *args: passed(symbol, "DDDUSDT"))
     monkeypatch.setattr(
@@ -250,3 +269,42 @@ def test_mixed_rejections_count_first_failed_gate_only(monkeypatch):
         "VOLUME_CONFIRM", "DIRECTION", "ZONE", "TIMING",
     )] == ["AAAUSDT", "BBBUSDT", "DDDUSDT", "CCCUSDT"]
     assert len(diag.log_lines(PUMP_CONFIG)) == 6
+
+
+def test_candle_konfirmasi_hanya_diunduh_untuk_yang_lolos_timeframe_besar(monkeypatch):
+    names = ("AAAUSDT", "BBBUSDT")
+    candidates = [
+        market.Candidate(sym, sym[:-4], 12.0, 10_000_000.0, 100.0)
+        for sym in names
+    ]
+    monkeypatch.setattr(market, "filter_and_rank_candidates",
+                        lambda *args: candidates)
+    monkeypatch.setattr(market, "direction_verdict",
+                        lambda symbol, *args: {
+                            "ok": symbol != "AAAUSDT",
+                            "interval": "1d",
+                            "reason": "AAAUSDT ditolak" if symbol == "AAAUSDT" else "lolos",
+                        })
+    monkeypatch.setattr(market, "daily_zone_verdict",
+                        lambda symbol, *args: {"ok": True, "interval": "1d", "reason": "lolos"})
+    monkeypatch.setattr(market, "zone_verdict",
+                        lambda symbol, *args: {"ok": True, "interval": "1h", "reason": "lolos"})
+    monkeypatch.setattr(market, "detect_entry_setup",
+                        lambda *args: market.SetupResult(True, "entry valid", 100.5, .2))
+    unduh = []
+
+    def fetch(symbol):
+        unduh.append(symbol)
+        return [sample_candle()]
+
+    diag = market.ScanDiagnostics()
+    best = market.find_best_candidate(
+        [], fetch, {**PUMP_CONFIG, "TIMING_FILTER_ENABLED": False},
+        direction_provider=lambda symbol: [sample_candle()],
+        zone_provider=lambda symbol: [sample_candle()],
+        diagnostics=diag,
+    )
+    assert best is not None
+    assert best.symbol == "BBBUSDT"
+    assert unduh == ["BBBUSDT"]
+    assert diag.rejection_counts == {"DIRECTION": 1}

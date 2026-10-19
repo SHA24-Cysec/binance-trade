@@ -59,6 +59,19 @@ def interval_to_ms(interval: str, default_minutes: int = 5) -> int:
     return int(INTERVAL_MINUTES.get(str(interval), default_minutes)) * 60_000
 
 
+def last_closed_bar_close_ms(interval: str, now_ms: int) -> int:
+    menit = INTERVAL_MINUTES.get(str(interval).strip().lower())
+    if menit is None:
+        raise ValueError(
+            f"Interval '{interval}' tidak dikenal; pilihan: "
+            + ", ".join(sorted(INTERVAL_MINUTES, key=INTERVAL_MINUTES.get))
+        )
+    batas = int(menit) * 60_000
+    if batas <= 0:
+        raise ValueError("Interval harus lebih besar dari nol")
+    return ((int(now_ms) // batas) - 1) * batas + batas - 1
+
+
 def parse_klines(raw: list) -> list[Kline]:
     out = []
     for idx, row in enumerate(raw):
@@ -221,6 +234,8 @@ def detect_demand_zone(klines: list[Kline], config: dict) -> dict:
     lookback = max(3, int(config.get("DEMAND_LOOKBACK_BARS", 20) or 20))
     buffer_pct = max(0.0, float(config.get("DEMAND_ZONE_BUFFER_PCT", 0.8) or 0.0))
     max_dist_pct = max(0.0, float(config.get("DEMAND_MAX_DISTANCE_PCT", 3.5) or 0.0))
+    inside = bool(config.get("DEMAND_REQUIRE_INSIDE_ZONE", False))
+    toleransi_pct = 0.0 if inside else max_dist_pct
     min_close_pos = max(
         0.0, min(1.0, float(config.get("DEMAND_MIN_CLOSE_POSITION", 0.45) or 0.0))
     )
@@ -324,12 +339,17 @@ def detect_demand_zone(klines: list[Kline], config: dict) -> dict:
             "close_position": close_pos,
         }
 
-    if max_dist_pct > 0 and distance_pct > max_dist_pct:
+    if distance_pct > toleransi_pct:
         return {
             "ok": False,
             "reason": (
                 f"harga terlalu jauh di atas zona demand: +{distance_pct:.2f}% "
-                f"di atas batas atas zona {zone_high:.6g} (batas {max_dist_pct:g}%)"
+                f"di atas batas atas zona {zone_high:.6g}"
+                + (
+                    " (wajib di dalam zona)"
+                    if inside
+                    else f" (batas {max_dist_pct:g}%)"
+                )
             ),
             "zone_low": zone_low,
             "zone_high": zone_high,
@@ -342,6 +362,7 @@ def detect_demand_zone(klines: list[Kline], config: dict) -> dict:
         "reason": (
             f"demand zone valid [{zone_low:.6g}..{zone_high:.6g}], "
             f"jarak +{distance_pct:.2f}%, close_pos {close_pos:.2f}"
+            + (", di dalam zona" if inside else "")
         ),
         "zone_low": zone_low,
         "zone_high": zone_high,
@@ -474,11 +495,17 @@ TREND_KLINE_LIMIT = 1000
 DIRECTION_DEFAULTS = {
     "DIRECTION_FILTER_ENABLED": True,
     "DIRECTION_INTERVAL": DIRECTION_DEFAULT_INTERVAL,
-    "DIRECTION_EMA_FAST": 10,
-    "DIRECTION_EMA_SLOW": 20,
+    "DIRECTION_EMA_FAST": 20,
+    "DIRECTION_EMA_SLOW": 50,
     "DIRECTION_ADX_PERIOD": 14,
     "DIRECTION_ADX_MIN": 20.0,
     "DIRECTION_LOOKBACK_BARS": 60,
+    "DIRECTION_ZONE_FILTER_ENABLED": True,
+    "DIRECTION_ZONE_LOOKBACK_BARS": 20,
+    "DIRECTION_ZONE_BUFFER_PCT": 2.0,
+    "DIRECTION_ZONE_MAX_DISTANCE_PCT": 5.0,
+    "DIRECTION_ZONE_MIN_CLOSE_POSITION": 0.35,
+    "DIRECTION_ZONE_REQUIRE_INSIDE_ZONE": True,
 }
 
 ZONE_DEFAULTS = {
@@ -486,7 +513,8 @@ ZONE_DEFAULTS = {
     "ZONE_INTERVAL": ZONE_DEFAULT_INTERVAL,
     "ZONE_LOOKBACK_BARS": 72,
     "ZONE_BUFFER_PCT": 1.5,
-    "ZONE_MAX_DISTANCE_PCT": 25.0,
+    "ZONE_MAX_DISTANCE_PCT": 4.0,
+    "ZONE_REQUIRE_INSIDE_ZONE": True,
     "ZONE_MIN_CLOSE_POSITION": 0.35,
 }
 
@@ -535,16 +563,84 @@ def direction_enabled(config: dict) -> bool:
 
 
 def direction_required_bars(config: dict) -> int:
-    fast, slow, adx_period, _ = _ema_adx_params(config, "DIRECTION", 10, 20)
+    fast, slow, adx_period, _ = _ema_adx_params(config, "DIRECTION", 20, 50)
     return max(fast, slow, 2 * adx_period + 1)
 
 
 def direction_window_bars(config: dict) -> int:
+    zona = direction_zone_window_bars(config)
     if not direction_enabled(config):
-        return 0
+        return zona
     diminta = int(config.get("DIRECTION_LOOKBACK_BARS", 60) or 60)
     diminta = max(1, min(TREND_KLINE_LIMIT - 1, diminta))
-    return max(direction_required_bars(config), diminta)
+    return max(direction_required_bars(config), diminta, zona)
+
+
+def direction_zone_enabled(config: dict) -> bool:
+    return bool(config.get("DIRECTION_ZONE_FILTER_ENABLED", False))
+
+
+def direction_zone_lookback_bars(config: dict) -> int:
+    lookback = int(config.get("DIRECTION_ZONE_LOOKBACK_BARS", 20) or 20)
+    return max(3, min(TREND_KLINE_LIMIT - 2, lookback))
+
+
+def direction_zone_window_bars(config: dict) -> int:
+    if not direction_zone_enabled(config):
+        return 0
+    return direction_zone_lookback_bars(config) + 1
+
+
+def direction_zone_gate_config(config: dict) -> dict:
+    return {
+        "DEMAND_ZONE_FILTER_ENABLED": direction_zone_enabled(config),
+        "DEMAND_LOOKBACK_BARS": direction_zone_lookback_bars(config),
+        "DEMAND_ZONE_BUFFER_PCT": max(
+            0.0, float(config.get("DIRECTION_ZONE_BUFFER_PCT", 2.0) or 0.0)
+        ),
+        "DEMAND_MAX_DISTANCE_PCT": max(
+            0.0, float(config.get("DIRECTION_ZONE_MAX_DISTANCE_PCT", 5.0) or 0.0)
+        ),
+        "DEMAND_REQUIRE_INSIDE_ZONE": bool(
+            config.get("DIRECTION_ZONE_REQUIRE_INSIDE_ZONE", False)
+        ),
+        "DEMAND_MIN_CLOSE_POSITION": float(
+            config.get("DIRECTION_ZONE_MIN_CLOSE_POSITION", 0.35) or 0.0
+        ),
+    }
+
+
+def evaluate_direction_zone(
+    klines: list[Kline],
+    config: dict,
+    signal_close_time_ms: Optional[int] = None,
+) -> dict:
+    interval = direction_interval(config)
+    wajib = direction_zone_window_bars(config)
+    if not direction_zone_enabled(config):
+        return {
+            "ok": True,
+            "reason": f"filter zona demand {interval} nonaktif",
+            "interval": interval,
+            "bars": 0,
+            "required": 0,
+            "zone_low": None,
+            "zone_high": None,
+            "distance_pct": None,
+            "close_position": None,
+        }
+    siap = [
+        k
+        for k in (klines or [])
+        if signal_close_time_ms is None
+        or int(k.close_time) <= int(signal_close_time_ms)
+    ]
+    jendela = siap[-wajib:] if wajib > 0 else siap
+    hasil = detect_demand_zone(jendela, direction_zone_gate_config(config))
+    hasil["interval"] = interval
+    hasil["bars"] = len(jendela)
+    hasil["required"] = wajib
+    return hasil
 
 
 def zone_interval(config: dict) -> str:
@@ -578,7 +674,10 @@ def zone_gate_config(config: dict) -> dict:
             0.0, float(config.get("ZONE_BUFFER_PCT", 1.5) or 0.0)
         ),
         "DEMAND_MAX_DISTANCE_PCT": max(
-            0.0, float(config.get("ZONE_MAX_DISTANCE_PCT", 25.0) or 0.0)
+            0.0, float(config.get("ZONE_MAX_DISTANCE_PCT", 4.0) or 0.0)
+        ),
+        "DEMAND_REQUIRE_INSIDE_ZONE": bool(
+            config.get("ZONE_REQUIRE_INSIDE_ZONE", False)
         ),
         "DEMAND_MIN_CLOSE_POSITION": float(
             config.get("ZONE_MIN_CLOSE_POSITION", 0.35) or 0.0
@@ -961,7 +1060,7 @@ def evaluate_direction(
             "checks": {},
             "values": {},
         }
-    fast, slow, adx_period, adx_min = _ema_adx_params(config, "DIRECTION", 10, 20)
+    fast, slow, adx_period, adx_min = _ema_adx_params(config, "DIRECTION", 20, 50)
     return evaluate_ema_adx(
         klines,
         interval=interval,
@@ -1055,7 +1154,7 @@ def direction_warmup_bars(config: dict, interval: str) -> int:
     Jalur native (candle harian diambil langsung dari bursa) tidak memakai
     angka ini karena candle harian tidak bergantung pada bar simulasi.
     """
-    if not direction_enabled(config):
+    if not direction_enabled(config) and not direction_zone_enabled(config):
         return 0
     source_minutes = int(INTERVAL_MINUTES.get(str(interval), 5))
     target_minutes = direction_interval_minutes(config)
@@ -1099,7 +1198,7 @@ def native_history_ms(config: dict) -> int:
     angka ini untuk menarik cukup candle historis sebelum rentang uji.
     """
     besoin = 0
-    if direction_enabled(config):
+    if direction_enabled(config) or direction_zone_enabled(config):
         besoin = max(
             besoin,
             direction_window_bars(config)
