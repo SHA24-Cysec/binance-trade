@@ -78,6 +78,8 @@ def evaluate_candle_exit(
     pnl_high = (candle.high / entry - 1.0) * 100.0
     pnl_low = (candle.low / entry - 1.0) * 100.0
     pnl_high_unit = candle.high - entry if atr_mode else pnl_high
+    be_armed_before = pos.be_active
+    trail_armed_before = pos.trailing_active
 
     if config["USE_BREAKEVEN"] and not pos.be_active and pnl_high_unit >= lv["be_trig"]:
         pos.be_active = True
@@ -104,9 +106,15 @@ def evaluate_candle_exit(
     if config["USE_TP"] and tp_hit:
         return "TAKE_PROFIT", max(tp_price, candle.open)
     if pos.be_active and candle.low <= pos.be_stop:
-        return "BREAKEVEN", min(pos.be_stop, candle.open)
+        return "BREAKEVEN", (
+            pos.be_stop if not be_armed_before else min(pos.be_stop, candle.open)
+        )
     if pos.trailing_active and candle.low <= pos.trailing_stop:
-        return "TRAILING_STOP", min(pos.trailing_stop, candle.open)
+        return "TRAILING_STOP", (
+            pos.trailing_stop
+            if not trail_armed_before
+            else min(pos.trailing_stop, candle.open)
+        )
     # TIME STOP dievaluasi paling akhir: SL/BE/TRAIL tetap menang pada bar yang
     # sama, jadi hierarki exit yang lama tidak berubah sama sekali. Exit memakai
     # harga close bar ini karena alasan penutupan adalah waktu, bukan level harga.

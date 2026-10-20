@@ -15,6 +15,8 @@ from trading.paper.paper_store import PaperStore
 
 logger = logging.getLogger("paper_client")
 
+PAPER_MATCH_DEPTH_LIMIT = 500
+
 
 class PaperClient(ExchangeClient):
     mode = "PAPER"
@@ -72,8 +74,7 @@ class PaperClient(ExchangeClient):
         return self._filters_cache.get(s)
 
     def _depth_for_engine(self, symbol: str) -> dict:
-        limit = int(self.config.get("PAPER_DEPTH_LIMIT", 100))
-        return self.market.get_depth(symbol, limit=limit)
+        return self.market.get_depth(symbol, limit=PAPER_MATCH_DEPTH_LIMIT)
 
     def sync_time(self) -> None:
         self.market.sync_time()

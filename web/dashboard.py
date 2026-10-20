@@ -152,7 +152,19 @@ _MANUAL_CLOSE_COOLDOWN_SECONDS = 5.0
 _last_manual_close_request = {"ts": 0.0}
 _manual_close_lock = threading.Lock()
 
-_ADMIN_TOKEN = secrets.token_urlsafe(32)
+def _load_admin_token() -> "tuple[str, str]":
+    raw = str(os.environ.get("DASHBOARD_ADMIN_TOKEN", "") or "").strip()
+    if len(raw) >= 24:
+        return raw, "environment"
+    if raw:
+        logger.warning(
+            "DASHBOARD_ADMIN_TOKEN diabaikan karena kurang dari 24 karakter; "
+            "dipakai token acak per proses."
+        )
+    return secrets.token_urlsafe(32), "process"
+
+
+_ADMIN_TOKEN, _ADMIN_TOKEN_SOURCE = _load_admin_token()
 
 _process_manager = BotProcessManager()
 _runtime_lock = threading.RLock()
@@ -683,6 +695,13 @@ def build_status():
             "be_stop_price": float(state.get("be_stop_price", 0) or 0),
             "trailing_active": bool(state.get("trailing_active")),
             "trailing_stop_price": float(state.get("trailing_stop_price", 0) or 0),
+            "native_protection": {
+                "active": isinstance(state.get("native_oco"), dict)
+                or isinstance(state.get("native_stop"), dict),
+                "stop_price": _native_protection_level(state),
+                "amend_pending": isinstance(state.get("native_amend"), dict),
+                "exit_blocked": bool(state.get("_native_stop_exit_blocked")),
+            },
         },
         "drawdown_strategy": strategy_dd.strategy_view(PUMP_CONFIG),
         "drawdown_account": account_drawdown_view(state, account_equity, process_status, PUMP_CONFIG),
@@ -696,6 +715,7 @@ def build_status():
         "account": {
             **account_equity,
             "peak_equity": state.get("peak_equity"),
+            "peak_equity_all_time": state.get("peak_equity_all_time"),
             "max_drawdown_pct": float(state.get("max_dd_pct") or 0.0),
             "dd_reset_count": int(state.get("dd_reset_count") or 0),
             "max_drawdown_limit_pct": float(
@@ -704,6 +724,7 @@ def build_status():
         },
         "flags": {
             "dd_stopped": bool(state.get("dd_stopped")),
+            "state_integrity_error": str(state.get("state_integrity_error") or ""),
         },
         "config": {
             "sl_pct": (
@@ -888,6 +909,28 @@ def _bt_native_htf_intervals(cfg: dict) -> list[str]:
     if bool(cfg.get("ZONE_FILTER_ENABLED", False)):
         out.append(str(cfg.get("ZONE_INTERVAL", "1h") or "1h"))
     return out
+
+
+def _bt_native_prebuilt(prep: dict, cfg: dict):
+    """Menyusun prebuilt dari candle timeframe tinggi native.
+
+    Kalau permintaan native tidak menghasilkan satu candle pun, backtest
+    dihentikan dengan pesan jelas. Tanpa ini seluruh kandidat ditolak
+    lapisan arah/zona dan hasilnya 0 trade yang terlihat seperti "strategi
+    tidak pernah sinyal".
+    """
+    arah = prep.get("native_arah")
+    zona = prep.get("native_zona")
+    if arah is None or zona is None:
+        return None
+    if _bt_native_htf_intervals(cfg) and not arah and not zona:
+        raise bt.BacktestError(
+            "Candle Daily/H1 native tidak berhasil diambil dari Binance, sehingga "
+            "layer arah dan layer zona akan menolak semua kandidat. Simulasi "
+            "dihentikan supaya tidak menampilkan 0 trade yang menyesatkan. Periksa "
+            "koneksi ke Binance lalu jalankan ulang."
+        )
+    return (None, None, arah, zona, None)
 
 
 def _bt_simulation_warmup_bars(cfg: dict) -> int:
@@ -1176,6 +1219,24 @@ def _bt_prepare_universe(
     }
 
 
+def _native_protection_level(state: dict) -> float:
+    oco = state.get("native_oco")
+    if isinstance(oco, dict):
+        below = oco.get("below")
+        if isinstance(below, dict):
+            try:
+                return float(below.get("stop_price") or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+    stop = state.get("native_stop")
+    if isinstance(stop, dict):
+        try:
+            return float(stop.get("stop_price") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+    return 0.0
+
+
 def _json_safe(value):
     if isinstance(value, float):
         return value if math.isfinite(value) else None
@@ -1227,9 +1288,7 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
         klien = prep.get("client")
 
         set_progress(0.82, "menjalankan simulasi portofolio...")
-        prebuilt = None
-        if prep.get("native_arah") is not None and prep.get("native_zona") is not None:
-            prebuilt = (None, None, prep["native_arah"], prep["native_zona"], None)
+        prebuilt = _bt_native_prebuilt(prep, cfg)
         result = pbt.run_portfolio_backtest(
             store,
             cfg,
@@ -1507,9 +1566,7 @@ def _bt_run_grid_job(
         kline_cache = prep["kline_cache"]
         klien = prep.get("client")
 
-        prebuilt = None
-        if prep.get("native_arah") is not None and prep.get("native_zona") is not None:
-            prebuilt = (None, None, prep["native_arah"], prep["native_zona"], None)
+        prebuilt = _bt_native_prebuilt(prep, cfg)
         set_progress(0.30, f"menjalankan grid search ({total_kombinasi} kombinasi)...")
         hasil = gs.run_portfolio_grid_search(
             store,
@@ -1669,6 +1726,7 @@ def _bt_min_days_note(cfg: dict, interval: str) -> tuple[int, str]:
     if not arah_aktif and not zona_aktif and not timing_aktif:
         return dasar, ""
 
+    native_htf = bool(_bt_native_htf_intervals(cfg))
     minimal = dasar
     catatan = ""
     if arah_aktif or zona_aktif:
@@ -1678,10 +1736,26 @@ def _bt_min_days_note(cfg: dict, interval: str) -> tuple[int, str]:
             "batas minimum hari pada rentang simulasi. Riwayat yang dibutuhkan "
             "tetap diunduh otomatis sebelum rentang uji."
         )
+    if not native_htf:
+        try:
+            jam_gerbang = pbt.parity.gate_warmup_ms(cfg, interval) / 3_600_000
+        except ValueError as exc:
+            return dasar, str(exc)
+        if jam_gerbang > 0:
+            minimal = max(minimal, int(math.ceil(jam_gerbang / 24.0)) + 1)
+            catatan += (
+                f" Tanpa candle timeframe tinggi native, gerbang Daily dan H1 harus "
+                f"dirangkai dari candle {interval} sehingga butuh sekitar "
+                f"{jam_gerbang:.2f} jam pemanasan."
+            )
     if timing_aktif:
         try:
-            jam_timing = pbt.parity.gate_warmup_ms(cfg, interval) / 3_600_000
-        except ValueError as exc:
+            jam_timing = (
+                strategy.timing_window_bars(cfg)
+                * strategy.interval_to_ms(interval)
+                / 3_600_000
+            )
+        except (ValueError, KeyError) as exc:
             return dasar, str(exc)
         minimal = max(minimal, int(math.ceil(jam_timing / 24.0)) + 1)
         catatan += (
@@ -2765,6 +2839,14 @@ def main(*, auto_start_bot: bool = False) -> int:
             print(f"Bot tidak dapat dimulai otomatis: {exc}")
 
     tampil = "localhost" if _DASHBOARD_HOST == "127.0.0.1" else _DASHBOARD_HOST
+    if _ADMIN_TOKEN_SOURCE == "environment":
+        print("Token admin diambil dari DASHBOARD_ADMIN_TOKEN di environment.")
+    else:
+        print(
+            "Token admin dibuat acak untuk proses ini dan ikut dirender ke halaman "
+            "dashboard. Isi DASHBOARD_ADMIN_TOKEN (minimal 24 karakter) bila token "
+            "perlu tetap sama antar restart."
+        )
     print(
         f"Dashboard berjalan di http://{tampil}:{_DASHBOARD_PORT}  (Ctrl+C untuk berhenti)"
     )

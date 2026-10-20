@@ -5,12 +5,23 @@ import math
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from decimal import Decimal
 from typing import Optional
 
 from trading.clients.binance_client import BinanceSpotClient
 from config.config import get_base_url, use_websocket
 
 logger = logging.getLogger("market_data")
+
+
+def _angka_teks(value) -> str:
+    try:
+        angka = Decimal(str(float(value)))
+    except (TypeError, ValueError):
+        return "0"
+    if not angka.is_finite():
+        return "0"
+    return format(angka, "f")
 
 
 class MarketDataProvider:
@@ -305,10 +316,10 @@ class MarketDataProvider:
                 if book is not None and age <= self._max_age:
                     return {
                         "symbol": symbol.upper(),
-                        "bidPrice": f"{book['bid']:.8f}",
-                        "bidQty": f"{book.get('bidQty', 0.0):.8f}",
-                        "askPrice": f"{book['ask']:.8f}",
-                        "askQty": f"{book.get('askQty', 0.0):.8f}",
+                        "bidPrice": _angka_teks(book["bid"]),
+                        "bidQty": _angka_teks(book.get("bidQty", 0.0)),
+                        "askPrice": _angka_teks(book["ask"]),
+                        "askQty": _angka_teks(book.get("askQty", 0.0)),
                     }
         return self.rest.get_book_ticker(symbol, max_retries=max_retries)
 

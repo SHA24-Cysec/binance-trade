@@ -50,6 +50,11 @@ class _StreamCache:
                 return None, float("inf")
             return self._data[key], time.monotonic() - self._ts[key]
 
+    def drop(self, key: str) -> None:
+        with self._lock:
+            self._data.pop(key, None)
+            self._ts.pop(key, None)
+
     def snapshot_all(self) -> dict[str, Any]:
         with self._lock:
             return dict(self._data)
@@ -147,6 +152,7 @@ class MarketWebSocket:
                     new_streams.remove(evicted)
                 else:
                     removed_streams.append(evicted)
+                    self._book.drop(evicted.split("@")[0].upper())
 
             if removed_streams:
                 self._send(

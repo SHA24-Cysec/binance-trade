@@ -132,9 +132,14 @@ def calculate_equity(
         account = client.get_account()
         if str(config.get("MODE", "PAPER")).upper() == "LIVE":
             _validate_live_account_snapshot(account, quote_asset)
+        elif isinstance(account, dict) and account.get("snapshot_error"):
+            raise EquityError(
+                f"snapshot akun PAPER tidak terbaca: {account['snapshot_error']}"
+            )
     except Exception as exc:
         return unverified(
             f"snapshot account tidak tersedia/valid: {type(exc).__name__}"
+            + (f" ({exc})" if str(exc) else "")
         )
 
     if not isinstance(account, dict):
@@ -142,6 +147,8 @@ def calculate_equity(
     raw_balances = account.get("balances")
     if not isinstance(raw_balances, list):
         return unverified("daftar balances tidak tersedia")
+    if not raw_balances:
+        return unverified("daftar balances kosong sehingga ekuitas tidak dapat dihitung")
 
     balances: dict[str, float] = {}
     assets = {}

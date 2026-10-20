@@ -462,10 +462,16 @@ def run_portfolio_grid_search(
         if potong_ms <= awal_data + warmup_ms:
             potong_ms = awal_data + warmup_ms + 1
 
-    hasil_grid.bar_latih = sum(1 for t in timeline if t <= potong_ms)
-    hasil_grid.bar_uji = (
-        len(timeline) - hasil_grid.bar_latih if float(rasio_latih) < 1.0 else 0
-    )
+    akhir_latih_ms = potong_ms
+    if float(rasio_latih) < 1.0:
+        akhir_latih_ms = potong_ms - 1
+        hasil_grid.bar_latih = sum(
+            1 for t in timeline if awal_data + warmup_ms <= t < potong_ms
+        )
+        hasil_grid.bar_uji = sum(1 for t in timeline if t >= potong_ms)
+    else:
+        hasil_grid.bar_latih = sum(1 for t in timeline if t >= awal_data + warmup_ms)
+        hasil_grid.bar_uji = 0
     if float(rasio_latih) < 1.0 and hasil_grid.bar_uji < 50:
         hasil_grid.peringatan.append(
             f"Periode uji hanya {hasil_grid.bar_uji} bar (di bawah 50). "
@@ -527,7 +533,7 @@ def run_portfolio_grid_search(
                 cfg,
                 interval,
                 warmup_ms=warmup_ms,
-                end_ms=potong_ms,
+                end_ms=akhir_latih_ms,
                 prebuilt=prebuilt,
                 progress_cb=_prog_latih,
                 cancel_cb=cancel_cb,

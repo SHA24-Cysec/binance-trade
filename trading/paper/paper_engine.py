@@ -73,14 +73,20 @@ class PaperMatchingEngine:
         self._trade_seq += 1
         return self._trade_seq
 
-    def _check_lot_size(self, filters: SymbolFilters, qty: Decimal) -> None:
+    def _check_lot_size(
+        self, filters: SymbolFilters, qty: Decimal, *, market: bool
+    ) -> None:
         if qty <= 0:
             raise _reject(ERR_INVALID_QTY, "(qty <= 0)")
-        if qty < filters.min_qty:
-            raise _reject(ERR_INVALID_QTY, f"(qty {qty} < minQty {filters.min_qty})")
-        step = filters.step_size
+        minimum = filters.min_qty if market else filters.lot_min_qty
+        maximum = filters.max_qty if market else filters.lot_max_qty
+        step = filters.step_size if market else filters.lot_step_size
+        if qty < minimum:
+            raise _reject(ERR_INVALID_QTY, f"(qty {qty} < minQty {minimum})")
+        if maximum > 0 and qty > maximum:
+            raise _reject(ERR_INVALID_QTY, f"(qty {qty} > maxQty {maximum})")
         if step > 0:
-            rem = (qty - filters.min_qty) % step
+            rem = qty % step
             if rem != 0:
                 raise _reject(
                     ERR_INVALID_QTY, f"(qty {qty} tidak kelipatan stepSize {step})"
@@ -342,7 +348,7 @@ class PaperMatchingEngine:
 
         if quantity is not None:
             qty = _d(quantity)
-            self._check_lot_size(filters, qty)
+            self._check_lot_size(filters, qty, market=True)
             best_price = levels[0][0]
             est_notional = qty * best_price
             if filters.min_notional > 0 and est_notional < filters.min_notional:
@@ -393,12 +399,16 @@ class PaperMatchingEngine:
             order["status"] = "FILLED"
         else:
             order["status"] = "EXPIRED"
-            logger.info(
-                "Market %s %s partial fill: %s dari %s (kedalaman kurang) -> EXPIRED sisa.",
+            logger.warning(
+                "Market %s %s hanya terisi %s dari %s karena snapshot order book "
+                "PAPER hanya memuat %d level untuk sisi ini. Bursa sungguhan akan "
+                "menyapu seluruh buku, jadi hasil simulasi ini lebih kecil dari yang "
+                "seharusnya. Perlakukan EXPIRED ini sebagai tanda likuiditas tipis.",
                 side,
                 symbol,
                 exec_qty,
                 orig_qty,
+                len(levels),
             )
         self.store.archive_order(order)
         return order
@@ -417,7 +427,7 @@ class PaperMatchingEngine:
             raise _reject(ERR_BAD_PARAM, "(LIMIT butuh quantity & price)")
         qty = _d(quantity)
         px = _d(price)
-        self._check_lot_size(filters, qty)
+        self._check_lot_size(filters, qty, market=False)
         self._check_price_filter(filters, px)
         if filters.min_notional > 0 and (qty * px) < filters.min_notional:
             raise _reject(
@@ -546,7 +556,9 @@ class PaperMatchingEngine:
             raise _reject(ERR_BAD_PARAM, "(STOP butuh quantity & stopPrice)")
         qty = _d(quantity)
         sp = _d(stop_price)
-        self._check_lot_size(filters, qty)
+        self._check_lot_size(
+            filters, qty, market=str(order_type).upper() == "STOP_LOSS"
+        )
         px = _d(price) if price is not None else _ZERO
         if px > 0:
             self._check_price_filter(filters, px)

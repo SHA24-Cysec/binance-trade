@@ -31,6 +31,9 @@ from backtesting.backtest import (
 )
 
 
+DATA_END_REASON = "DATA_END"
+
+
 @dataclass
 class PortfolioTrade:
     symbol: str
@@ -93,6 +96,7 @@ class PortfolioResult:
     mark_to_market_pnl_pct: float = 0.0
     mark_to_market_pnl_quote: float = 0.0
     mark_to_market_hold_minutes: float = 0.0
+    intra_drawdown_pct: float = 0.0
 
 
 def select_universe(
@@ -888,6 +892,8 @@ def run_portfolio_backtest(
     mark_to_market_pnl_pct = 0.0
     mark_to_market_pnl_quote = 0.0
     mark_to_market_hold_minutes = 0.0
+    peak_equity = initial_equity
+    intra_drawdown_pct = 0.0
 
     holding: Optional[str] = None
     position: Optional[parity.PositionState] = None
@@ -931,7 +937,7 @@ def run_portfolio_backtest(
         )
         butuh_timing = strategy.timing_required_bars(config)
         if bar_uji_timing < butuh_timing:
-            _pre_warnings.append(
+            warnings.append(
                 f"Periode uji sekitar {bar_uji_timing:.0f} candle "
                 f"{strategy.timing_interval(config)}, lebih pendek dari {butuh_timing} "
                 "candle yang dibutuhkan EMA + ADX di layer timing. Perpanjang rentang "
@@ -943,7 +949,21 @@ def run_portfolio_backtest(
         ot, ct, pct_arr, vol_arr, ready_arr = series_of[sym].board_arrays()
         papan_input.append((sym, ot, ct, pct_arr, vol_arr, ready_arr, len(ot)))
 
+    def _event_dalam_jendela(daftar: list):
+        for waktu_event, simbol_event in daftar:
+            if start_ms is not None and waktu_event < start_ms:
+                continue
+            if end_ms is not None and waktu_event > end_ms:
+                continue
+            yield waktu_event, simbol_event
+
     if entry_signal_cache is not None:
+        if start_ms is not None or end_ms is not None:
+            warnings.append(
+                "Cache sinyal entry dipakai bersama jendela waktu. Daftar sinyal "
+                "yang dilewati filter disaring ke dalam jendela, tetapi angka "
+                "scan/skip masih total dari seluruh rentang cache."
+            )
         direction_scans += int(getattr(entry_signal_cache, "direction_scans", 0))
         direction_skips += int(getattr(entry_signal_cache, "direction_skips", 0))
         daily_zone_scans += int(
@@ -956,8 +976,8 @@ def run_portfolio_backtest(
         zone_skips += int(getattr(entry_signal_cache, "zone_skips", 0))
         timing_scans += int(getattr(entry_signal_cache, "timing_scans", 0))
         timing_skips += int(getattr(entry_signal_cache, "timing_skips", 0))
-        for waktu_event, simbol_event in getattr(
-            entry_signal_cache, "daily_zone_events", []
+        for waktu_event, simbol_event in _event_dalam_jendela(
+            getattr(entry_signal_cache, "daily_zone_events", [])
         ):
             if len(skipped) >= max_skipped_records:
                 break
@@ -969,8 +989,8 @@ def run_portfolio_backtest(
                     holding=None,
                 )
             )
-        for waktu_event, simbol_event in getattr(
-            entry_signal_cache, "direction_events", []
+        for waktu_event, simbol_event in _event_dalam_jendela(
+            getattr(entry_signal_cache, "direction_events", [])
         ):
             if len(skipped) >= max_skipped_records:
                 break
@@ -982,8 +1002,8 @@ def run_portfolio_backtest(
                     holding=None,
                 )
             )
-        for waktu_event, simbol_event in getattr(
-            entry_signal_cache, "zone_events", []
+        for waktu_event, simbol_event in _event_dalam_jendela(
+            getattr(entry_signal_cache, "zone_events", [])
         ):
             if len(skipped) >= max_skipped_records:
                 break
@@ -995,8 +1015,8 @@ def run_portfolio_backtest(
                     holding=None,
                 )
             )
-        for waktu_event, simbol_event in getattr(
-            entry_signal_cache, "timing_events", []
+        for waktu_event, simbol_event in _event_dalam_jendela(
+            getattr(entry_signal_cache, "timing_events", [])
         ):
             if len(skipped) >= max_skipped_records:
                 break
@@ -1077,27 +1097,41 @@ def run_portfolio_backtest(
             board.sort(key=lambda x: -x[0])
 
         if holding is not None:
-            hi = series_of[holding].index_at(t_now)
-            if hi is None:
-                continue
-
             held_series = series_of[holding]
+            hi = held_series.index_at(t_now)
+            data_end_close = False
+            if hi is None:
+                hi = held_series.index_at_or_before(t_now)
+                if hi is None or hi + 1 < len(held_series):
+                    continue
+                data_end_close = True
             candle = (
                 held_series.kline_at(hi)
                 if entry_signal_cache is not None and held_series.has_ohlcv
                 else store.klines(holding)[hi]
             )
-            if candle.open_time < entry_time:
+            if candle.open_time < entry_time and not data_end_close:
                 continue
-            hold_minutes = (candle.close_time - entry_time) / 60000.0
+            hold_minutes = max(0.0, (candle.close_time - entry_time) / 60000.0)
 
             exit_reason = None
             exit_price = None
-            verdict = parity.evaluate_candle_exit(
-                position, candle, config, cap_ms=cap_ms, bar_ms=bar_ms
-            )
-            if verdict is not None:
-                exit_reason, exit_price = verdict
+            mtm_equity = equity
+            if data_end_close:
+                exit_reason = DATA_END_REASON
+                exit_price = candle.close
+                warnings.append(
+                    f"{holding} tidak lagi menerbitkan candle setelah "
+                    f"{int(candle.close_time)}. Posisi yang masih terbuka ditutup "
+                    "pada close terakhir yang tersedia supaya ekuitas dan slot "
+                    "trading tidak menggantung sampai akhir simulasi."
+                )
+            else:
+                verdict = parity.evaluate_candle_exit(
+                    position, candle, config, cap_ms=cap_ms, bar_ms=bar_ms
+                )
+                if verdict is not None:
+                    exit_reason, exit_price = verdict
 
             is_last = current_bi == total_bars - 1
             if exit_reason is None:
@@ -1164,6 +1198,13 @@ def run_portfolio_backtest(
                     candle.close_time, config
                 )
                 controls.update(candle.close_time, equity)
+            nilai_ekuitas = equity if exit_reason else mtm_equity
+            if nilai_ekuitas > peak_equity:
+                peak_equity = nilai_ekuitas
+            elif peak_equity > 0:
+                dd_sekarang = (peak_equity - nilai_ekuitas) / peak_equity * 100.0
+                if dd_sekarang > intra_drawdown_pct:
+                    intra_drawdown_pct = dd_sekarang
             continue
 
         entries_paused = controls.update(t_now + bar_ms - 1, equity)
@@ -1473,6 +1514,7 @@ def run_portfolio_backtest(
         mark_to_market_pnl_pct=mark_to_market_pnl_pct,
         mark_to_market_pnl_quote=mark_to_market_pnl_quote,
         mark_to_market_hold_minutes=mark_to_market_hold_minutes,
+        intra_drawdown_pct=intra_drawdown_pct,
     )
 
 
@@ -1546,6 +1588,7 @@ def summarize_portfolio(result: PortfolioResult) -> dict:
     for value in [initial] + [initial * (1.0 + v / 100.0) for v in equity_curve[1:]]:
         peak = max(peak, value)
         max_dd = max(max_dd, ((peak - value) / peak * 100.0) if peak > 0 else 0.0)
+    max_dd = max(max_dd, float(getattr(result, "intra_drawdown_pct", 0.0) or 0.0))
 
     gross_win = sum(t.pnl_pct for t in wins)
     gross_loss = abs(sum(t.pnl_pct for t in losses))

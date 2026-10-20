@@ -435,14 +435,17 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "USE_NATIVE_OCO": _field(
         "SL dan TP",
         "OCO exchange-side LIVE",
-        "Pasang OCO SELL native berisi TP limit dan SL limit pada posisi yang terdeteksi.",
+        "Pasang OCO SELL native berisi TP limit dan SL limit pada posisi yang terdeteksi. "
+        "Kaki SL mengikuti level Breakeven atau Trailing Stop bila level itu sudah melewati "
+        "SL awal, dan order dipasang ulang saat level naik.",
         "bool",
         dangerous=True,
     ),
     "USE_NATIVE_STOP_LOSS": _field(
         "SL dan TP",
         "Stop Loss exchange-side fallback",
-        "Fallback STOP_LOSS market native bila pemasangan OCO tidak didukung.",
+        "Fallback STOP_LOSS market native bila pemasangan OCO tidak didukung. Harga stop "
+        "mengikuti Breakeven atau Trailing Stop yang sudah aktif dan dipasang ulang saat naik.",
         "bool",
         dangerous=True,
     ),
@@ -887,7 +890,9 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "RISK_PERCENT": _field(
         "Ukuran Posisi",
         "Persen saldo per entry",
-        "Persentase saldo bebas yang digunakan.",
+        "Nominal posisi sebagai persentase saldo bebas, BUKAN risiko per trade. "
+        "Kerugian rupiah saat stop loss kena = nominal x jarak stop loss. Nilai 100 "
+        "berarti satu posisi memakai hampir seluruh saldo bebas.",
         "float",
         minimum=0.01,
         maximum=100,
@@ -1205,8 +1210,9 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     ),
     "USE_RISK_PERCENT": _field(
         "Ukuran Posisi",
-        "Gunakan persen risiko",
-        "Ukuran posisi dihitung dari saldo bebas.",
+        "Gunakan persen saldo",
+        "Ukuran posisi dihitung dari saldo bebas. Nonaktifkan untuk memakai "
+        "POSITION_SIZE_USDT sebagai nominal tetap.",
         "bool",
         dangerous=True,
     ),

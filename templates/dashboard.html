@@ -324,7 +324,7 @@
       .coin-fallback {
         background: var(--panel2);
         border: 1px solid var(--border);
-        color: var(--text, #e6e8ee);
+        color: var(--txt);
         font-size: 11px;
         font-weight: 700;
         line-height: 18px;
@@ -1773,11 +1773,11 @@
         white-space: nowrap;
       }
       .bt-seg-btn:hover {
-        color: var(--text, #e6e8ee);
+        color: var(--txt);
       }
       .bt-seg-btn.active {
         background: var(--panel);
-        color: var(--text, #e6e8ee);
+        color: var(--txt);
         box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
       }
       .bt-seg-btn:focus-visible {
@@ -4348,10 +4348,13 @@
         lb.innerHTML=events.map(e=>`<div class="logline ${safeLogClass(e.level)}">${esc(e.raw)}</div>`).join('');
       }
 
-      function renderChart(trades){
+      function renderChart(trades, summary){
         const wrap=document.getElementById('chartWrap');
         const closed=trades.filter(t=>t.sell_time && String(t.accounting_status||'LEGACY_UNVERIFIED').toUpperCase()==='VERIFIED' && t.pnl!==null && t.pnl!==undefined && Number.isFinite(Number(t.pnl))).slice().reverse();
         if(closed.length<1){wrap.innerHTML='<div class="empty"><div class="big">📊</div>Belum ada data trade untuk digambar.</div>';return;}
+        const totalTerverifikasi = (summary && summary.total_trades !== undefined && summary.total_trades !== null)
+          ? Number(summary.total_trades) : closed.length;
+        const terpotong = totalTerverifikasi > closed.length;
         let cum=0; const pts=[0];
         closed.forEach(t=>{cum+=t.pnl; pts.push(cum);});
         const W=560,H=240,pad=32;
@@ -4373,7 +4376,7 @@
           <path d="${area}" fill="url(#g)"/>
           <path d="${line}" fill="none" stroke="${col}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
           ${pts.map((v,i)=>`<circle cx="${x(i).toFixed(1)}" cy="${y(v).toFixed(1)}" r="${i===pts.length-1?4:2.5}" fill="${col}"/>`).join('')}
-          <text x="${pad}" y="16" fill="#7d8899" font-size="11" font-family="monospace">PnL kumulatif</text>
+          <text x="${pad}" y="16" fill="#7d8899" font-size="11" font-family="monospace">PnL kumulatif ${terpotong ? '· ' + closed.length + ' trade terakhir' : ''}</text>
           <text x="${W-pad}" y="16" fill="${col}" font-size="13" font-weight="700" text-anchor="end" font-family="monospace">${(cum>=0?'+':'')}${cum.toFixed(2)}<tspan fill="#7d8899" font-size="11" font-weight="600">${idrOf(cum)!=null?(' · ≈ '+fmtIDR(idrOf(cum), cum>=0)):''}</tspan></text>
         </svg>`;
       }
@@ -4430,7 +4433,7 @@
           renderSummary(d.summary, d.status.quote);
           renderTrades(d.trades, d.status.quote);
           renderLogs(d.events);
-          renderChart(d.trades);
+          renderChart(d.trades, d.summary);
           const t=new Date();
           document.getElementById('lastUpdate').textContent='diperbarui '+t.toLocaleTimeString('id-ID');
         }catch(e){
@@ -4912,24 +4915,23 @@
           days: days,
           max_symbols: maxSym,
           USE_ATR_EXIT: exitMode === 'atr',
-          ATR_PERIOD: document.getElementById('btAtrPeriod').value,
-          ATR_MULT_SL: document.getElementById('btAtrSl').value,
-          ATR_MULT_TP: document.getElementById('btAtrTp').value,
-          ATR_MULT_BE_TRIGGER: document.getElementById('btAtrBeTrig').value,
-          ATR_MULT_BE_LOCK: document.getElementById('btAtrBeLock').value,
-          ATR_MULT_TRAIL_START: document.getElementById('btAtrTrStart').value,
-          ATR_MULT_TRAIL: document.getElementById('btAtrTrStep').value,
-          SL_PCT: document.getElementById('btSl').value,
-          TP_PCT: document.getElementById('btTp').value,
-          BE_TRIGGER_PCT: document.getElementById('btBeTrig').value,
-          BE_LOCK_PCT: document.getElementById('btBeLock').value,
-          TRAILING_START_PCT: document.getElementById('btTrStart').value,
-          TRAILING_STEP_PCT: document.getElementById('btTrStep').value,
           MAX_HOLD_HOURS: document.getElementById('btMaxHold').value,
         };
-
-        if(payload.SL_PCT === '') delete payload.SL_PCT;
-        if(payload.TP_PCT === '') delete payload.TP_PCT;
+        const isiAtr = {
+          ATR_PERIOD: 'btAtrPeriod', ATR_MULT_SL: 'btAtrSl', ATR_MULT_TP: 'btAtrTp',
+          ATR_MULT_BE_TRIGGER: 'btAtrBeTrig', ATR_MULT_BE_LOCK: 'btAtrBeLock',
+          ATR_MULT_TRAIL_START: 'btAtrTrStart', ATR_MULT_TRAIL: 'btAtrTrStep',
+        };
+        const isiPersen = {
+          SL_PCT: 'btSl', TP_PCT: 'btTp', BE_TRIGGER_PCT: 'btBeTrig',
+          BE_LOCK_PCT: 'btBeLock', TRAILING_START_PCT: 'btTrStart',
+          TRAILING_STEP_PCT: 'btTrStep',
+        };
+        const sumber = exitMode === 'atr' ? isiAtr : isiPersen;
+        for(const [kunci, id] of Object.entries(sumber)){
+          const nilai = document.getElementById(id).value;
+          if(nilai !== '') payload[kunci] = nilai;
+        }
 
         btBusy(true);
         document.getElementById('btProgressWrap').style.display = 'flex';
@@ -5338,9 +5340,12 @@
 
       loadBtGridDefaults();
 
+      let _btPollInFlight = false;
       function pollBacktest(jobId){
         if(btPolling) clearInterval(btPolling);
         btPolling = setInterval(async () => {
+          if(_btPollInFlight) return;
+          _btPollInFlight = true;
           try{
             const r = await fetch('/api/backtest/status/' + jobId, {cache:'no-store'});
             const d = await r.json();
@@ -5381,6 +5386,8 @@
             clearInterval(btPolling); btPolling = null;
             finishBacktestUI();
             btShowError(e.message);
+          }finally{
+            _btPollInFlight = false;
           }
         }, 1200);
       }
@@ -5439,14 +5446,16 @@
         const key=String(r===null||r===undefined?'':r).toUpperCase();
         const map={STOP_LOSS:'stop_loss',TAKE_PROFIT:'take_profit',BREAKEVEN:'breakeven',
                    TRAILING_STOP:'trailing_stop',TIME_STOP:'time_stop',
-                   END_OF_DATA:'end_of_data',RISK_LIMIT_TRIGGERED:'end_of_data'};
+                   END_OF_DATA:'end_of_data',DATA_END:'end_of_data',
+                   RISK_LIMIT_TRIGGERED:'end_of_data'};
         return map[key] || 'dry';
       }
       function btReasonLabel(r){
         const key=String(r===null||r===undefined?'':r).toUpperCase();
         const map = {STOP_LOSS:'SL', TAKE_PROFIT:'TP', BREAKEVEN:'BE', TRAILING_STOP:'TRAIL',
                      TIME_STOP:'WAKTU',
-                     END_OF_DATA:'DATA HABIS', RISK_LIMIT_TRIGGERED:'BATAS RISIKO',
+                     END_OF_DATA:'DATA HABIS', DATA_END:'DATA SIMBOL HABIS',
+                     RISK_LIMIT_TRIGGERED:'BATAS RISIKO',
                      FILTER_DIRECTION:'GERBANG ARAH DAILY',
                      FILTER_DAILY_ZONE:'GERBANG ZONA DEMAND DAILY',
                      FILTER_ZONE:'GERBANG ZONA H1',
@@ -5481,7 +5490,7 @@
           <div class="card warn">
             <div class="label">Max drawdown</div>
             <div class="value mono">${fmt(s.max_drawdown_pct,2)}%</div>
-            <div class="sub">dari trade yang selesai, bukan mark-to-market</div></div>
+            <div class="sub">termasuk penurunan saat posisi masih terbuka (mark-to-market per candle)</div></div>
           <div class="card">
             <div class="label">Profit factor</div>
             <div class="value mono">${pfText}</div>

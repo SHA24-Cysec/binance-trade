@@ -27,6 +27,11 @@ def load_account_snapshot(path: str) -> dict:
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("root akun PAPER bukan object")
+        raw_balances = data.get("balances")
+        if not isinstance(raw_balances, dict) or not raw_balances:
+            raise ValueError("balances akun PAPER kosong atau tidak valid")
         balances = []
         for asset, b in sorted((data.get("balances") or {}).items()):
             balances.append(
@@ -46,8 +51,13 @@ def load_account_snapshot(path: str) -> dict:
             "updateTime": int(data.get("created_at_ms", 0)),
             "totalFees": data.get("total_fees", {}),
         }
-    except (json.JSONDecodeError, OSError, ValueError, TypeError, AttributeError):
-        return {"accountType": "SPOT", "balances": [], "permissions": ["SPOT"]}
+    except (json.JSONDecodeError, OSError, ValueError, TypeError, AttributeError) as exc:
+        return {
+            "accountType": "SPOT",
+            "balances": [],
+            "permissions": ["SPOT"],
+            "snapshot_error": f"{type(exc).__name__}: {exc}"[:200],
+        }
 
 
 class PaperStore:

@@ -6,7 +6,7 @@ import sqlite3
 import tempfile
 import threading
 from array import array
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from collections import OrderedDict
 from pathlib import Path
 from typing import Mapping, Optional, Sequence
@@ -220,6 +220,13 @@ class SymbolSeries:
         if pos < len(times) and times[pos] == open_time:
             return pos
         return None
+
+    def index_at_or_before(self, open_time: int) -> Optional[int]:
+        times = self._open_times
+        pos = bisect_right(times, int(open_time)) - 1
+        if pos < 0:
+            return None
+        return pos
 
     def ready(self, index: int) -> bool:
         return bool(self._ready[index])

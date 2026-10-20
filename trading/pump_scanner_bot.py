@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from copy import deepcopy
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -163,6 +164,7 @@ DEFAULT_STATE = {
     "last_scan_time": 0,
     "symbol_block_until": {},
     "peak_equity": None,
+    "peak_equity_all_time": None,
     "max_dd_pct": 0.0,
     "dd_reset_count": 0,
     "dd_stopped": False,
@@ -180,6 +182,8 @@ DEFAULT_STATE = {
     "native_stop": None,
     "native_oco": None,
     "native_protection_retry_at": 0,
+    "native_amend": None,
+    "native_amend_last_ms": 0,
     "_native_stop_exit_blocked": False,
     "reconciliation_required": False,
     "reconciliation_assets": [],
@@ -234,14 +238,20 @@ def load_pump_state(
     *,
     fail_closed: bool = False,
     allow_missing_state: bool = False,
+    mode: str = "PAPER",
 ) -> dict:
     raw, valid, load_error = state_mod.load_state_checked(path)
     state_missing = load_error == state_mod.STATE_FILE_MISSING
-    missing_state_acknowledged = (
-        fail_closed and allow_missing_state and state_missing and not valid
+    live = str(mode).strip().upper() == "LIVE"
+    fresh_state = (
+        fail_closed
+        and state_missing
+        and not valid
+        and (not live or allow_missing_state)
     )
     merged = deepcopy(DEFAULT_STATE)
     merged.update(raw)
+    merged["state_integrity_error"] = ""
 
     validation_errors: list[str] = []
     symbol = merged.get("current_symbol")
@@ -306,6 +316,7 @@ def load_pump_state(
         "pending_order",
         "native_stop",
         "native_oco",
+        "native_amend",
         "trade_accounting",
         "last_closed_trade",
         "pending_native_settlement",
@@ -397,7 +408,7 @@ def load_pump_state(
                 continue
             blocks_bersih[sym] = nilai
         merged["symbol_block_until"] = blocks_bersih
-    for key in ("peak_equity", "max_dd_pct"):
+    for key in ("peak_equity", "peak_equity_all_time", "max_dd_pct"):
         value = merged.get(key)
         if value is None:
             continue
@@ -431,7 +442,7 @@ def load_pump_state(
     if symbol is not None and (qty <= 0 or entry <= 0):
         validation_errors.append("current_symbol ada tanpa qty/entry_price positif")
 
-    if not valid and not missing_state_acknowledged:
+    if not valid and not fresh_state:
         validation_errors.append(load_error or "state tidak dapat dibaca")
     if fail_closed and validation_errors:
         reason = "; ".join(dict.fromkeys(validation_errors))
@@ -439,14 +450,18 @@ def load_pump_state(
         merged["reconciliation_required"] = True
         merged["reconciliation_reason"] = "STATE_INTEGRITY_UNVERIFIED"
         logger.critical(
-            "Integritas state LIVE tidak dapat diverifikasi: %s. Entry baru diblokir ",
+            "Integritas state tidak dapat diverifikasi: %s. Entry baru diblokir "
+            "sampai state diperbaiki, lalu dibaca ulang pada siklus berikutnya.",
             reason,
         )
-    elif missing_state_acknowledged:
-        logger.warning(
-            "Operator mengonfirmasi inisialisasi state LIVE baru; peak equity dan "
-            "posisi sebelumnya tidak dipulihkan. Rekonsiliasi tetap diwajibkan."
-        )
+    elif fresh_state:
+        if live:
+            logger.warning(
+                "Operator mengonfirmasi inisialisasi state LIVE baru; peak equity dan "
+                "posisi sebelumnya tidak dipulihkan. Rekonsiliasi tetap diwajibkan."
+            )
+        else:
+            logger.info("File state belum ada; bot memulai state baru yang bersih.")
     return merged
 
 
@@ -557,6 +572,9 @@ def describe_exit_mode(config: dict, state: dict) -> str:
 def update_equity_controls(state: dict, equity: float, config: dict) -> bool:
     if state.get("peak_equity") is None or equity > state["peak_equity"]:
         state["peak_equity"] = equity
+    all_time_peak = state.get("peak_equity_all_time")
+    if all_time_peak is None or equity > float(all_time_peak or 0.0):
+        state["peak_equity_all_time"] = equity
 
     peak = state["peak_equity"]
     dd_pct = (peak - equity) / peak * 100.0 if peak else 0.0
@@ -576,12 +594,12 @@ def update_equity_controls(state: dict, equity: float, config: dict) -> bool:
             )
             state["dd_reset_count"] = int(state.get("dd_reset_count") or 0) + 1
             logger.critical(
-                "STOP DRAWDOWN: turun %.2f%% dari puncak equity (max DD di-reset ke 0). "
-                "Entry baru dijeda %d jam.",
+                "STOP DRAWDOWN: turun %.2f%% dari puncak equity. Siklus risiko "
+                "berikutnya dimulai dari saldo sekarang, riwayat drawdown tetap "
+                "disimpan. Entry baru dijeda %d jam.",
                 dd_pct,
                 config["DD_COOLDOWN_HOURS"],
             )
-            state["max_dd_pct"] = 0.0
             state["peak_equity"] = equity
 
     if state.get("dd_stopped"):
@@ -1030,6 +1048,7 @@ def reset_position(state: dict) -> None:
     state["native_stop"] = None
     state["native_oco"] = None
     state["native_protection_retry_at"] = 0
+    state["native_amend"] = None
     state["_native_stop_exit_blocked"] = False
     state["trade_accounting"] = None
 
@@ -1962,14 +1981,33 @@ def _exit_distance(
     return entry * pct / 100.0 if atr_mode else pct
 
 
+def _protection_stop_price(
+    state: dict, config: dict, filters: SymbolFilters | None = None
+) -> float:
+    entry = float(state.get("entry_price") or 0.0)
+    if entry <= 0:
+        return 0.0
+    atr_mode = str(state.get("exit_source", "")).upper() == "ATR"
+    sl = abs(float(_exit_distance(state, config, "sl_pct", "SL_PCT", atr_mode, entry)))
+    level = entry - sl if atr_mode else entry * (1.0 - sl / 100.0)
+    if state.get("be_active"):
+        level = max(level, float(state.get("be_stop_price") or 0.0))
+    if state.get("trailing_active"):
+        level = max(level, float(state.get("trailing_stop_price") or 0.0))
+    if level <= 0:
+        return 0.0
+    if filters is not None:
+        level = filters.round_price(level)
+    return level
+
+
 def _native_oco_levels(
     state: dict, filters: SymbolFilters | None, config: dict
 ) -> dict:
     entry = float(state.get("entry_price") or 0.0)
     atr_mode = str(state.get("exit_source", "")).upper() == "ATR"
-    sl = _exit_distance(state, config, "sl_pct", "SL_PCT", atr_mode, entry)
     tp = _exit_distance(state, config, "tp_pct", "TP_PCT", atr_mode, entry)
-    raw_sl = entry - sl if atr_mode else entry * (1.0 - sl / 100.0)
+    raw_sl = _protection_stop_price(state, config)
     raw_tp = entry + tp if atr_mode else entry * (1.0 + tp / 100.0)
     buffer_pct = max(
         0.01, float(config.get("NATIVE_OCO_LIMIT_BUFFER_PCT", 0.10) or 0.10)
@@ -1994,16 +2032,7 @@ def _native_oco_levels(
 def _native_stop_price(
     state: dict, filters: SymbolFilters | None, config: dict | None = None
 ) -> float:
-    entry = float(state.get("entry_price") or 0.0)
-    atr_mode = str(state.get("exit_source", "")).upper() == "ATR"
-    sl = _exit_distance(state, config or {}, "sl_pct", "SL_PCT", atr_mode, entry)
-    if atr_mode:
-        raw = entry - sl
-    else:
-        raw = entry * (1.0 - sl / 100.0)
-    if filters is not None:
-        raw = filters.round_price(raw)
-    return raw
+    return _protection_stop_price(state, config or {}, filters)
 
 
 _DEFINITIVE_REJECT_CODES = {
@@ -2046,7 +2075,7 @@ def _arm_native_oco(
     client: ExchangeClient, config: dict, filters: SymbolFilters | None, state: dict
 ) -> bool:
     if not _native_oco_enabled(config):
-        return False
+        return True
     symbol = state.get("current_symbol")
     qty = float(state.get("qty") or 0.0)
     entry = float(state.get("entry_price") or 0.0)
@@ -2078,11 +2107,15 @@ def _arm_native_oco(
     limit_min = float(filters.limit_min_notional)
     limit_max = float(filters.limit_max_notional)
     prices = (below_price, below_stop, above_price, above_stop)
+    stop_boleh_di_atas_entry = bool(
+        state.get("be_active") or state.get("trailing_active")
+    )
     valid = (
         bid is not None
         and all(filters.price_valid(value) for value in prices)
         and below_price < below_stop < bid < above_price <= above_stop
-        and below_stop < entry < above_stop
+        and (below_stop < entry or stop_boleh_di_atas_entry)
+        and entry < above_stop
         and (limit_min <= 0 or qty * below_price >= limit_min)
         and (limit_min <= 0 or qty * above_price >= limit_min)
         and (limit_max <= 0 or qty * below_price <= limit_max)
@@ -2345,12 +2378,16 @@ def _arm_native_stop(
     qty = filters.round_qty(qty)
     bid = _executable_bid(client, symbol)
     stop_price = _native_stop_price(state, filters, config)
+    stop_boleh_di_atas_entry = bool(
+        state.get("be_active") or state.get("trailing_active")
+    )
     valid = (
         bid is not None
         and "STOP_LOSS" in filters.order_types
         and filters.market_qty_valid(qty)
         and filters.price_valid(stop_price)
-        and 0 < stop_price < entry
+        and 0 < stop_price
+        and (stop_price < entry or stop_boleh_di_atas_entry)
         and stop_price < bid
         and (
             filters.min_notional <= 0
@@ -2497,6 +2534,295 @@ def _ensure_native_protection(
             return _arm_native_stop(client, config, filters, state)
         return False
     return _arm_native_stop(client, config, filters, state)
+
+
+_NATIVE_AMEND_MIN_INTERVAL_MS = 60_000
+_NATIVE_AMEND_RETRY_MS = 5_000
+
+
+def _native_protected_stop_level(state: dict) -> float:
+    oco = state.get("native_oco")
+    if isinstance(oco, dict):
+        below = oco.get("below")
+        if isinstance(below, dict):
+            try:
+                return float(below.get("stop_price") or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+    stop = state.get("native_stop")
+    if isinstance(stop, dict):
+        try:
+            return float(stop.get("stop_price") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+    return 0.0
+
+
+def _native_ready_for_amend(state: dict) -> bool:
+    oco = state.get("native_oco")
+    if isinstance(oco, dict):
+        return str(oco.get("status") or "").upper() in ("EXECUTING", "PENDING")
+    stop = state.get("native_stop")
+    if isinstance(stop, dict):
+        return str(stop.get("status") or "").upper() == "NEW"
+    return False
+
+
+def _cancel_native_for_amend(
+    client: ExchangeClient, config: dict, state: dict, target: str
+) -> bool:
+    symbol = state.get("current_symbol")
+    if not symbol:
+        return False
+    if target == "OCO":
+        if not _reconcile_native_oco(client, config, state):
+            return False
+        intent = state.get("native_oco")
+        if not isinstance(intent, dict):
+            return False
+        try:
+            response = client.cancel_order_list(
+                symbol,
+                order_list_id=(
+                    int(intent["order_list_id"])
+                    if intent.get("order_list_id") is not None
+                    else None
+                ),
+                list_client_order_id=(
+                    None
+                    if intent.get("order_list_id") is not None
+                    else intent.get("list_client_order_id")
+                ),
+            )
+        except BinanceAPIError as exc:
+            if _is_order_not_found(exc):
+                state["native_oco"] = None
+                state["_native_stop_exit_blocked"] = False
+                _mark_reconciliation(state, "NATIVE_AMEND_CANCEL_NOT_FOUND", [symbol])
+                return True
+            state["_native_stop_exit_blocked"] = True
+            _mark_reconciliation(state, "NATIVE_AMEND_CANCEL_UNVERIFIED", [symbol])
+            state["native_protection_retry_at"] = state_mod.now_ms() + _NATIVE_AMEND_RETRY_MS
+            logger.critical(
+                "Amend OCO %s ditunda: pembatalan tidak terverifikasi (%s). SELL manual ditahan.",
+                symbol,
+                exc,
+            )
+            return False
+        identity_ok = (
+            isinstance(response, dict)
+            and str(response.get("symbol") or "").upper() == str(symbol).upper()
+            and str(response.get("listClientOrderId") or "")
+            == str(intent.get("list_client_order_id") or "")
+            and (
+                intent.get("order_list_id") is None
+                or str(response.get("orderListId")) == str(intent.get("order_list_id"))
+            )
+        )
+        if not identity_ok:
+            state["_native_stop_exit_blocked"] = True
+            _mark_reconciliation(state, "NATIVE_AMEND_CANCEL_IDENTITY_MISMATCH", [symbol])
+            return False
+        if _oco_response_has_fill(response):
+            state["_native_stop_exit_blocked"] = True
+            _mark_reconciliation(state, "NATIVE_AMEND_OCO_FILLED_ON_CANCEL", [symbol])
+            logger.critical(
+                "Amend OCO %s dihentikan: ada leg yang terisi saat pembatalan sehingga "
+                "posisi harus direkonsiliasi sebelum proteksi dipasang ulang.",
+                symbol,
+            )
+            return False
+        list_status = str(response.get("listOrderStatus") or "").upper()
+        if list_status not in ("ALL_DONE", "REJECT"):
+            state["_native_stop_exit_blocked"] = True
+            _mark_reconciliation(state, "NATIVE_AMEND_CANCEL_UNVERIFIED", [symbol])
+            return False
+        state["native_oco"] = None
+        state["_native_stop_exit_blocked"] = False
+        return True
+
+    if not _reconcile_native_stop(client, config, state):
+        return False
+    intent = state.get("native_stop")
+    if not isinstance(intent, dict):
+        return False
+    try:
+        response = client.cancel_order(
+            symbol,
+            order_id=(
+                int(intent["order_id"]) if intent.get("order_id") is not None else None
+            ),
+            orig_client_order_id=(
+                None
+                if intent.get("order_id") is not None
+                else intent.get("client_order_id")
+            ),
+        )
+    except BinanceAPIError as exc:
+        if _is_order_not_found(exc):
+            state["native_stop"] = None
+            state["_native_stop_exit_blocked"] = False
+            _mark_reconciliation(state, "NATIVE_AMEND_CANCEL_NOT_FOUND", [symbol])
+            return True
+        state["_native_stop_exit_blocked"] = True
+        _mark_reconciliation(state, "NATIVE_AMEND_CANCEL_UNVERIFIED", [symbol])
+        state["native_protection_retry_at"] = state_mod.now_ms() + _NATIVE_AMEND_RETRY_MS
+        logger.critical(
+            "Amend stop native %s ditunda: pembatalan tidak terverifikasi (%s). "
+            "SELL manual ditahan.",
+            symbol,
+            exc,
+        )
+        return False
+    status = str(response.get("status") or "").upper() if isinstance(response, dict) else ""
+    identity_ok = (
+        isinstance(response, dict)
+        and str(response.get("symbol") or "").upper() == str(symbol).upper()
+        and str(response.get("orderId")) == str(intent.get("order_id"))
+        and str(response.get("side") or "").upper() == "SELL"
+        and str(response.get("type") or "").upper() == "STOP_LOSS"
+    )
+    if not identity_ok or status not in ("CANCELED", "EXPIRED", "EXPIRED_IN_MATCH"):
+        state["_native_stop_exit_blocked"] = True
+        _mark_reconciliation(state, "NATIVE_AMEND_CANCEL_UNVERIFIED", [symbol])
+        logger.critical(
+            "Amend stop native %s ditunda: respons pembatalan tidak terverifikasi (%s).",
+            symbol,
+            status or "tanpa status",
+        )
+        return False
+    state["native_stop"] = None
+    state["_native_stop_exit_blocked"] = False
+    return True
+
+
+def _arm_native_protection_now(
+    client: ExchangeClient, config: dict, filters: SymbolFilters | None, state: dict
+) -> bool:
+    state["native_protection_retry_at"] = 0
+    if _native_oco_enabled(config):
+        if _arm_native_oco(client, config, filters, state):
+            return True
+        status = (state.get("native_oco") or {}).get("status")
+        if status in (None, "FAILED") and _native_stop_enabled(config):
+            state["native_oco"] = None
+            state["native_protection_retry_at"] = 0
+            return _arm_native_stop(client, config, filters, state)
+        return False
+    return _arm_native_stop(client, config, filters, state)
+
+
+def _run_native_amend(
+    client: ExchangeClient,
+    config: dict,
+    filters: SymbolFilters | None,
+    state: dict,
+    bid: float | None,
+) -> bool:
+    plan = state.get("native_amend")
+    if not isinstance(plan, dict):
+        return True
+    symbol = state.get("current_symbol")
+    if not symbol or float(state.get("qty") or 0.0) <= 0:
+        state["native_amend"] = None
+        state_mod.save_state(config["STATE_FILE"], state)
+        return True
+    if filters is None:
+        _mark_reconciliation(state, "NATIVE_AMEND_FILTERS_UNVERIFIED", [symbol])
+        state["native_protection_retry_at"] = state_mod.now_ms() + _NATIVE_AMEND_RETRY_MS
+        state_mod.save_state(config["STATE_FILE"], state)
+        return False
+    if bid is None or bid <= 0:
+        _mark_reconciliation(state, "NATIVE_AMEND_BID_UNVERIFIED", [symbol])
+        state["native_protection_retry_at"] = state_mod.now_ms() + _NATIVE_AMEND_RETRY_MS
+        state_mod.save_state(config["STATE_FILE"], state)
+        return False
+    wanted = float(plan.get("new_stop_price") or 0.0)
+    tick = float(filters.tick_size)
+    current = _native_protected_stop_level(state)
+    if current > 0 and wanted > 0 and current >= wanted - tick:
+        state["native_amend"] = None
+        state["native_amend_last_ms"] = state_mod.now_ms()
+        state_mod.save_state(config["STATE_FILE"], state)
+        return True
+    target = str(plan.get("target") or "")
+    if isinstance(state.get("native_oco"), dict) or isinstance(state.get("native_stop"), dict):
+        plan["attempts"] = int(plan.get("attempts") or 0) + 1
+        if not _cancel_native_for_amend(client, config, state, target):
+            state_mod.save_state(config["STATE_FILE"], state)
+            return False
+        _mark_reconciliation(state, "NATIVE_AMEND_NO_PROTECTION", [symbol])
+        state_mod.save_state(config["STATE_FILE"], state)
+        logger.warning(
+            "Proteksi native %s dibatalkan untuk dipindah ke %.12g. Posisi sesaat "
+            "tanpa proteksi exchange-side, exit lokal tetap aktif.",
+            symbol,
+            wanted,
+        )
+    armed = _arm_native_protection_now(client, config, filters, state)
+    if armed:
+        state["native_amend"] = None
+        state["native_amend_last_ms"] = state_mod.now_ms()
+        logger.warning(
+            "Proteksi native %s dipindah dari %.12g ke %.12g.",
+            symbol,
+            float(plan.get("old_stop_price") or 0.0),
+            wanted,
+        )
+    else:
+        state["native_protection_retry_at"] = state_mod.now_ms() + _NATIVE_AMEND_RETRY_MS
+        logger.critical(
+            "Proteksi native %s BELUM terpasang pada level baru %.12g. Percobaan ulang "
+            "tiap %d detik, entry baru diblokir sampai proteksi terverifikasi.",
+            symbol,
+            wanted,
+            _NATIVE_AMEND_RETRY_MS // 1000,
+        )
+    state_mod.save_state(config["STATE_FILE"], state)
+    return armed
+
+
+def _maybe_amend_native_protection(
+    client: ExchangeClient,
+    config: dict,
+    filters: SymbolFilters | None,
+    state: dict,
+    bid: float | None,
+) -> None:
+    if not _native_protection_enabled(config):
+        return
+    if state.get("native_amend") is not None:
+        _run_native_amend(client, config, filters, state, bid)
+        return
+    if state.get("_native_stop_exit_blocked") or state.get("pending_order"):
+        return
+    if not _native_ready_for_amend(state):
+        return
+    if filters is None or bid is None or bid <= 0:
+        return
+    current = _native_protected_stop_level(state)
+    if current <= 0:
+        return
+    wanted = _protection_stop_price(state, config, filters)
+    if wanted <= 0:
+        return
+    tick = float(filters.tick_size)
+    if wanted - current < tick:
+        return
+    if not (0 < wanted < bid) or not filters.price_valid(wanted):
+        return
+    now = state_mod.now_ms()
+    if now - int(state.get("native_amend_last_ms") or 0) < _NATIVE_AMEND_MIN_INTERVAL_MS:
+        return
+    state["native_amend"] = {
+        "target": "OCO" if isinstance(state.get("native_oco"), dict) else "STOP_LOSS",
+        "new_stop_price": wanted,
+        "old_stop_price": current,
+        "attempts": 0,
+        "created_at": now,
+    }
+    state_mod.save_state(config["STATE_FILE"], state)
+    _run_native_amend(client, config, filters, state, bid)
 
 
 def _oco_response_has_fill(response: dict) -> bool:
@@ -3422,15 +3748,43 @@ def _executable_bid(
         return None
 
 
-_listing_age_cache: dict = {}
+_LISTING_AGE_TTL_MS = 6 * 3_600_000
+_LISTING_AGE_CACHE_LIMIT = 500
+_listing_age_cache: "OrderedDict[str, tuple[int, float]]" = OrderedDict()
 
 
 def listing_age_days(client: ExchangeClient, symbol: str, now_ms: int) -> float:
-    if symbol in _listing_age_cache:
-        return _listing_age_cache[symbol]
+    now = int(now_ms or 0)
+    cached = _listing_age_cache.get(symbol)
+    if cached is not None:
+        cached_at, cached_age = cached
+        if 0 <= now - cached_at < _LISTING_AGE_TTL_MS:
+            _listing_age_cache.move_to_end(symbol)
+            return cached_age
+        _listing_age_cache.pop(symbol, None)
     raw = client.get_klines(symbol, "1d", limit=1, start_time_ms=0)
-    age = 0.0 if not raw else max(0.0, (now_ms - int(raw[0][0])) / 86_400_000.0)
-    _listing_age_cache[symbol] = age
+    if not raw:
+        raise BinanceAPIError(
+            502,
+            None,
+            f"riwayat harian {symbol} kosong sehingga usia listing tidak dapat "
+            "diverifikasi",
+        )
+    try:
+        first_open_ms = int(raw[0][0])
+    except (IndexError, TypeError, ValueError) as exc:
+        raise BinanceAPIError(
+            502, None, f"candle harian pertama {symbol} tidak valid"
+        ) from exc
+    if first_open_ms <= 0:
+        raise BinanceAPIError(
+            502, None, f"waktu listing {symbol} tidak valid ({first_open_ms})"
+        )
+    age = max(0.0, (now - first_open_ms) / 86_400_000.0)
+    _listing_age_cache[symbol] = (now, age)
+    _listing_age_cache.move_to_end(symbol)
+    while len(_listing_age_cache) > _LISTING_AGE_CACHE_LIMIT:
+        _listing_age_cache.popitem(last=False)
     return age
 
 
@@ -3733,6 +4087,37 @@ def open_position(
             price_ref,
         )
         return
+    sl_distance = float(preview.get("sl_pct") or 0.0)
+    if str(preview.get("source", "")).upper() == "ATR":
+        risk_quote = qty * sl_distance
+        risk_basis = "jarak harga SL x qty"
+    else:
+        risk_quote = notional * sl_distance / 100.0
+        risk_basis = "notional x SL persen"
+    exposure_pct = (notional / usdt_free * 100.0) if usdt_free > 0 else 0.0
+    risk_pct_free = (risk_quote / usdt_free * 100.0) if usdt_free > 0 else 0.0
+    log_risk = logger.info if risk_pct_free < 10.0 else logger.warning
+    log_risk(
+        "Risiko SL %s: nominal %.4f %s (%.1f%% saldo bebas %.4f), perkiraan "
+        "kerugian bila SL kena %.4f %s (%.2f%% saldo bebas) dihitung dari %s.",
+        candidate.symbol,
+        notional,
+        config["QUOTE_ASSET"],
+        exposure_pct,
+        usdt_free,
+        risk_quote,
+        config["QUOTE_ASSET"],
+        risk_pct_free,
+        risk_basis,
+    )
+    if exposure_pct >= 50.0:
+        logger.warning(
+            "Ukuran posisi %s memakai %.1f%% saldo bebas. RISK_PERCENT dan "
+            "POSITION_SIZE_USDT adalah NOMINAL posisi, bukan risiko per trade; "
+            "kerugian sebenarnya ditentukan jarak stop loss di atas.",
+            candidate.symbol,
+            exposure_pct,
+        )
     if not _entry_orderbook_ok(client, config, candidate.symbol, notional):
         return
     client_order_id = _new_client_order_id("buy")
@@ -4461,6 +4846,16 @@ def manage_exit(
         reasons.append("TRAILING_STOP")
     if not reasons and _time_stop_due(config, state):
         reasons.append(strategy.TIME_STOP_REASON)
+    if not reasons:
+        _maybe_amend_native_protection(
+            client,
+            config,
+            filters_cache.get(str(state.get("current_symbol") or "")),
+            state,
+            current_price,
+        )
+        if state.get("_native_stop_exit_blocked"):
+            return
     if reasons:
         close_position(
             client,
@@ -4742,8 +5137,9 @@ def run(
 
         state = load_pump_state(
             config["STATE_FILE"],
-            fail_closed=(mode == "LIVE"),
+            fail_closed=True,
             allow_missing_state=(mode == "LIVE" and allow_missing_live_state),
+            mode=mode,
         )
         if (
             mode == "LIVE"
