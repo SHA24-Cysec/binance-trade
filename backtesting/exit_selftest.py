@@ -453,7 +453,5 @@ def run(verbose: bool = True) -> tuple[bool, list[str]]:
 
 
 if __name__ == "__main__":
-    import sys
-
     sukses, _ = run(verbose=True)
     raise SystemExit(0 if sukses else 1)

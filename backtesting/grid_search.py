@@ -8,13 +8,11 @@ from typing import Callable, Optional, Sequence
 
 from backtesting import backtest as bt
 from backtesting import parity
-from strategy.indicators import Kline
+from strategy.indicators import Kline, direction_window_bars, zone_window_bars
 
 
 def parity_trend_window(config: dict) -> int:
-    from strategy import indicators as strategy_mod
-
-    return strategy_mod.gate_warmup_bars(config)
+    return direction_window_bars(config)
 
 
 KUNCI_ATR = (
@@ -257,7 +255,7 @@ def run_grid_search(
         if butuh_zona:
             bagian.append(
                 f"layer zona {base_config.get('ZONE_INTERVAL', '1h')} "
-                f"butuh {strategy_mod.zone_window_bars(base_config)} candle "
+                f"butuh {zone_window_bars(base_config)} candle "
                 f"{base_config.get('ZONE_INTERVAL', '1h')} tertutup"
             )
         hasil_grid.peringatan.append(
@@ -782,3 +780,165 @@ def parse_spec_cli(teks: str) -> dict:
     if not spec:
         raise GridSearchError("Spesifikasi grid tidak menghasilkan parameter apa pun.")
     return spec
+
+
+def selftest() -> bool:
+    from copy import deepcopy
+
+    from config.config import PUMP_CONFIG
+    from backtesting import synthetic_data as sd
+
+    ok_all = True
+
+    def check(nama, kondisi, ekstra=""):
+        nonlocal ok_all
+        if not kondisi:
+            ok_all = False
+        print(("  LULUS " if kondisi else "  GAGAL ") + nama + (("  -> " + str(ekstra)) if ekstra else ""))
+
+    print("Selftest grid_search")
+
+    check("buat_rentang dasar", buat_rentang(1.0, 2.0, 0.5) == [1.0, 1.5, 2.0])
+    try:
+        buat_rentang(2.0, 1.0, 0.5)
+        check("buat_rentang menolak akhir < awal", False)
+    except GridSearchError:
+        check("buat_rentang menolak akhir < awal", True)
+    try:
+        buat_rentang(1.0, 2.0, 0.0)
+        check("buat_rentang menolak langkah nol", False)
+    except GridSearchError:
+        check("buat_rentang menolak langkah nol", True)
+
+    try:
+        expand_grid({"BOGUS_KEY": [1.0]})
+        check("expand_grid menolak kunci tanpa efek", False)
+    except GridSearchError:
+        check("expand_grid menolak kunci tanpa efek", True)
+
+    kombinasi, dipangkas = expand_grid({"USE_ATR_EXIT": [True], "SL_PCT": [1.0, 2.0], "ATR_MULT_SL": [6.0, 7.0]})
+    check("expand_grid memangkas parameter persen saat ATR aktif", len(kombinasi) == 2 and dipangkas == 2, f"{len(kombinasi)} kombinasi, {dipangkas} dipangkas")
+    kombinasi, dipangkas = expand_grid({"USE_ATR_EXIT": [False], "ATR_MULT_SL": [6.0, 7.0], "SL_PCT": [1.0, 2.0]})
+    check("expand_grid memangkas parameter ATR saat ATR mati", len(kombinasi) == 2 and dipangkas == 2, f"{len(kombinasi)} kombinasi, {dipangkas} dipangkas")
+    try:
+        expand_grid({"SL_PCT": []})
+        check("expand_grid menolak daftar kosong", False)
+    except GridSearchError:
+        check("expand_grid menolak daftar kosong", True)
+
+    check("hitung_skor total_return_pct", hitung_skor({"total_return_pct": 5.0}, "total_return_pct") == 5.0)
+    check("hitung_skor profit_factor", hitung_skor({"profit_factor": 2.5}, "profit_factor") == 2.5)
+    check("hitung_skor win_rate", hitung_skor({"win_rate": 42.0}, "win_rate") == 42.0)
+    check("hitung_skor return_per_drawdown", abs(hitung_skor({"total_return_pct": 10.0, "max_drawdown_pct": -5.0}, "return_per_drawdown") - 2.0) < 1e-12)
+    check("hitung_skor NaN jadi nol", hitung_skor({"total_return_pct": float("nan")}, "total_return_pct") == 0.0)
+    check("hitung_skor inf positif", hitung_skor({"total_return_pct": float("inf")}, "total_return_pct") == 1e9)
+    check("hitung_skor inf negatif", hitung_skor({"total_return_pct": float("-inf")}, "total_return_pct") == -1e9)
+    try:
+        hitung_skor({}, "metrik_bohong")
+        check("hitung_skor menolak metrik tidak dikenal", False)
+    except GridSearchError:
+        check("hitung_skor menolak metrik tidak dikenal", True)
+
+    spec = parse_spec_cli("ATR_MULT_SL=1:2:0.5,TP_PCT=3|4,USE_ATR_EXIT=true")
+    check("parse_spec_cli rentang", spec["ATR_MULT_SL"] == [1.0, 1.5, 2.0], spec.get("ATR_MULT_SL"))
+    check("parse_spec_cli daftar", spec["TP_PCT"] == [3.0, 4.0])
+    check("parse_spec_cli boolean", spec["USE_ATR_EXIT"] == [True], spec.get("USE_ATR_EXIT"))
+    for teks in ("", "   ", "tanpa_sama_dengan", "KUNCI=", "ATR_MULT_SL=1:2", "ATR_MULT_SL=abc", "USE_ATR_EXIT=1:2:0.5"):
+        try:
+            parse_spec_cli(teks)
+            check(f"parse_spec_cli menolak {teks!r}", False)
+        except GridSearchError:
+            check(f"parse_spec_cli menolak {teks!r}", True)
+
+    cfg = deepcopy(PUMP_CONFIG)
+    cfg.update({
+        "_symbol": "",
+        "MODE": "PAPER",
+        "DIRECTION_FILTER_ENABLED": False,
+        "DIRECTION_ZONE_FILTER_ENABLED": False,
+        "ZONE_FILTER_ENABLED": False,
+        "TIMING_FILTER_ENABLED": False,
+        "DEMAND_ZONE_FILTER_ENABLED": False,
+        "BTC_FILTER_ENABLED": False,
+        "ROLLING_VOLUME_FILTER_ENABLED": False,
+        "PUMP_MIN_24H_CHANGE_PCT": -1000.0,
+        "MIN_QUOTE_VOLUME_USDT_24H": 0.0,
+        "USE_ATR_EXIT": False,
+        "USE_TP": True,
+        "USE_STOP_LOSS": True,
+        "USE_BREAKEVEN": False,
+        "USE_TRAILING": False,
+        "SL_PCT": 2.0,
+        "TP_PCT": 4.0,
+        "TAKER_FEE_PCT": 0.1,
+        "USE_BNB_FEE_DISCOUNT": False,
+        "USE_RISK_PERCENT": False,
+        "POSITION_SIZE_USDT": 100.0,
+        "MAX_POSITION_USDT": 0.0,
+        "BACKTEST_INITIAL_EQUITY_USDT": 1000.0,
+        "MAX_HOLD_HOURS": 0.0,
+        "COOLDOWN_MINUTES_AFTER_CLOSE": 0,
+        "MIN_SECONDS_BETWEEN_TRADES": 0,
+        "MAX_CHASE_PCT": 0.0,
+    })
+    klines = sd.seri_banyak_setup(harga=100.0, siklus=10, volume=9_000_000.0)
+
+    try:
+        run_grid_search(klines[:50], cfg, {"SL_PCT": [1.5]}, 300)
+        check("run_grid_search menolak data pendek", False)
+    except GridSearchError:
+        check("run_grid_search menolak data pendek", True)
+    try:
+        run_grid_search(klines, cfg, {"SL_PCT": [1.5]}, 300, metrik="metrik_bohong")
+        check("run_grid_search menolak metrik tidak dikenal", False)
+    except GridSearchError:
+        check("run_grid_search menolak metrik tidak dikenal", True)
+    try:
+        run_grid_search(klines, cfg, {"SL_PCT": [1.5]}, 300, rasio_latih=1.5)
+        check("run_grid_search menolak rasio latih di luar rentang", False)
+    except GridSearchError:
+        check("run_grid_search menolak rasio latih di luar rentang", True)
+    cfg["USE_TP"] = True
+    hasil_tolak = run_grid_search(klines, cfg, {"SL_PCT": [1.5, 2.5], "TP_PCT": [1.0, 4.0]}, 300, min_trades=1)
+    check("run_grid_search melewati kombinasi TP <= SL", hasil_tolak.total_kombinasi == 4 and len(hasil_tolak.hasil) == 2 and hasil_tolak.dilewati == 2, f"{hasil_tolak.total_kombinasi} kombinasi, {len(hasil_tolak.hasil)} hasil, {hasil_tolak.dilewati} dilewati")
+    cfg["USE_TP"] = False
+
+    hasil = run_grid_search(klines, cfg, {"SL_PCT": [1.5, 2.5], "TP_PCT": [3.0, 4.0]}, 300, min_trades=1)
+    check("run_grid_search menjalankan seluruh kombinasi", hasil.total_kombinasi == 4 and len(hasil.hasil) == 4, f"{hasil.total_kombinasi} kombinasi, {len(hasil.hasil)} hasil")
+    check("run_grid_search memeringkat hasil", all(hasil.hasil[i].skor_latih >= hasil.hasil[i + 1].skor_latih for i in range(len(hasil.hasil) - 1)))
+    check("run_grid_search mencatat bar latih dan uji", hasil.bar_latih > 0 and hasil.bar_uji > 0, f"{hasil.bar_latih}/{hasil.bar_uji}")
+    check("run_grid_search melaporkan periode uji", semua_uji(hasil), "item tanpa uji")
+
+    cfg_htf = deepcopy(PUMP_CONFIG)
+    cfg_htf.update({
+        "_symbol": "",
+        "MODE": "PAPER",
+        "DIRECTION_FILTER_ENABLED": True,
+        "DIRECTION_ZONE_FILTER_ENABLED": True,
+        "ZONE_FILTER_ENABLED": True,
+        "TIMING_FILTER_ENABLED": False,
+        "DEMAND_ZONE_FILTER_ENABLED": False,
+        "BTC_FILTER_ENABLED": False,
+        "ROLLING_VOLUME_FILTER_ENABLED": False,
+        "PUMP_MIN_24H_CHANGE_PCT": -1000.0,
+        "MIN_QUOTE_VOLUME_USDT_24H": 0.0,
+        "USE_ATR_EXIT": False,
+        "SL_PCT": 2.0,
+        "TP_PCT": 4.0,
+    })
+    klines_panjang = sd.seri_5m_trend(harga=100.0, jam_trend=1560)
+    hasil_htf = run_grid_search(klines_panjang, cfg_htf, {"SL_PCT": [1.5, 2.5]}, 300, min_trades=1)
+    check("run_grid_search menaikkan warmup gerbang timeframe tinggi", any("layer arah" in w and "layer zona" in w for w in hasil_htf.peringatan), [w[:80] for w in hasil_htf.peringatan])
+
+    print("\nHASIL: " + ("SEMUA LULUS" if ok_all else "ADA YANG GAGAL"))
+    return ok_all
+
+
+def semua_uji(hasil: HasilGridSearch) -> bool:
+    return all(item.uji is not None for item in hasil.hasil)
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(0 if selftest() else 1)

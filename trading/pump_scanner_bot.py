@@ -24,8 +24,6 @@ from trading.clients.binance_client import (
     permission_sets_allow,
 )
 from trading.clients.exchange_client import (
-    ACCOUNT_SPOT_PERMISSION_SOURCE,
-    ACCOUNT_SPOT_PERMISSION_VERIFIED,
     ExchangeClient,
     create_exchange_client,
 )
@@ -46,7 +44,6 @@ from trading import strategy_drawdown as strategy_dd
 from trading.equity import (
     account_risk_snapshot,
     _effective_account_permissions,
-    _spot_api_key_permission_verified,
     _validate_live_account_snapshot,
     collect_equity,
     publish_equity,

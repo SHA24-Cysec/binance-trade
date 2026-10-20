@@ -1659,3 +1659,157 @@ def _mk(t, o, h, low, c, qv=5_000_000.0):
         volume=1000.0,
         quote_volume=qv,
     )
+
+
+def selftest() -> bool:
+    from copy import deepcopy
+
+    from config.config import PUMP_CONFIG
+    from strategy.indicators import Kline as _Kline
+    from backtesting.synthetic_data import seri_banyak_setup, seri_dengan_setup
+
+    ok_all = True
+
+    def check(nama, kondisi, ekstra=""):
+        nonlocal ok_all
+        if not kondisi:
+            ok_all = False
+        print(("  LULUS " if kondisi else "  GAGAL ") + nama + (("  -> " + str(ekstra)) if ekstra else ""))
+
+    print("Selftest portfolio_backtest")
+
+    a = [_mk(i, 100, 101, 99, 100) for i in range(5)]
+    b = [_mk(i, 50, 51, 49, 50) for i in range(3, 9)]
+    with KlineStore.from_klines({"AUSDT": a, "BUSDT": b}) as _store_tl:
+        tl, seri = build_timeline(_store_tl, "5m")
+        check("timeline gabungan unik & terurut", tl == sorted(set(tl)) and len(tl) == 9, len(tl))
+        check("SymbolSeries memetakan waktu ke posisi", seri["BUSDT"].index_at(b[0].open_time) == 0)
+        check("SymbolSeries menolak waktu yang tidak ada", seri["BUSDT"].index_at(b[0].open_time - 1) is None)
+
+    cfg = deepcopy(PUMP_CONFIG)
+    cfg.update({
+        "_symbol": "",
+        "MODE": "PAPER",
+        "DIRECTION_FILTER_ENABLED": False,
+        "DIRECTION_ZONE_FILTER_ENABLED": False,
+        "ZONE_FILTER_ENABLED": False,
+        "TIMING_FILTER_ENABLED": False,
+        "DEMAND_ZONE_FILTER_ENABLED": False,
+        "BTC_FILTER_ENABLED": False,
+        "ROLLING_VOLUME_FILTER_ENABLED": False,
+        "PUMP_MIN_24H_CHANGE_PCT": -1000.0,
+        "MIN_QUOTE_VOLUME_USDT_24H": 0.0,
+        "USE_ATR_EXIT": False,
+        "USE_TP": True,
+        "USE_STOP_LOSS": True,
+        "USE_BREAKEVEN": False,
+        "USE_TRAILING": False,
+        "SL_PCT": 2.0,
+        "TP_PCT": 3.0,
+        "TAKER_FEE_PCT": 0.1,
+        "USE_BNB_FEE_DISCOUNT": False,
+        "USE_RISK_PERCENT": False,
+        "POSITION_SIZE_USDT": 100.0,
+        "MAX_POSITION_USDT": 0.0,
+        "BACKTEST_INITIAL_EQUITY_USDT": 1000.0,
+        "MAX_HOLD_HOURS": 0.0,
+        "COOLDOWN_MINUTES_AFTER_CLOSE": 0,
+        "MIN_SECONDS_BETWEEN_TRADES": 0,
+        "MAX_CHASE_PCT": 0.0,
+        "BACKTEST_ENTRY_SPREAD_PCT": 0.0,
+        "BACKTEST_SLIPPAGE_PCT": 0.0,
+        "BACKTEST_ENTRY_DELAY_BARS": 1,
+    })
+
+    def _jalankan(data_dict, cfg_uji):
+        with KlineStore.from_klines(data_dict) as _st:
+            return run_portfolio_backtest(_st, cfg_uji, "5m", warmup_ms=0)
+
+    up_a = seri_banyak_setup(harga=100.0, siklus=10, volume=9_000_000.0)
+    up_b = seri_banyak_setup(harga=200.0, siklus=10, volume=5_000_000.0)
+
+    res = _jalankan({"AUSDT": up_a, "BUSDT": up_b}, cfg)
+    overlaps = 0
+    for i in range(len(res.trades)):
+        for j in range(i + 1, len(res.trades)):
+            t1, t2 = res.trades[i], res.trades[j]
+            if t1.entry_time < t2.exit_time and t2.entry_time < t1.exit_time:
+                overlaps += 1
+    check("tidak pernah dua posisi bersamaan", overlaps == 0, overlaps)
+    check("menghasilkan trade", len(res.trades) > 0, len(res.trades))
+
+    if res.trades:
+        t = res.trades[0]
+        check("fee pulang-pergi dipotong", abs((t.gross_pnl_pct - t.pnl_pct) - 0.2) < 1e-9, t.gross_pnl_pct - t.pnl_pct)
+
+    cfg_cd = dict(cfg)
+    cfg_cd["COOLDOWN_MINUTES_AFTER_CLOSE"] = 240
+    res_cd = _jalankan({"AUSDT": up_a, "BUSDT": up_b}, cfg_cd)
+    viol = 0
+    for i in range(1, len(res_cd.trades)):
+        gap_min = (res_cd.trades[i].entry_time - res_cd.trades[i - 1].exit_time) / 60000.0
+        if gap_min < 239.9:
+            viol += 1
+    check("cooldown dihormati", viol == 0, viol)
+    check("cooldown mengurangi jumlah trade", len(res_cd.trades) <= len(res.trades), f"{len(res_cd.trades)} vs {len(res.trades)}")
+
+    entry_pertama = res.trades[0].entry_time if res.trades else 0
+    seq_sl = []
+    tandai = False
+    for k in up_a:
+        if tandai:
+            seq_sl.append(_Kline(open_time=k.open_time, open=k.open, high=k.open * 1.12, low=k.open * 0.88, close=k.open, close_time=k.close_time, volume=k.volume, quote_volume=k.quote_volume))
+            tandai = False
+            continue
+        seq_sl.append(k)
+        if k.open_time == entry_pertama:
+            tandai = True
+    res_sl = _jalankan({"AUSDT": seq_sl}, cfg)
+    check("skenario SL-vs-TP benar-benar menghasilkan trade", len(res_sl.trades) > 0, len(res_sl.trades))
+    spanning = [t for t in res_sl.trades if t.entry_time == entry_pertama]
+    if spanning:
+        check("SL diprioritaskan saat SL & TP kena di satu candle", all(t.reason == "STOP_LOSS" for t in spanning), [t.reason for t in spanning][:4])
+    else:
+        check("SL diprioritaskan saat SL & TP kena di satu candle", False, "tidak ada trade yang melewati candle ekstrem")
+
+    from backtesting import backtest as _bt
+
+    cfg_par = dict(cfg)
+    par_kl = seri_dengan_setup(harga=100.0, ekor="naik", panjang_ekor=20)
+    res_p1 = _bt.run_backtest(par_kl, dict(cfg_par, _symbol="AUSDT"), 0)
+    res_p2 = _jalankan({"AUSDT": par_kl}, cfg_par)
+    check("paritas entry satu simbol vs portofolio", [t.entry_time for t in res_p1.trades] == [t.entry_time for t in res_p2.trades], f"{[t.entry_time for t in res_p1.trades]} vs {[t.entry_time for t in res_p2.trades]}")
+    check("paritas alasan exit satu simbol vs portofolio", [t.reason for t in res_p1.trades] == [t.reason for t in res_p2.trades], f"{[t.reason for t in res_p1.trades]} vs {[t.reason for t in res_p2.trades]}")
+
+    cfg_vol = dict(cfg)
+    cfg_vol["MIN_QUOTE_VOLUME_USDT_24H"] = 1e15
+    res_vol = _jalankan({"AUSDT": up_a}, cfg_vol)
+    check("filter volume menyaring semua", len(res_vol.trades) == 0, len(res_vol.trades))
+    check("kontrol positif: data sama tanpa ambang volume tetap menghasilkan trade", len(_jalankan({"AUSDT": up_a}, cfg).trades) > 0)
+
+    s = summarize_portfolio(res)
+    check("total = menang + kalah", s["total_trades"] == s["wins"] + s["losses"])
+    check("kurva equity panjangnya benar", len(s["equity_curve"]) == s["total_trades"] + 1)
+    check("drawdown tidak negatif", s["max_drawdown_pct"] >= 0, s["max_drawdown_pct"])
+    check("return kotor >= bersih", s["gross_return_pct"] >= s["total_return_pct"] - 1e-9, f'{s["gross_return_pct"]:.3f} vs {s["total_return_pct"]:.3f}')
+    check("eksposur masuk akal (0-100%)", 0 <= s["exposure_pct"] <= 100, s["exposure_pct"])
+
+    tickers = [
+        {"symbol": "BTCUSDT", "priceChangePercent": "1.0", "quoteVolume": "9e9", "lastPrice": "60000"},
+        {"symbol": "USDCUSDT", "priceChangePercent": "0.0", "quoteVolume": "9e9", "lastPrice": "1"},
+        {"symbol": "BTCUPUSDT", "priceChangePercent": "5.0", "quoteVolume": "9e9", "lastPrice": "10"},
+        {"symbol": "ETHBTC", "priceChangePercent": "1.0", "quoteVolume": "9e9", "lastPrice": "0.05"},
+        {"symbol": "SOLUSDT", "priceChangePercent": "-3.0", "quoteVolume": "5e8", "lastPrice": "200"},
+    ]
+    uni = select_universe(tickers, {"QUOTE_ASSET": "USDT", "MIN_QUOTE_VOLUME_USDT_24H": 0, "EXTRA_EXCLUDE_SYMBOLS": []})
+    check("semesta buang stablecoin/leveraged/non-USDT", set(uni) == {"BTCUSDT", "SOLUSDT"}, uni)
+    check("select_universe tidak memakai ticker hari ini sebagai gerbang pump", "SOLUSDT" in uni)
+
+    print("\nHASIL: " + ("SEMUA LULUS" if ok_all else "ADA YANG GAGAL"))
+    return ok_all
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(0 if selftest() else 1)

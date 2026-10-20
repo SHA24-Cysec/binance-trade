@@ -48,7 +48,6 @@ from trading.equity import (
 )
 from trading import strategy_drawdown as strategy_dd
 from strategy import indicators as strategy
-from strategy.indicators import interval_to_ms
 from infrastructure.process.runtime_control import BotModeLock, BotAlreadyRunningError
 from market import coin_icons
 from market.fx_rate import IdrRateProvider
@@ -961,14 +960,15 @@ def _bt_timing_note(cfg: dict, interval: str) -> str:
         return "Layer timing nonaktif; tidak ada sinyal yang disaring olehnya."
     try:
         jam = pbt.parity.gate_warmup_ms(cfg, interval) / 3_600_000
+        candle = pbt.parity.gate_warmup_bars(cfg, interval)
     except ValueError as exc:
         return f"Layer timing tidak bisa disimulasikan: {exc}"
     return (
         f"Layer timing memakai candle {cfg.get('CONFIRM_INTERVAL', '5m')} yang sama "
         "dengan konfirmasi volume dan zona demand, jadi tidak ada unduhan tambahan. "
-        f"Gerbang EMA + ADX butuh {pbt.parity.gate_warmup_bars(cfg, interval)} candle "
+        f"Gerbang EMA + ADX butuh {candle} candle "
         "tertutup (sekitar "
-        f"{pbt.parity.gate_warmup_bars(cfg, interval) * interval_to_ms(interval) / 3_600_000:.2f} jam)."
+        f"{jam:.2f} jam)."
     )
 
 
