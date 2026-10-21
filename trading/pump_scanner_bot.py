@@ -4979,7 +4979,7 @@ def run(
     if have_bars < need_setup:
         logger.warning(
             "CONFIRM_LOOKBACK_BARS=%d lebih kecil dari %d candle yang dibutuhkan "
-            "konfirmasi volume dan ATR. Bot tetap mengambil %d candle per konfirmasi agar deteksi "
+            "gerbang entry M5. Bot tetap mengambil %d candle per konfirmasi agar deteksi "
             "tidak selalu gagal, tetapi perbaiki nilai config ini supaya backtest dan live "
             "benar-benar memakai angka yang sama.",
             have_bars,
@@ -5054,8 +5054,8 @@ def run(
         logger.info(
             "Layer zona AKTIF (%s): entry lolos hanya kalau candle %s terakhir yang "
             "sudah tutup bereaksi %s zona demand %s (lookback %d candle, %s, tebal zona "
-            "min %.2f%%, close_pos min %.2f). Kalau candle gagal diambil atau riwayatnya "
-            "kurang, kandidat DITOLAK (fail closed).",
+            "min %.2f%%, close_pos min %.2f), close > EMA%d > EMA%d, dan ADX%d >= %g. "
+            "Kalau candle gagal diambil atau riwayatnya kurang, kandidat DITOLAK (fail closed).",
             config.get("ZONE_INTERVAL", "1h"),
             config.get("ZONE_INTERVAL", "1h"),
             "di dalam"
@@ -5071,6 +5071,10 @@ def run(
             ),
             float(config.get("ZONE_BUFFER_PCT", 1.5) or 0.0),
             float(config.get("ZONE_MIN_CLOSE_POSITION", 0.35) or 0.0),
+            int(config.get("ZONE_EMA_FAST", 20) or 20),
+            int(config.get("ZONE_EMA_SLOW", 50) or 50),
+            int(config.get("ZONE_ADX_PERIOD", 14) or 14),
+            float(config.get("ZONE_ADX_MIN", 25.0) or 0.0),
         )
     else:
         logger.info(
@@ -5081,7 +5085,7 @@ def run(
         logger.info(
             "Layer timing AKTIF (%s): entry lolos hanya kalau candle %s terakhir yang sudah "
             "tutup memenuhi close > EMA%d, EMA%d > EMA%d, dan ADX%d >= %g. Memakai seri "
-            "konfirmasi yang sama dengan volume rolling dan zona demand %s.",
+            "konfirmasi yang sama dengan breakout-retest %s.",
             config.get("CONFIRM_INTERVAL", "5m"),
             config.get("CONFIRM_INTERVAL", "5m"),
             int(config.get("TIMING_EMA_FAST", 20) or 20),
@@ -5096,6 +5100,21 @@ def run(
             "Layer timing %s NONAKTIF: tidak ada pemeriksaan tren mikro.",
             config.get("CONFIRM_INTERVAL", "5m"),
         )
+    if config.get("BREAKOUT_RETEST_FILTER_ENABLED", False):
+        logger.info(
+            "Breakout-retest AKTIF (%s): swing high lookback %d, pivot %d/%d, retest "
+            "maksimum %d candle, toleransi %.2f ATR, maksimum %d sentuhan, bullish=%s.",
+            config.get("CONFIRM_INTERVAL", "5m"),
+            int(config.get("BREAKOUT_LOOKBACK_BARS", 30) or 30),
+            int(config.get("BREAKOUT_PIVOT_WING_BARS", 2) or 2),
+            int(config.get("BREAKOUT_PIVOT_WING_BARS", 2) or 2),
+            int(config.get("BREAKOUT_RETEST_MAX_BARS", 12) or 12),
+            float(config.get("BREAKOUT_RETEST_TOLERANCE_ATR", 0.2) or 0.0),
+            int(config.get("BREAKOUT_RETEST_MAX_TOUCHES", 2) or 2),
+            bool(config.get("BREAKOUT_RETEST_REQUIRE_BULLISH", True)),
+        )
+    else:
+        logger.info("Breakout-retest %s NONAKTIF.", config.get("CONFIRM_INTERVAL", "5m"))
     logger.info("=" * 70)
 
     client = None
@@ -5243,7 +5262,7 @@ def run(
             int(config.get("DIRECTION_EMA_FAST", 20)),
             int(config.get("DIRECTION_EMA_SLOW", 50)),
             int(config.get("DIRECTION_ADX_PERIOD", 14)),
-            float(config.get("DIRECTION_ADX_MIN", 20.0) or 0.0),
+            float(config.get("DIRECTION_ADX_MIN", 25.0) or 0.0),
             strategy.direction_window_bars(config),
         )
     if bool(config.get("DIRECTION_ZONE_FILTER_ENABLED", False)):
@@ -5268,15 +5287,18 @@ def run(
     if zone_provider is None:
         logger.warning(
             "Layer zona NONAKTIF (ZONE_FILTER_ENABLED=False). "
-            "Entry tidak pernah memakai zona demand H1 sebagai penyaring.",
+            "Entry tidak pernah memakai zona demand dan tren H1 sebagai penyaring.",
         )
     else:
         logger.info(
-            "Layer zona %s AKTIF: jendela %d candle %s tertutup per simbol "
-            "(fail closed bila data gagal diambil).",
+            "Layer zona dan tren %s AKTIF: jendela %d candle tertutup, close > EMA%d > "
+            "EMA%d dan ADX%d >= %g (fail closed bila data gagal diambil).",
             strategy.zone_interval(config),
             strategy.zone_window_bars(config),
-            strategy.zone_interval(config),
+            int(config.get("ZONE_EMA_FAST", 20)),
+            int(config.get("ZONE_EMA_SLOW", 50)),
+            int(config.get("ZONE_ADX_PERIOD", 14)),
+            float(config.get("ZONE_ADX_MIN", 25.0) or 0.0),
         )
     if not bool(config.get("TIMING_FILTER_ENABLED", False)):
         logger.info(
@@ -5287,12 +5309,12 @@ def run(
         logger.info(
             "Layer timing %s AKTIF: close > EMA%d > EMA%d dan ADX%d >= %g "
             "(jendela %d candle tertutup; memakai seri konfirmasi yang sama "
-            "dengan volume rolling dan zona demand M5).",
+            "dengan breakout-retest M5).",
             strategy.timing_interval(config),
             int(config.get("TIMING_EMA_FAST", 20)),
             int(config.get("TIMING_EMA_SLOW", 50)),
             int(config.get("TIMING_ADX_PERIOD", 14)),
-            float(config.get("TIMING_ADX_MIN", 20.0) or 0.0),
+            float(config.get("TIMING_ADX_MIN", 25.0) or 0.0),
             strategy.timing_window_bars(config),
         )
 
@@ -5561,11 +5583,14 @@ def run(
                                 if nilai.get("adx") is not None:
                                     trend_info += " (ADX %.1f)" % float(nilai["adx"])
                             if best.zone is not None:
-                                trend_info += " | zona %s: %s" % (
+                                nilai = best.zone.get("values") or {}
+                                trend_info += " | zona dan tren %s: %s" % (
                                     best.zone.get("interval")
                                     or strategy.zone_interval(config),
                                     best.zone.get("reason"),
                                 )
+                                if nilai.get("adx") is not None:
+                                    trend_info += " (ADX %.1f)" % float(nilai["adx"])
                             if best.timing is not None:
                                 nilai = best.timing.get("values") or {}
                                 trend_info += " | timing %s: %s" % (
@@ -5747,15 +5772,17 @@ def main() -> int:
     parser.add_argument(
         "--selftest",
         action="store_true",
-        help="Jalankan pemeriksaan aturan exit (termasuk time stop) tanpa menyentuh Binance.",
+        help="Jalankan pemeriksaan aturan entry dan exit tanpa menyentuh Binance.",
     )
     args = parser.parse_args()
 
     if args.selftest:
+        from backtesting.entry_selftest import run as _run_entry_selftest
         from backtesting.exit_selftest import run as _run_exit_selftest
 
-        sukses, _ = _run_exit_selftest(verbose=True)
-        return 0 if sukses else 1
+        entry_ok, _ = _run_entry_selftest(verbose=True)
+        exit_ok, _ = _run_exit_selftest(verbose=True)
+        return 0 if entry_ok and exit_ok else 1
 
     from infrastructure.network.file_descriptors import raise_fd_limit
 

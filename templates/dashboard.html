@@ -2435,7 +2435,7 @@
                 id="btDays"
                 min="2"
                 value="30"
-                title="Hari pertama dipakai sebagai warmup statistik 24 jam, jadi minimal 2 hari. Layer arah (Daily) dan layer zona (H1) memakai candle asli bursa, jadi tidak menambah batas minimum hari. Layer timing M5 dapat meminta sekitar 1 hari tambahan. Warmup ikut diunduh otomatis dan batas minimal hari disesuaikan oleh server."
+                title="Hari pertama dipakai sebagai warmup statistik 24 jam, jadi minimal 2 hari. Layer arah Daily dan zona H1 memakai candle asli bursa. Kebutuhan riwayat tren, breakout-retest, volume rolling, dan demand M5 dihitung otomatis oleh server."
                 oninput="btUpdateEstimate()"
               />
             </div>
@@ -2538,6 +2538,13 @@
             Mode ATR memakai multiplier ATR seperti bot live. Mode persentase
             tetap memakai SL, TP, BE, dan trailing berbasis persen. Pilihan ini
             hanya berlaku untuk simulasi backtest.
+          </div>
+          <div
+            id="btStrategySummary"
+            class="posbox"
+            style="margin-top: 12px"
+          >
+            <div class="posrow"><span class="k mut">Memuat konfigurasi strategi aktif...</span></div>
           </div>
           <div
             id="btEstimate"
@@ -4794,6 +4801,20 @@
             return;
           }
           _btDefaults = d;
+          const strategySummary = document.getElementById('btStrategySummary');
+          if(strategySummary){
+            const activeText = value => value ? 'aktif' : 'nonaktif';
+            const zoneMode = d.ZONE_REQUIRE_INSIDE_ZONE
+              ? 'wajib di dalam zona'
+              : 'dekat zona, jarak maks ' + fmt(d.ZONE_MAX_DISTANCE_PCT, 1) + '%';
+            strategySummary.innerHTML = `
+              <div class="posrow"><span class="k">Alur entry aktif</span><span class="v mono" style="font-size:11.5px">Daily &rarr; H1 &rarr; tren M5 &rarr; breakout-retest M5</span></div>
+              <div class="posrow"><span class="k">Arah ${esc(d.DIRECTION_INTERVAL || '1d')}</span><span class="v mono" style="font-size:11.5px">${activeText(d.DIRECTION_FILTER_ENABLED)}, Close &gt; EMA${fmt(d.DIRECTION_EMA_FAST,0)} &gt; EMA${fmt(d.DIRECTION_EMA_SLOW,0)}, ADX${fmt(d.DIRECTION_ADX_PERIOD,0)} &gt;= ${fmt(d.DIRECTION_ADX_MIN,1)}</span></div>
+              <div class="posrow"><span class="k">Demand dan tren ${esc(d.ZONE_INTERVAL || '1h')}</span><span class="v mono" style="font-size:11.5px">${activeText(d.ZONE_FILTER_ENABLED)}, ${zoneMode}, Close &gt; EMA${fmt(d.ZONE_EMA_FAST,0)} &gt; EMA${fmt(d.ZONE_EMA_SLOW,0)}, ADX${fmt(d.ZONE_ADX_PERIOD,0)} &gt;= ${fmt(d.ZONE_ADX_MIN,1)}</span></div>
+              <div class="posrow"><span class="k">Tren ${esc(d.timing_interval || '5m')}</span><span class="v mono" style="font-size:11.5px">${activeText(d.TIMING_FILTER_ENABLED)}, Close &gt; EMA${fmt(d.TIMING_EMA_FAST,0)} &gt; EMA${fmt(d.TIMING_EMA_SLOW,0)}, ADX${fmt(d.TIMING_ADX_PERIOD,0)} &gt;= ${fmt(d.TIMING_ADX_MIN,1)}</span></div>
+              <div class="posrow"><span class="k">Breakout-retest ${esc(d.timing_interval || '5m')}</span><span class="v mono" style="font-size:11.5px">${activeText(d.BREAKOUT_RETEST_FILTER_ENABLED)}, retest 1-${fmt(d.BREAKOUT_RETEST_MAX_BARS,0)} candle, toleransi ${fmt(d.BREAKOUT_RETEST_TOLERANCE_ATR,2)} ATR, sentuhan maks ${fmt(d.BREAKOUT_RETEST_MAX_TOUCHES,0)}${d.BREAKOUT_RETEST_REQUIRE_BULLISH ? ', wajib bullish' : ''}</span></div>
+              <div class="posrow"><span class="k">Filter tambahan</span><span class="v mono" style="font-size:11.5px">Demand Daily ${activeText(d.DIRECTION_ZONE_FILTER_ENABLED)}, volume M5 ${activeText(d.ROLLING_VOLUME_FILTER_ENABLED)}, demand M5 ${activeText(d.DEMAND_ZONE_FILTER_ENABLED)}</span></div>`;
+          }
           document.getElementById('btDays').value = d.default_days;
           document.getElementById('btExitMode').value = d.USE_ATR_EXIT ? 'atr' : 'fixed';
           document.getElementById('btAtrPeriod').value = d.ATR_PERIOD;
@@ -5458,8 +5479,9 @@
                      RISK_LIMIT_TRIGGERED:'BATAS RISIKO',
                      FILTER_DIRECTION:'GERBANG ARAH DAILY',
                      FILTER_DAILY_ZONE:'GERBANG ZONA DEMAND DAILY',
-                     FILTER_ZONE:'GERBANG ZONA H1',
-                     FILTER_TIMING:'GERBANG TIMING M5'};
+                     FILTER_ZONE:'GERBANG ZONA DAN TREN H1',
+                     FILTER_TIMING:'GERBANG TREN M5',
+                     FILTER_BREAKOUT_RETEST:'GERBANG BREAKOUT-RETEST M5'};
         return esc(map[key] || key);
       }
 
@@ -5476,8 +5498,8 @@
         const cardTone = v => v>0?'good':(v<0?'bad':'');
         const re = s.risk_events || {};
         const riskTotal = (re.dd_stop||0) + (re.forced_close||0) + (s.chase_skips||0);
-        const gateSkips = (s.direction_skips||0) + (s.zone_skips||0)
-          + (s.timing_skips||0);
+        const gateSkips = (s.direction_skips||0) + (s.daily_zone_skips||0)
+          + (s.zone_skips||0) + (s.timing_skips||0) + (s.breakout_skips||0);
         const cardsHtml = `
           <div class="card ${cardTone(s.total_return_pct)}">
             <div class="label">Return bersih</div>
@@ -5527,6 +5549,9 @@
         const arahInfo = res.direction || null;
         const zonaInfo = res.zone || null;
         const timingInfo = res.timing || null;
+        const breakoutInfo = res.breakout_retest || null;
+        const rollingInfo = res.rolling_volume || null;
+        const demandM5Info = res.demand_m5 || null;
         const emaAdxText = (g, labelInterval) => {
           if(!g || !g.enabled) return 'nonaktif';
           return 'aktif ' + esc(g.interval || labelInterval)
@@ -5540,6 +5565,9 @@
           return 'aktif ' + esc(g.interval || labelInterval)
             + ', lookback ' + fmt(g.lookback_bars, 0) + ' candle'
             + (g.require_inside ? ', wajib di dalam zona' : ', jarak maks ' + fmt(g.max_distance_pct, 1) + '%')
+            + (g.ema_fast == null ? '' : ', EMA ' + fmt(g.ema_fast, 0) + '/' + fmt(g.ema_slow, 0)
+              + ', ADX ' + fmt(g.adx_period, 0) + ' >= ' + fmt(g.adx_min, 1)
+              + ', tren ' + fmt(g.trend_lookback_bars, 0) + ' candle')
             + ', disaring ' + fmt(g.skips, 0) + ' dari ' + fmt(g.scans, 0) + ' sinyal';
         };
         const zonaHarianInfo = res.daily_zone || null;
@@ -5551,6 +5579,12 @@
           <div class="posrow"><span class="k">Layer zona ${esc(zonaInfo.interval || '1h')}</span><span class="v mono" style="font-size:11.5px">${zoneText(zonaInfo, '1h')}</span></div>` : '';
         const timingRow = timingInfo ? `
           <div class="posrow"><span class="k">Layer timing ${esc(timingInfo.interval || '5m')}</span><span class="v mono" style="font-size:11.5px">${emaAdxText(timingInfo, '5m')}</span></div>` : '';
+        const breakoutRow = breakoutInfo ? `
+          <div class="posrow"><span class="k">Breakout-retest ${esc(breakoutInfo.interval || '5m')}</span><span class="v mono" style="font-size:11.5px">${breakoutInfo.enabled ? 'aktif, swing '+fmt(breakoutInfo.lookback_bars,0)+' candle, pivot '+fmt(breakoutInfo.pivot_wing_bars,0)+'/'+fmt(breakoutInfo.pivot_wing_bars,0)+', retest maks '+fmt(breakoutInfo.max_bars,0)+' candle, toleransi '+fmt(breakoutInfo.tolerance_atr,2)+' ATR'+fmt(breakoutInfo.atr_period,0)+', sentuhan maks '+fmt(breakoutInfo.max_touches,0)+(breakoutInfo.require_bullish ? ', wajib bullish' : ', bullish opsional')+', disaring '+fmt(breakoutInfo.skips,0)+' dari '+fmt(breakoutInfo.scans,0)+' sinyal' : 'nonaktif'}</span></div>` : '';
+        const rollingRow = rollingInfo ? `
+          <div class="posrow"><span class="k">Volume rolling ${esc(rollingInfo.interval || '5m')}</span><span class="v mono" style="font-size:11.5px">${rollingInfo.enabled ? 'aktif, lookback '+fmt(rollingInfo.lookback_bars,0)+' candle, minimum '+fmt(rollingInfo.surge_mult,2)+'x, konfirmasi '+fmt(rollingInfo.confirmation_bars,0)+' candle' : 'nonaktif'}</span></div>` : '';
+        const demandM5Row = demandM5Info ? `
+          <div class="posrow"><span class="k">Demand ${esc(demandM5Info.interval || '5m')}</span><span class="v mono" style="font-size:11.5px">${demandM5Info.enabled ? 'aktif, lookback '+fmt(demandM5Info.lookback_bars,0)+' candle'+(demandM5Info.require_inside ? ', wajib di dalam zona' : ', jarak maks '+fmt(demandM5Info.max_distance_pct,1)+'%') : 'nonaktif'}</span></div>` : '';
         document.getElementById('btInfoBox').innerHTML = `
           <div class="posrow"><span class="k">Semesta simbol</span><span class="v mono">${fmt(res.universe_with_data,0)} berhasil / ${fmt(res.universe_requested,0)} diminta${res.symbols_failed_count? ' ('+fmt(res.symbols_failed_count,0)+' gagal)':''}</span></div>
           <div class="posrow"><span class="k">Rentang data</span><span class="v mono" style="font-size:11.5px">${esc(res.start_time||'-')} &rarr; ${esc(res.end_time||'-')}</span></div>
@@ -5560,6 +5594,9 @@
           ${zonaHarianRow}
           ${zonaRow}
           ${timingRow}
+          ${breakoutRow}
+          ${rollingRow}
+          ${demandM5Row}
           <div style="border-top:1px solid var(--border);margin:4px 0"></div>
           ${reasonRows || '<div class="posrow"><span class="k mut">Tidak ada trade terjadi pada rentang & parameter ini.</span></div>'}
           ${(res.warnings&&res.warnings.length)? '<div style="border-top:1px solid var(--border);margin:4px 0"></div>'+res.warnings.map(w=>`<div class="posrow"><span class="k" style="color:var(--amber)">⚠ ${esc(w)}</span></div>`).join('') : ''}
@@ -5571,7 +5608,7 @@
         document.getElementById('btTradeCount').textContent = trades.length ? '('+trades.length+' trade)' : '';
         const tb = document.getElementById('btTradeBody');
         if(!trades.length){
-          tb.innerHTML = '<tr><td colspan="9" class="empty">Tidak ada entry yang sah pada rentang ini. Coba longgarkan parameter volume rolling, perbanyak simbol, atau perpanjang rentang hari.</td></tr>';
+          tb.innerHTML = '<tr><td colspan="9" class="empty">Tidak ada entry yang sah pada rentang ini. Periksa diagnostik D1, H1, dan M5, perbanyak simbol, atau perpanjang rentang hari.</td></tr>';
         } else {
           tb.innerHTML = trades.map(t=>`
             <tr>

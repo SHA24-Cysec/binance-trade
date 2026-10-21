@@ -90,6 +90,8 @@ class PortfolioResult:
     zone_scans: int = 0
     timing_skips: int = 0
     timing_scans: int = 0
+    breakout_skips: int = 0
+    breakout_scans: int = 0
     same_coin_skips: int = 0
     mark_to_market_open: bool = False
     mark_to_market_symbol: Optional[str] = None
@@ -443,6 +445,9 @@ class EntrySignalCache(dict):
         self.timing_scans = 0
         self.timing_skips = 0
         self.timing_events: list = []
+        self.breakout_scans = 0
+        self.breakout_skips = 0
+        self.breakout_events: list = []
 
 
 def build_direction_lookups(
@@ -712,15 +717,6 @@ def precompute_entry_signals(
                     if len(signals.zone_events) < max_skipped_records:
                         signals.zone_events.append((int(t_now), sym))
                     continue
-            try:
-                setup = scanner.detect_entry_setup(window_klines, config)
-            except Exception as exc:
-                raise BacktestError(
-                    f"Evaluasi sinyal {sym} pada waktu {int(t_now)} "
-                    f"(bar {index}) gagal: {type(exc).__name__}: {str(exc)[:160]}"
-                ) from exc
-            if not setup.ok:
-                continue
             if bool(config.get("TIMING_FILTER_ENABLED", False)):
                 lock = timing_of.get(sym) if timing_of else None
                 signals.timing_scans += 1
@@ -733,6 +729,21 @@ def precompute_entry_signals(
                     if len(signals.timing_events) < max_skipped_records:
                         signals.timing_events.append((int(t_now), sym))
                     continue
+            if strategy.breakout_retest_enabled(config):
+                signals.breakout_scans += 1
+            try:
+                setup = scanner.detect_entry_setup(window_klines, config)
+            except Exception as exc:
+                raise BacktestError(
+                    f"Evaluasi sinyal {sym} pada waktu {int(t_now)} "
+                    f"(bar {index}) gagal: {type(exc).__name__}: {str(exc)[:160]}"
+                ) from exc
+            if not setup.ok:
+                if setup.reason.startswith("breakout-retest ditolak"):
+                    signals.breakout_skips += 1
+                    if len(signals.breakout_events) < max_skipped_records:
+                        signals.breakout_events.append((int(t_now), sym))
+                continue
             lolos.append((rank, pct24, sym, index, vol24, setup))
 
         if not lolos:
@@ -866,7 +877,7 @@ def run_portfolio_backtest(
     if int(config.get("CONFIRM_LOOKBACK_BARS", 0)) < _butuh:
         _pre_warnings.append(
             f"CONFIRM_LOOKBACK_BARS={config.get('CONFIRM_LOOKBACK_BARS')} lebih kecil dari "
-            f"{_butuh} candle yang dibutuhkan konfirmasi volume dan ATR. Simulasi memakai "
+            f"{_butuh} candle yang dibutuhkan gerbang entry M5. Simulasi memakai "
             f"{lookback} candle agar deteksi tetap mungkin, tetapi perbaiki config supaya "
             "backtest dan bot live benar-benar memakai angka yang sama."
         )
@@ -914,6 +925,8 @@ def run_portfolio_backtest(
     zone_scans = 0
     timing_skips = 0
     timing_scans = 0
+    breakout_skips = 0
+    breakout_scans = 0
     symbol_blocks: dict = {}
     same_coin_skips = 0
     max_chase_pct = float(config.get("MAX_CHASE_PCT", 0) or 0)
@@ -976,6 +989,8 @@ def run_portfolio_backtest(
         zone_skips += int(getattr(entry_signal_cache, "zone_skips", 0))
         timing_scans += int(getattr(entry_signal_cache, "timing_scans", 0))
         timing_skips += int(getattr(entry_signal_cache, "timing_skips", 0))
+        breakout_scans += int(getattr(entry_signal_cache, "breakout_scans", 0))
+        breakout_skips += int(getattr(entry_signal_cache, "breakout_skips", 0))
         for waktu_event, simbol_event in _event_dalam_jendela(
             getattr(entry_signal_cache, "daily_zone_events", [])
         ):
@@ -1025,6 +1040,19 @@ def run_portfolio_backtest(
                     time=waktu_event,
                     symbol=simbol_event,
                     reason="FILTER_TIMING",
+                    holding=None,
+                )
+            )
+        for waktu_event, simbol_event in _event_dalam_jendela(
+            getattr(entry_signal_cache, "breakout_events", [])
+        ):
+            if len(skipped) >= max_skipped_records:
+                break
+            skipped.append(
+                SkippedSignal(
+                    time=waktu_event,
+                    symbol=simbol_event,
+                    reason="FILTER_BREAKOUT_RETEST",
                     holding=None,
                 )
             )
@@ -1275,15 +1303,6 @@ def run_portfolio_backtest(
                                 )
                             )
                         continue
-                try:
-                    setup = scanner.detect_entry_setup(window_kl, config)
-                except Exception as exc:
-                    raise BacktestError(
-                        f"Evaluasi sinyal {sym} pada waktu {int(t_now)} "
-                        f"(bar {i}) gagal: {type(exc).__name__}: {str(exc)[:160]}"
-                    ) from exc
-                if not setup.ok:
-                    continue
                 if bool(config.get("TIMING_FILTER_ENABLED", False)):
                     lock = timing_of.get(sym) if timing_of else None
                     timing_scans += 1
@@ -1299,6 +1318,28 @@ def run_portfolio_backtest(
                                 )
                             )
                         continue
+                if strategy.breakout_retest_enabled(config):
+                    breakout_scans += 1
+                try:
+                    setup = scanner.detect_entry_setup(window_kl, config)
+                except Exception as exc:
+                    raise BacktestError(
+                        f"Evaluasi sinyal {sym} pada waktu {int(t_now)} "
+                        f"(bar {i}) gagal: {type(exc).__name__}: {str(exc)[:160]}"
+                    ) from exc
+                if not setup.ok:
+                    if setup.reason.startswith("breakout-retest ditolak"):
+                        breakout_skips += 1
+                        if len(skipped) < max_skipped_records:
+                            skipped.append(
+                                SkippedSignal(
+                                    time=t_now,
+                                    symbol=sym,
+                                    reason="FILTER_BREAKOUT_RETEST",
+                                    holding=None,
+                                )
+                            )
+                    continue
                 lolos.append((rank, pct, sym, i, vol24, setup))
 
             if not lolos:
@@ -1487,6 +1528,15 @@ def run_portfolio_backtest(
                 )
                 + (
                     [
+                        f"{breakout_skips} dari {breakout_scans} sinyal yang sudah lolos "
+                        f"tren M5 ditolak oleh breakout-retest "
+                        f"{strategy.timing_interval(config)}, sama seperti bot live."
+                    ]
+                    if breakout_skips
+                    else []
+                )
+                + (
+                    [
                         f"{same_coin_skips} sinyal dilewati oleh blokir koin sama setelah "
                         f"loss (SAME_COIN_BLOCK_HOURS="
                         f"{parity.same_coin_block_hours(config):g} jam), sama seperti bot live."
@@ -1508,6 +1558,8 @@ def run_portfolio_backtest(
         zone_scans=zone_scans,
         timing_skips=timing_skips,
         timing_scans=timing_scans,
+        breakout_skips=breakout_skips,
+        breakout_scans=breakout_scans,
         same_coin_skips=same_coin_skips,
         mark_to_market_open=mark_to_market_open,
         mark_to_market_symbol=mark_to_market_symbol,
@@ -1685,6 +1737,8 @@ def summarize_portfolio(result: PortfolioResult) -> dict:
         "zone_scans": int(getattr(result, "zone_scans", 0)),
         "timing_skips": int(getattr(result, "timing_skips", 0)),
         "timing_scans": int(getattr(result, "timing_scans", 0)),
+        "breakout_skips": int(getattr(result, "breakout_skips", 0)),
+        "breakout_scans": int(getattr(result, "breakout_scans", 0)),
         "same_coin_skips": int(getattr(result, "same_coin_skips", 0)),
         **parity.per_trade_metrics(trades),
     }
@@ -1737,6 +1791,7 @@ def selftest() -> bool:
         "DIRECTION_ZONE_FILTER_ENABLED": False,
         "ZONE_FILTER_ENABLED": False,
         "TIMING_FILTER_ENABLED": False,
+        "BREAKOUT_RETEST_FILTER_ENABLED": False,
         "DEMAND_ZONE_FILTER_ENABLED": False,
         "BTC_FILTER_ENABLED": False,
         "ROLLING_VOLUME_FILTER_ENABLED": False,

@@ -98,13 +98,14 @@ class ScanDiagnostics:
         labels = {
             "DIRECTION": f"arah {arah_interval}",
             "DAILY_ZONE": f"zona demand {arah_interval}",
-            "ZONE": f"zona {zona_interval}",
+            "ZONE": f"zona demand dan tren {zona_interval}",
             "CANDLE_CONFIRM": f"candle {interval} gagal diambil",
+            "TIMING": f"timing {interval}",
             "HISTORY_CONFIRM": f"riwayat {interval} kurang",
+            "BREAKOUT_RETEST": f"breakout-retest {interval}",
             "VOLUME_CONFIRM": f"volume rolling {interval}",
             "DEMAND_CONFIRM": f"demand {interval}",
             "SETUP_CONFIRM": f"konfirmasi {interval}",
-            "TIMING": f"timing {interval}",
         }
         candle = "belum tersedia"
         if self.latest_signal_close_ms > 0:
@@ -453,11 +454,17 @@ class SetupResult:
     ok: bool
     reason: str
     signal_close: Optional[float] = None
+    signal_close_time: Optional[int] = None
     atr_value: Optional[float] = None
     demand_zone_low: Optional[float] = None
     demand_zone_high: Optional[float] = None
     demand_distance_pct: Optional[float] = None
     demand_close_position: Optional[float] = None
+    breakout_level: Optional[float] = None
+    breakout_time: Optional[int] = None
+    retest_zone_low: Optional[float] = None
+    retest_zone_high: Optional[float] = None
+    retest_touches: int = 0
 
 
 def _demand_zone_confirmation(klines: list[Kline], config: dict) -> dict:
@@ -465,7 +472,7 @@ def _demand_zone_confirmation(klines: list[Kline], config: dict) -> dict:
 
 
 def _rolling_volume_confirmation(klines: list[Kline], config: dict) -> tuple[bool, str]:
-    if not bool(config.get("ROLLING_VOLUME_FILTER_ENABLED", True)):
+    if not bool(config.get("ROLLING_VOLUME_FILTER_ENABLED", False)):
         return True, "rolling volume nonaktif"
 
     lookback = max(1, int(config.get("ROLLING_VOLUME_LOOKBACK_BARS", 20) or 20))
@@ -519,9 +526,29 @@ def detect_entry_setup(klines: list[Kline], config: dict) -> SetupResult:
     closes = [float(k.close) for k in klines]
     if any(x <= 0 or not math.isfinite(x) for x in closes):
         return SetupResult(False, "close candle tidak valid")
+
+    breakout = strategy.evaluate_breakout_retest(klines, config)
+    breakout_fields = {
+        "breakout_level": breakout.get("breakout_level"),
+        "breakout_time": breakout.get("breakout_time"),
+        "retest_zone_low": breakout.get("retest_zone_low"),
+        "retest_zone_high": breakout.get("retest_zone_high"),
+        "retest_touches": int(breakout.get("retest_touches", 0) or 0),
+    }
+    if not breakout["ok"]:
+        return SetupResult(
+            False,
+            f"breakout-retest ditolak: {breakout['reason']}",
+            **breakout_fields,
+        )
+
     volume_ok, volume_detail = _rolling_volume_confirmation(klines, config)
     if not volume_ok:
-        return SetupResult(False, f"rolling volume ditolak: {volume_detail}")
+        return SetupResult(
+            False,
+            f"rolling volume ditolak: {volume_detail}",
+            **breakout_fields,
+        )
     demand = _demand_zone_confirmation(klines, config)
     if not demand["ok"]:
         return SetupResult(
@@ -531,16 +558,27 @@ def detect_entry_setup(klines: list[Kline], config: dict) -> SetupResult:
             demand_zone_high=demand.get("zone_high"),
             demand_distance_pct=demand.get("distance_pct"),
             demand_close_position=demand.get("close_position"),
+            **breakout_fields,
         )
+
+    details = []
+    if strategy.breakout_retest_enabled(config):
+        details.append(breakout["reason"])
+    if bool(config.get("ROLLING_VOLUME_FILTER_ENABLED", False)):
+        details.append(volume_detail)
+    if bool(config.get("DEMAND_ZONE_FILTER_ENABLED", False)):
+        details.append(demand["reason"])
     return SetupResult(
         True,
-        f"entry sah: {volume_detail}, {demand['reason']}",
+        "entry sah: " + (", ".join(details) if details else "seluruh filter aktif lolos"),
         signal_close=klines[-1].close,
+        signal_close_time=int(klines[-1].close_time),
         atr_value=strategy.atr(klines, int(config.get("ATR_PERIOD", 14) or 14)),
         demand_zone_low=demand.get("zone_low"),
         demand_zone_high=demand.get("zone_high"),
         demand_distance_pct=demand.get("distance_pct"),
         demand_close_position=demand.get("close_position"),
+        **breakout_fields,
     )
 
 
@@ -668,9 +706,16 @@ def zone_verdict(
         "zone_high": None,
         "distance_pct": None,
         "close_position": None,
+        "close": None,
+        "ema_fast": None,
+        "ema_slow": None,
+        "adx": None,
+        "checks": {},
+        "values": {},
+        "trend": None,
     }
     if not bool(config.get("ZONE_FILTER_ENABLED", False)):
-        return {"ok": True, "reason": f"filter zona {interval} nonaktif", **kosong}
+        return {"ok": True, "reason": f"filter zona dan tren {interval} nonaktif", **kosong}
     if zone_provider is None:
         return {
             "ok": False,
@@ -807,7 +852,7 @@ def find_best_candidate(
             if not zona["ok"]:
                 cand.confirmed = False
                 cand.confirm_reason = (
-                    f"zona {zona.get('interval') or '1h'} ditolak: {zona['reason']}"
+                    f"zona dan tren {zona.get('interval') or '1h'} ditolak: {zona['reason']}"
                 )
                 if diagnostics is not None:
                     diagnostics.reject("ZONE", cand.symbol, zona["reason"])
@@ -847,6 +892,28 @@ def find_best_candidate(
             continue
         if diagnostics is not None:
             diagnostics.observe_signal(klines)
+        signal_close_time_ms = int(klines[-1].close_time) if klines else None
+        if bool(config.get("TIMING_FILTER_ENABLED", False)):
+            timing = timing_verdict(config, klines or [], signal_close_time_ms)
+            cand.timing = timing
+            if not timing["ok"]:
+                cand.confirmed = False
+                timing_reason = (
+                    f"timing {timing.get('interval') or '5m'} ditolak: {timing['reason']}"
+                )
+                cand.confirm_reason = (
+                    f"{cand.confirm_reason} | {timing_reason}"
+                    if cand.confirm_reason
+                    else timing_reason
+                )
+                if diagnostics is not None:
+                    diagnostics.reject("TIMING", cand.symbol, timing["reason"])
+                continue
+            cand.confirm_reason = (
+                f"{cand.confirm_reason} | {timing['reason']}"
+                if cand.confirm_reason
+                else timing["reason"]
+            )
         hasil = detect_entry_setup(klines or [], config)
         cand.confirmed = hasil.ok
         cand.confirm_reason = (
@@ -857,7 +924,9 @@ def find_best_candidate(
         cand.setup = hasil
         if not hasil.ok:
             if diagnostics is not None:
-                if hasil.reason.startswith("rolling volume ditolak"):
+                if hasil.reason.startswith("breakout-retest ditolak"):
+                    stage = "BREAKOUT_RETEST"
+                elif hasil.reason.startswith("rolling volume ditolak"):
                     stage = "VOLUME_CONFIRM"
                 elif hasil.reason.startswith("zona demand ditolak"):
                     stage = "DEMAND_CONFIRM"
@@ -867,19 +936,6 @@ def find_best_candidate(
                     stage = "SETUP_CONFIRM"
                 diagnostics.reject(stage, cand.symbol, hasil.reason)
             continue
-        signal_close_time_ms = int(klines[-1].close_time)
-        if bool(config.get("TIMING_FILTER_ENABLED", False)):
-            timing = timing_verdict(config, klines, signal_close_time_ms)
-            cand.timing = timing
-            if not timing["ok"]:
-                cand.confirmed = False
-                cand.confirm_reason = (
-                    f"timing {timing.get('interval') or '5m'} ditolak: {timing['reason']}"
-                )
-                if diagnostics is not None:
-                    diagnostics.reject("TIMING", cand.symbol, timing["reason"])
-                continue
-            cand.confirm_reason = f"{cand.confirm_reason} | {timing['reason']}"
         lolos.append(cand)
 
     if not lolos:

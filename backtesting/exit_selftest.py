@@ -53,6 +53,7 @@ def config_dasar(cap_jam: float | None = CAP_CONTOH, ekor: str = "datar") -> dic
             "DIRECTION_ZONE_FILTER_ENABLED": False,
             "ZONE_FILTER_ENABLED": False,
             "TIMING_FILTER_ENABLED": False,
+            "BREAKOUT_RETEST_FILTER_ENABLED": False,
             "BTC_FILTER_ENABLED": False,
             "ROLLING_VOLUME_FILTER_ENABLED": False,
             "DEMAND_ZONE_FILTER_ENABLED": False,

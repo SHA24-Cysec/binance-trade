@@ -722,7 +722,7 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "CONFIRM_LOOKBACK_BARS": _field(
         "Scan",
         "Jumlah candle konfirmasi",
-        "Jumlah candle tertutup untuk konfirmasi volume dan ATR. Limit endpoint klines 1000 per panggilan.",
+        "Jumlah candle tertutup untuk breakout-retest, EMA, ADX, serta filter tambahan M5. Limit endpoint klines 1000 per panggilan.",
         "int",
         minimum=3,
         maximum=1000,
@@ -1106,7 +1106,7 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "ZONE_FILTER_ENABLED": _field(
         "Zona H1",
         "Filter zona demand H1",
-        "Layer kedua: wajibkan harga masih berada di dekat zona demand H1 supaya entry tidak terjadi saat harga sudah melayang jauh di atas dasar H1. Memakai candle H1 yang sama dengan layer zona, tanpa unduhan tambahan. Data gagal diambil berarti kandidat ditolak (fail closed).",
+        "Layer kedua: candle H1 harus berada di dalam atau dekat zona demand, menutup di atas EMA cepat, memiliki EMA cepat di atas EMA lambat, dan memenuhi ambang ADX. Data gagal diambil berarti kandidat ditolak (fail closed).",
         "bool",
     ),
     "ZONE_INTERVAL": _field(
@@ -1158,10 +1158,54 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         minimum=0.0,
         maximum=1.0,
     ),
+    "ZONE_EMA_FAST": _field(
+        "Zona H1",
+        "Periode EMA cepat H1",
+        "EMA cepat pada candle H1. Entry memerlukan close di atas EMA cepat dan EMA cepat di atas EMA lambat.",
+        "int",
+        minimum=2,
+        maximum=500,
+        unit="candle",
+    ),
+    "ZONE_EMA_SLOW": _field(
+        "Zona H1",
+        "Periode EMA lambat H1",
+        "EMA lambat pada candle H1. Wajib lebih besar dari periode EMA cepat.",
+        "int",
+        minimum=3,
+        maximum=999,
+        unit="candle",
+    ),
+    "ZONE_ADX_PERIOD": _field(
+        "Zona H1",
+        "Periode ADX H1",
+        "Periode ADX Wilder untuk mengukur kekuatan tren H1.",
+        "int",
+        minimum=2,
+        maximum=200,
+        unit="candle",
+    ),
+    "ZONE_ADX_MIN": _field(
+        "Zona H1",
+        "Ambang ADX H1",
+        "ADX minimum agar tren H1 dianggap kuat. Nilai bawaan 25.",
+        "float",
+        minimum=0,
+        maximum=100,
+    ),
+    "ZONE_TREND_LOOKBACK_BARS": _field(
+        "Zona H1",
+        "Jendela tren H1",
+        "Jumlah candle H1 tertutup yang dipakai menghitung EMA dan ADX.",
+        "int",
+        minimum=20,
+        maximum=999,
+        unit="candle",
+    ),
     "TIMING_FILTER_ENABLED": _field(
         "Timing M5",
         "Filter timing M5",
-        "Layer ketiga: gerbang tren mikro pada candle konfirmasi M5. Entry hanya boleh kalau candle M5 terakhir sudah tutup di atas EMA cepat, EMA cepat di atas EMA lambat, dan ADX minimal. Bersamaan dengan lonjakan volume rolling dan zona demand M5, tiga syarat ini menentukan waktu entry.",
+        "Layer ketiga: gerbang tren mikro pada candle konfirmasi M5. Entry hanya boleh kalau candle M5 terakhir sudah tutup di atas EMA cepat, EMA cepat di atas EMA lambat, dan ADX minimal. Gerbang ini wajib lolos bersama breakout dan retest M5.",
         "bool",
     ),
     "TIMING_EMA_FAST": _field(
@@ -1207,6 +1251,72 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         minimum=20,
         maximum=999,
         unit="candle",
+    ),
+    "BREAKOUT_RETEST_FILTER_ENABLED": _field(
+        "Breakout Retest M5",
+        "Filter breakout dan retest",
+        "Entry memerlukan breakout tertutup di atas swing high terkonfirmasi, kemudian retest sah pada candle M5 terakhir.",
+        "bool",
+    ),
+    "BREAKOUT_LOOKBACK_BARS": _field(
+        "Breakout Retest M5",
+        "Lookback swing high",
+        "Jumlah candle sebelum breakout yang dipakai mencari swing high terakhir.",
+        "int",
+        minimum=5,
+        maximum=500,
+        unit="candle",
+    ),
+    "BREAKOUT_PIVOT_WING_BARS": _field(
+        "Breakout Retest M5",
+        "Sayap pivot swing high",
+        "Jumlah candle di kiri dan kanan yang harus lebih rendah agar sebuah high menjadi swing high terkonfirmasi.",
+        "int",
+        minimum=1,
+        maximum=20,
+        unit="candle",
+    ),
+    "BREAKOUT_ATR_PERIOD": _field(
+        "Breakout Retest M5",
+        "Periode ATR retest",
+        "Periode ATR yang menentukan lebar toleransi area retest.",
+        "int",
+        minimum=2,
+        maximum=200,
+        unit="candle",
+    ),
+    "BREAKOUT_RETEST_TOLERANCE_ATR": _field(
+        "Breakout Retest M5",
+        "Toleransi retest",
+        "Jarak di atas dan bawah level breakout yang masih dianggap area retest, dalam kelipatan ATR.",
+        "float",
+        minimum=0,
+        maximum=10,
+        unit="ATR",
+    ),
+    "BREAKOUT_RETEST_MAX_BARS": _field(
+        "Breakout Retest M5",
+        "Batas waktu retest",
+        "Jumlah maksimum candle setelah breakout untuk menunggu retest.",
+        "int",
+        minimum=1,
+        maximum=100,
+        unit="candle",
+    ),
+    "BREAKOUT_RETEST_MAX_TOUCHES": _field(
+        "Breakout Retest M5",
+        "Maksimum sentuhan retest",
+        "Jumlah maksimum candle yang menyentuh area breakout sebelum setup dianggap terlalu sering diuji.",
+        "int",
+        minimum=1,
+        maximum=20,
+        unit="sentuhan",
+    ),
+    "BREAKOUT_RETEST_REQUIRE_BULLISH": _field(
+        "Breakout Retest M5",
+        "Retest wajib bullish",
+        "Jika aktif, candle retest terakhir harus ditutup lebih tinggi daripada harga pembukaannya.",
+        "bool",
     ),
     "USE_RISK_PERCENT": _field(
         "Ukuran Posisi",
@@ -1427,6 +1537,10 @@ _LEGACY_KEY_MIGRATION = {
     "M15_TREND_ADX_PERIOD": "TIMING_ADX_PERIOD",
     "M15_TREND_ADX_MIN": "TIMING_ADX_MIN",
     "M15_TREND_LOOKBACK_BARS": "TIMING_LOOKBACK_BARS",
+    "SWING_LOOKBACK_BARS": "BREAKOUT_LOOKBACK_BARS",
+    "SWING_PIVOT_WING_BARS": "BREAKOUT_PIVOT_WING_BARS",
+    "MAX_BARS_BREAKOUT_TO_RETEST": "BREAKOUT_RETEST_MAX_BARS",
+    "MAX_RETEST_TOUCHES": "BREAKOUT_RETEST_MAX_TOUCHES",
 }
 
 
@@ -1763,11 +1877,36 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
     saring_zona = mode_aware is False or _flag_untuk_relasi(
         cfg, "ZONE_FILTER_ENABLED", False
     )
-    if saring_zona and not _flag_untuk_relasi(cfg, "ZONE_REQUIRE_INSIDE_ZONE", False):
-        nilai = pasangan("ZONE_MAX_DISTANCE_PCT", "ZONE_BUFFER_PCT")
-        if nilai is not None and nilai[0] < nilai[1]:
-            keluar["ZONE_MAX_DISTANCE_PCT"] = (
-                "harus lebih besar atau sama dengan ZONE_BUFFER_PCT"
+    if saring_zona:
+        if not _flag_untuk_relasi(cfg, "ZONE_REQUIRE_INSIDE_ZONE", False):
+            nilai = pasangan("ZONE_MAX_DISTANCE_PCT", "ZONE_BUFFER_PCT")
+            if nilai is not None and nilai[0] < nilai[1]:
+                keluar["ZONE_MAX_DISTANCE_PCT"] = (
+                    "harus lebih besar atau sama dengan ZONE_BUFFER_PCT"
+                )
+        nilai = pasangan("ZONE_EMA_SLOW", "ZONE_EMA_FAST")
+        if nilai is not None and nilai[0] <= nilai[1]:
+            keluar["ZONE_EMA_SLOW"] = (
+                "harus lebih besar dari ZONE_EMA_FAST agar susunan EMA tidak terbalik"
+            )
+        _periksa_jendela(
+            keluar,
+            cfg,
+            "ZONE_TREND_LOOKBACK_BARS",
+            "ZONE_EMA_FAST",
+            "ZONE_EMA_SLOW",
+            "ZONE_ADX_PERIOD",
+        )
+
+    saring_breakout = mode_aware is False or _flag_untuk_relasi(
+        cfg, "BREAKOUT_RETEST_FILTER_ENABLED", False
+    )
+    if saring_breakout:
+        lookback = _angka_untuk_relasi(cfg, "BREAKOUT_LOOKBACK_BARS")
+        wing = _angka_untuk_relasi(cfg, "BREAKOUT_PIVOT_WING_BARS")
+        if lookback is not None and wing is not None and lookback < 2 * wing + 1:
+            keluar["BREAKOUT_LOOKBACK_BARS"] = (
+                f"minimal {int(2 * wing + 1)} candle untuk pivot dengan sayap {int(wing)}"
             )
 
     try:
@@ -1901,6 +2040,21 @@ def validate_candidate(
                 "yang dibutuhkan zona demand harian. Gerbang zona memakai jendela "
                 "terbesar agar tetap terisi, dan live serta backtest ikut memakainya."
             )
+        if cleaned.get("ZONE_FILTER_ENABLED") and cleaned["ZONE_ADX_MIN"] == 0:
+            warnings.append(
+                "ZONE_ADX_MIN nol: cek kekuatan tren H1 mati, hanya zona demand dan "
+                "susunan EMA yang menyaring entry."
+            )
+        if cleaned.get("BREAKOUT_RETEST_FILTER_ENABLED"):
+            from strategy.indicators import breakout_retest_required_bars
+
+            required_breakout = breakout_retest_required_bars(cleaned)
+            if int(cleaned["CONFIRM_LOOKBACK_BARS"]) < required_breakout:
+                warnings.append(
+                    f"CONFIRM_LOOKBACK_BARS {cleaned['CONFIRM_LOOKBACK_BARS']} lebih kecil "
+                    f"dari {required_breakout} candle yang dibutuhkan breakout-retest. "
+                    "Bot otomatis mengambil jendela minimum tersebut."
+                )
         if cleaned.get("TIMING_FILTER_ENABLED"):
             minimal_timing = max(
                 int(cleaned["TIMING_EMA_SLOW"]),

@@ -64,6 +64,8 @@ class BacktestResult:
     zone_skips: int = 0
     timing_scans: int = 0
     timing_skips: int = 0
+    breakout_scans: int = 0
+    breakout_skips: int = 0
     same_coin_skips: int = 0
     mark_to_market_open: bool = False
     mark_to_market_pnl_pct: float = 0.0
@@ -217,6 +219,8 @@ def run_backtest(
     zone_skips = 0
     timing_scans = 0
     timing_skips = 0
+    breakout_scans = 0
+    breakout_skips = 0
 
     initial_equity = initial_backtest_equity(config)
     symbol = str(config.get("_symbol", "") or "")
@@ -381,14 +385,6 @@ def run_backtest(
                         i += 1
                         continue
                 window_klines = klines[max(0, i - lookback + 1) : i + 1]
-                setup = scanner.detect_entry_setup(window_klines, config)
-                if not setup.ok:
-                    i += 1
-                    continue
-                if parity.same_coin_blocked(symbol, candle.open_time, symbol_blocks):
-                    same_coin_skips += 1
-                    i += 1
-                    continue
                 if bool(config.get("TIMING_FILTER_ENABLED", False)):
                     timing_scans += 1
                     if (
@@ -398,6 +394,18 @@ def run_backtest(
                         timing_skips += 1
                         i += 1
                         continue
+                if strategy.breakout_retest_enabled(config):
+                    breakout_scans += 1
+                setup = scanner.detect_entry_setup(window_klines, config)
+                if not setup.ok:
+                    if setup.reason.startswith("breakout-retest ditolak"):
+                        breakout_skips += 1
+                    i += 1
+                    continue
+                if parity.same_coin_blocked(symbol, candle.open_time, symbol_blocks):
+                    same_coin_skips += 1
+                    i += 1
+                    continue
                 if setup.ok:
                     entry_idx = i + entry_delay_bars
                     if entry_idx >= n:
@@ -549,7 +557,7 @@ def run_backtest(
             f"(EMA{int(config.get('DIRECTION_EMA_FAST', 20) or 20)}/"
             f"EMA{int(config.get('DIRECTION_EMA_SLOW', 50) or 50)} dan ADX"
             f"{int(config.get('DIRECTION_ADX_PERIOD', 14))} >= "
-            f"{float(config.get('DIRECTION_ADX_MIN', 20.0) or 0.0):g}), sama seperti bot live."
+            f"{float(config.get('DIRECTION_ADX_MIN', 25.0) or 0.0):g}), sama seperti bot live."
         )
     if daily_zone_skips:
         warnings.append(
@@ -585,7 +593,11 @@ def run_backtest(
                 )
             )
             + f", tebal zona minimum "
-            f"{float(config.get('ZONE_BUFFER_PCT', 1.5) or 0.0):g}%), sama seperti bot live."
+            f"{float(config.get('ZONE_BUFFER_PCT', 1.5) or 0.0):g}%, EMA"
+            f"{int(config.get('ZONE_EMA_FAST', 20) or 20)}/"
+            f"EMA{int(config.get('ZONE_EMA_SLOW', 50) or 50)}, ADX"
+            f"{int(config.get('ZONE_ADX_PERIOD', 14) or 14)} >= "
+            f"{float(config.get('ZONE_ADX_MIN', 25.0) or 0.0):g}), sama seperti bot live."
         )
     if timing_skips:
         warnings.append(
@@ -594,8 +606,16 @@ def run_backtest(
             f"(EMA{int(config.get('TIMING_EMA_FAST', 20) or 20)}/"
             f"EMA{int(config.get('TIMING_EMA_SLOW', 50) or 50)} dan ADX"
             f"{int(config.get('TIMING_ADX_PERIOD', 14) or 14)} >= "
-            f"{float(config.get('TIMING_ADX_MIN', 20.0) or 0.0):g} pada "
+            f"{float(config.get('TIMING_ADX_MIN', 25.0) or 0.0):g} pada "
             f"{timing_lookup.interval}, sama seperti bot live."
+        )
+    if breakout_skips:
+        warnings.append(
+            f"{breakout_skips} dari {breakout_scans} sinyal yang sudah lolos tren M5 "
+            f"ditolak oleh breakout-retest {str(config.get('CONFIRM_INTERVAL', '5m'))} "
+            f"(retest maksimum {int(config.get('BREAKOUT_RETEST_MAX_BARS', 12) or 12)} "
+            f"candle, toleransi "
+            f"{float(config.get('BREAKOUT_RETEST_TOLERANCE_ATR', 0.2) or 0.0):g} ATR)."
         )
     result = BacktestResult(
         symbol=config.get("_symbol", "?"),
@@ -623,6 +643,8 @@ def run_backtest(
         zone_skips=zone_skips,
         timing_scans=timing_scans,
         timing_skips=timing_skips,
+        breakout_scans=breakout_scans,
+        breakout_skips=breakout_skips,
         same_coin_skips=same_coin_skips,
         mark_to_market_open=mark_to_market_open,
         mark_to_market_pnl_pct=mark_to_market_pnl_pct,
@@ -784,6 +806,7 @@ OVERRIDE_CASTERS = {
         "BE_LOCK_PCT": float,
         "TRAILING_START_PCT": float,
         "TRAILING_STEP_PCT": float,
+        "CONFIRM_LOOKBACK_BARS": int,
         "DEMAND_ZONE_FILTER_ENABLED": _as_bool,
         "DEMAND_LOOKBACK_BARS": int,
         "DEMAND_ZONE_BUFFER_PCT": float,
@@ -810,12 +833,25 @@ OVERRIDE_CASTERS = {
         "ZONE_MAX_DISTANCE_PCT": float,
         "ZONE_MIN_CLOSE_POSITION": float,
         "ZONE_REQUIRE_INSIDE_ZONE": _as_bool,
+        "ZONE_EMA_FAST": int,
+        "ZONE_EMA_SLOW": int,
+        "ZONE_ADX_PERIOD": int,
+        "ZONE_ADX_MIN": float,
+        "ZONE_TREND_LOOKBACK_BARS": int,
         "TIMING_FILTER_ENABLED": _as_bool,
         "TIMING_EMA_FAST": int,
         "TIMING_EMA_SLOW": int,
         "TIMING_ADX_PERIOD": int,
         "TIMING_ADX_MIN": float,
         "TIMING_LOOKBACK_BARS": int,
+        "BREAKOUT_RETEST_FILTER_ENABLED": _as_bool,
+        "BREAKOUT_LOOKBACK_BARS": int,
+        "BREAKOUT_PIVOT_WING_BARS": int,
+        "BREAKOUT_ATR_PERIOD": int,
+        "BREAKOUT_RETEST_TOLERANCE_ATR": float,
+        "BREAKOUT_RETEST_MAX_BARS": int,
+        "BREAKOUT_RETEST_MAX_TOUCHES": int,
+        "BREAKOUT_RETEST_REQUIRE_BULLISH": _as_bool,
         "PUMP_MIN_24H_CHANGE_PCT": float,
         "MIN_QUOTE_VOLUME_USDT_24H": float,
         "ROLLING_VOLUME_FILTER_ENABLED": _as_bool,
@@ -957,6 +993,11 @@ def validate_params(cfg: dict) -> None:
             ("ZONE_BUFFER_PCT", 0.05, 20.0),
             ("ZONE_MAX_DISTANCE_PCT", 0.1, 50.0),
             ("ZONE_MIN_CLOSE_POSITION", 0.0, 1.0),
+            ("ZONE_EMA_FAST", 2, 500),
+            ("ZONE_EMA_SLOW", 3, strategy.TREND_KLINE_LIMIT - 1),
+            ("ZONE_ADX_PERIOD", 2, 200),
+            ("ZONE_ADX_MIN", 0.0, 100.0),
+            ("ZONE_TREND_LOOKBACK_BARS", 20, strategy.TREND_KLINE_LIMIT - 1),
         ]
         for key, lo, hi in zona_checks:
             lo, hi = _rentang_demand(key, lo, hi)
@@ -970,6 +1011,22 @@ def validate_params(cfg: dict) -> None:
             strategy.zone_warmup_bars(cfg, interval)
         except ValueError as exc:
             raise BacktestError(str(exc)) from exc
+
+    if bool(cfg.get("BREAKOUT_RETEST_FILTER_ENABLED", False)):
+        breakout_checks = [
+            ("BREAKOUT_LOOKBACK_BARS", 5, 500),
+            ("BREAKOUT_PIVOT_WING_BARS", 1, 20),
+            ("BREAKOUT_ATR_PERIOD", 2, 200),
+            ("BREAKOUT_RETEST_TOLERANCE_ATR", 0.0, 10.0),
+            ("BREAKOUT_RETEST_MAX_BARS", 1, 100),
+            ("BREAKOUT_RETEST_MAX_TOUCHES", 1, 20),
+        ]
+        for key, lo, hi in breakout_checks:
+            val = cfg.get(key)
+            if val is None or not (lo <= float(val) <= hi):
+                raise BacktestError(
+                    f"Parameter '{key}'={val} di luar rentang wajar ({lo}..{hi})."
+                )
 
     if bool(cfg.get("TIMING_FILTER_ENABLED", False)):
         timing_checks = [
@@ -986,11 +1043,16 @@ def validate_params(cfg: dict) -> None:
                     f"Parameter '{key}'={val} di luar rentang wajar ({lo}..{hi})."
                 )
 
+    confirm_lookback = int(cfg.get("CONFIRM_LOOKBACK_BARS", 0))
+    if not 3 <= confirm_lookback <= 1000:
+        raise BacktestError(
+            "CONFIRM_LOOKBACK_BARS harus berada pada rentang 3 sampai 1000 candle."
+        )
     butuh = strategy.required_lookback_bars(cfg)
-    if int(cfg.get("CONFIRM_LOOKBACK_BARS", 0)) < butuh:
+    if confirm_lookback < butuh:
         raise BacktestError(
             f"CONFIRM_LOOKBACK_BARS={cfg.get('CONFIRM_LOOKBACK_BARS')} lebih kecil dari {butuh} "
-            "candle yang dibutuhkan konfirmasi volume dan ATR. Naikkan nilainya supaya backtest "
+            "candle yang dibutuhkan gerbang entry M5. Naikkan nilainya supaya backtest "
             "dan bot live memakai jendela yang sama."
         )
 
@@ -1139,15 +1201,17 @@ def main():
     parser.add_argument(
         "--selftest",
         action="store_true",
-        help="Jalankan pemeriksaan aturan exit (termasuk time stop) tanpa menyentuh Binance.",
+        help="Jalankan pemeriksaan aturan entry dan exit tanpa menyentuh Binance.",
     )
     args = parser.parse_args()
 
     if args.selftest:
+        from backtesting.entry_selftest import run as _run_entry_selftest
         from backtesting.exit_selftest import run as _run_exit_selftest
 
-        sukses, _ = _run_exit_selftest(verbose=True)
-        raise SystemExit(0 if sukses else 1)
+        entry_ok, _ = _run_entry_selftest(verbose=True)
+        exit_ok, _ = _run_exit_selftest(verbose=True)
+        raise SystemExit(0 if entry_ok and exit_ok else 1)
 
     if len(_sys.argv) == 1:
         parser.print_help()
@@ -1168,7 +1232,7 @@ def main():
         butuh_gerbang = strategy.gate_warmup_bars(cfg, interval)
     except ValueError as exc:
         raise BacktestError(str(exc)) from exc
-    warmup = max(warmup, butuh_gerbang)
+    warmup = max(warmup, butuh_gerbang, strategy.required_lookback_bars(cfg))
     total_bars = warmup + bars_per_day(interval) * args.days
     bar_per_hari = float(bars_per_day(interval))
 
@@ -1203,15 +1267,23 @@ def main():
     if strategy.zone_enabled(cfg):
         pemanasan_zona = strategy.zone_warmup_bars(cfg, interval)
         print(
-            f"  Layer zona {strategy.zone_interval(cfg)} aktif: {pemanasan_zona} candle "
-            f"{interval} (sekitar {pemanasan_zona / bar_per_hari:.2f} hari) diperlukan "
-            "untuk warmup. Rentang unduhan diperpanjang otomatis."
+            f"  Layer zona demand dan tren {strategy.zone_interval(cfg)} aktif: "
+            f"{pemanasan_zona} candle {interval} (sekitar "
+            f"{pemanasan_zona / bar_per_hari:.2f} hari) diperlukan untuk warmup. "
+            "Rentang unduhan diperpanjang otomatis."
         )
     if strategy.timing_enabled(cfg):
         print(
             f"  Layer timing {strategy.timing_interval(cfg)} aktif: jendela "
             f"{strategy.timing_window_bars(cfg)} candle (minimum "
             f"{strategy.timing_required_bars(cfg)} candle untuk EMA dan ADX)."
+        )
+    if strategy.breakout_retest_enabled(cfg):
+        print(
+            f"  Breakout-retest {strategy.timing_interval(cfg)} aktif: jendela minimum "
+            f"{strategy.breakout_retest_required_bars(cfg)} candle, retest maksimum "
+            f"{int(cfg.get('BREAKOUT_RETEST_MAX_BARS', 12) or 12)} candle, toleransi "
+            f"{float(cfg.get('BREAKOUT_RETEST_TOLERANCE_ATR', 0.2) or 0.0):g} ATR."
         )
     client = BinanceSpotClient(
         "",

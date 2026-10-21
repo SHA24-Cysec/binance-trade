@@ -118,8 +118,17 @@ def parse_klines(raw: list) -> list[Kline]:
 
 
 def required_lookback_bars(config: dict) -> int:
-    rolling_lookback = int(config.get("ROLLING_VOLUME_LOOKBACK_BARS", 20) or 20)
-    confirmation_bars = int(config.get("ROLLING_VOLUME_CONFIRMATION_BARS", 1) or 1)
+    rolling_enabled = bool(config.get("ROLLING_VOLUME_FILTER_ENABLED", False))
+    rolling_lookback = (
+        int(config.get("ROLLING_VOLUME_LOOKBACK_BARS", 20) or 20)
+        if rolling_enabled
+        else 0
+    )
+    confirmation_bars = (
+        int(config.get("ROLLING_VOLUME_CONFIRMATION_BARS", 1) or 1)
+        if rolling_enabled
+        else 0
+    )
     demand_lookback = (
         int(config.get("DEMAND_LOOKBACK_BARS", 20) or 20) + 1
         if bool(config.get("DEMAND_ZONE_FILTER_ENABLED", False))
@@ -131,11 +140,17 @@ def required_lookback_bars(config: dict) -> int:
         if bool(config.get("TIMING_FILTER_ENABLED", False))
         else 0
     )
+    breakout_lookback = (
+        breakout_retest_required_bars(config)
+        if bool(config.get("BREAKOUT_RETEST_FILTER_ENABLED", False))
+        else 0
+    )
     return max(
         atr_period,
-        rolling_lookback + max(1, confirmation_bars),
+        rolling_lookback + max(1, confirmation_bars) if rolling_enabled else 0,
         demand_lookback,
         timing_lookback,
+        breakout_lookback,
     )
 
 
@@ -218,6 +233,203 @@ def atr(klines: list[Kline], period: int = 14) -> float | None:
     for tr in trs[period:]:
         result = (result * (period - 1) + tr) / period
     return result if math.isfinite(result) and result > 0 else None
+
+
+def breakout_retest_enabled(config: dict) -> bool:
+    return bool(config.get("BREAKOUT_RETEST_FILTER_ENABLED", False))
+
+
+def breakout_retest_required_bars(config: dict) -> int:
+    if not breakout_retest_enabled(config):
+        return 0
+    lookback = max(5, int(config.get("BREAKOUT_LOOKBACK_BARS", 30) or 30))
+    wing = max(1, int(config.get("BREAKOUT_PIVOT_WING_BARS", 2) or 2))
+    max_bars = max(1, int(config.get("BREAKOUT_RETEST_MAX_BARS", 12) or 12))
+    atr_period = max(2, int(config.get("BREAKOUT_ATR_PERIOD", 14) or 14))
+    return max(
+        lookback + max_bars + 2 * wing + 2,
+        atr_period + max_bars + 2,
+        2 * wing + 4,
+    )
+
+
+def _is_pivot_high(klines: list[Kline], index: int, wing: int) -> bool:
+    if index < wing or index + wing >= len(klines):
+        return False
+    level = float(klines[index].high)
+    return all(
+        level > float(klines[pos].high)
+        for pos in range(index - wing, index + wing + 1)
+        if pos != index
+    )
+
+
+def evaluate_breakout_retest(klines: list[Kline], config: dict) -> dict:
+    interval = str(config.get("CONFIRM_INTERVAL", TIMING_DEFAULT_INTERVAL) or TIMING_DEFAULT_INTERVAL)
+    required = breakout_retest_required_bars(config)
+    kosong = {
+        "interval": interval,
+        "bars": len(klines or []),
+        "required": required,
+        "breakout_level": None,
+        "breakout_index": None,
+        "breakout_time": None,
+        "pivot_index": None,
+        "retest_touches": 0,
+        "retest_zone_low": None,
+        "retest_zone_high": None,
+        "breakout_atr": None,
+    }
+    if not breakout_retest_enabled(config):
+        return {
+            "ok": True,
+            "reason": f"filter breakout-retest {interval} nonaktif",
+            **kosong,
+        }
+    jendela = list(klines or [])[-required:]
+    kosong["bars"] = len(jendela)
+    if len(jendela) < required:
+        return {
+            "ok": False,
+            "reason": f"data breakout-retest {interval} kurang: {len(jendela)} dari minimum {required}",
+            **kosong,
+        }
+    for candle in jendela:
+        values = (
+            float(candle.open),
+            float(candle.high),
+            float(candle.low),
+            float(candle.close),
+        )
+        if (
+            not all(math.isfinite(value) and value > 0 for value in values)
+            or values[1] < values[2]
+        ):
+            return {
+                "ok": False,
+                "reason": f"data OHLC breakout-retest {interval} tidak valid",
+                **kosong,
+            }
+
+    lookback = max(5, int(config.get("BREAKOUT_LOOKBACK_BARS", 30) or 30))
+    wing = max(1, int(config.get("BREAKOUT_PIVOT_WING_BARS", 2) or 2))
+    max_bars = max(1, int(config.get("BREAKOUT_RETEST_MAX_BARS", 12) or 12))
+    atr_period = max(2, int(config.get("BREAKOUT_ATR_PERIOD", 14) or 14))
+    tolerance_atr = max(
+        0.0, float(config.get("BREAKOUT_RETEST_TOLERANCE_ATR", 0.2) or 0.0)
+    )
+    max_touches = max(
+        1, int(config.get("BREAKOUT_RETEST_MAX_TOUCHES", 2) or 2)
+    )
+    require_bullish = bool(config.get("BREAKOUT_RETEST_REQUIRE_BULLISH", True))
+    last_index = len(jendela) - 1
+    earliest_breakout = max(2 * wing + 1, last_index - max_bars)
+    breakout = None
+
+    for breakout_index in range(last_index - 1, earliest_breakout - 1, -1):
+        pivot_start = max(wing, breakout_index - lookback)
+        pivot_stop = breakout_index - wing
+        pivots = [
+            index
+            for index in range(pivot_start, pivot_stop)
+            if _is_pivot_high(jendela, index, wing)
+        ]
+        if not pivots:
+            continue
+        pivot_index = pivots[-1]
+        level = float(jendela[pivot_index].high)
+        breakout_close = float(jendela[breakout_index].close)
+        previous_close = float(jendela[breakout_index - 1].close)
+        if breakout_close > level and previous_close <= level:
+            breakout = (breakout_index, pivot_index, level)
+            break
+
+    if breakout is None:
+        return {
+            "ok": False,
+            "reason": f"belum ada breakout {interval} tertutup di atas swing high terkonfirmasi",
+            **kosong,
+        }
+
+    breakout_index, pivot_index, level = breakout
+    breakout_atr = atr(jendela[: breakout_index + 1], atr_period)
+    if breakout_atr is None:
+        return {
+            "ok": False,
+            "reason": f"ATR{atr_period} saat breakout {interval} belum terdefinisi",
+            **{
+                **kosong,
+                "breakout_level": level,
+                "breakout_index": breakout_index,
+                "breakout_time": int(jendela[breakout_index].close_time),
+            },
+        }
+
+    tolerance = float(breakout_atr) * tolerance_atr
+    zone_low = level - tolerance
+    zone_high = level + tolerance
+    post_breakout = jendela[breakout_index + 1 :]
+    latest = post_breakout[-1]
+    touches = sum(
+        1
+        for candle in post_breakout
+        if float(candle.low) <= zone_high and float(candle.high) >= zone_low
+    )
+    terisi = {
+        **kosong,
+        "breakout_level": level,
+        "breakout_index": breakout_index,
+        "breakout_time": int(jendela[breakout_index].close_time),
+        "pivot_index": pivot_index,
+        "retest_touches": touches,
+        "retest_zone_low": zone_low,
+        "retest_zone_high": zone_high,
+        "breakout_atr": float(breakout_atr),
+    }
+
+    if any(float(candle.close) < zone_low for candle in post_breakout[:-1]):
+        return {
+            "ok": False,
+            "reason": f"struktur breakout {interval} gagal sebelum retest: close turun di bawah {zone_low:.6g}",
+            **terisi,
+        }
+    if not zone_low <= float(latest.low) <= zone_high:
+        return {
+            "ok": False,
+            "reason": (
+                f"candle {interval} terakhir belum retest area {zone_low:.6g} sampai "
+                f"{zone_high:.6g} di sekitar breakout {level:.6g}"
+            ),
+            **terisi,
+        }
+    if float(latest.close) <= level:
+        return {
+            "ok": False,
+            "reason": f"retest {interval} belum bertahan: close {latest.close:.6g} tidak di atas level {level:.6g}",
+            **terisi,
+        }
+    if require_bullish and float(latest.close) <= float(latest.open):
+        return {
+            "ok": False,
+            "reason": f"candle retest {interval} belum bullish",
+            **terisi,
+        }
+    if touches > max_touches:
+        return {
+            "ok": False,
+            "reason": f"area breakout {interval} sudah disentuh {touches} kali, maksimum {max_touches}",
+            **terisi,
+        }
+
+    age = last_index - breakout_index
+    return {
+        "ok": True,
+        "reason": (
+            f"breakout-retest {interval} valid di {level:.6g}: breakout {age} candle lalu, "
+            f"retest {touches}/{max_touches}, toleransi {tolerance_atr:g} ATR"
+        ),
+        **terisi,
+    }
 
 
 def detect_demand_zone(klines: list[Kline], config: dict) -> dict:
@@ -498,14 +710,14 @@ DIRECTION_DEFAULTS = {
     "DIRECTION_EMA_FAST": 20,
     "DIRECTION_EMA_SLOW": 50,
     "DIRECTION_ADX_PERIOD": 14,
-    "DIRECTION_ADX_MIN": 20.0,
+    "DIRECTION_ADX_MIN": 25.0,
     "DIRECTION_LOOKBACK_BARS": 60,
-    "DIRECTION_ZONE_FILTER_ENABLED": True,
+    "DIRECTION_ZONE_FILTER_ENABLED": False,
     "DIRECTION_ZONE_LOOKBACK_BARS": 20,
     "DIRECTION_ZONE_BUFFER_PCT": 2.0,
     "DIRECTION_ZONE_MAX_DISTANCE_PCT": 5.0,
     "DIRECTION_ZONE_MIN_CLOSE_POSITION": 0.35,
-    "DIRECTION_ZONE_REQUIRE_INSIDE_ZONE": True,
+    "DIRECTION_ZONE_REQUIRE_INSIDE_ZONE": False,
 }
 
 ZONE_DEFAULTS = {
@@ -514,8 +726,13 @@ ZONE_DEFAULTS = {
     "ZONE_LOOKBACK_BARS": 72,
     "ZONE_BUFFER_PCT": 1.5,
     "ZONE_MAX_DISTANCE_PCT": 4.0,
-    "ZONE_REQUIRE_INSIDE_ZONE": True,
+    "ZONE_REQUIRE_INSIDE_ZONE": False,
     "ZONE_MIN_CLOSE_POSITION": 0.35,
+    "ZONE_EMA_FAST": 20,
+    "ZONE_EMA_SLOW": 50,
+    "ZONE_ADX_PERIOD": 14,
+    "ZONE_ADX_MIN": 25.0,
+    "ZONE_TREND_LOOKBACK_BARS": 60,
 }
 
 TIMING_DEFAULTS = {
@@ -523,8 +740,19 @@ TIMING_DEFAULTS = {
     "TIMING_EMA_FAST": 20,
     "TIMING_EMA_SLOW": 50,
     "TIMING_ADX_PERIOD": 14,
-    "TIMING_ADX_MIN": 20.0,
+    "TIMING_ADX_MIN": 25.0,
     "TIMING_LOOKBACK_BARS": 60,
+}
+
+BREAKOUT_RETEST_DEFAULTS = {
+    "BREAKOUT_RETEST_FILTER_ENABLED": True,
+    "BREAKOUT_LOOKBACK_BARS": 30,
+    "BREAKOUT_PIVOT_WING_BARS": 2,
+    "BREAKOUT_ATR_PERIOD": 14,
+    "BREAKOUT_RETEST_TOLERANCE_ATR": 0.2,
+    "BREAKOUT_RETEST_MAX_BARS": 12,
+    "BREAKOUT_RETEST_MAX_TOUCHES": 2,
+    "BREAKOUT_RETEST_REQUIRE_BULLISH": True,
 }
 
 
@@ -542,7 +770,7 @@ def _ema_adx_params(config: dict, prefix: str, default_fast: int, default_slow: 
     fast = max(2, int(config.get(f"{prefix}_EMA_FAST", default_fast) or default_fast))
     slow = max(3, int(config.get(f"{prefix}_EMA_SLOW", default_slow) or default_slow))
     adx_period = max(2, int(config.get(f"{prefix}_ADX_PERIOD", 14) or 14))
-    adx_min = float(config.get(f"{prefix}_ADX_MIN", 20.0) or 0.0)
+    adx_min = float(config.get(f"{prefix}_ADX_MIN", 25.0) or 0.0)
     if adx_min < 0:
         adx_min = 0.0
     return fast, slow, adx_period, adx_min
@@ -660,10 +888,31 @@ def zone_lookback_bars(config: dict) -> int:
     return max(3, min(TREND_KLINE_LIMIT - 2, lookback))
 
 
-def zone_window_bars(config: dict) -> int:
+def zone_demand_window_bars(config: dict) -> int:
     if not zone_enabled(config):
         return 0
     return zone_lookback_bars(config) + 1
+
+
+def zone_trend_required_bars(config: dict) -> int:
+    if not zone_enabled(config):
+        return 0
+    fast, slow, adx_period, _ = _ema_adx_params(config, "ZONE", 20, 50)
+    return max(fast, slow, 2 * adx_period + 1)
+
+
+def zone_trend_window_bars(config: dict) -> int:
+    if not zone_enabled(config):
+        return 0
+    requested = int(config.get("ZONE_TREND_LOOKBACK_BARS", 60) or 60)
+    requested = max(1, min(TREND_KLINE_LIMIT - 1, requested))
+    return max(zone_trend_required_bars(config), requested)
+
+
+def zone_window_bars(config: dict) -> int:
+    if not zone_enabled(config):
+        return 0
+    return max(zone_demand_window_bars(config), zone_trend_window_bars(config))
 
 
 def zone_gate_config(config: dict) -> dict:
@@ -870,12 +1119,6 @@ def evaluate_ema_adx(
     nama_kunci_jendela: str,
     signal_close_time_ms: Optional[int] = None,
 ) -> dict:
-    """Cek EMA cepat/lambat plus ADX pada satu timeframe.
-
-    Dipakai dua kali: layer arah (Daily) dan layer timing (M5). Keduanya
-    menolak kalau close tidak di atas EMA cepat, susunan EMA terbalik, atau
-    ADX di bawah ambang.
-    """
     if interval not in INTERVAL_MINUTES:
         return {
             "ok": False,
@@ -1081,13 +1324,12 @@ def evaluate_zone(
     config: dict,
     signal_close_time_ms: Optional[int] = None,
 ) -> dict:
-    """Layer zona: posisi harga dibanding zona demand H1."""
     interval = zone_interval(config)
-    wajib = zone_window_bars(config)
+    required = zone_window_bars(config)
     if not zone_enabled(config):
         return {
             "ok": True,
-            "reason": f"filter zona {interval} nonaktif",
+            "reason": f"filter zona dan tren {interval} nonaktif",
             "interval": interval,
             "bars": 0,
             "required": 0,
@@ -1095,19 +1337,61 @@ def evaluate_zone(
             "zone_high": None,
             "distance_pct": None,
             "close_position": None,
+            "close": None,
+            "ema_fast": None,
+            "ema_slow": None,
+            "adx": None,
+            "checks": {},
+            "values": {},
+            "trend": None,
         }
-    siap = [
-        k
-        for k in (klines or [])
+    available = [
+        candle
+        for candle in (klines or [])
         if signal_close_time_ms is None
-        or int(k.close_time) <= int(signal_close_time_ms)
+        or int(candle.close_time) <= int(signal_close_time_ms)
     ]
-    jendela = siap[-wajib:] if wajib > 0 else siap
-    hasil = detect_demand_zone(jendela, zone_gate_config(config))
-    hasil["interval"] = interval
-    hasil["bars"] = len(jendela)
-    hasil["required"] = wajib
-    return hasil
+    window = available[-required:] if required > 0 else available
+    demand_required = zone_demand_window_bars(config)
+    demand_window = window[-demand_required:] if demand_required > 0 else window
+    demand = detect_demand_zone(demand_window, zone_gate_config(config))
+    fast, slow, adx_period, adx_min = _ema_adx_params(config, "ZONE", 20, 50)
+    trend = evaluate_ema_adx(
+        window,
+        interval=interval,
+        fast=fast,
+        slow=slow,
+        adx_period=adx_period,
+        adx_min=adx_min,
+        window=zone_trend_window_bars(config),
+        required=zone_trend_required_bars(config),
+        label="tren zona",
+        nama_kunci_jendela="ZONE_TREND_LOOKBACK_BARS",
+    )
+    reasons = []
+    if not demand["ok"]:
+        reasons.append(f"demand ditolak: {demand['reason']}")
+    if not trend["ok"]:
+        reasons.append(f"tren ditolak: {trend['reason']}")
+    if not reasons:
+        reasons.append(f"{demand['reason']} | {trend['reason']}")
+    return {
+        **demand,
+        "ok": bool(demand["ok"] and trend["ok"]),
+        "reason": " | ".join(reasons),
+        "interval": interval,
+        "bars": len(window),
+        "required": required,
+        "demand_bars": len(demand_window),
+        "demand_required": demand_required,
+        "close": trend.get("close"),
+        "ema_fast": trend.get("ema_fast"),
+        "ema_slow": trend.get("ema_slow"),
+        "adx": trend.get("adx"),
+        "checks": trend.get("checks") or {},
+        "values": trend.get("values") or {},
+        "trend": trend,
+    }
 
 
 def evaluate_timing(

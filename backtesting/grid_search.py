@@ -32,6 +32,9 @@ KUNCI_PERSEN = (
     "TRAILING_START_PCT",
     "TRAILING_STEP_PCT",
 )
+KUNCI_GRID_PORTOFOLIO = frozenset(
+    ("USE_ATR_EXIT", "MAX_HOLD_HOURS", *KUNCI_ATR, *KUNCI_PERSEN)
+)
 
 MAX_KOMBINASI = 2000
 
@@ -103,6 +106,17 @@ def _pastikan_kunci_berefek(spec: dict) -> None:
             + ", ".join(sorted(tidak_dikenal))
             + ". Parameter yang didukung: "
             + ", ".join(sorted(bt.OVERRIDE_CASTERS))
+            + "."
+        )
+
+
+def _pastikan_grid_portofolio_hanya_exit(spec: dict) -> None:
+    tidak_didukung = sorted(set(spec) - KUNCI_GRID_PORTOFOLIO)
+    if tidak_didukung:
+        raise GridSearchError(
+            "Grid portofolio hanya boleh menyapu parameter exit karena lookup timeframe "
+            "tinggi dibangun dari konfigurasi entry dasar. Parameter entry yang ditolak: "
+            + ", ".join(tidak_didukung)
             + "."
         )
 
@@ -430,6 +444,7 @@ def run_portfolio_grid_search(
     min_trades = int(min_trades)
     if min_trades < 1:
         raise GridSearchError("min_trades minimal 1.")
+    _pastikan_grid_portofolio_hanya_exit(spec)
 
     kombinasi, dipangkas = expand_grid(
         spec,
@@ -831,6 +846,18 @@ def selftest() -> bool:
         check("expand_grid menolak daftar kosong", False)
     except GridSearchError:
         check("expand_grid menolak daftar kosong", True)
+    try:
+        _pastikan_grid_portofolio_hanya_exit(
+            {"BREAKOUT_RETEST_TOLERANCE_ATR": [0.1, 0.2]}
+        )
+        check("grid portofolio menolak parameter entry", False)
+    except GridSearchError:
+        check("grid portofolio menolak parameter entry", True)
+    try:
+        _pastikan_grid_portofolio_hanya_exit({"ATR_MULT_SL": [5.0, 6.0]})
+        check("grid portofolio menerima parameter exit", True)
+    except GridSearchError:
+        check("grid portofolio menerima parameter exit", False)
 
     check("hitung_skor total_return_pct", hitung_skor({"total_return_pct": 5.0}, "total_return_pct") == 5.0)
     check("hitung_skor profit_factor", hitung_skor({"profit_factor": 2.5}, "profit_factor") == 2.5)
@@ -864,6 +891,7 @@ def selftest() -> bool:
         "DIRECTION_ZONE_FILTER_ENABLED": False,
         "ZONE_FILTER_ENABLED": False,
         "TIMING_FILTER_ENABLED": False,
+        "BREAKOUT_RETEST_FILTER_ENABLED": False,
         "DEMAND_ZONE_FILTER_ENABLED": False,
         "BTC_FILTER_ENABLED": False,
         "ROLLING_VOLUME_FILTER_ENABLED": False,
@@ -923,6 +951,7 @@ def selftest() -> bool:
         "DIRECTION_ZONE_FILTER_ENABLED": True,
         "ZONE_FILTER_ENABLED": True,
         "TIMING_FILTER_ENABLED": False,
+        "BREAKOUT_RETEST_FILTER_ENABLED": False,
         "DEMAND_ZONE_FILTER_ENABLED": False,
         "BTC_FILTER_ENABLED": False,
         "ROLLING_VOLUME_FILTER_ENABLED": False,

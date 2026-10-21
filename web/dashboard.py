@@ -844,6 +844,17 @@ BT_PARAM_KEYS = (
     "BE_LOCK_PCT",
     "TRAILING_START_PCT",
     "TRAILING_STEP_PCT",
+    "CONFIRM_LOOKBACK_BARS",
+    "ROLLING_VOLUME_FILTER_ENABLED",
+    "ROLLING_VOLUME_LOOKBACK_BARS",
+    "ROLLING_VOLUME_SURGE_MULT",
+    "ROLLING_VOLUME_CONFIRMATION_BARS",
+    "DEMAND_ZONE_FILTER_ENABLED",
+    "DEMAND_LOOKBACK_BARS",
+    "DEMAND_ZONE_BUFFER_PCT",
+    "DEMAND_MAX_DISTANCE_PCT",
+    "DEMAND_MIN_CLOSE_POSITION",
+    "DEMAND_REQUIRE_INSIDE_ZONE",
     "DIRECTION_FILTER_ENABLED",
     "DIRECTION_INTERVAL",
     "DIRECTION_EMA_FAST",
@@ -858,26 +869,37 @@ BT_PARAM_KEYS = (
     "DIRECTION_ZONE_MIN_CLOSE_POSITION",
     "DIRECTION_ZONE_REQUIRE_INSIDE_ZONE",
     "ZONE_REQUIRE_INSIDE_ZONE",
-    "DEMAND_REQUIRE_INSIDE_ZONE",
     "ZONE_FILTER_ENABLED",
     "ZONE_INTERVAL",
     "ZONE_LOOKBACK_BARS",
     "ZONE_BUFFER_PCT",
     "ZONE_MAX_DISTANCE_PCT",
     "ZONE_MIN_CLOSE_POSITION",
+    "ZONE_EMA_FAST",
+    "ZONE_EMA_SLOW",
+    "ZONE_ADX_PERIOD",
+    "ZONE_ADX_MIN",
+    "ZONE_TREND_LOOKBACK_BARS",
     "TIMING_FILTER_ENABLED",
     "TIMING_EMA_FAST",
     "TIMING_EMA_SLOW",
     "TIMING_ADX_PERIOD",
     "TIMING_ADX_MIN",
     "TIMING_LOOKBACK_BARS",
+    "BREAKOUT_RETEST_FILTER_ENABLED",
+    "BREAKOUT_LOOKBACK_BARS",
+    "BREAKOUT_PIVOT_WING_BARS",
+    "BREAKOUT_ATR_PERIOD",
+    "BREAKOUT_RETEST_TOLERANCE_ATR",
+    "BREAKOUT_RETEST_MAX_BARS",
+    "BREAKOUT_RETEST_MAX_TOUCHES",
+    "BREAKOUT_RETEST_REQUIRE_BULLISH",
 )
 
 GRID_PARAM_KEYS = tuple(
-    k
-    for k in BT_PARAM_KEYS
-    if k != "USE_ATR_EXIT"
-    and not k.startswith(("DIRECTION_", "ZONE_", "TIMING_"))
+    key
+    for key in BT_PARAM_KEYS
+    if key != "USE_ATR_EXIT" and key in gs.KUNCI_GRID_PORTOFOLIO
 )
 
 _bt_jobs: dict = {}
@@ -904,7 +926,9 @@ def _bt_simulation_interval(cfg: dict) -> str:
 def _bt_native_htf_intervals(cfg: dict) -> list[str]:
     """Interval timeframe tinggi yang diambil langsung dari bursa."""
     out: list[str] = []
-    if bool(cfg.get("DIRECTION_FILTER_ENABLED", False)):
+    if bool(cfg.get("DIRECTION_FILTER_ENABLED", False)) or bool(
+        cfg.get("DIRECTION_ZONE_FILTER_ENABLED", False)
+    ):
         out.append(str(cfg.get("DIRECTION_INTERVAL", "1d") or "1d"))
     if bool(cfg.get("ZONE_FILTER_ENABLED", False)):
         out.append(str(cfg.get("ZONE_INTERVAL", "1h") or "1h"))
@@ -923,12 +947,20 @@ def _bt_native_prebuilt(prep: dict, cfg: dict):
     zona = prep.get("native_zona")
     if arah is None or zona is None:
         return None
-    if _bt_native_htf_intervals(cfg) and not arah and not zona:
+    missing = []
+    if (
+        bool(cfg.get("DIRECTION_FILTER_ENABLED", False))
+        or bool(cfg.get("DIRECTION_ZONE_FILTER_ENABLED", False))
+    ) and not arah:
+        missing.append(str(cfg.get("DIRECTION_INTERVAL", "1d") or "1d"))
+    if bool(cfg.get("ZONE_FILTER_ENABLED", False)) and not zona:
+        missing.append(str(cfg.get("ZONE_INTERVAL", "1h") or "1h"))
+    if missing:
         raise bt.BacktestError(
-            "Candle Daily/H1 native tidak berhasil diambil dari Binance, sehingga "
-            "layer arah dan layer zona akan menolak semua kandidat. Simulasi "
-            "dihentikan supaya tidak menampilkan 0 trade yang menyesatkan. Periksa "
-            "koneksi ke Binance lalu jalankan ulang."
+            "Candle timeframe tinggi native tidak berhasil diambil untuk "
+            + ", ".join(missing)
+            + ". Simulasi dihentikan supaya tidak menampilkan 0 trade yang "
+            "menyesatkan. Periksa koneksi ke Binance lalu jalankan ulang."
         )
     return (None, None, arah, zona, None)
 
@@ -941,7 +973,10 @@ def _bt_simulation_warmup_bars(cfg: dict) -> int:
     diperlukan pada rentang simulasi.
     """
     interval = _bt_simulation_interval(cfg)
-    dasar = bt.bars_per_day(interval) + 30
+    dasar = max(
+        bt.bars_per_day(interval) + 30,
+        strategy.required_lookback_bars(cfg),
+    )
     if _bt_native_htf_intervals(cfg):
         return dasar
     try:
@@ -962,24 +997,22 @@ def _bt_estimate_requests(days: int, max_symbols: int, cfg: dict) -> int:
 
 
 def _bt_direction_warmup_note(cfg: dict, interval: str) -> str:
-    if not bool(cfg.get("DIRECTION_FILTER_ENABLED", False)):
-        return (
-            "Layer arah sedang NONAKTIF, jadi candle harian tidak diambil dan tidak ada "
-            "sinyal yang disaring di atas."
-        )
+    arah_active = bool(cfg.get("DIRECTION_FILTER_ENABLED", False))
+    daily_zone_active = bool(cfg.get("DIRECTION_ZONE_FILTER_ENABLED", False))
+    if not arah_active and not daily_zone_active:
+        return "Gerbang Daily nonaktif, jadi candle harian tidak diambil."
     try:
         hari = pbt.parity.direction_warmup_ms(cfg, interval) / float(bt.MS_PER_DAY)
     except ValueError:
         return (
-            "Layer arah aktif, tetapi interval arah tidak sepadan dengan interval "
+            "Gerbang Daily aktif, tetapi intervalnya tidak sepadan dengan interval "
             "simulasi sehingga backtest ini akan menolak berjalan."
         )
     return (
-        f"Layer arah memakai candle {cfg.get('DIRECTION_INTERVAL', '1d')} asli dari bursa, "
-        "sama persis seperti bot live, sehingga tidak menambah warmup pada rentang "
+        f"Gerbang Daily memakai candle {cfg.get('DIRECTION_INTERVAL', '1d')} asli dari "
+        "bursa, sama seperti bot live, sehingga tidak menambah warmup pada rentang "
         f"simulasi {interval}. Kalau memakai jalur agregasi, pemanasan gerbang ini "
-        f"butuh sekitar {hari:.1f} hari pertama. Bandingkan penghitung sinyal yang "
-        "disaring layer arah pada ringkasan di atas."
+        f"butuh sekitar {hari:.1f} hari pertama."
     )
 
 
@@ -999,19 +1032,30 @@ def _bt_zone_warmup_note(cfg: dict, interval: str) -> str:
 
 
 def _bt_timing_note(cfg: dict, interval: str) -> str:
-    if not bool(cfg.get("TIMING_FILTER_ENABLED", False)):
-        return "Layer timing nonaktif; tidak ada sinyal yang disaring olehnya."
+    timing_active = bool(cfg.get("TIMING_FILTER_ENABLED", False))
+    breakout_active = bool(cfg.get("BREAKOUT_RETEST_FILTER_ENABLED", False))
+    rolling_active = bool(cfg.get("ROLLING_VOLUME_FILTER_ENABLED", False))
+    demand_active = bool(cfg.get("DEMAND_ZONE_FILTER_ENABLED", False))
+    if not any((timing_active, breakout_active, rolling_active, demand_active)):
+        return "Seluruh gerbang tambahan M5 nonaktif."
     try:
-        jam = pbt.parity.gate_warmup_ms(cfg, interval) / 3_600_000
-        candle = pbt.parity.gate_warmup_bars(cfg, interval)
-    except ValueError as exc:
-        return f"Layer timing tidak bisa disimulasikan: {exc}"
+        candle = strategy.required_lookback_bars(cfg)
+        jam = candle * strategy.interval_to_ms(interval) / 3_600_000
+    except (ValueError, KeyError) as exc:
+        return f"Gerbang M5 tidak bisa disimulasikan: {exc}"
+    aktif = []
+    if timing_active:
+        aktif.append("tren M5")
+    if breakout_active:
+        aktif.append("breakout-retest")
+    if rolling_active:
+        aktif.append("volume rolling")
+    if demand_active:
+        aktif.append("demand M5")
     return (
-        f"Layer timing memakai candle {cfg.get('CONFIRM_INTERVAL', '5m')} yang sama "
-        "dengan konfirmasi volume dan zona demand, jadi tidak ada unduhan tambahan. "
-        f"Gerbang EMA + ADX butuh {candle} candle "
-        "tertutup (sekitar "
-        f"{jam:.2f} jam)."
+        f"{' lalu '.join(aktif)} memakai candle {cfg.get('CONFIRM_INTERVAL', '5m')} "
+        f"yang sama, tanpa unduhan tambahan. Gerbang M5 membutuhkan {candle} candle "
+        f"tertutup, sekitar {jam:.2f} jam."
     )
 
 
@@ -1140,8 +1184,10 @@ def _bt_prepare_universe(
 
         arah_of = {}
         zona_of = {}
-        native_htf_aktif = bool(cfg.get("DIRECTION_FILTER_ENABLED", False)) or bool(
-            cfg.get("ZONE_FILTER_ENABLED", False)
+        native_htf_aktif = (
+            bool(cfg.get("DIRECTION_FILTER_ENABLED", False))
+            or bool(cfg.get("DIRECTION_ZONE_FILTER_ENABLED", False))
+            or bool(cfg.get("ZONE_FILTER_ENABLED", False))
         )
         if native_htf_aktif:
             set_progress(
@@ -1395,6 +1441,13 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "max_distance_pct": float(cfg.get("ZONE_MAX_DISTANCE_PCT", 4.0) or 0.0),
                 "require_inside": bool(cfg.get("ZONE_REQUIRE_INSIDE_ZONE", False)),
                 "min_close_position": float(cfg.get("ZONE_MIN_CLOSE_POSITION", 0.35) or 0.0),
+                "ema_fast": int(cfg.get("ZONE_EMA_FAST", 20) or 20),
+                "ema_slow": int(cfg.get("ZONE_EMA_SLOW", 50) or 50),
+                "adx_period": int(cfg.get("ZONE_ADX_PERIOD", 14) or 14),
+                "adx_min": float(cfg.get("ZONE_ADX_MIN", 25.0) or 0.0),
+                "trend_lookback_bars": int(
+                    cfg.get("ZONE_TREND_LOOKBACK_BARS", 60) or 60
+                ),
                 "skips": int(getattr(result, "zone_skips", 0)),
                 "scans": int(getattr(result, "zone_scans", 0)),
             },
@@ -1408,6 +1461,55 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "lookback_bars": int(cfg.get("TIMING_LOOKBACK_BARS", 60) or 60),
                 "skips": int(getattr(result, "timing_skips", 0)),
                 "scans": int(getattr(result, "timing_scans", 0)),
+            },
+            "breakout_retest": {
+                "enabled": bool(cfg.get("BREAKOUT_RETEST_FILTER_ENABLED", False)),
+                "interval": str(cfg.get("CONFIRM_INTERVAL", "5m")),
+                "lookback_bars": int(cfg.get("BREAKOUT_LOOKBACK_BARS", 30) or 30),
+                "pivot_wing_bars": int(
+                    cfg.get("BREAKOUT_PIVOT_WING_BARS", 2) or 2
+                ),
+                "atr_period": int(cfg.get("BREAKOUT_ATR_PERIOD", 14) or 14),
+                "tolerance_atr": float(
+                    cfg.get("BREAKOUT_RETEST_TOLERANCE_ATR", 0.2) or 0.0
+                ),
+                "max_bars": int(cfg.get("BREAKOUT_RETEST_MAX_BARS", 12) or 12),
+                "max_touches": int(
+                    cfg.get("BREAKOUT_RETEST_MAX_TOUCHES", 2) or 2
+                ),
+                "require_bullish": bool(
+                    cfg.get("BREAKOUT_RETEST_REQUIRE_BULLISH", True)
+                ),
+                "skips": int(getattr(result, "breakout_skips", 0)),
+                "scans": int(getattr(result, "breakout_scans", 0)),
+            },
+            "rolling_volume": {
+                "enabled": bool(cfg.get("ROLLING_VOLUME_FILTER_ENABLED", False)),
+                "interval": str(cfg.get("CONFIRM_INTERVAL", "5m")),
+                "lookback_bars": int(
+                    cfg.get("ROLLING_VOLUME_LOOKBACK_BARS", 20) or 20
+                ),
+                "surge_mult": float(cfg.get("ROLLING_VOLUME_SURGE_MULT", 1.2) or 0.0),
+                "confirmation_bars": int(
+                    cfg.get("ROLLING_VOLUME_CONFIRMATION_BARS", 1) or 1
+                ),
+            },
+            "demand_m5": {
+                "enabled": bool(cfg.get("DEMAND_ZONE_FILTER_ENABLED", False)),
+                "interval": str(cfg.get("CONFIRM_INTERVAL", "5m")),
+                "lookback_bars": int(cfg.get("DEMAND_LOOKBACK_BARS", 20) or 20),
+                "zone_buffer_pct": float(
+                    cfg.get("DEMAND_ZONE_BUFFER_PCT", 0.8) or 0.0
+                ),
+                "max_distance_pct": float(
+                    cfg.get("DEMAND_MAX_DISTANCE_PCT", 4.5) or 0.0
+                ),
+                "min_close_position": float(
+                    cfg.get("DEMAND_MIN_CLOSE_POSITION", 0.35) or 0.0
+                ),
+                "require_inside": bool(
+                    cfg.get("DEMAND_REQUIRE_INSIDE_ZONE", False)
+                ),
             },
             "trades": trades_out,
             "skipped": skipped_out,
@@ -1645,9 +1747,10 @@ def _bt_run_grid_job(
                 "walk-forward bergulir). Untuk keyakinan lebih, ulangi dengan beberapa "
                 "rasio dan rentang hari yang berbeda.",
                 "Yang disapu grid hanya parameter EXIT. Layer arah (DIRECTION_*), layer "
-                "zona (ZONE_*), layer timing (TIMING_*), dan USE_ATR_EXIT tidak ikut disapu: "
-                "nilainya diambil dari form backtest karena "
-                "sinyal entry dihitung sekali lalu dipakai ulang oleh semua kombinasi. Untuk "
+                "zona (ZONE_*), layer timing (TIMING_*), breakout-retest (BREAKOUT_*), "
+                "rolling volume (ROLLING_*), demand M5 (DEMAND_*), dan USE_ATR_EXIT tidak "
+                "ikut disapu: nilainya diambil dari konfigurasi backtest dan tetap sama pada "
+                "semua kombinasi. Lookup timeframe tinggi digunakan ulang. Untuk "
                 "membandingkan setelan trend, jalankan backtest portofolio terpisah per setelan.",
                 "Statistik 24 jam DIREKONSTRUKSI dari candle, bukan snapshot "
                 "ticker/24hr historis. Volume itulah yang menentukan simbol mana yang "
@@ -1707,8 +1810,15 @@ def _bt_demand_limitations(cfg: dict, interval: str) -> str:
         "Layer zona H1 juga SUDAH disimulasikan dengan aturan yang sama seperti bot "
         "live: memakai candle "
         + str(cfg.get("ZONE_INTERVAL", "1h"))
-        + " yang sudah tutup, memakai mesin zona yang sama dengan filter demand M5 "
-        "hanya parameternya berbeda. Lapisan ini diperiksa SETELAH layer arah, dan "
+        + " yang sudah tutup untuk memeriksa demand zone, EMA"
+        + str(int(cfg.get("ZONE_EMA_FAST", 20) or 20))
+        + "/"
+        + str(int(cfg.get("ZONE_EMA_SLOW", 50) or 50))
+        + ", dan ADX"
+        + str(int(cfg.get("ZONE_ADX_PERIOD", 14) or 14))
+        + " minimal "
+        + f"{float(cfg.get('ZONE_ADX_MIN', 25.0) or 0.0):g}. "
+        "Lapisan ini diperiksa SETELAH layer arah, dan "
         "fail closed bila candle tidak cukup. Penghitung "
         "\"disaring X dari Y sinyal\" pada ringkasan hanya menghitung sinyal yang "
         "SUDAH lolos gerbang sebelumnya: angka 0 berarti lapisan itu tidak pernah "
@@ -1720,10 +1830,16 @@ def _bt_demand_limitations(cfg: dict, interval: str) -> str:
 
 def _bt_min_days_note(cfg: dict, interval: str) -> tuple[int, str]:
     dasar = 2
-    arah_aktif = bool(cfg.get("DIRECTION_FILTER_ENABLED", False))
+    arah_aktif = bool(cfg.get("DIRECTION_FILTER_ENABLED", False)) or bool(
+        cfg.get("DIRECTION_ZONE_FILTER_ENABLED", False)
+    )
     zona_aktif = bool(cfg.get("ZONE_FILTER_ENABLED", False))
     timing_aktif = bool(cfg.get("TIMING_FILTER_ENABLED", False))
-    if not arah_aktif and not zona_aktif and not timing_aktif:
+    breakout_aktif = bool(cfg.get("BREAKOUT_RETEST_FILTER_ENABLED", False))
+    rolling_aktif = bool(cfg.get("ROLLING_VOLUME_FILTER_ENABLED", False))
+    demand_aktif = bool(cfg.get("DEMAND_ZONE_FILTER_ENABLED", False))
+    m5_aktif = any((timing_aktif, breakout_aktif, rolling_aktif, demand_aktif))
+    if not arah_aktif and not zona_aktif and not m5_aktif:
         return dasar, ""
 
     native_htf = bool(_bt_native_htf_intervals(cfg))
@@ -1748,36 +1864,41 @@ def _bt_min_days_note(cfg: dict, interval: str) -> tuple[int, str]:
                 f"dirangkai dari candle {interval} sehingga butuh sekitar "
                 f"{jam_gerbang:.2f} jam pemanasan."
             )
-    if timing_aktif:
+    if m5_aktif:
         try:
-            jam_timing = (
-                strategy.timing_window_bars(cfg)
-                * strategy.interval_to_ms(interval)
-                / 3_600_000
-            )
+            m5_bars = strategy.required_lookback_bars(cfg)
+            jam_timing = m5_bars * strategy.interval_to_ms(interval) / 3_600_000
         except (ValueError, KeyError) as exc:
             return dasar, str(exc)
         minimal = max(minimal, int(math.ceil(jam_timing / 24.0)) + 1)
         catatan += (
-            f" Layer timing ({cfg.get('CONFIRM_INTERVAL', '5m')}) butuh sekitar "
+            f" Gerbang M5 ({cfg.get('CONFIRM_INTERVAL', '5m')}) butuh sekitar "
             f"{jam_timing:.2f} jam riwayat sebelum bar pertama bisa dievaluasi."
         )
     return minimal, catatan.strip()
 
 
 def _bt_peringatan_timing(cfg: dict, days: int) -> list:
-    if not bool(cfg.get("TIMING_FILTER_ENABLED", False)):
+    m5_active = any(
+        bool(cfg.get(key, False))
+        for key in (
+            "TIMING_FILTER_ENABLED",
+            "BREAKOUT_RETEST_FILTER_ENABLED",
+            "ROLLING_VOLUME_FILTER_ENABLED",
+            "DEMAND_ZONE_FILTER_ENABLED",
+        )
+    )
+    if not m5_active:
         return []
     interval = str(cfg.get("CONFIRM_INTERVAL", "5m") or "5m")
     bar_uji = int(days) * 1440 // max(1, bt.INTERVAL_MINUTES.get(interval, 5))
-    butuh = pbt.parity.gate_warmup_bars(cfg, interval)
+    butuh = strategy.required_lookback_bars(cfg)
     if bar_uji >= butuh:
         return []
     return [
         f"Rentang uji {int(days)} hari mencakup sekitar {bar_uji} candle {interval}, "
-        f"lebih pendek dari kebutuhan layer timing ({butuh} candle). "
-        "Gerbang tetap dijalankan, tetapi hasilnya kurang representatif; "
-        "perpanjang rentang uji atau turunkan TIMING_LOOKBACK_BARS."
+        f"lebih pendek dari kebutuhan gerbang M5 ({butuh} candle). Gerbang tetap "
+        "dijalankan, tetapi hasilnya kurang representatif; perpanjang rentang uji."
     ]
 
 
@@ -2885,14 +3006,16 @@ if __name__ == "__main__":
         "--selftest",
         action="store_true",
         help=(
-            "Jalankan pemeriksaan aturan exit (termasuk time stop) tanpa "
-            "menjalankan server dashboard."
+            "Jalankan pemeriksaan aturan entry dan exit tanpa menjalankan "
+            "server dashboard."
         ),
     )
     _args = _parser.parse_args()
     if _args.selftest:
+        from backtesting.entry_selftest import run as _run_entry_selftest
         from backtesting.exit_selftest import run as _run_exit_selftest
 
-        _sukses, _ = _run_exit_selftest(verbose=True)
-        raise SystemExit(0 if _sukses else 1)
+        _entry_ok, _ = _run_entry_selftest(verbose=True)
+        _exit_ok, _ = _run_exit_selftest(verbose=True)
+        raise SystemExit(0 if _entry_ok and _exit_ok else 1)
     raise SystemExit(main(auto_start_bot=False))
