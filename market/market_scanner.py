@@ -45,6 +45,8 @@ class Candidate:
     confirmed: bool = False
     confirm_reason: str = ""
     setup: "Optional[SetupResult]" = None
+    htf_trend: "Optional[dict]" = None
+    htf_resistance: "Optional[dict]" = None
     direction: "Optional[dict]" = None
     direction_zone: "Optional[dict]" = None
     timing: "Optional[dict]" = None
@@ -93,7 +95,10 @@ class ScanDiagnostics:
             return []
         interval = str(config.get("CONFIRM_INTERVAL", "5m"))
         arah_interval = str(config.get("DIRECTION_INTERVAL", "15m"))
+        htf_interval = str(config.get("HTF_INTERVAL", "1h"))
         labels = {
+            "HTF_TREND": f"tren {htf_interval}",
+            "HTF_RESISTANCE": f"resistance {htf_interval}",
             "DIRECTION": f"arah {arah_interval}",
             "DIRECTION_ZONE": f"zona demand {arah_interval}",
             "CANDLE_CONFIRM": f"candle {interval} gagal diambil",
@@ -118,6 +123,18 @@ class ScanDiagnostics:
             f"candle konfirmasi terbaru tutup {candle}.",
             "Diagnostik: setiap simbol dicatat pada gerbang pertama yang gagal.",
         ]
+        if bool(config.get("HTF_FILTER_ENABLED", False)):
+            lines.insert(
+                0,
+                f"Status gerbang tren HTF {htf_interval}: AKTIF; hanya candle tertutup "
+                "yang dipakai dan kegagalan data menolak entry.",
+            )
+        if strategy.htf_resistance_enabled(config):
+            lines.insert(
+                1 if lines else 0,
+                f"Status resistance HTF {htf_interval}: AKTIF; close sinyal M5 "
+                "dibandingkan dengan pivot high H1 tertutup.",
+            )
         for stage, label in labels.items():
             count = self.rejection_counts.get(stage, 0)
             if not count:
@@ -583,6 +600,80 @@ def setup_quality_key(setup: SetupResult, candidate: Candidate) -> tuple:
     return (-float(candidate.quote_volume),)
 
 
+def _htf_trend_context(
+    symbol: str,
+    config: dict,
+    htf_provider,
+    signal_close_time_ms: int | None = None,
+) -> tuple[dict, list[Kline] | None]:
+    from strategy import indicators as strategy_mod
+
+    interval = strategy_mod.htf_interval(config)
+    if not strategy_mod.htf_enabled(config):
+        return strategy_mod.evaluate_htf([], config, signal_close_time_ms), None
+
+    kosong = {
+        "interval": interval,
+        "bars": 0,
+        "required": strategy_mod.htf_required_bars(config),
+        "window": strategy_mod.htf_window_bars(config),
+        "close": None,
+        "ema_fast": None,
+        "ema_slow": None,
+        "adx": None,
+        "checks": {},
+        "values": {},
+    }
+    if htf_provider is None:
+        return (
+            {
+                "ok": False,
+                "reason": (
+                    f"filter tren HTF {interval} aktif tetapi penyedia candle "
+                    "tidak tersedia (ditolak demi keamanan)"
+                ),
+                **kosong,
+            },
+            None,
+        )
+    try:
+        klines = htf_provider(symbol)
+    except Exception as exc:
+        return (
+            {
+                "ok": False,
+                "reason": f"candle tren HTF {interval} {symbol} gagal diambil: {exc} (ditolak demi keamanan)",
+                **kosong,
+            },
+            None,
+        )
+    if not klines:
+        return (
+            {
+                "ok": False,
+                "reason": f"candle tren HTF {interval} {symbol} kosong (ditolak demi keamanan)",
+                **kosong,
+            },
+            None,
+        )
+    rows = list(klines)
+    return (
+        strategy_mod.evaluate_htf(rows, config, signal_close_time_ms),
+        rows,
+    )
+
+
+def htf_trend_verdict(
+    symbol: str,
+    config: dict,
+    htf_provider,
+    signal_close_time_ms: int | None = None,
+) -> dict:
+    return _htf_trend_context(
+        symbol, config, htf_provider, signal_close_time_ms
+    )[0]
+
+
 def direction_verdict(
     symbol: str,
     config: dict,
@@ -725,6 +816,7 @@ def find_best_candidate(
     direction_provider: "Optional[Callable[[str], list]]" = None,
     diagnostics: Optional[ScanDiagnostics] = None,
     confirm_close_time_ms: "int | None" = None,
+    htf_provider: "Optional[Callable[[str], list]]" = None,
 ) -> Optional[Candidate]:
     ranked = filter_and_rank_candidates(tickers, config, tradable_symbols)
     top_n = ranked[: int(config.get("TOP_N_CANDIDATES_TO_CONFIRM", 10) or 10)]
@@ -744,7 +836,31 @@ def find_best_candidate(
             logger.debug("Pemanasan harga kandidat dilewati: %s", exc)
 
     lolos_htf: list[Candidate] = []
+    htf_klines_by_symbol: dict[str, list[Kline]] = {}
+    resistance_active = strategy.htf_resistance_enabled(config)
     for cand in top_n:
+        if strategy.htf_enabled(config):
+            if resistance_active:
+                tren_htf, htf_klines = _htf_trend_context(
+                    cand.symbol, config, htf_provider, confirm_close_time_ms
+                )
+                if htf_klines is not None:
+                    htf_klines_by_symbol[cand.symbol] = htf_klines
+            else:
+                tren_htf = htf_trend_verdict(
+                    cand.symbol, config, htf_provider, confirm_close_time_ms
+                )
+            cand.htf_trend = tren_htf
+            if not tren_htf["ok"]:
+                cand.confirmed = False
+                cand.confirm_reason = (
+                    f"tren HTF {tren_htf.get('interval') or '1h'} ditolak: "
+                    f"{tren_htf['reason']}"
+                )
+                if diagnostics is not None:
+                    diagnostics.reject("HTF_TREND", cand.symbol, tren_htf["reason"])
+                continue
+            cand.confirm_reason = tren_htf["reason"]
         if bool(config.get("DIRECTION_FILTER_ENABLED", False)):
             arah = direction_verdict(
                 cand.symbol, config, direction_provider, confirm_close_time_ms
@@ -758,7 +874,11 @@ def find_best_candidate(
                 if diagnostics is not None:
                     diagnostics.reject("DIRECTION", cand.symbol, arah["reason"])
                 continue
-            cand.confirm_reason = arah["reason"]
+            cand.confirm_reason = (
+                f"{cand.confirm_reason} | {arah['reason']}"
+                if cand.confirm_reason
+                else arah["reason"]
+            )
         if bool(config.get("DIRECTION_ZONE_FILTER_ENABLED", False)):
             zona_arah = direction_zone_verdict(
                 cand.symbol, config, direction_provider, confirm_close_time_ms
@@ -811,6 +931,48 @@ def find_best_candidate(
         if diagnostics is not None:
             diagnostics.observe_signal(klines)
         signal_close_time_ms = int(klines[-1].close_time) if klines else None
+        if resistance_active:
+            try:
+                signal_price = float(klines[-1].close) if klines else None
+                resistance = strategy.evaluate_htf_resistance(
+                    htf_klines_by_symbol.get(cand.symbol, []),
+                    config,
+                    signal_price=signal_price,
+                    signal_close_time_ms=signal_close_time_ms,
+                )
+            except Exception as exc:
+                resistance = {
+                    "ok": False,
+                    "interval": strategy.htf_interval(config),
+                    "resistance_price": None,
+                    "distance_pct": None,
+                    "reason": (
+                        f"evaluasi resistance HTF gagal: {exc} "
+                        "(ditolak demi keamanan)"
+                    ),
+                }
+            cand.htf_resistance = resistance
+            if not resistance["ok"]:
+                cand.confirmed = False
+                resistance_reason = (
+                    f"resistance HTF {resistance.get('interval') or '1h'} "
+                    f"ditolak: {resistance['reason']}"
+                )
+                cand.confirm_reason = (
+                    f"{cand.confirm_reason} | {resistance_reason}"
+                    if cand.confirm_reason
+                    else resistance_reason
+                )
+                if diagnostics is not None:
+                    diagnostics.reject(
+                        "HTF_RESISTANCE", cand.symbol, resistance["reason"]
+                    )
+                continue
+            cand.confirm_reason = (
+                f"{cand.confirm_reason} | {resistance['reason']}"
+                if cand.confirm_reason
+                else resistance["reason"]
+            )
         if bool(config.get("TIMING_FILTER_ENABLED", False)):
             timing = timing_verdict(config, klines or [], signal_close_time_ms)
             cand.timing = timing

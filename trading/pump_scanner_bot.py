@@ -69,6 +69,7 @@ class HtfKlineCache:
         self._config = config
         self._lock = threading.RLock()
         self._cache: dict[str, tuple[int, list]] = {}
+        self._negative_cache: dict[str, tuple[float, str, bool]] = {}
 
     def interval(self) -> str:
         raise NotImplementedError
@@ -82,35 +83,97 @@ class HtfKlineCache:
     def _interval_ms(self) -> int:
         return int(strategy.INTERVAL_MINUTES[self.interval()]) * 60_000
 
+    def negative_cache_ttl_seconds(self) -> float:
+        return 0.0
+
+    def require_latest_closed_bar(self) -> bool:
+        return False
+
     def _last_closed_open_time(self, now_ms: int) -> int:
         step = self._interval_ms()
         return ((int(now_ms) // step) - 1) * step
+
+    def _simpan_kegagalan(
+        self, symbol: str, reason: str, *, gagal: bool, ttl: float
+    ) -> None:
+        if ttl <= 0:
+            return
+        with self._lock:
+            self._negative_cache[symbol] = (
+                time.monotonic() + ttl,
+                str(reason),
+                bool(gagal),
+            )
 
     def window_klines(self, symbol: str, now_ms: int) -> list:
         jendela = self.window_bars()
         if jendela <= 0:
             return []
         terakhir_tutup = self._last_closed_open_time(now_ms)
+        ttl_gagal = max(0.0, float(self.negative_cache_ttl_seconds()))
         with self._lock:
             tersimpan = self._cache.get(symbol)
-            if tersimpan is not None and tersimpan[0] >= terakhir_tutup:
-                return list(tersimpan[1])
+            if tersimpan is not None:
+                cache_cocok = (
+                    tersimpan[0] == terakhir_tutup
+                    if self.require_latest_closed_bar()
+                    else tersimpan[0] >= terakhir_tutup
+                )
+                if cache_cocok:
+                    return list(tersimpan[1])
+            negatif = self._negative_cache.get(symbol)
+            if negatif is not None:
+                sampai, alasan, gagal = negatif
+                if time.monotonic() < sampai:
+                    if gagal:
+                        raise RuntimeError(
+                            f"pengambilan candle {self.interval()} sebelumnya gagal "
+                            f"(retry ditahan sementara): {alasan}"
+                        )
+                    return []
+                self._negative_cache.pop(symbol, None)
 
-        raw = self._client.get_klines(
-            symbol,
-            self.interval(),
-            limit=min(strategy.TREND_KLINE_LIMIT, jendela + 1),
-        )
-        closed = [
-            k
-            for k in strategy.parse_klines(raw or [])
-            if int(k.close_time) < int(now_ms)
-        ]
+        try:
+            raw = self._client.get_klines(
+                symbol,
+                self.interval(),
+                limit=min(strategy.TREND_KLINE_LIMIT, jendela + 1),
+            )
+            closed = [
+                k
+                for k in strategy.parse_klines(raw or [])
+                if int(k.close_time) < int(now_ms)
+            ]
+        except Exception as exc:
+            self._simpan_kegagalan(symbol, str(exc), gagal=True, ttl=ttl_gagal)
+            raise
+
         siap = closed[-jendela:]
+        if not siap:
+            self._simpan_kegagalan(
+                symbol,
+                f"tidak ada candle {self.interval()} tertutup yang tersedia",
+                gagal=False,
+                ttl=ttl_gagal,
+            )
+            return []
+        if (
+            self.require_latest_closed_bar()
+            and int(siap[-1].open_time) != int(terakhir_tutup)
+        ):
+            alasan = (
+                f"candle {self.interval()} tertutup terbaru belum tersedia atau basi "
+                f"(open_time {int(siap[-1].open_time)}, seharusnya {int(terakhir_tutup)}; "
+                "ditolak demi keamanan)"
+            )
+            self._simpan_kegagalan(
+                symbol, alasan, gagal=True, ttl=ttl_gagal
+            )
+            raise RuntimeError(alasan)
 
-        if siap:
-            with self._lock:
-                self._cache[symbol] = (int(siap[-1].open_time), siap)
+        with self._lock:
+            self._cache[symbol] = (int(siap[-1].open_time), siap)
+            self._negative_cache.pop(symbol, None)
         return list(siap)
 
     def provider(self, symbol: str) -> list:
@@ -127,6 +190,34 @@ class DirectionCache(HtfKlineCache):
 
     def verdict(self, symbol: str, now_ms: int) -> dict:
         return strategy.evaluate_direction(
+            self.window_klines(symbol, now_ms), self._config
+        )
+
+
+class HtfTrendCache(HtfKlineCache):
+
+    def interval(self) -> str:
+        return strategy.htf_interval(self._config)
+
+    def window_bars(self) -> int:
+        return strategy.htf_window_bars(self._config)
+
+    def require_latest_closed_bar(self) -> bool:
+        return True
+
+    def negative_cache_ttl_seconds(self) -> float:
+        try:
+            interval = float(
+                self._config.get("MARKET_SCAN_INTERVAL_SECONDS", 30) or 30
+            )
+        except (TypeError, ValueError):
+            interval = 30.0
+        if not math.isfinite(interval) or interval <= 0:
+            interval = 30.0
+        return max(30.0, min(300.0, interval))
+
+    def verdict(self, symbol: str, now_ms: int) -> dict:
+        return strategy.evaluate_htf(
             self.window_klines(symbol, now_ms), self._config
         )
 
@@ -5178,6 +5269,20 @@ def run(
         config.get("DIRECTION_FILTER_ENABLED", False)
     ) or bool(config.get("DIRECTION_ZONE_FILTER_ENABLED", False))
     direction_provider = direction_cache.provider if butuh_candle_arah else None
+    htf_cache = HtfTrendCache(client, config) if strategy.htf_enabled(config) else None
+    htf_provider = htf_cache.provider if htf_cache is not None else None
+    if htf_provider is not None:
+        logger.info(
+            "Gerbang tren HTF %s AKTIF: close > EMA%d > EMA%d dan ADX%d >= %g "
+            "(jendela %d candle tertutup; candle berjalan dikecualikan; jika data "
+            "gagal/kurang, entry ditolak demi keamanan; hasil per simbol di-cache).",
+            strategy.htf_interval(config),
+            int(config.get("HTF_EMA_FAST", 20)),
+            int(config.get("HTF_EMA_SLOW", 50)),
+            int(config.get("HTF_ADX_PERIOD", 14)),
+            float(config.get("HTF_ADX_MIN", 30.0) or 0.0),
+            strategy.htf_window_bars(config),
+        )
     if direction_provider is None:
         logger.warning(
             "Layer arah NONAKTIF (DIRECTION_FILTER_ENABLED=False). "
@@ -5456,6 +5561,7 @@ def run(
                         direction_provider=direction_provider,
                         diagnostics=scan_diagnostics,
                         confirm_close_time_ms=batas_konfirmasi,
+                        htf_provider=htf_provider,
                     )
                     if best:
                         book = client.get_book_ticker(best.symbol)
@@ -5485,9 +5591,18 @@ def run(
                             )
                         if spread_pct <= config["MAX_SPREAD_PCT"] and chase_ok:
                             trend_info = ""
+                            if best.htf_trend is not None:
+                                nilai = best.htf_trend.get("values") or {}
+                                trend_info = " | tren HTF %s: %s" % (
+                                    best.htf_trend.get("interval")
+                                    or strategy.htf_interval(config),
+                                    best.htf_trend.get("reason"),
+                                )
+                                if nilai.get("adx") is not None:
+                                    trend_info += " (ADX %.1f)" % float(nilai["adx"])
                             if best.direction is not None:
                                 nilai = best.direction.get("values") or {}
-                                trend_info = " | arah %s: %s" % (
+                                trend_info += " | arah %s: %s" % (
                                     best.direction.get("interval")
                                     or strategy.direction_interval(config),
                                     best.direction.get("reason"),
@@ -5562,13 +5677,18 @@ def run(
                                 spread_pct,
                                 config["MAX_SPREAD_PCT"],
                             )
-                    else:
+                    if not best:
                         logger.info(
                             "Tidak ada kandidat entry pada scan ini (%d diperiksa dari "
                             "%d yang lolos filter pasar).",
                             scan_diagnostics.checked_candidates,
                             scan_diagnostics.market_candidates,
                         )
+                    htf_rejection_logged = (
+                        strategy.htf_enabled(scan_config)
+                        and scan_diagnostics.rejection_counts.get("HTF_TREND", 0) > 0
+                    )
+                    if not best or htf_rejection_logged:
                         diagnostic_now_ms = state_mod.now_ms()
                         if should_log_scan_diagnostics(
                             scan_diagnostics,

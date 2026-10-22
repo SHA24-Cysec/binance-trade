@@ -9,6 +9,7 @@ from typing import Callable, Optional, Sequence
 from backtesting import backtest as bt
 from backtesting import parity
 from strategy.indicators import Kline, direction_window_bars
+from strategy import indicators as strategy
 
 
 def parity_trend_window(config: dict) -> int:
@@ -257,18 +258,66 @@ def run_grid_search(
         base_config.get("DIRECTION_FILTER_ENABLED", False)
         or base_config.get("DIRECTION_ZONE_FILTER_ENABLED", False)
     )
+    htf_aktif_di_grid = strategy.htf_enabled(base_config)
+    raw_htf_enabled = spec.get("HTF_FILTER_ENABLED")
+    if raw_htf_enabled is not None:
+        if isinstance(raw_htf_enabled, dict):
+            raw_htf_values = buat_rentang(
+                float(raw_htf_enabled["mulai"]),
+                float(raw_htf_enabled["sampai"]),
+                float(raw_htf_enabled["langkah"]),
+            )
+        elif isinstance(raw_htf_enabled, (list, tuple)):
+            raw_htf_values = list(raw_htf_enabled)
+        else:
+            raw_htf_values = [raw_htf_enabled]
+        caster_htf = bt.OVERRIDE_CASTERS["HTF_FILTER_ENABLED"]
+        for raw_value in raw_htf_values:
+            if raw_value is None or raw_value == "":
+                continue
+            try:
+                htf_aktif_di_grid = htf_aktif_di_grid or caster_htf(raw_value)
+            except ValueError:
+                # Nilai invalid akan ditandai sebagai kombinasi gagal di loop grid.
+                continue
+    htf_config = dict(base_config)
+    if htf_aktif_di_grid:
+        htf_config["HTF_FILTER_ENABLED"] = True
+        htf_config["HTF_INTERVAL"] = "1h"
+    butuh_htf_data = htf_aktif_di_grid
     try:
-        butuh_warmup = parity.gate_warmup_bars(base_config, interval_sim)
+        butuh_warmup = parity.gate_warmup_bars(htf_config, interval_sim)
+        if htf_aktif_di_grid:
+            for params in kombinasi:
+                try:
+                    cfg_pemanasan = bt.apply_overrides(htf_config, params)
+                    cfg_pemanasan["HTF_FILTER_ENABLED"] = True
+                    cfg_pemanasan["HTF_INTERVAL"] = "1h"
+                    butuh_warmup = max(
+                        butuh_warmup,
+                        parity.gate_warmup_bars(cfg_pemanasan, interval_sim),
+                    )
+                except (bt.BacktestError, KeyError, TypeError, ValueError):
+                    continue
     except ValueError as exc:
         raise GridSearchError(str(exc)) from exc
     if int(warmup_bars) < butuh_warmup:
+        if htf_aktif_di_grid:
+            alasan_warmup = "gerbang arah/HTF memerlukan candle tertutup"
+        else:
+            alasan_warmup = (
+                f"layer arah {base_config.get('DIRECTION_INTERVAL', '15m')} butuh "
+                f"{parity_trend_window(base_config)} candle tertutup"
+            )
         hasil_grid.peringatan.append(
             f"Warmup {warmup_bars} bar dinaikkan menjadi {butuh_warmup} bar karena "
-            f"layer arah {base_config.get('DIRECTION_INTERVAL', '15m')} butuh "
-            f"{parity_trend_window(base_config)} candle tertutup. "
-            "Unduhan data harus mencakup rentang warmup ini."
+            f"{alasan_warmup}. Unduhan data harus mencakup rentang warmup ini."
         )
         warmup_bars = butuh_warmup
+    if n <= int(warmup_bars) + 10:
+        raise GridSearchError(
+            f"Data terlalu pendek: {n} candle dengan warmup {warmup_bars}."
+        )
 
     if rasio_latih >= 1.0:
         potong = n
@@ -294,6 +343,17 @@ def run_grid_search(
             if kl_uji
             else []
         )
+
+    htf_latih = (
+        parity.build_htf_klines(kl_latih, htf_config, interval_sim)
+        if butuh_htf_data
+        else None
+    )
+    htf_uji = (
+        parity.build_htf_klines(kl_uji, htf_config, interval_sim)
+        if butuh_htf_data and kl_uji
+        else []
+    )
 
     if kl_uji and hasil_grid.bar_uji < 50:
         hasil_grid.peringatan.append(
@@ -327,6 +387,7 @@ def run_grid_search(
                 warmup_bars,
                 btc_klines=btc_klines,
                 direction_klines=arah_latih,
+                htf_klines=htf_latih,
             )
             s_latih = bt.summarize(r_latih)
         except Exception as exc:
@@ -365,6 +426,7 @@ def run_grid_search(
                     warmup_bars,
                     btc_klines=btc_klines,
                     direction_klines=arah_uji,
+                    htf_klines=htf_uji,
                 )
                 s_uji = bt.summarize(r_uji)
                 item.uji = s_uji
@@ -446,6 +508,18 @@ def run_portfolio_grid_search(
         )
     awal_data, akhir_data = timeline[0], timeline[-1]
 
+    if strategy.htf_enabled(base_config):
+        try:
+            butuh_htf_ms = parity.gate_warmup_ms(base_config, interval)
+        except ValueError as exc:
+            raise GridSearchError(str(exc)) from exc
+        if int(warmup_ms) < butuh_htf_ms:
+            hasil_grid.peringatan.append(
+                f"Warmup {warmup_ms} ms dinaikkan menjadi {butuh_htf_ms} ms karena "
+                "gerbang tren HTF memerlukan candle tertutup sebelum bar entry pertama."
+            )
+            warmup_ms = butuh_htf_ms
+
     if float(rasio_latih) >= 1.0:
         potong_ms = akhir_data
         hasil_grid.peringatan.append(
@@ -480,24 +554,27 @@ def run_portfolio_grid_search(
     native_arah = None
     if native_prebuilt is not None:
         _, _, native_arah, _ = pbt.unpack_prebuilt(native_prebuilt)
-    native_htf = native_arah is not None
     arah_of = (
         native_arah
         if native_arah is not None
         else pbt.build_direction_lookups(store, list(series_of), base_config, interval)
     )
     timing_of = pbt.build_timing_lookups(store, list(series_of), base_config, interval)
-    if arah_of and not native_htf:
+    native_htf_of = pbt.unpack_prebuilt_htf(native_prebuilt)
+    htf_of = (
+        native_htf_of
+        if native_htf_of is not None
+        else pbt.build_htf_lookups(store, list(series_of), base_config, interval)
+    )
+    if (arah_of and native_arah is None) or strategy.htf_enabled(base_config):
         butuh_warmup = parity.gate_warmup_ms(base_config, interval)
         if int(warmup_ms) < butuh_warmup:
             hasil_grid.peringatan.append(
-                f"Warmup {warmup_ms} ms dinaikkan menjadi {butuh_warmup} ms karena layer "
-                f"arah {base_config.get('DIRECTION_INTERVAL', '15m')} butuh paling sedikit "
-                f"{parity.gate_warmup_bars(base_config, interval)} "
-                f"candle {interval} sebagai pemanasan."
+                f"Warmup {warmup_ms} ms dinaikkan menjadi {butuh_warmup} ms karena "
+                "gerbang arah/HTF memerlukan candle tertutup sebelum bar entry pertama."
             )
             warmup_ms = butuh_warmup
-    prebuilt = (timeline, series_of, arah_of, timing_of)
+    prebuilt = (timeline, series_of, arah_of, timing_of, htf_of)
     try:
         entry_cache_shared = pbt.precompute_entry_signals(
             store,

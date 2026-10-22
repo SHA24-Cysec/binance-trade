@@ -58,6 +58,10 @@ class BacktestResult:
     chase_skips: int = 0
     direction_scans: int = 0
     direction_skips: int = 0
+    htf_scans: int = 0
+    htf_skips: int = 0
+    htf_resistance_scans: int = 0
+    htf_resistance_skips: int = 0
     direction_zone_scans: int = 0
     direction_zone_skips: int = 0
     timing_scans: int = 0
@@ -197,6 +201,7 @@ def run_backtest(
     progress_cb: Optional[Callable[[float], None]] = None,
     btc_klines: Optional[list[Kline]] = None,
     direction_klines: Optional[list[Kline]] = None,
+    htf_klines: Optional[list[Kline]] = None,
 ) -> BacktestResult:
     interval = config.get("CONFIRM_INTERVAL", "5m")
     window = bars_per_day(interval)
@@ -210,6 +215,10 @@ def run_backtest(
     warnings: list[str] = []
     direction_scans = 0
     direction_skips = 0
+    htf_scans = 0
+    htf_skips = 0
+    htf_resistance_scans = 0
+    htf_resistance_skips = 0
     direction_zone_scans = 0
     direction_zone_skips = 0
     timing_scans = 0
@@ -280,17 +289,36 @@ def run_backtest(
         interval,
         sudah_dirangkai=direction_klines is not None,
     )
+    htf_lookup = parity.make_htf_lookup(
+        htf_klines if htf_klines is not None else klines,
+        config,
+        interval,
+        sudah_dirangkai=htf_klines is not None,
+    )
     timing_lookup = parity.make_timing_lookup(klines, config)
-    if direction_lookup is not None:
+    if direction_lookup is not None or htf_lookup is not None:
         butuh_warmup = strategy.gate_warmup_bars(config, interval)
         if int(warmup_bars) < butuh_warmup:
-            warnings.append(
-                f"Warmup {warmup_bars} bar {interval} dinaikkan menjadi {butuh_warmup} bar "
-                f"karena layer arah {direction_lookup.interval} butuh "
-                f"{direction_lookup.window} candle tertutup. "
-                "Naikkan warmup di pemanggil (atau perpanjang rentang data) supaya "
-                "backtest dan live memakai riwayat yang sama."
-            )
+            if htf_lookup is None:
+                warnings.append(
+                    f"Warmup {warmup_bars} bar {interval} dinaikkan menjadi {butuh_warmup} bar "
+                    f"karena layer arah {direction_lookup.interval} butuh "
+                    f"{direction_lookup.window} candle tertutup. "
+                    "Naikkan warmup di pemanggil (atau perpanjang rentang data) supaya "
+                    "backtest dan live memakai riwayat yang sama."
+                )
+            else:
+                nama_gerbang = (
+                    f"arah {direction_lookup.interval} dan tren HTF {htf_lookup.interval}"
+                    if direction_lookup is not None
+                    else f"tren HTF {htf_lookup.interval}"
+                )
+                warnings.append(
+                    f"Warmup {warmup_bars} bar {interval} dinaikkan menjadi {butuh_warmup} bar "
+                    f"karena {nama_gerbang} memerlukan riwayat candle tertutup. "
+                    "Naikkan warmup di pemanggil (atau perpanjang rentang data) supaya "
+                    "backtest dan live memakai riwayat yang sama."
+                )
             warmup_bars = butuh_warmup
 
     i = max(warmup_bars, window - 1, lookback)
@@ -330,6 +358,24 @@ def run_backtest(
                     ),
                 )
             ):
+                if htf_lookup is not None:
+                    htf_scans += 1
+                    verdict_htf = htf_lookup.verdict_at(candle.close_time)
+                    if not verdict_htf["ok"]:
+                        htf_skips += 1
+                        i += 1
+                        continue
+                if strategy.htf_resistance_enabled(config):
+                    htf_resistance_scans += 1
+                    verdict_resistance = (
+                        htf_lookup.resistance_at(candle.close_time, candle.close)
+                        if htf_lookup is not None
+                        else {"ok": False}
+                    )
+                    if not verdict_resistance["ok"]:
+                        htf_resistance_skips += 1
+                        i += 1
+                        continue
                 if bool(config.get("DIRECTION_FILTER_ENABLED", False)):
                     direction_scans += 1
                     verdict = (
@@ -518,6 +564,22 @@ def run_backtest(
             f"{chase_skips} sinyal dilewati oleh filter MAX_CHASE_PCT "
             f"({max_chase_pct:g}%), sama seperti bot live."
         )
+    if htf_skips:
+        warnings.append(
+            f"{htf_skips} dari {htf_scans} sinyal konfirmasi dilewati oleh gerbang "
+            f"tren HTF {htf_lookup.interval} (close > EMA{int(config.get('HTF_EMA_FAST', 20))} "
+            f"> EMA{int(config.get('HTF_EMA_SLOW', 50))} dan ADX"
+            f"{int(config.get('HTF_ADX_PERIOD', 14))} >= "
+            f"{float(config.get('HTF_ADX_MIN', 30.0) or 0.0):g}), sama seperti bot live."
+        )
+    if htf_resistance_skips:
+        warnings.append(
+            f"{htf_resistance_skips} dari {htf_resistance_scans} sinyal konfirmasi "
+            f"dilewati filter resistance HTF {strategy.htf_interval(config)}: ruang "
+            f"ke pivot swing-high terdekat harus >= "
+            f"{float(config.get('HTF_RESISTANCE_MIN_ROOM_PCT', 1.5) or 0.0):g}% "
+            "dari close M5; hanya memakai candle H1 tertutup."
+        )
     if direction_skips:
         warnings.append(
             f"{direction_skips} dari {direction_scans} sinyal konfirmasi dilewati oleh "
@@ -584,6 +646,10 @@ def run_backtest(
         chase_skips=chase_skips,
         direction_scans=direction_scans,
         direction_skips=direction_skips,
+        htf_scans=htf_scans,
+        htf_skips=htf_skips,
+        htf_resistance_scans=htf_resistance_scans,
+        htf_resistance_skips=htf_resistance_skips,
         direction_zone_scans=direction_zone_scans,
         direction_zone_skips=direction_zone_skips,
         timing_scans=timing_scans,
@@ -713,6 +779,10 @@ def summarize(result: BacktestResult) -> dict:
         "chase_skips": int(result.chase_skips),
         "direction_scans": int(getattr(result, "direction_scans", 0)),
         "direction_skips": int(getattr(result, "direction_skips", 0)),
+        "htf_scans": int(getattr(result, "htf_scans", 0)),
+        "htf_skips": int(getattr(result, "htf_skips", 0)),
+        "htf_resistance_scans": int(getattr(result, "htf_resistance_scans", 0)),
+        "htf_resistance_skips": int(getattr(result, "htf_resistance_skips", 0)),
         "direction_zone_scans": int(getattr(result, "direction_zone_scans", 0)),
         "direction_zone_skips": int(getattr(result, "direction_zone_skips", 0)),
         "timing_scans": int(getattr(result, "timing_scans", 0)),
@@ -760,6 +830,17 @@ OVERRIDE_CASTERS = {
         "DEMAND_MAX_DISTANCE_PCT": float,
         "DEMAND_MIN_CLOSE_POSITION": float,
         "DEMAND_REQUIRE_INSIDE_ZONE": _as_bool,
+        "HTF_FILTER_ENABLED": _as_bool,
+        "HTF_INTERVAL": str,
+        "HTF_EMA_FAST": int,
+        "HTF_EMA_SLOW": int,
+        "HTF_ADX_PERIOD": int,
+        "HTF_ADX_MIN": float,
+        "HTF_LOOKBACK_BARS": int,
+        "HTF_RESISTANCE_FILTER_ENABLED": _as_bool,
+        "HTF_RESISTANCE_LOOKBACK_BARS": int,
+        "HTF_RESISTANCE_PIVOT_WING_BARS": int,
+        "HTF_RESISTANCE_MIN_ROOM_PCT": float,
         "DIRECTION_FILTER_ENABLED": _as_bool,
         "DIRECTION_INTERVAL": str,
         "DIRECTION_EMA_FAST": int,
@@ -899,6 +980,40 @@ def validate_params(cfg: dict) -> None:
                 f"dari {butuh_arah} candle yang dibutuhkan EMA dan ADX pada "
                 f"{cfg.get('DIRECTION_INTERVAL', '15m')}. Naikkan nilainya supaya backtest "
                 "dan bot live memakai jendela arah yang sama."
+            )
+
+    if strategy.htf_enabled(cfg):
+        htf_interval = str(cfg.get("HTF_INTERVAL", "1h") or "1h").strip().lower()
+        if htf_interval not in strategy.INTERVAL_MINUTES:
+            raise BacktestError(
+                f"HTF_INTERVAL '{htf_interval}' tidak didukung untuk backtest."
+            )
+        if htf_interval != "1h":
+            raise BacktestError(
+                "Tahap A membatasi HTF_INTERVAL ke '1h' supaya gerbang tetap H1."
+            )
+        htf_checks = [
+            ("HTF_EMA_FAST", 2, 500),
+            ("HTF_EMA_SLOW", 3, strategy.TREND_KLINE_LIMIT - 1),
+            ("HTF_ADX_PERIOD", 2, 200),
+            ("HTF_ADX_MIN", 0.0, 100.0),
+            ("HTF_LOOKBACK_BARS", 20, strategy.TREND_KLINE_LIMIT - 1),
+        ]
+        for key, lo, hi in htf_checks:
+            val = cfg.get(key)
+            if val is None or not (lo <= float(val) <= hi):
+                raise BacktestError(
+                    f"Parameter '{key}'={val} di luar rentang wajar ({lo}..{hi})."
+                )
+        try:
+            butuh_htf = strategy.htf_required_bars(cfg)
+            strategy.htf_warmup_bars(cfg, cfg.get("CONFIRM_INTERVAL", "5m"))
+        except (KeyError, ValueError) as exc:
+            raise BacktestError(str(exc)) from exc
+        if int(cfg.get("HTF_LOOKBACK_BARS", 0)) < butuh_htf:
+            raise BacktestError(
+                f"HTF_LOOKBACK_BARS={cfg.get('HTF_LOOKBACK_BARS')} lebih kecil dari "
+                f"{butuh_htf} candle yang dibutuhkan EMA dan ADX H1."
             )
 
     if bool(cfg.get("DIRECTION_ZONE_FILTER_ENABLED", False)):
@@ -1047,13 +1162,27 @@ def print_single_result(result: BacktestResult) -> None:
         risk_info
         or summary.get("chase_skips")
         or summary.get("direction_skips")
+        or summary.get("htf_scans")
+        or summary.get("htf_resistance_scans")
         or summary.get("direction_zone_skips")
         or summary.get("timing_skips")
     ):
         print(
             f"Kontrol akun/filter: {risk_info}, chase dilewati {summary.get('chase_skips', 0)}, "
             f"arah dilewati {summary.get('direction_skips', 0)}, "
-            f"zona arah dilewati {summary.get('direction_zone_skips', 0)}, "
+            + (
+                f"tren HTF dilewati {summary.get('htf_skips', 0)} dari "
+                f"{summary.get('htf_scans', 0)}, "
+                if summary.get("htf_scans")
+                else ""
+            )
+            + (
+                f"resistance H1 dilewati {summary.get('htf_resistance_skips', 0)} dari "
+                f"{summary.get('htf_resistance_scans', 0)}, "
+                if summary.get("htf_resistance_scans")
+                else ""
+            )
+            + f"zona arah dilewati {summary.get('direction_zone_skips', 0)}, "
             f"timing dilewati {summary.get('timing_skips', 0)}"
         )
     if result.warnings:

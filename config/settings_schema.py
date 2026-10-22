@@ -701,7 +701,7 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "CONFIRM_INTERVAL": _field(
         "Scan",
         "Interval konfirmasi",
-        "Interval candle konfirmasi entry M5 (timing dan breakout-retest). DIRECTION_INTERVAL wajib kelipatan bulat dari nilai ini dan tidak boleh lebih pendek supaya backtest dapat merangkai candle arah dari candle konfirmasi.",
+        "Interval candle konfirmasi untuk eksekusi entry M5. DIRECTION_INTERVAL wajib kelipatan bulat dari nilai ini dan tidak boleh lebih pendek agar candle arah dapat dirangkai dari data konfirmasi; saat HTF_FILTER_ENABLED aktif, HTF_INTERVAL juga wajib kompatibel dan tidak lebih pendek dari interval konfirmasi.",
         "str",
         editor="select",
         options=[
@@ -997,6 +997,97 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         "int",
         minimum=1,
         maximum=1000,
+    ),
+    "HTF_FILTER_ENABLED": _field(
+        "Tren H1",
+        "Gerbang tren H1",
+        "Default nonaktif agar penarikan kode tidak mengubah perilaku LIVE diam-diam. Jika diaktifkan, entry hanya lolos bila candle H1 tertutup memenuhi close > EMA cepat > EMA lambat dan ADX minimal. Data gagal atau riwayat kurang menolak entry. Aktifkan manual hanya setelah backtest A/B dan uji PAPER lolos.",
+        "bool",
+    ),
+    "HTF_INTERVAL": _field(
+        "Tren H1",
+        "Interval tren HTF",
+        "Timeframe gerbang tren tinggi untuk strategi tiga timeframe; ditetapkan 1h agar tetap H1.",
+        "str",
+        editor="select",
+        options=["1h"],
+    ),
+    "HTF_EMA_FAST": _field(
+        "Tren H1",
+        "EMA cepat H1",
+        "Periode EMA cepat pada candle H1. Wajib lebih kecil dari EMA lambat.",
+        "int",
+        minimum=2,
+        maximum=500,
+        unit="candle",
+    ),
+    "HTF_EMA_SLOW": _field(
+        "Tren H1",
+        "EMA lambat H1",
+        "Periode EMA lambat pada candle H1; maksimal 999 candle agar kebutuhan data tetap di bawah batas limit klines per panggilan.",
+        "int",
+        minimum=3,
+        maximum=999,
+        unit="candle",
+    ),
+    "HTF_ADX_PERIOD": _field(
+        "Tren H1",
+        "Periode ADX H1",
+        "Periode ADX Wilder pada candle H1. Butuh sekitar dua kali periode ini candle agar ADX terdefinisi.",
+        "int",
+        minimum=2,
+        maximum=200,
+        unit="candle",
+    ),
+    "HTF_ADX_MIN": _field(
+        "Tren H1",
+        "Ambang ADX H1",
+        "Nilai default 30 adalah titik awal konservatif, BUKAN angka final, dan WAJIB dikalibrasi lewat backtest A/B sebelum gerbang H1 diaktifkan. Nilai 0 menonaktifkan cek kekuatan ADX.",
+        "float",
+        minimum=0,
+        maximum=100,
+    ),
+    "HTF_LOOKBACK_BARS": _field(
+        "Tren H1",
+        "Jendela candle H1",
+        "Jumlah candle H1 tertutup untuk menghitung EMA dan ADX. Bila kurang dari kebutuhan indikator, bot memakai kebutuhan minimum dan menolak entry selama riwayat belum cukup.",
+        "int",
+        minimum=20,
+        maximum=999,
+        unit="candle",
+    ),
+    "HTF_RESISTANCE_FILTER_ENABLED": _field(
+        "Resistance H1",
+        "Filter ruang ke resistance H1",
+        "Default nonaktif. Pada langkah konfigurasi ini, kunci masih belum dihubungkan ke scanner atau backtest; mengubahnya belum mengubah perilaku. Saat integrasi selesai, filter hanya valid bersama HTF_FILTER_ENABLED dan akan menolak entry bila ruang dari close sinyal M5 ke pivot swing-high H1 terdekat di atas harga kurang dari ambang. Jangan menganggap filter aktif sebelum integrasi dan uji A/B serta PAPER selesai.",
+        "bool",
+    ),
+    "HTF_RESISTANCE_LOOKBACK_BARS": _field(
+        "Resistance H1",
+        "Lookback resistance H1",
+        "Jumlah candle H1 tertutup untuk mencari pivot resistance. Harus tersedia di dalam HTF_LOOKBACK_BARS agar tidak membutuhkan jendela data tambahan.",
+        "int",
+        minimum=5,
+        maximum=999,
+        unit="candle",
+    ),
+    "HTF_RESISTANCE_PIVOT_WING_BARS": _field(
+        "Resistance H1",
+        "Sayap pivot resistance H1",
+        "Jumlah candle tertutup di kiri dan kanan untuk mengonfirmasi swing-high. Pivot terbaru belum boleh dipakai sebelum seluruh candle di sisi kanan tutup.",
+        "int",
+        minimum=1,
+        maximum=499,
+        unit="candle",
+    ),
+    "HTF_RESISTANCE_MIN_ROOM_PCT": _field(
+        "Resistance H1",
+        "Ruang minimum ke resistance H1",
+        "Entry ditolak bila jarak dari close sinyal M5 ke resistance pivot H1 terdekat di atasnya kurang dari nilai ini. Default 1,5% hanya titik awal uji, bukan nilai final atau rekomendasi profit.",
+        "float",
+        minimum=0.0,
+        maximum=50.0,
+        unit="%",
     ),
     "DIRECTION_FILTER_ENABLED": _field(
         "Arah M15",
@@ -1723,6 +1814,53 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
             "DIRECTION_ADX_PERIOD",
         )
 
+    # Relasi HTF baru divalidasi saat gerbang diaktifkan agar flag default
+    # nonaktif tidak mengubah validasi konfigurasi atau perilaku lama.
+    if _flag_untuk_relasi(cfg, "HTF_FILTER_ENABLED", False):
+        nilai = pasangan("HTF_EMA_SLOW", "HTF_EMA_FAST")
+        if nilai is not None and nilai[0] <= nilai[1]:
+            keluar["HTF_EMA_SLOW"] = (
+                "harus lebih besar dari HTF_EMA_FAST agar susunan EMA tidak terbalik"
+            )
+        _periksa_jendela(
+            keluar,
+            cfg,
+            "HTF_LOOKBACK_BARS",
+            "HTF_EMA_FAST",
+            "HTF_EMA_SLOW",
+            "HTF_ADX_PERIOD",
+        )
+
+    if _flag_untuk_relasi(cfg, "HTF_RESISTANCE_FILTER_ENABLED", False):
+        if not _flag_untuk_relasi(cfg, "HTF_FILTER_ENABLED", False):
+            keluar["HTF_RESISTANCE_FILTER_ENABLED"] = (
+                "hanya dapat diaktifkan bersama HTF_FILTER_ENABLED agar flag HTF "
+                "mati tetap tidak menambah request atau mengubah perilaku"
+            )
+        lookback_resistance = _angka_untuk_relasi(
+            cfg, "HTF_RESISTANCE_LOOKBACK_BARS"
+        )
+        pivot_wing = _angka_untuk_relasi(cfg, "HTF_RESISTANCE_PIVOT_WING_BARS")
+        if (
+            lookback_resistance is not None
+            and pivot_wing is not None
+            and lookback_resistance < 2 * pivot_wing + 1
+        ):
+            keluar["HTF_RESISTANCE_LOOKBACK_BARS"] = (
+                f"minimal {int(2 * pivot_wing + 1)} candle untuk pivot "
+                f"dengan sayap {int(pivot_wing)}"
+            )
+        lookback_htf = _angka_untuk_relasi(cfg, "HTF_LOOKBACK_BARS")
+        if (
+            lookback_resistance is not None
+            and lookback_htf is not None
+            and lookback_resistance > lookback_htf
+        ):
+            keluar["HTF_RESISTANCE_LOOKBACK_BARS"] = (
+                "tidak boleh melebihi HTF_LOOKBACK_BARS agar memakai jendela H1 "
+                "yang sama tanpa request tambahan"
+            )
+
     saring_timing = mode_aware is False or _flag_untuk_relasi(
         cfg, "TIMING_FILTER_ENABLED", False
     )
@@ -1793,8 +1931,11 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
         menit_arah = _INTERVAL_MINUTES.get(
             str(cfg.get("DIRECTION_INTERVAL", "")).lower()
         )
+        menit_htf = _INTERVAL_MINUTES.get(
+            str(cfg.get("HTF_INTERVAL", "")).lower()
+        )
     except ImportError:
-        menit_konfirmasi = menit_arah = None
+        menit_konfirmasi = menit_arah = menit_htf = None
 
     if menit_arah and menit_konfirmasi:
         if menit_arah % menit_konfirmasi != 0 or menit_arah < menit_konfirmasi:
@@ -1802,6 +1943,17 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
                 "harus kelipatan bulat dari CONFIRM_INTERVAL dan tidak lebih pendek, "
                 "supaya backtest bisa merangkai candle arah dari candle konfirmasi"
             )
+
+    if (
+        _flag_untuk_relasi(cfg, "HTF_FILTER_ENABLED", False)
+        and menit_htf
+        and menit_konfirmasi
+        and (menit_htf % menit_konfirmasi != 0 or menit_htf < menit_konfirmasi)
+    ):
+        keluar["HTF_INTERVAL"] = (
+            "harus kelipatan bulat dari CONFIRM_INTERVAL dan tidak lebih pendek, "
+            "agar backtest dapat merangkai candle HTF tanpa look-ahead"
+        )
 
     batas_tahan = _angka_untuk_relasi(cfg, "MAX_HOLD_HOURS")
     if batas_tahan is not None and batas_tahan > 0:
@@ -1876,6 +2028,34 @@ def validate_candidate(
                     "DIRECTION_ADX_MIN nol: cek kekuatan arah mati, hanya susunan EMA "
                     "yang menyaring entry sehingga pasar sideways lebih mudah diloloskan."
                 )
+        if cleaned["HTF_FILTER_ENABLED"]:
+            minimal_htf = max(
+                int(cleaned["HTF_EMA_SLOW"]),
+                2 * int(cleaned["HTF_ADX_PERIOD"]) + 1,
+            )
+            if int(cleaned["HTF_LOOKBACK_BARS"]) < minimal_htf:
+                warnings.append(
+                    f"HTF_LOOKBACK_BARS {cleaned['HTF_LOOKBACK_BARS']} lebih kecil dari "
+                    f"{minimal_htf} candle yang dibutuhkan EMA dan ADX H1. Gerbang H1 "
+                    "memakai minimum itu dan menolak entry selama riwayat belum cukup."
+                )
+            warnings.append(
+                f"HTF_ADX_MIN={cleaned['HTF_ADX_MIN']:g} adalah titik awal konservatif, "
+                "bukan angka final; wajib dikalibrasi dengan backtest A/B sebelum "
+                "gerbang H1 dipakai."
+            )
+            if cleaned["HTF_ADX_MIN"] == 0:
+                warnings.append(
+                    "HTF_ADX_MIN nol: cek kekuatan tren H1 praktis tidak menyaring, "
+                    "sehingga lebih banyak kondisi sideways dapat lolos."
+                )
+        if cleaned["HTF_RESISTANCE_FILTER_ENABLED"]:
+            warnings.append(
+                "Filter resistance H1 belum dihubungkan ke scanner/backtest pada "
+                "langkah ini; mengaktifkan kunci belum mengubah perilaku. Setelah "
+                "integrasi, nilai lookback, pivot, dan ruang minimum wajib diuji A/B "
+                "serta PAPER sebelum dipertimbangkan untuk LIVE."
+            )
         for kunci_zona, kunci_ketat, label in (
             ("DEMAND_ZONE_FILTER_ENABLED", "DEMAND_REQUIRE_INSIDE_ZONE", "M5"),
             (

@@ -356,6 +356,44 @@ class DirectionLookup:
         )
 
 
+class HtfLookup:
+
+    def __init__(self, htf_klines: Sequence[Kline], config: dict) -> None:
+        from strategy import indicators as strategy_mod
+
+        self.config = config
+        self.interval = strategy_mod.htf_interval(config)
+        self.window = strategy_mod.htf_window_bars(config)
+        self.required = strategy_mod.htf_required_bars(config)
+        self.klines = sorted(
+            list(htf_klines), key=lambda k: int(k.open_time)
+        )
+        self.close_times = [int(k.close_time) for k in self.klines]
+
+    def window_at(self, signal_close_time_ms: int) -> list:
+        idx = bisect_right(self.close_times, int(signal_close_time_ms))
+        return self.klines[max(0, idx - self.window) : idx]
+
+    def verdict_at(self, signal_close_time_ms: int) -> dict:
+        from strategy import indicators as strategy_mod
+
+        return strategy_mod.evaluate_htf(
+            self.window_at(signal_close_time_ms),
+            self.config,
+            signal_close_time_ms=signal_close_time_ms,
+        )
+
+    def resistance_at(self, signal_close_time_ms: int, signal_price: float) -> dict:
+        from strategy import indicators as strategy_mod
+
+        return strategy_mod.evaluate_htf_resistance(
+            self.window_at(signal_close_time_ms),
+            self.config,
+            signal_price=signal_price,
+            signal_close_time_ms=signal_close_time_ms,
+        )
+
+
 class TimingLookup:
 
     def __init__(self, timing_klines: Sequence[Kline], config: dict) -> None:
@@ -422,6 +460,40 @@ def make_direction_lookup(
         else build_direction_klines(klines, config, interval)
     )
     return DirectionLookup(bars, config)
+
+
+def build_htf_klines(
+    klines: Sequence[Kline], config: dict, interval: str
+) -> list[Kline]:
+    from strategy import indicators as strategy_mod
+
+    target_interval = strategy_mod.htf_interval(config)
+    target = strategy_mod.INTERVAL_MINUTES.get(target_interval)
+    if target is None:
+        raise ValueError(
+            f"HTF_INTERVAL '{target_interval}' tidak dikenal untuk perangkaian candle."
+        )
+    source = _source_minutes(interval, "tren HTF")
+    return strategy_mod.aggregate_klines(list(klines), int(target), source)
+
+
+def make_htf_lookup(
+    klines: Sequence[Kline],
+    config: dict,
+    interval: str,
+    *,
+    sudah_dirangkai: bool = False,
+) -> Optional[HtfLookup]:
+    from strategy import indicators as strategy_mod
+
+    if not strategy_mod.htf_enabled(config):
+        return None
+    bars = (
+        list(klines)
+        if sudah_dirangkai
+        else build_htf_klines(klines, config, interval)
+    )
+    return HtfLookup(bars, config)
 
 
 def make_timing_lookup(

@@ -84,6 +84,10 @@ class PortfolioResult:
     chase_skips: int = 0
     direction_skips: int = 0
     direction_scans: int = 0
+    htf_skips: int = 0
+    htf_scans: int = 0
+    htf_resistance_skips: int = 0
+    htf_resistance_scans: int = 0
     direction_zone_skips: int = 0
     direction_zone_scans: int = 0
     timing_skips: int = 0
@@ -394,6 +398,16 @@ class EntrySignalCache(dict):
         self.direction_scans = 0
         self.direction_skips = 0
         self.direction_events: list = []
+        self.htf_scans = 0
+        self.htf_skips = 0
+        self.htf_scans_by_time: dict[int, int] = {}
+        self.htf_skips_by_time: dict[int, int] = {}
+        self.htf_events: list = []
+        self.htf_resistance_scans = 0
+        self.htf_resistance_skips = 0
+        self.htf_resistance_scans_by_time: dict[int, int] = {}
+        self.htf_resistance_skips_by_time: dict[int, int] = {}
+        self.htf_resistance_events: list = []
         self.direction_zone_scans = 0
         self.direction_zone_skips = 0
         self.direction_zone_events: list = []
@@ -434,6 +448,30 @@ def build_direction_lookups(
     return lookups
 
 
+def build_htf_lookups(
+    store: KlineStore, symbols: list, config: dict, interval: str
+) -> dict:
+    if not strategy.htf_enabled(config):
+        return {}
+    try:
+        htf_interval = strategy.htf_interval(config)
+        strategy.htf_warmup_bars(config, interval)
+    except ValueError as exc:
+        raise BacktestError(str(exc)) from exc
+    if htf_interval != "1h":
+        raise BacktestError("Tahap A membatasi HTF_INTERVAL ke '1h' untuk portfolio backtest.")
+    lookups: dict = {}
+    for sym in symbols:
+        klines = store.klines(sym)
+        if not klines:
+            continue
+        lookup = parity.make_htf_lookup(klines, config, interval)
+        if lookup is not None:
+            lookups[sym] = lookup
+        del klines
+    return lookups
+
+
 def build_timing_lookups(
     store: KlineStore, symbols: list, config: dict, interval: str
 ) -> dict:
@@ -463,6 +501,12 @@ def unpack_prebuilt(prebuilt: Optional[tuple]):
     return prebuilt[0], prebuilt[1], None, None
 
 
+def unpack_prebuilt_htf(prebuilt: Optional[tuple]):
+    if prebuilt is None or len(prebuilt) < 5:
+        return None
+    return prebuilt[4]
+
+
 def _siapkan_arah(prebuilt, store, series_of, config, interval):
     _, _, arah_of, _ = unpack_prebuilt(prebuilt)
     if arah_of is not None:
@@ -482,6 +526,22 @@ def _siapkan_timing(prebuilt, store, series_of, config, interval):
     if not config.get("TIMING_FILTER_ENABLED", False):
         return {}
     return build_timing_lookups(store, list(series_of), config, interval)
+
+
+def _siapkan_htf(prebuilt, store, series_of, config, interval):
+    if not strategy.htf_enabled(config):
+        return {}
+    try:
+        htf_interval = strategy.htf_interval(config)
+        strategy.htf_warmup_bars(config, interval)
+    except ValueError as exc:
+        raise BacktestError(str(exc)) from exc
+    if htf_interval != "1h":
+        raise BacktestError("Tahap A membatasi HTF_INTERVAL ke '1h' untuk portfolio backtest.")
+    htf_of = unpack_prebuilt_htf(prebuilt)
+    if htf_of is not None:
+        return htf_of
+    return build_htf_lookups(store, list(series_of), config, interval)
 
 
 def precompute_entry_signals(
@@ -527,20 +587,30 @@ def precompute_entry_signals(
     native_htf = prebuilt is not None and arah_of is not None
     if not native_htf:
         arah_of = _siapkan_arah(prebuilt, store, series_of, config, interval)
+    htf_of = _siapkan_htf(prebuilt, store, series_of, config, interval)
     if not timing_of:
         timing_of = _siapkan_timing(prebuilt, store, series_of, config, interval)
-    if arah_of and not native_htf:
+    if (arah_of and not native_htf) or strategy.htf_enabled(config):
         butuh_warmup = parity.gate_warmup_ms(config, interval)
         if int(warmup_ms) < butuh_warmup:
-            logger.warning(
-                "Warmup %d ms dinaikkan menjadi %d ms karena layer arah %s "
-                "butuh paling sedikit %d candle %s sebagai pemanasan.",
-                warmup_ms,
-                butuh_warmup,
-                strategy.direction_interval(config),
-                strategy.gate_warmup_bars(config, interval),
-                interval,
-            )
+            if strategy.htf_enabled(config):
+                logger.warning(
+                    "Warmup %d ms dinaikkan menjadi %d ms karena gerbang arah/HTF "
+                    "memerlukan candle tertutup %s sebagai pemanasan.",
+                    warmup_ms,
+                    butuh_warmup,
+                    interval,
+                )
+            else:
+                logger.warning(
+                    "Warmup %d ms dinaikkan menjadi %d ms karena layer arah %s "
+                    "butuh paling sedikit %d candle %s sebagai pemanasan.",
+                    warmup_ms,
+                    butuh_warmup,
+                    strategy.direction_interval(config),
+                    strategy.gate_warmup_bars(config, interval),
+                    interval,
+                )
             warmup_ms = butuh_warmup
     first_allowed_time = timeline[0] + int(warmup_ms)
 
@@ -598,6 +668,44 @@ def precompute_entry_signals(
                     f"Evaluasi sinyal {sym} pada waktu {int(t_now)} "
                     f"(bar {index}) gagal: {type(exc).__name__}: {str(exc)[:160]}"
                 ) from exc
+            if strategy.htf_enabled(config):
+                lock_htf = htf_of.get(sym) if htf_of else None
+                waktu_scan_htf = int(t_now)
+                signals.htf_scans += 1
+                signals.htf_scans_by_time[waktu_scan_htf] = (
+                    signals.htf_scans_by_time.get(waktu_scan_htf, 0) + 1
+                )
+                if (
+                    lock_htf is None
+                    or signal_candle is None
+                    or not lock_htf.verdict_at(signal_candle.close_time)["ok"]
+                ):
+                    signals.htf_skips += 1
+                    signals.htf_skips_by_time[waktu_scan_htf] = (
+                        signals.htf_skips_by_time.get(waktu_scan_htf, 0) + 1
+                    )
+                    if len(signals.htf_events) < max_skipped_records:
+                        signals.htf_events.append((int(t_now), sym))
+                    continue
+            if strategy.htf_resistance_enabled(config):
+                waktu_scan_resistance = int(t_now)
+                signals.htf_resistance_scans += 1
+                signals.htf_resistance_scans_by_time[waktu_scan_resistance] = (
+                    signals.htf_resistance_scans_by_time.get(waktu_scan_resistance, 0) + 1
+                )
+                verdict_resistance = (
+                    lock_htf.resistance_at(signal_candle.close_time, signal_candle.close)
+                    if lock_htf is not None and signal_candle is not None
+                    else {"ok": False}
+                )
+                if not verdict_resistance["ok"]:
+                    signals.htf_resistance_skips += 1
+                    signals.htf_resistance_skips_by_time[waktu_scan_resistance] = (
+                        signals.htf_resistance_skips_by_time.get(waktu_scan_resistance, 0) + 1
+                    )
+                    if len(signals.htf_resistance_events) < max_skipped_records:
+                        signals.htf_resistance_events.append((int(t_now), sym))
+                    continue
             if bool(config.get("DIRECTION_FILTER_ENABLED", False)):
                 lock = arah_of.get(sym) if arah_of else None
                 signals.direction_scans += 1
@@ -753,18 +861,26 @@ def run_portfolio_backtest(
     native_htf = prebuilt is not None and arah_of is not None
     if not native_htf:
         arah_of = _siapkan_arah(prebuilt, store, series_of, config, interval)
+    htf_of = _siapkan_htf(prebuilt, store, series_of, config, interval)
     if not timing_of:
         timing_of = _siapkan_timing(prebuilt, store, series_of, config, interval)
-    if arah_of and not native_htf:
+    if (arah_of and not native_htf) or strategy.htf_enabled(config):
         _butuh_gerbang = parity.gate_warmup_ms(config, interval)
         if int(warmup_ms) < _butuh_gerbang:
-            _pre_warnings.append(
-                f"Warmup {warmup_ms} ms dinaikkan menjadi {_butuh_gerbang} ms karena "
-                f"layer arah {config.get('DIRECTION_INTERVAL', '15m')} butuh "
-                f"{strategy.direction_window_bars(config)} candle tertutup "
-                "(termasuk jendela zona demand arah) sebelum bar entry pertama. "
-                "Unduhan data harus mencakup rentang warmup ini."
-            )
+            if strategy.htf_enabled(config):
+                _pre_warnings.append(
+                    f"Warmup {warmup_ms} ms dinaikkan menjadi {_butuh_gerbang} ms karena "
+                    "gerbang arah/HTF membutuhkan riwayat candle tertutup sebelum bar "
+                    "entry pertama. Unduhan data harus mencakup rentang warmup ini."
+                )
+            else:
+                _pre_warnings.append(
+                    f"Warmup {warmup_ms} ms dinaikkan menjadi {_butuh_gerbang} ms karena "
+                    f"layer arah {config.get('DIRECTION_INTERVAL', '15m')} butuh "
+                    f"{strategy.direction_window_bars(config)} candle tertutup "
+                    "(termasuk jendela zona demand arah) sebelum bar entry pertama. "
+                    "Unduhan data harus mencakup rentang warmup ini."
+                )
             warmup_ms = _butuh_gerbang
     _butuh = strategy.required_lookback_bars(config)
     if int(config.get("CONFIRM_LOOKBACK_BARS", 0)) < _butuh:
@@ -812,6 +928,10 @@ def run_portfolio_backtest(
     chase_skips = 0
     direction_skips = 0
     direction_scans = 0
+    htf_skips = 0
+    htf_scans = 0
+    htf_resistance_skips = 0
+    htf_resistance_scans = 0
     direction_zone_skips = 0
     direction_zone_scans = 0
     timing_skips = 0
@@ -861,15 +981,88 @@ def run_portfolio_backtest(
                 continue
             yield waktu_event, simbol_event
 
+    def _jumlah_htf_dalam_jendela(daftar: dict) -> int:
+        return sum(
+            int(jumlah)
+            for waktu, jumlah in (daftar or {}).items()
+            if int(waktu) >= int(first_allowed_time)
+            and int(waktu) <= int(timeline[-1])
+        )
+
+    def _event_htf_dalam_jendela(daftar: list):
+        for waktu_event, simbol_event in daftar:
+            if waktu_event < first_allowed_time or waktu_event > timeline[-1]:
+                continue
+            yield waktu_event, simbol_event
+
     if entry_signal_cache is not None:
         if start_ms is not None or end_ms is not None:
             warnings.append(
                 "Cache sinyal entry dipakai bersama jendela waktu. Daftar sinyal "
-                "yang dilewati filter disaring ke dalam jendela, tetapi angka "
-                "scan/skip masih total dari seluruh rentang cache."
+                "yang dilewati filter disaring ke dalam jendela; hitungan HTF juga "
+                "disaring per waktu, sedangkan hitungan filter entry lain masih total "
+                "dari seluruh rentang cache."
             )
         direction_scans += int(getattr(entry_signal_cache, "direction_scans", 0))
         direction_skips += int(getattr(entry_signal_cache, "direction_skips", 0))
+        htf_scan_map = getattr(entry_signal_cache, "htf_scans_by_time", None)
+        htf_skip_map = getattr(entry_signal_cache, "htf_skips_by_time", None)
+        if isinstance(htf_scan_map, dict):
+            htf_scans += _jumlah_htf_dalam_jendela(htf_scan_map)
+        else:
+            htf_scans += int(getattr(entry_signal_cache, "htf_scans", 0))
+        if isinstance(htf_skip_map, dict):
+            htf_skips += _jumlah_htf_dalam_jendela(htf_skip_map)
+        else:
+            htf_skips += int(getattr(entry_signal_cache, "htf_skips", 0))
+        htf_resistance_scan_map = getattr(
+            entry_signal_cache, "htf_resistance_scans_by_time", None
+        )
+        htf_resistance_skip_map = getattr(
+            entry_signal_cache, "htf_resistance_skips_by_time", None
+        )
+        if isinstance(htf_resistance_scan_map, dict):
+            htf_resistance_scans += _jumlah_htf_dalam_jendela(
+                htf_resistance_scan_map
+            )
+        else:
+            htf_resistance_scans += int(
+                getattr(entry_signal_cache, "htf_resistance_scans", 0)
+            )
+        if isinstance(htf_resistance_skip_map, dict):
+            htf_resistance_skips += _jumlah_htf_dalam_jendela(
+                htf_resistance_skip_map
+            )
+        else:
+            htf_resistance_skips += int(
+                getattr(entry_signal_cache, "htf_resistance_skips", 0)
+            )
+        for waktu_event, simbol_event in _event_htf_dalam_jendela(
+            getattr(entry_signal_cache, "htf_events", [])
+        ):
+            if len(skipped) >= max_skipped_records:
+                break
+            skipped.append(
+                SkippedSignal(
+                    time=waktu_event,
+                    symbol=simbol_event,
+                    reason="FILTER_HTF_TREND",
+                    holding=None,
+                )
+            )
+        for waktu_event, simbol_event in _event_htf_dalam_jendela(
+            getattr(entry_signal_cache, "htf_resistance_events", [])
+        ):
+            if len(skipped) >= max_skipped_records:
+                break
+            skipped.append(
+                SkippedSignal(
+                    time=waktu_event,
+                    symbol=simbol_event,
+                    reason="FILTER_HTF_RESISTANCE",
+                    holding=None,
+                )
+            )
         direction_zone_scans += int(
             getattr(entry_signal_cache, "direction_zone_scans", 0)
         )
@@ -1128,6 +1321,43 @@ def run_portfolio_backtest(
                 if i + 1 < lookback:
                     continue
                 window_kl = kl[max(0, i - lookback + 1) : i + 1]
+                if strategy.htf_enabled(config):
+                    lock_htf = htf_of.get(sym) if htf_of else None
+                    htf_scans += 1
+                    if (
+                        lock_htf is None
+                        or not lock_htf.verdict_at(kl[i].close_time)["ok"]
+                    ):
+                        htf_skips += 1
+                        if len(skipped) < max_skipped_records:
+                            skipped.append(
+                                SkippedSignal(
+                                    time=t_now,
+                                    symbol=sym,
+                                    reason="FILTER_HTF_TREND",
+                                    holding=None,
+                                )
+                            )
+                        continue
+                if strategy.htf_resistance_enabled(config):
+                    htf_resistance_scans += 1
+                    verdict_resistance = (
+                        lock_htf.resistance_at(kl[i].close_time, kl[i].close)
+                        if lock_htf is not None
+                        else {"ok": False}
+                    )
+                    if not verdict_resistance["ok"]:
+                        htf_resistance_skips += 1
+                        if len(skipped) < max_skipped_records:
+                            skipped.append(
+                                SkippedSignal(
+                                    time=t_now,
+                                    symbol=sym,
+                                    reason="FILTER_HTF_RESISTANCE",
+                                    holding=None,
+                                )
+                            )
+                        continue
                 if bool(config.get("DIRECTION_FILTER_ENABLED", False)):
                     lock = arah_of.get(sym) if arah_of else None
                     direction_scans += 1
@@ -1361,6 +1591,26 @@ def run_portfolio_backtest(
                 )
                 + (
                     [
+                        f"{htf_skips} dari {htf_scans} sinyal konfirmasi dilewati "
+                        f"gerbang tren HTF {strategy.htf_interval(config)}; evaluasi "
+                        "menggunakan hanya candle HTF tertutup yang tersedia pada waktu sinyal."
+                    ]
+                    if strategy.htf_enabled(config) and htf_skips
+                    else []
+                )
+                + (
+                    [
+                        f"{htf_resistance_skips} dari {htf_resistance_scans} sinyal konfirmasi "
+                        f"dilewati filter resistance HTF {strategy.htf_interval(config)}: ruang "
+                        f"ke pivot swing-high terdekat harus >= "
+                        f"{float(config.get('HTF_RESISTANCE_MIN_ROOM_PCT', 1.5) or 0.0):g}% "
+                        "dari close M5; hanya memakai candle H1 tertutup."
+                    ]
+                    if strategy.htf_resistance_enabled(config) and htf_resistance_skips
+                    else []
+                )
+                + (
+                    [
                         f"{direction_zone_skips} dari {direction_zone_scans} sinyal konfirmasi "
                         f"dilewati zona demand "
                         f"{config.get('DIRECTION_INTERVAL', '15m')}, memakai candle "
@@ -1404,6 +1654,10 @@ def run_portfolio_backtest(
         chase_skips=chase_skips,
         direction_skips=direction_skips,
         direction_scans=direction_scans,
+        htf_skips=htf_skips,
+        htf_scans=htf_scans,
+        htf_resistance_skips=htf_resistance_skips,
+        htf_resistance_scans=htf_resistance_scans,
         direction_zone_skips=direction_zone_skips,
         direction_zone_scans=direction_zone_scans,
         timing_skips=timing_skips,
@@ -1581,6 +1835,10 @@ def summarize_portfolio(result: PortfolioResult) -> dict:
         "chase_skips": int(result.chase_skips),
         "direction_skips": int(getattr(result, "direction_skips", 0)),
         "direction_scans": int(getattr(result, "direction_scans", 0)),
+        "htf_skips": int(getattr(result, "htf_skips", 0)),
+        "htf_scans": int(getattr(result, "htf_scans", 0)),
+        "htf_resistance_skips": int(getattr(result, "htf_resistance_skips", 0)),
+        "htf_resistance_scans": int(getattr(result, "htf_resistance_scans", 0)),
         "direction_zone_skips": int(getattr(result, "direction_zone_skips", 0)),
         "direction_zone_scans": int(getattr(result, "direction_zone_scans", 0)),
         "timing_skips": int(getattr(result, "timing_skips", 0)),

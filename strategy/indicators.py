@@ -762,6 +762,50 @@ def direction_window_bars(config: dict) -> int:
     return max(direction_required_bars(config), diminta, zona)
 
 
+def htf_interval(config: dict) -> str:
+    return _interval_from_config(config, "HTF_INTERVAL", "1h")
+
+
+def htf_enabled(config: dict) -> bool:
+    return bool(config.get("HTF_FILTER_ENABLED", False))
+
+
+def htf_required_bars(config: dict) -> int:
+    fast, slow, adx_period, _ = _ema_adx_params(config, "HTF", 20, 50)
+    return max(fast, slow, 2 * adx_period + 1)
+
+
+def htf_window_bars(config: dict) -> int:
+    if not htf_enabled(config):
+        return 0
+    diminta = int(config.get("HTF_LOOKBACK_BARS", 60) or 60)
+    diminta = max(1, min(TREND_KLINE_LIMIT - 1, diminta))
+    return max(
+        htf_required_bars(config),
+        diminta,
+        htf_resistance_window_bars(config),
+    )
+
+
+def htf_resistance_enabled(config: dict) -> bool:
+    return htf_enabled(config) and bool(
+        config.get("HTF_RESISTANCE_FILTER_ENABLED", False)
+    )
+
+
+def htf_resistance_window_bars(config: dict) -> int:
+    if not htf_resistance_enabled(config):
+        return 0
+    try:
+        wing = max(1, int(config.get("HTF_RESISTANCE_PIVOT_WING_BARS", 2) or 2))
+        requested = int(config.get("HTF_RESISTANCE_LOOKBACK_BARS", 60) or 60)
+    except (TypeError, ValueError):
+        wing, requested = 2, 60
+    minimum = 2 * wing + 1
+    requested = max(1, min(TREND_KLINE_LIMIT - 1, requested))
+    return max(minimum, requested)
+
+
 def direction_zone_enabled(config: dict) -> bool:
     return bool(config.get("DIRECTION_ZONE_FILTER_ENABLED", False))
 
@@ -1213,6 +1257,270 @@ def evaluate_direction(
     )
 
 
+def evaluate_htf(
+    klines: list[Kline],
+    config: dict,
+    signal_close_time_ms: Optional[int] = None,
+) -> dict:
+    interval = htf_interval(config)
+    if not htf_enabled(config):
+        return {
+            "ok": True,
+            "reason": f"filter tren HTF {interval} nonaktif",
+            "interval": interval,
+            "bars": 0,
+            "required": 0,
+            "window": 0,
+            "close": None,
+            "ema_fast": None,
+            "ema_slow": None,
+            "adx": None,
+            "checks": {},
+            "values": {},
+        }
+    fast, slow, adx_period, adx_min = _ema_adx_params(config, "HTF", 20, 50)
+    window = htf_window_bars(config)
+    required = htf_required_bars(config)
+    interval_ms = interval_to_ms(interval)
+    siap = [
+        k
+        for k in (klines or [])
+        if signal_close_time_ms is None
+        or int(k.close_time) <= int(signal_close_time_ms)
+    ]
+    jendela = siap[-window:]
+    hasil = evaluate_ema_adx(
+        jendela,
+        interval=interval,
+        fast=fast,
+        slow=slow,
+        adx_period=adx_period,
+        adx_min=adx_min,
+        window=window,
+        required=required,
+        label="tren HTF",
+        nama_kunci_jendela="HTF_LOOKBACK_BARS",
+    )
+
+    if len(jendela) >= required:
+        for sebelumnya, sekarang in zip(jendela, jendela[1:]):
+            if (
+                int(sekarang.open_time) - int(sebelumnya.open_time) != interval_ms
+                or int(sebelumnya.close_time) != int(sebelumnya.open_time) + interval_ms - 1
+                or int(sekarang.close_time) != int(sekarang.open_time) + interval_ms - 1
+            ):
+                return {
+                    **hasil,
+                    "ok": False,
+                    "reason": (
+                        f"data candle HTF {interval} memiliki celah atau waktu candle "
+                        "tidak valid (ditolak demi keamanan)"
+                    ),
+                }
+
+    if signal_close_time_ms is not None:
+        terakhir_seharusnya = (
+            ((int(signal_close_time_ms) + 1) // interval_ms) - 1
+        ) * interval_ms
+        if not jendela or int(jendela[-1].open_time) != terakhir_seharusnya:
+            return {
+                **hasil,
+                "ok": False,
+                "reason": (
+                    f"candle HTF {interval} tertutup terbaru tidak tersedia pada "
+                    f"waktu sinyal (open_time terakhir "
+                    f"{int(jendela[-1].open_time) if jendela else 'tidak ada'}, "
+                    f"seharusnya {terakhir_seharusnya}; ditolak demi keamanan)"
+                ),
+            }
+    return hasil
+
+
+def evaluate_htf_resistance(
+    klines: list[Kline],
+    config: dict,
+    signal_price: float,
+    signal_close_time_ms: Optional[int] = None,
+) -> dict:
+    interval = htf_interval(config)
+    wing = max(1, int(config.get("HTF_RESISTANCE_PIVOT_WING_BARS", 2) or 2))
+    window = htf_resistance_window_bars(config)
+    kosong = {
+        "interval": interval,
+        "bars": 0,
+        "required": window,
+        "window": window,
+        "resistance_price": None,
+        "resistance_open_time": None,
+        "signal_price": None,
+        "distance_pct": None,
+        "minimum_room_pct": None,
+    }
+    if not htf_resistance_enabled(config):
+        return {
+            "ok": True,
+            "reason": f"filter resistance HTF {interval} nonaktif",
+            **kosong,
+        }
+
+    try:
+        minimum_room = float(config.get("HTF_RESISTANCE_MIN_ROOM_PCT", 1.5))
+        price = float(signal_price)
+    except (TypeError, ValueError):
+        return {
+            "ok": False,
+            "reason": "harga sinyal atau ambang ruang resistance HTF tidak valid",
+            **kosong,
+        }
+    if not math.isfinite(minimum_room) or minimum_room < 0:
+        return {
+            "ok": False,
+            "reason": "ambang ruang resistance HTF harus finite dan tidak negatif",
+            **kosong,
+        }
+    if not math.isfinite(price) or price <= 0:
+        return {
+            "ok": False,
+            "reason": "harga sinyal untuk resistance HTF harus finite dan lebih besar dari nol",
+            **kosong,
+        }
+    if window < 2 * wing + 1:
+        return {
+            "ok": False,
+            "reason": (
+                f"lookback resistance HTF {window} lebih kecil dari minimum "
+                f"{2 * wing + 1} candle untuk pivot dengan sayap {wing}"
+            ),
+            **kosong,
+        }
+
+    interval_ms = interval_to_ms(interval)
+    try:
+        siap = [
+            k
+            for k in (klines or [])
+            if signal_close_time_ms is None
+            or int(k.close_time) <= int(signal_close_time_ms)
+        ]
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return {
+            "ok": False,
+            "reason": f"waktu candle resistance HTF {interval} tidak valid",
+            **kosong,
+        }
+    jendela = siap[-window:]
+    dasar = {**kosong, "bars": len(jendela)}
+    if len(jendela) < window:
+        return {
+            "ok": False,
+            "reason": (
+                f"data resistance HTF {interval} kurang: {len(jendela)} "
+                f"dari minimum {window} candle tertutup"
+            ),
+            **dasar,
+        }
+
+    for index, candle in enumerate(jendela):
+        try:
+            open_time = int(candle.open_time)
+            close_time = int(candle.close_time)
+            values = tuple(
+                float(value)
+                for value in (candle.open, candle.high, candle.low, candle.close)
+            )
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return {
+                "ok": False,
+                "reason": f"data candle resistance HTF {interval} tidak valid",
+                **dasar,
+            }
+        candle_open, candle_high, candle_low, candle_close = values
+        if (
+            not all(math.isfinite(value) and value > 0 for value in values)
+            or candle_high < max(candle_open, candle_close, candle_low)
+            or candle_low > min(candle_open, candle_close, candle_high)
+            or close_time != open_time + interval_ms - 1
+            or (
+                index > 0
+                and open_time - int(jendela[index - 1].open_time) != interval_ms
+            )
+        ):
+            return {
+                "ok": False,
+                "reason": (
+                    f"data candle resistance HTF {interval} memiliki OHLC/waktu "
+                    "tidak valid atau celah (ditolak demi keamanan)"
+                ),
+                **dasar,
+            }
+
+    if signal_close_time_ms is not None:
+        terakhir_seharusnya = (
+            ((int(signal_close_time_ms) + 1) // interval_ms) - 1
+        ) * interval_ms
+        if int(jendela[-1].open_time) != terakhir_seharusnya:
+            return {
+                "ok": False,
+                "reason": (
+                    f"candle resistance HTF {interval} tertutup terbaru tidak "
+                    f"tersedia pada waktu sinyal (open_time terakhir "
+                    f"{int(jendela[-1].open_time)}, seharusnya "
+                    f"{terakhir_seharusnya}; ditolak demi keamanan)"
+                ),
+                **dasar,
+            }
+
+    level_di_atas = [
+        index
+        for index in range(wing, len(jendela) - wing)
+        if _is_pivot_high(jendela, index, wing)
+        and float(jendela[index].high) >= price
+    ]
+    if not level_di_atas:
+        return {
+            "ok": True,
+            "reason": (
+                f"tidak ada pivot resistance HTF {interval} terkonfirmasi di atas "
+                "harga sinyal"
+            ),
+            **dasar,
+            "signal_price": price,
+            "minimum_room_pct": minimum_room,
+        }
+
+    pivot_index = min(
+        level_di_atas,
+        key=lambda index: (float(jendela[index].high), -index),
+    )
+    resistance_price = float(jendela[pivot_index].high)
+    distance_pct = (resistance_price - price) / price * 100.0
+    terisi = {
+        **dasar,
+        "resistance_price": resistance_price,
+        "resistance_open_time": int(jendela[pivot_index].open_time),
+        "signal_price": price,
+        "distance_pct": distance_pct,
+        "minimum_room_pct": minimum_room,
+    }
+    if distance_pct < minimum_room:
+        return {
+            "ok": False,
+            "reason": (
+                f"harga terlalu dekat dengan resistance HTF {interval}: ruang "
+                f"{distance_pct:.2f}% di bawah batas {minimum_room:.2f}%"
+            ),
+            **terisi,
+        }
+    return {
+        "ok": True,
+        "reason": (
+            f"ruang ke resistance HTF {interval} terdekat {distance_pct:.2f}% "
+            f"memenuhi batas {minimum_room:.2f}%"
+        ),
+        **terisi,
+    }
+
+
 def evaluate_timing(
     klines: list[Kline],
     config: dict,
@@ -1266,15 +1574,52 @@ def direction_warmup_bars(config: dict, interval: str) -> int:
     return (direction_window_bars(config) + 1) * rasio + rasio
 
 
+def htf_warmup_bars(config: dict, interval: str) -> int:
+    if not htf_enabled(config):
+        return 0
+    source_interval = str(interval).strip().lower()
+    source_minutes = INTERVAL_MINUTES.get(source_interval)
+    if source_minutes is None:
+        raise ValueError(
+            f"Interval simulasi '{interval}' tidak dikenal sehingga candle HTF "
+            "tidak bisa dirangkai."
+        )
+    target_interval = htf_interval(config)
+    target_minutes = int(INTERVAL_MINUTES[target_interval])
+    if target_minutes % source_minutes:
+        raise ValueError(
+            f"HTF_INTERVAL '{target_interval}' ({target_minutes} menit) harus "
+            f"kelipatan bulat dari interval simulasi '{interval}' "
+            f"({source_minutes} menit) supaya candle HTF bisa dirangkai dari "
+            "data yang sudah diunduh."
+        )
+    rasio = target_minutes // source_minutes
+    return (htf_window_bars(config) + 1) * rasio + rasio
+
+
 def gate_warmup_bars(config: dict, interval: str) -> int:
-    return direction_warmup_bars(config, interval)
+    return max(
+        direction_warmup_bars(config, interval),
+        htf_warmup_bars(config, interval),
+    )
 
 
 def native_history_ms(config: dict) -> int:
+    kebutuhan = []
     if direction_enabled(config) or direction_zone_enabled(config):
-        return int(
-            direction_window_bars(config)
-            * INTERVAL_MINUTES[direction_interval(config)]
-            * 60_000
+        kebutuhan.append(
+            int(
+                direction_window_bars(config)
+                * INTERVAL_MINUTES[direction_interval(config)]
+                * 60_000
+            )
         )
-    return 0
+    if htf_enabled(config):
+        kebutuhan.append(
+            int(
+                htf_window_bars(config)
+                * INTERVAL_MINUTES[htf_interval(config)]
+                * 60_000
+            )
+        )
+    return max(kebutuhan, default=0)

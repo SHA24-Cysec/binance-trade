@@ -855,6 +855,17 @@ BT_PARAM_KEYS = (
     "DEMAND_MAX_DISTANCE_PCT",
     "DEMAND_MIN_CLOSE_POSITION",
     "DEMAND_REQUIRE_INSIDE_ZONE",
+    "HTF_FILTER_ENABLED",
+    "HTF_INTERVAL",
+    "HTF_EMA_FAST",
+    "HTF_EMA_SLOW",
+    "HTF_ADX_PERIOD",
+    "HTF_ADX_MIN",
+    "HTF_LOOKBACK_BARS",
+    "HTF_RESISTANCE_FILTER_ENABLED",
+    "HTF_RESISTANCE_LOOKBACK_BARS",
+    "HTF_RESISTANCE_PIVOT_WING_BARS",
+    "HTF_RESISTANCE_MIN_ROOM_PCT",
     "DIRECTION_FILTER_ENABLED",
     "DIRECTION_INTERVAL",
     "DIRECTION_EMA_FAST",
@@ -947,9 +958,15 @@ def _bt_simulation_warmup_bars(cfg: dict) -> int:
         strategy.required_lookback_bars(cfg),
     )
     if _bt_native_htf_intervals(cfg):
+        if strategy.htf_enabled(cfg):
+            try:
+                butuh_htf = strategy.htf_warmup_bars(cfg, interval)
+                return max(dasar, butuh_htf)
+            except ValueError:
+                return dasar
         return dasar
     try:
-        return dasar + pbt.parity.gate_warmup_bars(cfg, interval)
+        return max(dasar, pbt.parity.gate_warmup_bars(cfg, interval))
     except ValueError:
         return dasar
 
@@ -968,20 +985,40 @@ def _bt_estimate_requests(days: int, max_symbols: int, cfg: dict) -> int:
 def _bt_direction_warmup_note(cfg: dict, interval: str) -> str:
     arah_active = bool(cfg.get("DIRECTION_FILTER_ENABLED", False))
     direction_zone_active = bool(cfg.get("DIRECTION_ZONE_FILTER_ENABLED", False))
+    catatan_htf = ""
+    if strategy.htf_enabled(cfg):
+        try:
+            jam_htf = (
+                strategy.htf_warmup_bars(cfg, interval)
+                * strategy.interval_to_ms(interval)
+                / 3_600_000.0
+            )
+        except ValueError as exc:
+            return f"Gerbang HTF tidak bisa disimulasikan: {exc}"
+        catatan_htf = (
+            f" Gerbang tren HTF {strategy.htf_interval(cfg)} dirangkai dari candle "
+            f"{interval} tertutup, butuh sekitar {jam_htf:.1f} jam warmup, dan hanya "
+            "memakai candle HTF yang sudah tutup pada waktu sinyal."
+        )
     if not arah_active and not direction_zone_active:
-        return "Gerbang arah M15 nonaktif, jadi candle arah tidak diambil."
+        return (
+            "Gerbang arah M15 nonaktif, jadi candle arah tidak diambil."
+            + catatan_htf
+        )
     try:
         jam = pbt.parity.direction_warmup_ms(cfg, interval) / 3_600_000.0
     except ValueError:
         return (
             "Gerbang arah M15 aktif, tetapi intervalnya tidak sepadan dengan interval "
             "simulasi sehingga backtest ini akan menolak berjalan."
+            + catatan_htf
         )
     return (
         f"Gerbang arah memakai candle {cfg.get('DIRECTION_INTERVAL', '15m')} asli dari "
         "bursa, sama seperti bot live, sehingga tidak menambah warmup pada rentang "
         f"simulasi {interval}. Kalau memakai jalur agregasi, pemanasan gerbang ini "
         f"butuh sekitar {jam:.1f} jam pertama."
+        + catatan_htf
     )
 
 
@@ -1020,22 +1057,28 @@ def _bt_prepare_universe(
     bt.bars_per_day(interval)
     bar_ms = bt.INTERVAL_MINUTES[interval] * 60_000
     warmup_ms = bt.MS_PER_DAY + 30 * bar_ms
-    if not (
-        bool(cfg.get("DIRECTION_FILTER_ENABLED", False))
-        or bool(cfg.get("DIRECTION_ZONE_FILTER_ENABLED", False))
-    ):
+    arah_native = bool(cfg.get("DIRECTION_FILTER_ENABLED", False)) or bool(
+        cfg.get("DIRECTION_ZONE_FILTER_ENABLED", False)
+    )
+    if not arah_native or strategy.htf_enabled(cfg):
         try:
-            butuh_gerbang_ms = pbt.parity.gate_warmup_ms(cfg, interval)
+            if arah_native and strategy.htf_enabled(cfg):
+                butuh_gerbang_bars = strategy.htf_warmup_bars(cfg, interval)
+                nama_gerbang = f"tren HTF {strategy.htf_interval(cfg)}"
+            else:
+                butuh_gerbang_bars = pbt.parity.gate_warmup_bars(cfg, interval)
+                nama_gerbang = "gerbang arah/HTF"
+            butuh_gerbang_ms = butuh_gerbang_bars * bar_ms
         except ValueError as exc:
             raise bt.BacktestError(str(exc)) from exc
         if butuh_gerbang_ms > warmup_ms:
             logger.info(
-                "Warmup backtest dinaikkan dari %.1f jam menjadi %.1f jam karena "
-                "layer arah %s butuh paling sedikit %d candle %s sebagai pemanasan.",
+                "Warmup backtest dinaikkan dari %.1f jam menjadi %.1f jam karena %s "
+                "memerlukan %d candle %s sebagai pemanasan.",
                 warmup_ms / 3_600_000.0,
                 butuh_gerbang_ms / 3_600_000.0,
-                cfg.get("DIRECTION_INTERVAL", "15m"),
-                pbt.parity.gate_warmup_bars(cfg, interval),
+                nama_gerbang,
+                butuh_gerbang_bars,
                 interval,
             )
             warmup_ms = butuh_gerbang_ms
@@ -1350,6 +1393,32 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
             ),
             "params_used": {k: cfg.get(k) for k in BT_PARAM_KEYS},
             "summary": summary,
+            "htf": {
+                "enabled": bool(cfg.get("HTF_FILTER_ENABLED", False)),
+                "interval": str(cfg.get("HTF_INTERVAL", "1h")),
+                "ema_fast": int(cfg.get("HTF_EMA_FAST", 20) or 20),
+                "ema_slow": int(cfg.get("HTF_EMA_SLOW", 50) or 50),
+                "adx_period": int(cfg.get("HTF_ADX_PERIOD", 14) or 14),
+                "adx_min": float(cfg.get("HTF_ADX_MIN", 30.0) or 0.0),
+                "lookback_bars": int(cfg.get("HTF_LOOKBACK_BARS", 60) or 60),
+                "skips": int(getattr(result, "htf_skips", 0)),
+                "scans": int(getattr(result, "htf_scans", 0)),
+            },
+            "htf_resistance": {
+                "enabled": bool(strategy.htf_resistance_enabled(cfg)),
+                "interval": str(cfg.get("HTF_INTERVAL", "1h")),
+                "lookback_bars": int(
+                    cfg.get("HTF_RESISTANCE_LOOKBACK_BARS", 60) or 60
+                ),
+                "pivot_wing_bars": int(
+                    cfg.get("HTF_RESISTANCE_PIVOT_WING_BARS", 2) or 2
+                ),
+                "minimum_room_pct": float(
+                    cfg.get("HTF_RESISTANCE_MIN_ROOM_PCT", 1.5) or 0.0
+                ),
+                "skips": int(getattr(result, "htf_resistance_skips", 0)),
+                "scans": int(getattr(result, "htf_resistance_scans", 0)),
+            },
             "direction": {
                 "enabled": bool(cfg.get("DIRECTION_FILTER_ENABLED", False)),
                 "interval": cfg.get("DIRECTION_INTERVAL", "15m"),
@@ -1505,6 +1574,16 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 + _bt_demand_limitations(cfg, prep["interval"])
                 + " "
                 + _bt_timing_note(cfg, prep["interval"])
+                + (
+                    f" Gerbang HTF H1 di backtest dirangkai dari candle {prep['interval']} yang lengkap, "
+                    "dibatasi pada waktu sinyal, dan menolak data H1 terbaru yang hilang, "
+                    "bercelah, atau kurang. Live memakai candle H1 native sehingga hasil "
+                    "masih dapat berbeda karena sumber/kelengkapan data. "
+                    f"HTF_ADX_MIN={float(cfg.get('HTF_ADX_MIN', 30.0) or 0.0):g} "
+                    "adalah titik awal yang wajib dikalibrasi, bukan nilai final."
+                    if strategy.htf_enabled(cfg)
+                    else " Gerbang tren HTF nonaktif untuk simulasi ini."
+                )
                 + " Filter live yang SUDAH disimulasikan dari candle: filter BTC (BTC_MAX_DROP_PCT, "
                 "memakai candle BTC historis), MAX_CHASE_PCT, MIN_SECONDS_BETWEEN_TRADES, "
                 "COOLDOWN_MINUTES_AFTER_CLOSE, equity stop (drawdown), dan "
@@ -1767,27 +1846,43 @@ def _bt_min_days_note(cfg: dict, interval: str) -> tuple[int, str]:
     if not arah_aktif and not m5_aktif:
         return dasar, ""
 
-    native_htf = bool(_bt_native_htf_intervals(cfg))
+    arah_native = bool(_bt_native_htf_intervals(cfg))
     minimal = dasar
     catatan = ""
-    if arah_aktif:
+    if arah_aktif and arah_native:
         catatan = (
             f"Layer arah ({cfg.get('DIRECTION_INTERVAL', '15m')}) memakai candle asli bursa, "
             "sama seperti bot live, jadi riwayat arah tidak menambah "
             "batas minimum hari pada rentang simulasi. Riwayat yang dibutuhkan "
             "tetap diunduh otomatis sebelum rentang uji."
         )
-    if not native_htf:
+    if arah_aktif and not arah_native:
         try:
-            jam_gerbang = pbt.parity.gate_warmup_ms(cfg, interval) / 3_600_000
+            jam_arah = (
+                pbt.parity.direction_warmup_ms(cfg, interval) / 3_600_000.0
+            )
         except ValueError as exc:
             return dasar, str(exc)
-        if jam_gerbang > 0:
-            minimal = max(minimal, int(math.ceil(jam_gerbang / 24.0)) + 1)
+        if jam_arah > 0:
+            minimal = max(minimal, int(math.ceil(jam_arah / 24.0)) + 1)
             catatan += (
-                f" Tanpa candle arah native, gerbang {cfg.get('DIRECTION_INTERVAL', '15m')} harus "
-                f"dirangkai dari candle {interval} sehingga butuh sekitar "
-                f"{jam_gerbang:.2f} jam pemanasan."
+                f" Gerbang arah {cfg.get('DIRECTION_INTERVAL', '15m')} dirangkai dari "
+                f"candle {interval}, sehingga butuh sekitar {jam_arah:.2f} jam pemanasan."
+            )
+    if strategy.htf_enabled(cfg):
+        try:
+            jam_htf = (
+                strategy.htf_warmup_bars(cfg, interval)
+                * strategy.interval_to_ms(interval)
+                / 3_600_000.0
+            )
+        except ValueError as exc:
+            return dasar, str(exc)
+        if jam_htf > 0:
+            minimal = max(minimal, int(math.ceil(jam_htf / 24.0)) + 1)
+            catatan += (
+                f" Gerbang tren HTF {strategy.htf_interval(cfg)} dirangkai dari candle "
+                f"{interval}, sehingga butuh sekitar {jam_htf:.2f} jam pemanasan."
             )
     if m5_aktif:
         try:
@@ -1889,7 +1984,7 @@ def api_backtest_start():
     if max_symbols > 600:
         return jsonify({"error": "Jumlah simbol maksimal 600."}), 400
 
-    est_requests = _bt_estimate_requests(days, max_symbols, PUMP_CONFIG)
+    est_requests = _bt_estimate_requests(days, max_symbols, cfg_hari)
     if est_requests > 20000:
         return (
             jsonify(
@@ -2267,6 +2362,8 @@ def api_backtest_defaults():
         out["warmup_bars"] / float(bt.bars_per_day(_bt_simulation_interval(PUMP_CONFIG))),
         1,
     )
+    cfg_htf = dict(PUMP_CONFIG, HTF_FILTER_ENABLED=True)
+    out["warmup_bars_htf_enabled"] = int(_bt_simulation_warmup_bars(cfg_htf))
     out["native_intervals"] = _bt_native_htf_intervals(PUMP_CONFIG)
     out["native_history_days"] = round(
         strategy.native_history_ms(PUMP_CONFIG) / float(bt.MS_PER_DAY), 1
