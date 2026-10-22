@@ -46,8 +46,7 @@ class Candidate:
     confirm_reason: str = ""
     setup: "Optional[SetupResult]" = None
     direction: "Optional[dict]" = None
-    daily_zone: "Optional[dict]" = None
-    zone: "Optional[dict]" = None
+    direction_zone: "Optional[dict]" = None
     timing: "Optional[dict]" = None
 
 
@@ -93,12 +92,10 @@ class ScanDiagnostics:
         if not self.checked_candidates:
             return []
         interval = str(config.get("CONFIRM_INTERVAL", "5m"))
-        arah_interval = str(config.get("DIRECTION_INTERVAL", "1d"))
-        zona_interval = str(config.get("ZONE_INTERVAL", "1h"))
+        arah_interval = str(config.get("DIRECTION_INTERVAL", "15m"))
         labels = {
             "DIRECTION": f"arah {arah_interval}",
-            "DAILY_ZONE": f"zona demand {arah_interval}",
-            "ZONE": f"zona demand dan tren {zona_interval}",
+            "DIRECTION_ZONE": f"zona demand {arah_interval}",
             "CANDLE_CONFIRM": f"candle {interval} gagal diambil",
             "TIMING": f"timing {interval}",
             "HISTORY_CONFIRM": f"riwayat {interval} kurang",
@@ -594,7 +591,7 @@ def direction_verdict(
 ) -> dict:
     from strategy import indicators as strategy_mod
 
-    interval = str(config.get("DIRECTION_INTERVAL", "1d") or "1d")
+    interval = str(config.get("DIRECTION_INTERVAL", "15m") or "15m")
     kosong = {
         "interval": interval,
         "bars": 0,
@@ -637,7 +634,7 @@ def direction_verdict(
     )
 
 
-def daily_zone_verdict(
+def direction_zone_verdict(
     symbol: str,
     config: dict,
     direction_provider,
@@ -689,69 +686,9 @@ def daily_zone_verdict(
     )
 
 
-def zone_verdict(
-    symbol: str,
-    config: dict,
-    zone_provider,
-    signal_close_time_ms: int | None = None,
-) -> dict:
-    from strategy import indicators as strategy_mod
-
-    interval = str(config.get("ZONE_INTERVAL", "1h") or "1h")
-    kosong = {
-        "interval": interval,
-        "bars": 0,
-        "required": strategy_mod.zone_window_bars(config),
-        "zone_low": None,
-        "zone_high": None,
-        "distance_pct": None,
-        "close_position": None,
-        "close": None,
-        "ema_fast": None,
-        "ema_slow": None,
-        "adx": None,
-        "checks": {},
-        "values": {},
-        "trend": None,
-    }
-    if not bool(config.get("ZONE_FILTER_ENABLED", False)):
-        return {"ok": True, "reason": f"filter zona dan tren {interval} nonaktif", **kosong}
-    if zone_provider is None:
-        return {
-            "ok": False,
-            "reason": (
-                f"filter zona {interval} aktif tetapi penyedia candle zona "
-                "tidak tersedia (fail closed)"
-            ),
-            **kosong,
-        }
-    try:
-        klines = zone_provider(symbol)
-    except Exception as exc:
-        return {
-            "ok": False,
-            "reason": f"candle zona {interval} {symbol} gagal diambil: {exc}",
-            **kosong,
-        }
-    if not klines:
-        return {
-            "ok": False,
-            "reason": f"candle zona {interval} {symbol} kosong",
-            **kosong,
-        }
-    return strategy_mod.evaluate_zone(
-        list(klines), config, signal_close_time_ms
-    )
-
-
 def timing_verdict(
     config: dict, klines: list, signal_close_time_ms: int | None = None
 ) -> dict:
-    """Verdict layer timing, dibaca dari seri candle konfirmasi yang sama.
-
-    Layer timing memakai seri konfirmasi (M5) yang sudah diunduh untuk
-    konfirmasi entry, jadi tidak perlu pengambilan candle tambahan.
-    """
     from strategy import indicators as strategy_mod
 
     interval = strategy_mod.timing_interval(config)
@@ -786,7 +723,6 @@ def find_best_candidate(
     klines_fetcher_many: "Optional[Callable[[list], dict]]" = None,
     prewarm_fn: "Optional[Callable[[list], None]]" = None,
     direction_provider: "Optional[Callable[[str], list]]" = None,
-    zone_provider: "Optional[Callable[[str], list]]" = None,
     diagnostics: Optional[ScanDiagnostics] = None,
     confirm_close_time_ms: "int | None" = None,
 ) -> Optional[Candidate]:
@@ -817,50 +753,32 @@ def find_best_candidate(
             if not arah["ok"]:
                 cand.confirmed = False
                 cand.confirm_reason = (
-                    f"arah {arah.get('interval') or '1d'} ditolak: {arah['reason']}"
+                    f"arah {arah.get('interval') or '15m'} ditolak: {arah['reason']}"
                 )
                 if diagnostics is not None:
                     diagnostics.reject("DIRECTION", cand.symbol, arah["reason"])
                 continue
             cand.confirm_reason = arah["reason"]
         if bool(config.get("DIRECTION_ZONE_FILTER_ENABLED", False)):
-            zona_harian = daily_zone_verdict(
+            zona_arah = direction_zone_verdict(
                 cand.symbol, config, direction_provider, confirm_close_time_ms
             )
-            cand.daily_zone = zona_harian
-            if not zona_harian["ok"]:
+            cand.direction_zone = zona_arah
+            if not zona_arah["ok"]:
                 cand.confirmed = False
                 cand.confirm_reason = (
-                    f"zona demand {zona_harian.get('interval') or '1d'} ditolak: "
-                    f"{zona_harian['reason']}"
+                    f"zona demand {zona_arah.get('interval') or '15m'} ditolak: "
+                    f"{zona_arah['reason']}"
                 )
                 if diagnostics is not None:
                     diagnostics.reject(
-                        "DAILY_ZONE", cand.symbol, zona_harian["reason"]
+                        "DIRECTION_ZONE", cand.symbol, zona_arah["reason"]
                     )
                 continue
             cand.confirm_reason = (
-                f"{cand.confirm_reason} | {zona_harian['reason']}"
+                f"{cand.confirm_reason} | {zona_arah['reason']}"
                 if cand.confirm_reason
-                else zona_harian["reason"]
-            )
-        if bool(config.get("ZONE_FILTER_ENABLED", False)):
-            zona = zone_verdict(
-                cand.symbol, config, zone_provider, confirm_close_time_ms
-            )
-            cand.zone = zona
-            if not zona["ok"]:
-                cand.confirmed = False
-                cand.confirm_reason = (
-                    f"zona dan tren {zona.get('interval') or '1h'} ditolak: {zona['reason']}"
-                )
-                if diagnostics is not None:
-                    diagnostics.reject("ZONE", cand.symbol, zona["reason"])
-                continue
-            cand.confirm_reason = (
-                f"{cand.confirm_reason} | {zona['reason']}"
-                if cand.confirm_reason
-                else zona["reason"]
+                else zona_arah["reason"]
             )
         lolos_htf.append(cand)
 

@@ -3,7 +3,11 @@ from __future__ import annotations
 from copy import deepcopy
 
 from config.config import PUMP_CONFIG
-from config.settings_schema import validate_candidate
+from config.settings_schema import (
+    _migrate_legacy_keys,
+    _validate_override_payload,
+    validate_candidate,
+)
 from market.market_scanner import ScanDiagnostics, detect_entry_setup, find_best_candidate
 from strategy import indicators as strategy
 from strategy.indicators import Kline
@@ -14,14 +18,9 @@ def _m5(index: int, open_price: float, high: float, low: float, close: float) ->
     return Kline(start, open_price, high, low, close, start + 299_999, 1_000.0, 100_000.0)
 
 
-def _h1(index: int, open_price: float, high: float, low: float, close: float) -> Kline:
-    start = index * 3_600_000
-    return Kline(start, open_price, high, low, close, start + 3_599_999, 1_000.0, 100_000.0)
-
-
-def _d1(index: int, open_price: float, high: float, low: float, close: float) -> Kline:
-    start = index * 86_400_000
-    return Kline(start, open_price, high, low, close, start + 86_399_999, 1_000.0, 100_000.0)
+def _m15(index: int, open_price: float, high: float, low: float, close: float) -> Kline:
+    start = index * 900_000
+    return Kline(start, open_price, high, low, close, start + 899_999, 1_000.0, 100_000.0)
 
 
 def breakout_series() -> list[Kline]:
@@ -57,28 +56,20 @@ def falling_m5() -> list[Kline]:
     return rows
 
 
-def rising_h1() -> list[Kline]:
+def rising_m15() -> list[Kline]:
     rows = []
-    for index in range(80):
-        close = 100.0 + index * 0.03
-        rows.append(_h1(index, close - 0.05, close + 0.1, close - 0.1, close))
+    for index in range(65):
+        close = 100.0 + index * 0.12
+        rows.append(_m15(index, close - 0.05, close + 0.15, close - 0.15, close))
     return rows
 
 
-def falling_h1() -> list[Kline]:
+def falling_m15() -> list[Kline]:
     rows = []
-    for index in range(79):
-        close = 103.0 - index * 0.03
-        rows.append(_h1(index, close - 0.05, close + 0.1, close - 0.1, close))
-    rows.append(_h1(79, 100.65, 100.85, 100.55, 100.71))
-    return rows
-
-
-def rising_d1() -> list[Kline]:
-    rows = []
-    for index in range(80):
-        close = 100.0 + index * 0.3
-        rows.append(_d1(index, close - 0.1, close + 0.2, close - 0.2, close))
+    for index in range(64):
+        close = 108.0 - index * 0.10
+        rows.append(_m15(index, close + 0.05, close + 0.15, close - 0.15, close))
+    rows.append(_m15(64, 101.65, 101.85, 101.55, 101.72))
     return rows
 
 
@@ -140,7 +131,6 @@ def run(verbose: bool = True) -> tuple[bool, list[str]]:
     order_cfg = dict(cfg)
     order_cfg["DIRECTION_FILTER_ENABLED"] = False
     order_cfg["DIRECTION_ZONE_FILTER_ENABLED"] = False
-    order_cfg["ZONE_FILTER_ENABLED"] = False
     diagnostics = ScanDiagnostics()
     selected = find_best_candidate(
         [
@@ -163,48 +153,102 @@ def run(verbose: bool = True) -> tuple[bool, list[str]]:
         and not diagnostics.rejection_counts.get("BREAKOUT_RETEST"),
     )
 
-    daily = rising_d1()
-    direction_ok = strategy.evaluate_direction(daily, cfg)
-    check("d1_ema_adx", direction_ok["ok"], direction_ok["reason"])
+    m15 = rising_m15()
+    direction_ok = strategy.evaluate_direction(m15, cfg)
+    check("m15_ema_adx", direction_ok["ok"], direction_ok["reason"])
     check(
-        "d1_strict_ema_order",
+        "m15_strict_ema_order",
         float(direction_ok.get("close") or 0.0)
         > float(direction_ok.get("ema_fast") or 0.0)
         > float(direction_ok.get("ema_slow") or 0.0),
     )
-    future_daily = daily + [_d1(80, 120.0, 121.0, 79.0, 80.0)]
+    check("m15_adx_25", float(direction_ok.get("adx") or 0.0) >= 25.0)
+    future_m15 = m15 + [_m15(65, 108.0, 109.0, 79.0, 80.0)]
     closed_direction = strategy.evaluate_direction(
-        future_daily, cfg, signal_close_time_ms=daily[-1].close_time
+        future_m15, cfg, signal_close_time_ms=m15[-1].close_time
     )
     check(
-        "d1_closed_candle_cutoff",
-        closed_direction["ok"] and not strategy.evaluate_direction(future_daily, cfg)["ok"],
+        "m15_closed_candle_cutoff",
+        closed_direction["ok"] and not strategy.evaluate_direction(future_m15, cfg)["ok"],
     )
 
-    zone_ok = strategy.evaluate_zone(rising_h1(), cfg)
-    check("h1_demand_ema_adx", zone_ok["ok"], zone_ok["reason"])
-    check(
-        "h1_strict_ema_order",
-        float(zone_ok.get("close") or 0.0) > float(zone_ok.get("ema_fast") or 0.0) > float(zone_ok.get("ema_slow") or 0.0),
-    )
-    check("h1_adx_25", float(zone_ok.get("adx") or 0.0) >= 25.0)
-    h1_rows = rising_h1()
-    h1_future = h1_rows + [_h1(80, 102.0, 103.0, 69.0, 70.0)]
-    closed_zone = strategy.evaluate_zone(
-        h1_future, cfg, signal_close_time_ms=h1_rows[-1].close_time
-    )
-    check(
-        "h1_closed_candle_cutoff",
-        closed_zone["ok"] and not strategy.evaluate_zone(h1_future, cfg)["ok"],
-    )
-
-    zone_down = strategy.evaluate_zone(falling_h1(), cfg)
-    check("h1_rejects_wrong_trend", not zone_down["ok"] and "tren ditolak" in zone_down["reason"], zone_down["reason"])
+    direction_down = strategy.evaluate_direction(falling_m15(), cfg)
+    check("m15_rejects_wrong_trend", not direction_down["ok"], direction_down["reason"])
 
     strong_cfg = dict(cfg)
-    strong_cfg["ZONE_ADX_MIN"] = 101.0
-    zone_weak = strategy.evaluate_zone(rising_h1(), strong_cfg)
-    check("h1_adx_threshold_enforced", not zone_weak["ok"] and "ADX14" in zone_weak["reason"])
+    strong_cfg["DIRECTION_ADX_MIN"] = 101.0
+    direction_weak = strategy.evaluate_direction(m15, strong_cfg)
+    check(
+        "m15_adx_threshold_enforced",
+        not direction_weak["ok"] and "ADX14" in direction_weak["reason"],
+    )
+
+    zone_ok = strategy.evaluate_direction_zone(m15, cfg)
+    check("m15_demand_zone_valid", zone_ok["ok"], zone_ok["reason"])
+    closed_zone = strategy.evaluate_direction_zone(
+        future_m15, cfg, signal_close_time_ms=m15[-1].close_time
+    )
+    check(
+        "m15_demand_zone_closed_cutoff",
+        closed_zone["ok"] and not strategy.evaluate_direction_zone(future_m15, cfg)["ok"],
+    )
+
+    spiked_m15 = list(m15)
+    spiked_m15[-1] = _m15(64, 114.0, 118.0, 113.5, 117.5)
+    zone_spike = strategy.evaluate_direction_zone(spiked_m15, cfg)
+    check(
+        "m15_demand_zone_rejects_spike_too_far",
+        not zone_spike["ok"] and "terlalu jauh" in zone_spike["reason"],
+        zone_spike["reason"],
+    )
+
+    spike_diag = ScanDiagnostics()
+    spike_selected = find_best_candidate(
+        [
+            {
+                "symbol": "SPIKEUSDT",
+                "priceChangePercent": "22",
+                "quoteVolume": "1000000000",
+                "lastPrice": "117.5",
+            }
+        ],
+        lambda _symbol: rows,
+        cfg,
+        tradable_symbols={"SPIKEUSDT"},
+        direction_provider=lambda _symbol: spiked_m15,
+        diagnostics=spike_diag,
+    )
+    check(
+        "scanner_rejects_m15_spike",
+        spike_selected is None
+        and spike_diag.rejection_counts.get("DIRECTION_ZONE") == 1,
+    )
+
+    full_diag = ScanDiagnostics()
+    full_selected = find_best_candidate(
+        [
+            {
+                "symbol": "GOODUSDT",
+                "priceChangePercent": "18",
+                "quoteVolume": "1000000000",
+                "lastPrice": "110.8",
+            }
+        ],
+        lambda _symbol: rows,
+        cfg,
+        tradable_symbols={"GOODUSDT"},
+        direction_provider=lambda _symbol: m15,
+        diagnostics=full_diag,
+    )
+    check(
+        "scanner_full_two_timeframe_pipeline",
+        full_selected is not None
+        and full_selected.confirmed
+        and full_selected.direction is not None
+        and full_selected.direction_zone is not None
+        and full_selected.timing is not None
+        and full_selected.setup is not None,
+    )
 
     extra_cfg = dict(cfg)
     extra_cfg["ROLLING_VOLUME_LOOKBACK_BARS"] = 500
@@ -218,20 +262,40 @@ def run(verbose: bool = True) -> tuple[bool, list[str]]:
 
     cleaned, errors, _warnings = validate_candidate(dict(cfg), "PAPER")
     check("config_valid", not errors, str(errors))
+    invalid_dir = dict(cfg)
+    invalid_dir["DIRECTION_EMA_SLOW"] = invalid_dir["DIRECTION_EMA_FAST"]
+    _, dir_errors, _ = validate_candidate(invalid_dir, "PAPER")
+    check("config_rejects_m15_ema_order", "DIRECTION_EMA_SLOW" in dir_errors)
     invalid_zone = dict(cfg)
-    invalid_zone["ZONE_EMA_SLOW"] = invalid_zone["ZONE_EMA_FAST"]
+    invalid_zone["DIRECTION_ZONE_MAX_DISTANCE_PCT"] = 0.5
+    invalid_zone["DIRECTION_ZONE_BUFFER_PCT"] = 1.2
     _, zone_errors, _ = validate_candidate(invalid_zone, "PAPER")
-    check("config_rejects_h1_ema_order", "ZONE_EMA_SLOW" in zone_errors)
+    check("config_rejects_m15_zone_distance", "DIRECTION_ZONE_MAX_DISTANCE_PCT" in zone_errors)
     invalid_breakout = dict(cfg)
     invalid_breakout["BREAKOUT_LOOKBACK_BARS"] = 5
     invalid_breakout["BREAKOUT_PIVOT_WING_BARS"] = 3
     _, breakout_errors, _ = validate_candidate(invalid_breakout, "PAPER")
     check("config_rejects_invalid_pivot_window", "BREAKOUT_LOOKBACK_BARS" in breakout_errors)
+    migrated = _migrate_legacy_keys(
+        {
+            "ZONE_FILTER_ENABLED": True,
+            "ZONE_INTERVAL": "1h",
+            "HTF_DEMAND_ZONE_BUFFER_PCT": 1.5,
+            "DIRECTION_INTERVAL": "15m",
+        }
+    )
+    _validate_override_payload(migrated)
     check(
-        "default_three_timeframes",
-        cleaned["DIRECTION_INTERVAL"] == "1d"
-        and cleaned["ZONE_INTERVAL"] == "1h"
-        and cleaned["CONFIRM_INTERVAL"] == "5m",
+        "legacy_zone_keys_migrated_cleanly",
+        migrated == {"DIRECTION_INTERVAL": "15m"},
+        str(migrated),
+    )
+    check(
+        "default_two_timeframes",
+        cleaned["DIRECTION_INTERVAL"] == "15m"
+        and cleaned["CONFIRM_INTERVAL"] == "5m"
+        and "ZONE_INTERVAL" not in cleaned
+        and "ZONE_FILTER_ENABLED" not in cleaned,
     )
     check(
         "default_ema_adx",
@@ -240,24 +304,24 @@ def run(verbose: bool = True) -> tuple[bool, list[str]]:
             for key, value in (
                 ("DIRECTION_EMA_FAST", 20),
                 ("DIRECTION_EMA_SLOW", 50),
-                ("DIRECTION_ADX_MIN", 25.0),
-                ("ZONE_EMA_FAST", 20),
-                ("ZONE_EMA_SLOW", 50),
-                ("ZONE_ADX_MIN", 25.0),
+                ("DIRECTION_ADX_MIN", 32.0),
+                ("DIRECTION_ZONE_LOOKBACK_BARS", 28),
+                ("DIRECTION_ZONE_MAX_DISTANCE_PCT", 7.0),
                 ("TIMING_EMA_FAST", 20),
                 ("TIMING_EMA_SLOW", 50),
-                ("TIMING_ADX_MIN", 25.0),
+                ("TIMING_ADX_MIN", 18.0),
+                ("ATR_MULT_TRAIL_START", 9.0),
+                ("MAX_HOLD_HOURS", 24.0),
             )
         ),
     )
     check(
         "default_exact_strategy",
         cleaned["DIRECTION_FILTER_ENABLED"]
-        and cleaned["ZONE_FILTER_ENABLED"]
+        and cleaned["DIRECTION_ZONE_FILTER_ENABLED"]
         and cleaned["TIMING_FILTER_ENABLED"]
         and cleaned["BREAKOUT_RETEST_FILTER_ENABLED"]
-        and not cleaned["ZONE_REQUIRE_INSIDE_ZONE"]
-        and not cleaned["DIRECTION_ZONE_FILTER_ENABLED"]
+        and not cleaned["DIRECTION_ZONE_REQUIRE_INSIDE_ZONE"]
         and not cleaned["ROLLING_VOLUME_FILTER_ENABLED"]
         and not cleaned["DEMAND_ZONE_FILTER_ENABLED"],
     )

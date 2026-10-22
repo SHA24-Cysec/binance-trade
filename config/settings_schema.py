@@ -701,7 +701,7 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "CONFIRM_INTERVAL": _field(
         "Scan",
         "Interval konfirmasi",
-        "Interval candle konfirmasi volume rolling dan candle layer timing. ZONE_INTERVAL dan DIRECTION_INTERVAL wajib kelipatan bulat dari nilai ini, 1m sampai 15m paling aman, supaya backtest bisa merangkai candle zona dan arah dari candle konfirmasi.",
+        "Interval candle konfirmasi entry M5 (timing dan breakout-retest). DIRECTION_INTERVAL wajib kelipatan bulat dari nilai ini dan tidak boleh lebih pendek supaya backtest dapat merangkai candle arah dari candle konfirmasi.",
         "str",
         editor="select",
         options=[
@@ -999,213 +999,114 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         maximum=1000,
     ),
     "DIRECTION_FILTER_ENABLED": _field(
-        "Arah Daily",
-        "Filter arah Daily",
-        "Layer pertama: tandai arah utama dari candle Daily. Entry hanya boleh kalau candle harian terakhir sudah tutup di atas EMA cepat, EMA cepat di atas EMA lambat, dan ADX minimal. Data harian gagal diambil atau riwayat belum cukup berarti kandidat ditolak (fail closed).",
+        "Arah M15",
+        "Filter arah M15",
+        "Layer pertama: tandai arah utama dari candle M15. Entry hanya boleh kalau candle arah terakhir sudah tutup di atas EMA cepat, EMA cepat di atas EMA lambat, dan ADX minimal. Data gagal diambil atau riwayat belum cukup berarti kandidat ditolak (fail closed).",
         "bool",
     ),
     "DIRECTION_INTERVAL": _field(
-        "Arah Daily",
+        "Arah M15",
         "Interval arah",
-        "Timeframe untuk layer arah. Default 1d (harian). Bot live mengambil candle ini langsung dari bursa, backtest memakai candle yang sama.",
+        "Timeframe untuk layer arah. Default 15m (M15). Bot live mengambil candle ini langsung dari bursa, backtest memakai aturan yang sama.",
         "str",
         editor="select",
-        options=["1d", "12h", "8h", "6h", "4h"],
+        options=["15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"],
     ),
     "DIRECTION_EMA_FAST": _field(
-        "Arah Daily",
+        "Arah M15",
         "Periode EMA cepat arah",
-        "EMA cepat pada candle arah. Default 20, sejajar dengan EMA cepat layer timing. Wajib lebih kecil dari EMA lambat.",
+        "EMA cepat pada candle arah M15. Default 20, sejajar dengan EMA cepat layer timing. Wajib lebih kecil dari EMA lambat.",
         "int",
         minimum=2,
         maximum=500,
         unit="candle",
     ),
     "DIRECTION_EMA_SLOW": _field(
-        "Arah Daily",
+        "Arah M15",
         "Periode EMA lambat arah",
-        "EMA lambat pada candle arah. Default 50, sejajar dengan EMA lambat layer timing; dipakai juga sebagai penentu panjang riwayat minimum sehingga koin butuh sekitar 50 candle harian sebelum bisa di-entry. Maksimal 999 candle karena endpoint klines Binance membatasi 1000 candle per panggilan.",
+        "EMA lambat pada candle arah M15. Default 50, sejajar dengan EMA lambat layer timing; dipakai juga sebagai penentu panjang riwayat minimum. Maksimal 999 candle karena endpoint klines Binance membatasi 1000 candle per panggilan.",
         "int",
         minimum=3,
         maximum=999,
         unit="candle",
     ),
     "DIRECTION_ADX_PERIOD": _field(
-        "Arah Daily",
+        "Arah M15",
         "Periode ADX arah",
-        "Periode ADX Wilder pada candle arah. Butuh sekitar dua kali periode ini candle agar nilainya terdefinisi.",
+        "Periode ADX Wilder pada candle arah M15. Butuh sekitar dua kali periode ini candle agar nilainya terdefinisi.",
         "int",
         minimum=2,
         maximum=200,
         unit="candle",
     ),
     "DIRECTION_ADX_MIN": _field(
-        "Arah Daily",
+        "Arah M15",
         "Ambang ADX arah",
-        "ADX minimum agar arah dianggap kuat. Isi 0 untuk mematikan cek kekuatan arah dan hanya memakai susunan EMA.",
+        "ADX minimum agar arah M15 dianggap kuat. Isi 0 untuk mematikan cek kekuatan arah dan hanya memakai susunan EMA.",
         "float",
         minimum=0,
         maximum=100,
     ),
     "DIRECTION_LOOKBACK_BARS": _field(
-        "Arah Daily",
+        "Arah M15",
         "Jendela candle arah",
-        "Jumlah candle tertutup timeframe arah yang dipakai menghitung EMA dan ADX. Nilai ini dipakai sama persis oleh bot live dan backtest; endpoint klines Binance membatasi 1000 candle per panggilan.",
+        "Jumlah candle tertutup timeframe arah M15 yang dipakai menghitung EMA, ADX, dan zona demand M15. Nilai ini dipakai sama persis oleh bot live dan backtest.",
         "int",
         minimum=20,
         maximum=999,
         unit="candle",
     ),
     "DIRECTION_ZONE_FILTER_ENABLED": _field(
-        "Arah Daily",
-        "Filter zona demand Daily",
-        "Dijalankan tepat setelah arah, di candle yang sama, tanpa unduhan tambahan. Entry hanya boleh kalau harga masih berada di dalam atau dekat zona demand yang dipetakan dari candle harian: close di atas dasar zona, candle sinyal bullish, close_pos di atas ambang, dan jarak dari atap zona tidak melewati batas. Candle gagal diambil atau riwayat kurang berarti kandidat ditolak (fail closed).",
+        "Arah M15",
+        "Filter zona demand M15",
+        "Dijalankan tepat setelah arah pada seri candle M15 yang sama tanpa unduhan tambahan. Entry hanya boleh kalau harga masih berada di dalam atau dekat zona demand M15: close di atas dasar zona, candle sinyal bullish, close_pos di atas ambang, dan jarak dari atap zona tidak melewati batas (fail closed).",
         "bool",
     ),
     "DIRECTION_ZONE_LOOKBACK_BARS": _field(
-        "Arah Daily",
-        "Lookback zona demand Daily",
-        "Jumlah candle harian tertutup yang memetakan dasar zona demand. Default 20 candle = sekitar satu bulan struktur harga harian.",
+        "Arah M15",
+        "Lookback zona demand M15",
+        "Jumlah candle M15 tertutup yang memetakan dasar zona demand. Default 28 candle (sekitar 7 jam struktur harga M15).",
         "int",
         minimum=3,
         maximum=997,
         unit="candle",
     ),
     "DIRECTION_ZONE_BUFFER_PCT": _field(
-        "Arah Daily",
-        "Tebal zona demand Daily",
-        "Tebal minimum zona demand harian di atas level dasarnya, dalam persen. Candle harian lebih lebar daripada H1, jadi defaultnya lebih tebal. Nilai ini juga menentukan candle mana yang dihitung sebagai dasar zona.",
+        "Arah M15",
+        "Tebal zona demand M15",
+        "Tebal minimum zona demand M15 di atas level dasarnya, dalam persen. Nilai ini juga menentukan candle mana yang dihitung sebagai dasar zona akumulasi.",
         "float",
         minimum=0.0,
         maximum=20.0,
         unit="%",
     ),
     "DIRECTION_ZONE_MAX_DISTANCE_PCT": _field(
-        "Arah Daily",
-        "Jarak maksimum dari zona Daily",
-        "Jarak maksimum close candle harian di atas ATAP zona demand, dalam persen. Harus lebih besar atau sama dengan tebal zona. Makin kecil, makin paksa entry terjadi di area demand dan bukan di tengah jalan naik.",
+        "Arah M15",
+        "Jarak maksimum dari zona M15",
+        "Jarak maksimum close candle M15 di atas ATAP zona demand, dalam persen. Harus lebih besar atau sama dengan tebal zona agar tidak membeli di pucuk M15.",
         "float",
         minimum=0.0,
         maximum=50.0,
         unit="%",
     ),
     "DIRECTION_ZONE_MIN_CLOSE_POSITION": _field(
-        "Arah Daily",
-        "Posisi close minimum candle Daily",
-        "Posisi penutupan minimum di dalam rentang high-low candle sinyal harian (0.0 di low, 1.0 di high) sebagai bukti dorongan pembeli di zona.",
+        "Arah M15",
+        "Posisi close minimum candle M15",
+        "Posisi penutupan minimum di dalam rentang high-low candle sinyal M15 (0.0 di low, 1.0 di high) sebagai bukti dorongan pembeli di zona.",
         "float",
         minimum=0.0,
         maximum=1.0,
     ),
     "DIRECTION_ZONE_REQUIRE_INSIDE_ZONE": _field(
-        "Arah Daily",
-        "Wajib di dalam zona demand Daily",
-        "True berarti close candle harian harus benar-benar berada di antara dasar dan atap zona demand; DIRECTION_ZONE_MAX_DISTANCE_PCT tidak dipakai lagi. False membuka toleransi di atas atap zona sebesar nilai kunci jarak itu.",
+        "Arah M15",
+        "Wajib di dalam zona demand M15",
+        "True berarti close candle M15 harus benar-benar berada di antara dasar dan atap zona demand; DIRECTION_ZONE_MAX_DISTANCE_PCT tidak dipakai lagi. False membuka toleransi di atas atap zona sebesar nilai kunci jarak itu.",
         "bool",
-    ),
-    "ZONE_FILTER_ENABLED": _field(
-        "Zona H1",
-        "Filter zona demand H1",
-        "Layer kedua: candle H1 harus berada di dalam atau dekat zona demand, menutup di atas EMA cepat, memiliki EMA cepat di atas EMA lambat, dan memenuhi ambang ADX. Data gagal diambil berarti kandidat ditolak (fail closed).",
-        "bool",
-    ),
-    "ZONE_INTERVAL": _field(
-        "Zona H1",
-        "Interval zona",
-        "Timeframe untuk layer zona. Default 1h. Bot live mengambil candle ini langsung dari bursa, backtest memakai candle yang sama.",
-        "str",
-        editor="select",
-        options=["1h", "2h", "4h", "6h", "8h", "12h"],
-    ),
-    "ZONE_LOOKBACK_BARS": _field(
-        "Zona H1",
-        "Lookback zona demand",
-        "Jumlah candle timeframe zona tertutup yang memetakan dasar zona demand. Default 72 candle H1 = 3 hari struktur harga. Makin besar, makin jauh ke belakang dasarnya dicari dan makin ketat menolak entry yang sudah jauh dari dasar.",
-        "int",
-        minimum=3,
-        maximum=500,
-        unit="candle",
-    ),
-    "ZONE_BUFFER_PCT": _field(
-        "Zona H1",
-        "Tebal zona demand",
-        "Tebal minimum zona demand dalam persen di atas dasar zona. Candle timeframe zona lebih lebar daripada M5, jadi defaultnya lebih tebal.",
-        "float",
-        minimum=0.0,
-        maximum=20.0,
-        unit="%",
-    ),
-    "ZONE_MAX_DISTANCE_PCT": _field(
-        "Zona H1",
-        "Jarak maksimum dari zona",
-        "Jarak maksimum close candle zona di atas ATAP zona demand, dalam persen. Harus lebih besar atau sama dengan tebal zona.",
-        "float",
-        minimum=0.0,
-        maximum=50.0,
-        unit="%",
-    ),
-    "ZONE_REQUIRE_INSIDE_ZONE": _field(
-        "Zona H1",
-        "Wajib di dalam zona demand H1",
-        "True berarti close candle H1 harus berada di antara dasar dan atap zona demand, dan ZONE_MAX_DISTANCE_PCT tidak dipakai lagi. False memperbolehkan harga melayang di atas atap zona sejauh nilai kunci jarak. Nilai 0 pada kunci jarak hanya berarti toleransi nol kalau mode wajib-di-dalam ini aktif.",
-        "bool",
-    ),
-    "ZONE_MIN_CLOSE_POSITION": _field(
-        "Zona H1",
-        "Posisi close minimum candle zona",
-        "Posisi penutupan minimum di dalam rentang high-low candle sinyal (0.0 di low, 1.0 di high) sebagai bukti dorongan demand pembeli.",
-        "float",
-        minimum=0.0,
-        maximum=1.0,
-    ),
-    "ZONE_EMA_FAST": _field(
-        "Zona H1",
-        "Periode EMA cepat H1",
-        "EMA cepat pada candle H1. Entry memerlukan close di atas EMA cepat dan EMA cepat di atas EMA lambat.",
-        "int",
-        minimum=2,
-        maximum=500,
-        unit="candle",
-    ),
-    "ZONE_EMA_SLOW": _field(
-        "Zona H1",
-        "Periode EMA lambat H1",
-        "EMA lambat pada candle H1. Wajib lebih besar dari periode EMA cepat.",
-        "int",
-        minimum=3,
-        maximum=999,
-        unit="candle",
-    ),
-    "ZONE_ADX_PERIOD": _field(
-        "Zona H1",
-        "Periode ADX H1",
-        "Periode ADX Wilder untuk mengukur kekuatan tren H1.",
-        "int",
-        minimum=2,
-        maximum=200,
-        unit="candle",
-    ),
-    "ZONE_ADX_MIN": _field(
-        "Zona H1",
-        "Ambang ADX H1",
-        "ADX minimum agar tren H1 dianggap kuat. Nilai bawaan 25.",
-        "float",
-        minimum=0,
-        maximum=100,
-    ),
-    "ZONE_TREND_LOOKBACK_BARS": _field(
-        "Zona H1",
-        "Jendela tren H1",
-        "Jumlah candle H1 tertutup yang dipakai menghitung EMA dan ADX.",
-        "int",
-        minimum=20,
-        maximum=999,
-        unit="candle",
     ),
     "TIMING_FILTER_ENABLED": _field(
         "Timing M5",
         "Filter timing M5",
-        "Layer ketiga: gerbang tren mikro pada candle konfirmasi M5. Entry hanya boleh kalau candle M5 terakhir sudah tutup di atas EMA cepat, EMA cepat di atas EMA lambat, dan ADX minimal. Gerbang ini wajib lolos bersama breakout dan retest M5.",
+        "Layer kedua: gerbang tren mikro pada candle konfirmasi M5. Entry hanya boleh kalau candle M5 terakhir sudah tutup di atas EMA cepat, EMA cepat di atas EMA lambat, dan ADX minimal. Gerbang ini wajib lolos bersama breakout dan retest M5.",
         "bool",
     ),
     "TIMING_EMA_FAST": _field(
@@ -1516,6 +1417,18 @@ REMOVED_PARAMETERS = frozenset(
         "M15_TREND_ADX_PERIOD",
         "M15_TREND_ADX_MIN",
         "M15_TREND_LOOKBACK_BARS",
+        "ZONE_FILTER_ENABLED",
+        "ZONE_INTERVAL",
+        "ZONE_LOOKBACK_BARS",
+        "ZONE_BUFFER_PCT",
+        "ZONE_MAX_DISTANCE_PCT",
+        "ZONE_REQUIRE_INSIDE_ZONE",
+        "ZONE_MIN_CLOSE_POSITION",
+        "ZONE_EMA_FAST",
+        "ZONE_EMA_SLOW",
+        "ZONE_ADX_PERIOD",
+        "ZONE_ADX_MIN",
+        "ZONE_TREND_LOOKBACK_BARS",
     }
 )
 
@@ -1526,11 +1439,6 @@ _LEGACY_KEY_MIGRATION = {
     "TREND_ADX_PERIOD": "DIRECTION_ADX_PERIOD",
     "TREND_ADX_MIN": "DIRECTION_ADX_MIN",
     "TREND_LOOKBACK_BARS": "DIRECTION_LOOKBACK_BARS",
-    "HTF_DEMAND_FILTER_ENABLED": "ZONE_FILTER_ENABLED",
-    "HTF_DEMAND_LOOKBACK_BARS": "ZONE_LOOKBACK_BARS",
-    "HTF_DEMAND_ZONE_BUFFER_PCT": "ZONE_BUFFER_PCT",
-    "HTF_DEMAND_MAX_DISTANCE_PCT": "ZONE_MAX_DISTANCE_PCT",
-    "HTF_DEMAND_MIN_CLOSE_POSITION": "ZONE_MIN_CLOSE_POSITION",
     "M15_TREND_FILTER_ENABLED": "TIMING_FILTER_ENABLED",
     "M15_TREND_EMA_FAST": "TIMING_EMA_FAST",
     "M15_TREND_EMA_SLOW": "TIMING_EMA_SLOW",
@@ -1545,13 +1453,6 @@ _LEGACY_KEY_MIGRATION = {
 
 
 def _migrate_legacy_keys(payload: dict) -> dict:
-    """Pindahkan setelan versi lama ke kunci timeframe baru.
-
-    Bot sebelumnya memakai satu timeframe tinggi untuk arah sekaligus zona,
-    dan satu gerbang M15 terpisah. Sekarang arah, zona, dan timing punya
-    timeframe masing-masing, jadi setelan lama dipetakan ke layer yang
-    paling mirip agar pengguna tidak kehilangan hasil tuningnya.
-    """
     hasil = dict(payload)
     for lama, baru in _LEGACY_KEY_MIGRATION.items():
         if lama not in hasil:
@@ -1725,7 +1626,6 @@ def _periksa_jendela(
     kunci_ema_slow: str,
     kunci_adx: str,
 ) -> None:
-    """Pastikan jendela candle cukup panjang untuk EMA dan ADX yang dipilih."""
     jendela = _angka_untuk_relasi(cfg, kunci_jendela)
     if jendela is None:
         return
@@ -1853,50 +1753,25 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
                 "harus lebih besar atau sama dengan DEMAND_ZONE_BUFFER_PCT"
             )
 
-    saring_zona_harian = mode_aware is False or _flag_untuk_relasi(
+    saring_zona_arah = mode_aware is False or _flag_untuk_relasi(
         cfg, "DIRECTION_ZONE_FILTER_ENABLED", False
     )
-    if saring_zona_harian and not _flag_untuk_relasi(
-        cfg, "DIRECTION_ZONE_REQUIRE_INSIDE_ZONE", False
-    ):
-        nilai = pasangan(
-            "DIRECTION_ZONE_MAX_DISTANCE_PCT", "DIRECTION_ZONE_BUFFER_PCT"
-        )
-        if nilai is not None and nilai[0] < nilai[1]:
-            keluar["DIRECTION_ZONE_MAX_DISTANCE_PCT"] = (
-                "harus lebih besar atau sama dengan DIRECTION_ZONE_BUFFER_PCT"
+    if saring_zona_arah:
+        if not _flag_untuk_relasi(cfg, "DIRECTION_ZONE_REQUIRE_INSIDE_ZONE", False):
+            nilai = pasangan(
+                "DIRECTION_ZONE_MAX_DISTANCE_PCT", "DIRECTION_ZONE_BUFFER_PCT"
             )
+            if nilai is not None and nilai[0] < nilai[1]:
+                keluar["DIRECTION_ZONE_MAX_DISTANCE_PCT"] = (
+                    "harus lebih besar atau sama dengan DIRECTION_ZONE_BUFFER_PCT"
+                )
         jendela = _angka_untuk_relasi(cfg, "DIRECTION_LOOKBACK_BARS")
         butuh = _angka_untuk_relasi(cfg, "DIRECTION_ZONE_LOOKBACK_BARS")
         if jendela is not None and butuh is not None and jendela < butuh + 1:
             keluar["DIRECTION_LOOKBACK_BARS"] = (
-                f"minimal {int(butuh) + 1} candle supaya zona demand harian punya "
+                f"minimal {int(butuh) + 1} candle supaya zona demand arah punya "
                 "riwayat yang cukup pada jendela yang sama"
             )
-
-    saring_zona = mode_aware is False or _flag_untuk_relasi(
-        cfg, "ZONE_FILTER_ENABLED", False
-    )
-    if saring_zona:
-        if not _flag_untuk_relasi(cfg, "ZONE_REQUIRE_INSIDE_ZONE", False):
-            nilai = pasangan("ZONE_MAX_DISTANCE_PCT", "ZONE_BUFFER_PCT")
-            if nilai is not None and nilai[0] < nilai[1]:
-                keluar["ZONE_MAX_DISTANCE_PCT"] = (
-                    "harus lebih besar atau sama dengan ZONE_BUFFER_PCT"
-                )
-        nilai = pasangan("ZONE_EMA_SLOW", "ZONE_EMA_FAST")
-        if nilai is not None and nilai[0] <= nilai[1]:
-            keluar["ZONE_EMA_SLOW"] = (
-                "harus lebih besar dari ZONE_EMA_FAST agar susunan EMA tidak terbalik"
-            )
-        _periksa_jendela(
-            keluar,
-            cfg,
-            "ZONE_TREND_LOOKBACK_BARS",
-            "ZONE_EMA_FAST",
-            "ZONE_EMA_SLOW",
-            "ZONE_ADX_PERIOD",
-        )
 
     saring_breakout = mode_aware is False or _flag_untuk_relasi(
         cfg, "BREAKOUT_RETEST_FILTER_ENABLED", False
@@ -1918,23 +1793,14 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
         menit_arah = _INTERVAL_MINUTES.get(
             str(cfg.get("DIRECTION_INTERVAL", "")).lower()
         )
-        menit_zona = _INTERVAL_MINUTES.get(
-            str(cfg.get("ZONE_INTERVAL", "")).lower()
-        )
     except ImportError:
-        menit_konfirmasi = menit_arah = menit_zona = None
+        menit_konfirmasi = menit_arah = None
 
     if menit_arah and menit_konfirmasi:
         if menit_arah % menit_konfirmasi != 0 or menit_arah < menit_konfirmasi:
             keluar["DIRECTION_INTERVAL"] = (
                 "harus kelipatan bulat dari CONFIRM_INTERVAL dan tidak lebih pendek, "
                 "supaya backtest bisa merangkai candle arah dari candle konfirmasi"
-            )
-    if menit_zona and menit_konfirmasi:
-        if menit_zona % menit_konfirmasi != 0 or menit_zona < menit_konfirmasi:
-            keluar["ZONE_INTERVAL"] = (
-                "harus kelipatan bulat dari CONFIRM_INTERVAL dan tidak lebih pendek, "
-                "supaya backtest bisa merangkai candle zona dari candle konfirmasi"
             )
 
     batas_tahan = _angka_untuk_relasi(cfg, "MAX_HOLD_HOURS")
@@ -2001,15 +1867,9 @@ def validate_candidate(
             if int(cleaned["DIRECTION_LOOKBACK_BARS"]) < _minimal:
                 warnings.append(
                     f"DIRECTION_LOOKBACK_BARS {cleaned['DIRECTION_LOOKBACK_BARS']} lebih "
-                    f"kecil dari {_minimal} candle harian yang dibutuhkan EMA dan ADX. "
+                    f"kecil dari {_minimal} candle yang dibutuhkan EMA dan ADX arah. "
                     "Gerbang arah memakai nilai minimum itu dan menolak entry selama "
-                    "riwayat harian belum cukup."
-                )
-            if int(cleaned["DIRECTION_LOOKBACK_BARS"]) < 30:
-                warnings.append(
-                    "DIRECTION_LOOKBACK_BARS di bawah 30 candle harian: koin yang baru "
-                    "listing belum punya riwayat arah yang cukup sehingga ditolak "
-                    "gerbang arah (fail closed)."
+                    "riwayat belum cukup."
                 )
             if cleaned["DIRECTION_ADX_MIN"] == 0:
                 warnings.append(
@@ -2018,11 +1878,10 @@ def validate_candidate(
                 )
         for kunci_zona, kunci_ketat, label in (
             ("DEMAND_ZONE_FILTER_ENABLED", "DEMAND_REQUIRE_INSIDE_ZONE", "M5"),
-            ("ZONE_FILTER_ENABLED", "ZONE_REQUIRE_INSIDE_ZONE", "H1"),
             (
                 "DIRECTION_ZONE_FILTER_ENABLED",
                 "DIRECTION_ZONE_REQUIRE_INSIDE_ZONE",
-                "harian",
+                "arah M15",
             ),
         ):
             if cleaned.get(kunci_zona) and cleaned.get(kunci_ketat):
@@ -2037,13 +1896,8 @@ def validate_candidate(
             warnings.append(
                 f"DIRECTION_LOOKBACK_BARS {cleaned['DIRECTION_LOOKBACK_BARS']} lebih "
                 f"kecil dari {int(cleaned['DIRECTION_ZONE_LOOKBACK_BARS']) + 1} candle "
-                "yang dibutuhkan zona demand harian. Gerbang zona memakai jendela "
+                "yang dibutuhkan zona demand arah. Gerbang zona memakai jendela "
                 "terbesar agar tetap terisi, dan live serta backtest ikut memakainya."
-            )
-        if cleaned.get("ZONE_FILTER_ENABLED") and cleaned["ZONE_ADX_MIN"] == 0:
-            warnings.append(
-                "ZONE_ADX_MIN nol: cek kekuatan tren H1 mati, hanya zona demand dan "
-                "susunan EMA yang menyaring entry."
             )
         if cleaned.get("BREAKOUT_RETEST_FILTER_ENABLED"):
             from strategy.indicators import breakout_retest_required_bars

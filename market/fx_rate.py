@@ -225,7 +225,7 @@ class IdrRateProvider:
             rate: "float | None" = None
             try:
                 rate = self._fetch_from_exchange()
-            except Exception as exc:  # noqa: BLE001 - jalur tampilan tidak boleh meledak
+            except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
                 logger.debug("Gagal mengambil kurs %s: %s", self.symbol(), error)
 
@@ -357,7 +357,7 @@ class IdrRateProvider:
         try:
             with interprocess_lock(path):
                 atomic_write_json(path, payload)
-        except Exception as exc:  # noqa: BLE001 - cache bersifat best-effort
+        except Exception as exc:
             logger.debug("Gagal menyimpan cache kurs ke %s: %s", path, exc)
 
 

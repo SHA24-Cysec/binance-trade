@@ -77,7 +77,7 @@ class _SessionRegistry:
             adapter = requests.adapters.HTTPAdapter(
                 pool_connections=2, pool_maxsize=max(1, int(pool_maxsize))
             )
-        except Exception:  # pragma: no cover - urllib3 selalu ada bersama requests
+        except Exception:
             return
         session.mount("http://", adapter)
         session.mount("https://", adapter)
@@ -89,7 +89,7 @@ class _SessionRegistry:
         for session in sesi:
             try:
                 session.headers.update(headers)
-            except Exception:  # pragma: no cover - sesi rusak tidak boleh menjatuhkan
+            except Exception:
                 logger.debug("Gagal memperbarui header sesi", exc_info=True)
 
     def _new_session(self):
@@ -143,7 +143,7 @@ class _SessionRegistry:
             for sesi in tutup:
                 try:
                     sesi.close()
-                except Exception:  # pragma: no cover - penutupan best-effort
+                except Exception:
                     logger.debug("Gagal menutup sesi usang", exc_info=True)
 
     def _reap_locked(self) -> list:
@@ -232,7 +232,6 @@ def _round_down_places(value, places: int):
 _REDACT_PARAMS = ("signature", "apiKey", "api_key", "secret", "token")
 _REDACT_RE = re.compile(r"(?i)\b(" + "|".join(_REDACT_PARAMS) + r")=[^&\s\"'>]*")
 
-# SAPI budgets are independent per endpoint, with separate IP and UID headers.
 SAPI_IP_WEIGHT_LIMIT = 12_000
 SAPI_UID_WEIGHT_LIMIT = 180_000
 _SAPI_REQUEST_LIMITS = {
@@ -265,6 +264,7 @@ class BinanceSpotClient:
         self.api_key = api_key
         self.api_secret = api_secret
         self.base_url = base_url.rstrip("/")
+        self._public_base_url = self.base_url
         self.timeout = timeout
         self.allow_signed = allow_signed
         self._registry = _SessionRegistry(max_sessions=max_sessions)
@@ -421,7 +421,8 @@ class BinanceSpotClient:
                 q = f"{q}&signature={signature}"
             else:
                 q = _build_query(local_params)
-            u = f"{self.base_url}{path}"
+            root = self.base_url if signed else self._public_base_url
+            u = f"{root}{path}"
             return f"{u}?{q}" if q else u
 
         request_weight = self._estimate_request_weight(method, path, base_params)
@@ -448,6 +449,13 @@ class BinanceSpotClient:
                     resp = sesi.request(method, url, timeout=self.timeout)
 
                 self._record_used_weight(resp.headers, method, path)
+
+                if resp.status_code == 451 and not signed and self._public_base_url != "https://data-api.binance.vision":
+                    self._public_base_url = "https://data-api.binance.vision"
+                    url = build_url()
+                    with self._registry.use() as sesi:
+                        resp = sesi.request(method, url, timeout=self.timeout)
+                    self._record_used_weight(resp.headers, method, path)
 
                 if resp.status_code >= 400:
                     try:

@@ -32,8 +32,7 @@
           "IBM Plex Mono", "SF Mono", SFMono-Regular, ui-monospace, Menlo,
           Consolas, monospace;
       }
-      /* Lapisan tampilan IDR: angka USDT tetap utama, rupiah menyusul
-         sebagai sub judul kecil di bawahnya. */
+      
       .idrsub {
         display: block;
         margin-top: 3px;
@@ -553,15 +552,7 @@
         margin-top: 2px;
       }
 
-      /* ------------------------------------------------------------------
-         Panel Parameter Strategi saat posisi terbuka.
-         Blok ETA memberi hitung mundur menuju Take Profit, lalu setiap
-         baris level punya meter sendiri yang terisi mengikuti harga live.
-         Lebar meter digerakkan lewat transition pada elemen yang sama,
-         bukan innerHTML baru tiap detik, supaya animasinya benar benar
-         mulus. Aturan prefers-reduced-motion di bagian bawah berkas ini
-         sudah otomatis meredam seluruh animasi di blok ini.
-         ------------------------------------------------------------------ */
+      
       .eta-box {
         position: relative;
         overflow: hidden;
@@ -691,8 +682,7 @@
         );
         animation: shimmer 1.6s linear infinite;
       }
-      /* Sapuan indeterminate: dipakai saat laju harga belum cukup sampel,
-         jadi pengguna tahu angka ETA sedang dihitung, bukan macet. */
+      
       .eta-track.loading::after {
         content: "";
         position: absolute;
@@ -771,9 +761,7 @@
         gap: 7px;
         background: var(--panel2);
         border: 1px solid var(--border);
-        /* Kartu level diberi jarak agar tidak terlihat menempel. Gap induk
-           .posbox 2px ditambah margin 3px atas bawah menghasilkan 8px antar
-           kartu, sementara baris biasa di panel tetap rapat seperti semula. */
+        
         margin: 3px 0;
       }
       .prow-top {
@@ -854,19 +842,12 @@
         color: var(--red);
         border-color: rgba(244, 63, 94, 0.35);
       }
-      /* Atribut hidden harus tetap menang atas display:inline-block di atas. */
+      
       .lvl-chip[hidden] {
         display: none;
       }
 
-      /* ------------------------------------------------------------------
-         Panel Posisi Terbuka: rel harga memakai bahasa visual yang sama
-         dengan panel Parameter Strategi. Rel membentang dari harga Stop
-         Loss di kiri sampai Take Profit di kanan, garis putih menandai
-         harga entry, dan titik hidup bergeser mulus mengikuti harga live.
-         Penanda milestone memakai kelas .eta-mark yang sama persis supaya
-         kedua panel benar benar seragam.
-         ------------------------------------------------------------------ */
+      
       .pos-rail {
         position: relative;
         padding: 12px 13px 11px;
@@ -994,7 +975,7 @@
           opacity: 0;
         }
       }
-      /* Tinggi rel sedikit berbeda dari track ETA, jadi tiknya digeser. */
+      
       .pos-rail .eta-mark::before {
         top: -15px;
         height: 10px;
@@ -1785,7 +1766,7 @@
         outline-offset: 1px;
       }
 
-      /* Latar gradien berwarna di belakang kartu kaca, agar efek blur terlihat. */
+      
       .glass-cards {
         position: relative;
         padding: 14px;
@@ -1793,7 +1774,7 @@
         background: transparent;
         border: 1px solid rgba(255, 255, 255, 0.07);
       }
-      /* Kartu ringkasan Ikhtisar: gaya glassmorphism (tanpa garis tepi kiri). */
+      
       .glass-cards .card {
         background: rgba(255, 255, 255, 0.05);
         -webkit-backdrop-filter: blur(18px) saturate(160%);
@@ -2435,7 +2416,7 @@
                 id="btDays"
                 min="2"
                 value="30"
-                title="Hari pertama dipakai sebagai warmup statistik 24 jam, jadi minimal 2 hari. Layer arah Daily dan zona H1 memakai candle asli bursa. Kebutuhan riwayat tren, breakout-retest, volume rolling, dan demand M5 dihitung otomatis oleh server."
+                title="Hari pertama dipakai sebagai warmup statistik 24 jam, jadi minimal 2 hari. Layer arah dan zona demand M15 memakai candle asli bursa. Kebutuhan riwayat tren, breakout-retest, volume rolling, dan demand M5 dihitung otomatis oleh server."
                 oninput="btUpdateEstimate()"
               />
             </div>
@@ -3176,13 +3157,6 @@
       const sign = n => (n>0?'+':'');
       const cls = n => n>0?'pos':(n<0?'neg':'mut');
 
-      /* ------------------------------------------------------------------
-         Lapisan tampilan IDR.
-         Semua angka utama tetap dalam USDT (mata uang kuotasi bot). Angka
-         rupiah hanya pelengkap, dihitung dari satu kurs yang dikirim server
-         pada status.fx supaya tidak ada dua sumber kebenaran. Bila kurs
-         belum tersedia, semua elemen rupiah disembunyikan dan nilai USDT
-         tampil seperti biasa. */
       let _fx = null;
 
       function fxRate(){
@@ -3194,9 +3168,6 @@
         return !!(_fx && _fx.enabled!==false) && fxRate()!==null;
       }
 
-      /* Format rupiah gaya Indonesia, ringkas untuk angka besar:
-         17.910 · 2,5 jt · 15 M · 1,2 T. Satu angka desimal dipakai hanya
-         bila memang perlu, tanpa nol ekor yang mengganggu. */
       const ringkasRp = v => Number(v).toLocaleString(LOCALE,{minimumFractionDigits:0,maximumFractionDigits:1});
       function fmtIDR(n, withSign){
         if(n===null||n===undefined||isNaN(n)) return '-';
@@ -3220,7 +3191,6 @@
         return v*r;
       }
 
-      /* Baris sub judul rupiah (blok) atau sisipan dalam satu baris. */
       function idrSub(usdtAmount, withSign, extraClass){
         const v = idrOf(usdtAmount);
         if(v===null) return '';
@@ -3356,9 +3326,6 @@
         return parts.join(' ');
       }
 
-      // Logo simbol: ambil ikon koin dari CDN publik (spothq/cryptocurrency-icons)
-      // berdasarkan aset dasar (BOMEUSDT -> bome). Bila gagal dimuat (koin tidak
-      // ada di CDN atau tidak ada internet), ditampilkan lingkaran huruf inisial.
       const LOGO_QUOTES = ['FDUSD','USDT','USDC','BUSD','TUSD','BTC','ETH','BNB'];
       const LOGO_CDN = 'https://cdn.jsdelivr.net/gh/spothq/cryptocurrency-icons@master/128/color/';
       function baseAsset(sym){
@@ -3366,8 +3333,7 @@
         for(const q of LOGO_QUOTES){ if(s.endsWith(q) && s.length>q.length) return s.slice(0, -q.length); }
         return s;
       }
-      // Urutan sumber: 1) /api/coin-icon (CoinGecko, di-cache backend),
-      // 2) CDN spothq, 3) lingkaran huruf inisial.
+
       function coinLogo(sym, size=20){
         const base = baseAsset(sym);
         const letter = (base.charAt(0) || '?');
@@ -3378,7 +3344,7 @@
       function symLabel(sym, size=20){
         return '<span class="symname">'+coinLogo(sym, size)+'<b>'+esc(sym)+'</b></span>';
       }
-      // Gambar yang gagal dimuat diganti huruf inisial (event error tidak naik ke atas, jadi pakai capture).
+      
       document.addEventListener('error', function(e){
         const t = e.target;
         if(t && t.classList && t.classList.contains('coin-logo')){
@@ -3440,8 +3406,6 @@
         }
         document.getElementById('footer').innerHTML='Dashboard kontrol lokal · bot dijalankan manual melalui Resume Bot.'+(flags.length?' &nbsp;|&nbsp; '+flags.join(' · '):'');
 
-        // Panel posisi dirender lewat renderPositionPanel supaya rel harga
-        // dan isinya ditambal, bukan ditulis ulang tiap detik.
         renderPositionPanel(s);
         if(p.has_position){
           window._currentPositionSymbol = p.symbol;
@@ -3472,35 +3436,17 @@
         }else{
           modeTxt='PERSEN LAMA';
         }
-        // Isi panel dirender lewat renderConfigPanel supaya elemen meter
-        // dipertahankan antar pembaruan dan animasinya tidak ter-reset.
+
         renderConfigPanel(s, exitAtr, fb, modeTxt, noteTxt);
       }
 
-      /* ------------------------------------------------------------------
-         Panel Parameter Strategi: hitung mundur ETA dan meter per level.
-
-         Sumber angka seluruhnya dari /api/status yang sudah ada, tidak ada
-         endpoint baru. Catatan penting soal satuan: ketika exit_source
-         bernilai ATR, field sl_pct/tp_pct/be_trigger_pct/trail_start_pct
-         berisi JARAK DALAM SATUAN HARGA (lihat _exit_distance di
-         trading/pump_scanner_bot.py), sedangkan pada mode persen tetap
-         isinya persen. cfgLevelPct menyeragamkan keduanya menjadi persen
-         terhadap harga entry supaya satu rumus meter berlaku untuk dua
-         mode exit.
-
-         ETA dihitung di sisi klien dari laju PnL: sampel persen PnL
-         dikumpulkan tiap polling, kemiringannya diambil dengan regresi
-         linier, lalu dihaluskan EMA agar angka tidak meloncat. Estimasi
-         ini perkiraan statistik murni, bukan janji waktu dari bot.
-         ------------------------------------------------------------------ */
-      const ETA_WINDOW_MS = 180000;   // jendela sampel laju harga
-      const ETA_MIN_SAMPLES = 5;      // sampel minimum sebelum berani estimasi
-      const ETA_MIN_SPAN_MS = 10000;  // rentang waktu minimum antar sampel
-      const ETA_GAP_RESET_MS = 20000; // jeda polling lebih lama berarti buang riwayat
-      const ETA_MIN_SLOPE = 1e-5;     // persen per detik, ambang laju berarti
-      const ETA_MAX_SECONDS = 86400;  // di atas ini tidak berguna ditampilkan
-      const ETA_ALPHA = 0.3;          // bobot EMA penghalus laju
+      const ETA_WINDOW_MS = 180000;   
+      const ETA_MIN_SAMPLES = 5;      
+      const ETA_MIN_SPAN_MS = 10000;  
+      const ETA_GAP_RESET_MS = 20000; 
+      const ETA_MIN_SLOPE = 1e-5;     
+      const ETA_MAX_SECONDS = 86400;  
+      const ETA_ALPHA = 0.3;          
 
       const _eta = {
         symbol: null,
@@ -3529,14 +3475,6 @@
         _eta.target = null;
       }
 
-      /* Target hitung mundur dipilih adaptif dua arah.
-
-         Harga naik: menuju level naik aktif terdekat yang belum terlewati,
-         urut dari Breakeven, Mulai Trailing, lalu Take Profit.
-         Harga turun: menuju Stop Loss sebagai peringatan dini.
-
-         Level yang saklarnya mati tidak pernah ikut dipilih, jadi panel
-         tidak lagi menghitung mundur ke Take Profit ketika USE_TP mati. */
       function etaPickTarget(pnl, lv, slope){
         const falling = slope !== null && slope < -ETA_MIN_SLOPE;
         if(falling && lv.sl !== null) return {key: 'sl', pct: -lv.sl, dir: -1};
@@ -3548,9 +3486,7 @@
           ups.sort((a, b) => a.pct - b.pct);
           return ups[0];
         }
-        // Tidak ada target di atas harga sekarang. Bila Take Profit aktif
-        // berarti targetnya sudah terlewati, dan itu tetap dilaporkan
-        // sebagai tercapai alih alih dianggap tidak ada target.
+
         if(lv.tp !== null) return {key: 'tp', pct: lv.tp, dir: 1};
         return null;
       }
@@ -3588,8 +3524,7 @@
           return;
         }
         const last = _eta.samples.length ? _eta.samples[_eta.samples.length-1] : null;
-        // Polling sempat dijeda atau tab lama tidak aktif: riwayat lama tidak
-        // mewakili laju sekarang, jadi dibuang daripada menghasilkan ETA palsu.
+
         if(last && now - last.t > ETA_GAP_RESET_MS){
           _eta.samples.length = 0;
           _eta.slope = null;
@@ -3605,15 +3540,12 @@
         _eta.target = target;
 
         if(!lv.any){ _eta.state='noexit'; _eta.anchorSec=null; return; }
-        // Habisnya target dan tercapainya target adalah fakta yang tidak
-        // bergantung pada laju, jadi diperiksa lebih dulu supaya tidak
-        // tertutup status "mengukur laju" yang menyesatkan.
+
         if(target === null){ _eta.state='done'; _eta.anchorSec=null; return; }
         const remain = target.dir > 0 ? (target.pct - v) : (v - target.pct);
         if(remain <= 0){ _eta.state='reached'; _eta.anchorSec=0; _eta.anchorAt=now; return; }
         if(raw === null){ _eta.state='measuring'; _eta.anchorSec=null; return; }
-        // Laju menuju target: naik memakai kemiringan apa adanya, turun
-        // memakai kebalikannya supaya keduanya positif saat mendekat.
+
         const speed = target.dir > 0 ? _eta.slope : -_eta.slope;
         if(!(speed > ETA_MIN_SLOPE)){
           _eta.state = (speed < -ETA_MIN_SLOPE) ? 'away' : 'flat';
@@ -3640,7 +3572,6 @@
         return h > 0 ? (h + ':' + p(m) + ':' + p(s)) : (p(m) + ':' + p(s));
       }
 
-      /* Satu nilai level menjadi persen terhadap entry, apa pun mode exitnya. */
       function cfgLevelPct(raw, atr, entry){
         if(raw === null || raw === undefined || raw === '') return null;
         const n = Number(raw);
@@ -3661,9 +3592,6 @@
       };
       let _cfgUI = null;
 
-      /* Saklar mekanisme exit dibaca dari flag yang dikirim build_status.
-         Bila backend lama belum mengirim flag, dipakai cara lama yaitu
-         menganggap level aktif selama nilainya ada. */
       function cfgFlagOn(flag, raw){
         if(flag === undefined || flag === null){
           return raw !== null && raw !== undefined && raw !== '';
@@ -3671,7 +3599,6 @@
         return !!flag;
       }
 
-      /* Ringkasan level aktif beserta nilainya dalam persen terhadap entry. */
       function cfgLevels(c, exitAtr, entry, beOn, trOn){
         const on = {
           sl: cfgFlagOn(c.use_stop_loss, c.sl_pct),
@@ -3687,15 +3614,12 @@
           on: on, beOn: !!beOn, trOn: !!trOn
         };
         lv.any = on.sl || on.tp || on.be || on.tr;
-        // Puncak jalur milestone: level naik aktif tertinggi.
+        
         const ups = [lv.tp, lv.tr, lv.be].filter(v => v !== null);
         lv.maxUp = ups.length ? Math.max.apply(null, ups) : null;
         return lv;
       }
 
-      /* Kerangka panel dibangun ulang hanya saat strukturnya berubah. Selama
-         strukturnya sama, pembaruan tiap detik cuma menyentuh teks dan lebar
-         meter, sehingga transition CSS tidak pernah ter-reset di tengah. */
       function buildConfigPanel(box, sig, meter, noteHtml, keys, track){
         let html = '';
         if(meter){
@@ -3706,7 +3630,7 @@
             + '</div>'
             + '<div class="eta-time dim" id="cfgEtaTime">mengukur…</div>'
             + '<div class="eta-sub" id="cfgEtaSub">mengumpulkan sampel harga live</div>';
-          // Jalur milestone hanya berguna bila ada level naik yang aktif.
+          
           if(track){
             html += '<div class="eta-track" id="cfgEtaTrack"><span class="eta-fill" id="cfgEtaFill"></span></div>'
               + '<div class="eta-marks" id="cfgEtaMarks"></div>';
@@ -3789,8 +3713,6 @@
         }
       }
 
-      /* Angka hitung mundur diperbarui lokal tiap 250 ms supaya terasa
-         berjalan, tidak menunggu polling berikutnya. */
       function paintEtaClock(){
         if(!_cfgUI || !_cfgUI.meter || !_cfgUI.etaTime) return;
         if(_eta.state !== 'eta') return;
@@ -3800,8 +3722,6 @@
         if(_cfgUI.etaBox && sec !== null && sec <= 60) _cfgUI.etaBox.classList.add('near');
       }
 
-      /* Lama hold ikut berjalan lokal supaya detiknya tidak terlihat macet
-         di antara dua polling. */
       const _hold = {sec: null, at: 0};
 
       function paintHold(){
@@ -3816,17 +3736,6 @@
       }
       setInterval(paintLiveBits, 250);
 
-      /* ------------------------------------------------------------------
-         Panel Posisi Terbuka.
-
-         Dirender dengan pola yang sama seperti panel Parameter Strategi:
-         kerangka dibangun sekali, lalu tiap polling hanya menambal teks,
-         posisi titik, dan lebar zona. Dengan begitu transisi CSS tidak
-         ter-reset dan gambar logo koin tidak dimuat ulang tiap detik.
-
-         Rel harga memakai pembagi yang sama dengan panel strategi lewat
-         cfgLevelPct, jadi mode ATR dan mode persen tetap sama benarnya.
-         ------------------------------------------------------------------ */
       let _posUI = null;
 
       function buildPositionPanel(pb, sig, hasPos, rail, beOn, trOn){
@@ -3897,8 +3806,7 @@
         const entry = Number(p.entry_price);
         const exitAtr = c.exit_source === 'ATR';
         const beOn = !!p.be_active, trOn = !!p.trailing_active;
-        // Level yang saklarnya mati bernilai null, jadi otomatis tidak
-        // ikut digambar pada rel maupun penanda milestone.
+
         const lv = cfgLevels(c, exitAtr, entry, beOn, trOn);
         const rail = hasPos && entry > 0 && (lv.sl !== null || lv.maxUp !== null);
 
@@ -3910,7 +3818,6 @@
         const u = _posUI;
         const live = (p.live_price === null || p.live_price === undefined) ? null : Number(p.live_price);
 
-        // Angka besar PnL.
         if(p.pnl_pct !== null && p.pnl_pct !== undefined){
           u.pnlN.textContent = sign(p.pnl_pct) + fmt(p.pnl_pct) + '%';
           u.pnlN.className = 'n ' + cls(p.pnl_pct);
@@ -3926,7 +3833,6 @@
           u.pnlIdr.innerHTML = '';
         }
 
-        // Logo koin hanya ditulis ulang saat simbolnya benar benar berganti.
         if(u.sym !== p.symbol){
           u.symEl.innerHTML = symLabel(p.symbol, 22);
           u.sym = p.symbol;
@@ -3951,9 +3857,6 @@
 
         if(!rail) return;
 
-        // Batas rel: harga SL di kiri dan level naik aktif tertinggi di
-        // kanan. Bila satu sisi mati, batasnya diturunkan dari sisi yang
-        // masih hidup supaya skala rel tetap masuk akal.
         const lo = lv.sl !== null
           ? entry*(1 - lv.sl/100)
           : entry*(1 - (lv.maxUp !== null ? lv.maxUp : 2)/200);
@@ -3975,8 +3878,7 @@
         u.railDot.style.left = liveAt.toFixed(2) + '%';
         u.railDot.classList.toggle('neg', !up);
         u.railDot.classList.toggle('idle', live === null);
-        // Label batas ikut menyebut level naik tertinggi yang benar benar
-        // aktif, jadi tidak lagi menulis TP ketika take profit dimatikan.
+
         const topKey = lv.maxUp === null ? null
           : (lv.tp === lv.maxUp ? 'tp' : (lv.tr === lv.maxUp ? 'tr' : 'be'));
         const shortOf = {tp: 'TP', tr: 'Trail', be: 'BE'};
@@ -4031,11 +3933,9 @@
         const beOn = !!p.be_active, trOn = !!p.trailing_active;
         const lv = cfgLevels(c, exitAtr, entryPx, beOn, trOn);
 
-        // Meter hanya relevan bila ada posisi dan harga entry valid.
         const meter = !!p.has_position && entryPx > 0;
         etaTrack(meter, p.symbol, pnlPct, lv);
 
-        // Level yang saklarnya mati tidak ditampilkan sama sekali.
         const keys = ['sl', 'tp', 'be', 'tr'].filter(k => lv.on[k]);
         const track = meter && lv.maxUp !== null && lv.maxUp > 0;
         const sig = [meter ? 'meter' : 'plain', track ? 'track' : 'notrack',
@@ -4053,7 +3953,6 @@
         const waiting = pnlPct === null;
         const gap = target => fmt(Math.max(0, target - pnlPct), 2) + '% lagi';
 
-        // Stop Loss dibaca terbalik: meter penuh berarti harga makin dekat ke SL.
         if(lv.on.sl){
           if(lv.sl === null || waiting){
             cfgPaintRow('sl', txt('sl'), null, waiting ? 'menunggu harga live' : 'nilai belum tersedia');
@@ -4096,8 +3995,6 @@
           }
         }
 
-        // Jalur milestone membentang dari entry sampai level naik aktif
-        // tertinggi, jadi skalanya ikut menyesuaikan ketika TP dimatikan.
         let prog = 0;
         if(track){
           prog = (pnlPct !== null) ? Math.max(0, Math.min(1, pnlPct/lv.maxUp)) : 0;
@@ -4205,7 +4102,6 @@
         _cfgUI.etaTime.classList.toggle('dim', dim);
         _cfgUI.etaSub.textContent = subTxt;
 
-        // Sorotan hijau hanya untuk target naik, bukan saat mendekati SL.
         const etaSec = etaSeconds();
         const naik = tg && tg.dir > 0;
         const near = (_eta.state === 'reached' && naik)
@@ -4483,9 +4379,6 @@
           (p.job_warning?`<br><span style="color:var(--amber)">Proteksi child tree Windows tidak aktif: ${esc(p.job_warning)}</span>`:'');
       }
 
-      // Notifikasi kontrol bot: tampil di satu tumpukan, bisa ditutup dengan tombol x.
-      // Hasil aksi (ok/warn/err) hilang otomatis; kondisi (posisi terbuka, mode konflik)
-      // tetap tampil selama masih berlaku, kecuali ditutup pengguna.
       const _noticeTimers = new WeakMap();
       const NOTICE_AUTO_MS = { ok: 5000, warn: 7000, err: 10000 };
 
@@ -4519,8 +4412,6 @@
         delete el.dataset.dismissed;
       }
 
-      // Peringatan kondisi: tidak hilang sendiri, tapi tidak muncul lagi setelah ditutup
-      // selama kuncinya (key) sama. Kunci berubah berarti kondisi baru.
       function showPersistentNotice(el, kind, icon, html, key){
         if(!el) return;
         if(el.dataset.dismissed === key){ el.classList.remove('show'); return; }
@@ -4572,7 +4463,7 @@
         if(opStatus==='SUCCEEDED'){
           const p=operation.process||{};
           const key=opId+':'+opStatus;
-          // Hanya tampilkan sekali per operasi: poll ulang tidak boleh menghidupkan notifikasi lagi.
+          
           if(_lastOpNoticeKey!==key){
             _lastOpNoticeKey=key;
             setControlActionStatus('ok','✅ '+action+' selesai. Status proses: '+(p.status||'-')+', PID '+(p.pid||'-')+'.',opId);
@@ -4804,16 +4695,16 @@
           const strategySummary = document.getElementById('btStrategySummary');
           if(strategySummary){
             const activeText = value => value ? 'aktif' : 'nonaktif';
-            const zoneMode = d.ZONE_REQUIRE_INSIDE_ZONE
+            const dirZoneMode = d.DIRECTION_ZONE_REQUIRE_INSIDE_ZONE
               ? 'wajib di dalam zona'
-              : 'dekat zona, jarak maks ' + fmt(d.ZONE_MAX_DISTANCE_PCT, 1) + '%';
+              : 'dekat zona, jarak maks ' + fmt(d.DIRECTION_ZONE_MAX_DISTANCE_PCT, 1) + '%';
             strategySummary.innerHTML = `
-              <div class="posrow"><span class="k">Alur entry aktif</span><span class="v mono" style="font-size:11.5px">Daily &rarr; H1 &rarr; tren M5 &rarr; breakout-retest M5</span></div>
-              <div class="posrow"><span class="k">Arah ${esc(d.DIRECTION_INTERVAL || '1d')}</span><span class="v mono" style="font-size:11.5px">${activeText(d.DIRECTION_FILTER_ENABLED)}, Close &gt; EMA${fmt(d.DIRECTION_EMA_FAST,0)} &gt; EMA${fmt(d.DIRECTION_EMA_SLOW,0)}, ADX${fmt(d.DIRECTION_ADX_PERIOD,0)} &gt;= ${fmt(d.DIRECTION_ADX_MIN,1)}</span></div>
-              <div class="posrow"><span class="k">Demand dan tren ${esc(d.ZONE_INTERVAL || '1h')}</span><span class="v mono" style="font-size:11.5px">${activeText(d.ZONE_FILTER_ENABLED)}, ${zoneMode}, Close &gt; EMA${fmt(d.ZONE_EMA_FAST,0)} &gt; EMA${fmt(d.ZONE_EMA_SLOW,0)}, ADX${fmt(d.ZONE_ADX_PERIOD,0)} &gt;= ${fmt(d.ZONE_ADX_MIN,1)}</span></div>
+              <div class="posrow"><span class="k">Alur entry aktif</span><span class="v mono" style="font-size:11.5px">${esc(d.DIRECTION_INTERVAL || '15m')} &rarr; tren M5 &rarr; breakout-retest M5</span></div>
+              <div class="posrow"><span class="k">Arah ${esc(d.DIRECTION_INTERVAL || '15m')}</span><span class="v mono" style="font-size:11.5px">${activeText(d.DIRECTION_FILTER_ENABLED)}, Close &gt; EMA${fmt(d.DIRECTION_EMA_FAST,0)} &gt; EMA${fmt(d.DIRECTION_EMA_SLOW,0)}, ADX${fmt(d.DIRECTION_ADX_PERIOD,0)} &gt;= ${fmt(d.DIRECTION_ADX_MIN,1)}</span></div>
+              <div class="posrow"><span class="k">Zona demand ${esc(d.DIRECTION_INTERVAL || '15m')}</span><span class="v mono" style="font-size:11.5px">${activeText(d.DIRECTION_ZONE_FILTER_ENABLED)}, lookback ${fmt(d.DIRECTION_ZONE_LOOKBACK_BARS,0)} candle, ${dirZoneMode}</span></div>
               <div class="posrow"><span class="k">Tren ${esc(d.timing_interval || '5m')}</span><span class="v mono" style="font-size:11.5px">${activeText(d.TIMING_FILTER_ENABLED)}, Close &gt; EMA${fmt(d.TIMING_EMA_FAST,0)} &gt; EMA${fmt(d.TIMING_EMA_SLOW,0)}, ADX${fmt(d.TIMING_ADX_PERIOD,0)} &gt;= ${fmt(d.TIMING_ADX_MIN,1)}</span></div>
               <div class="posrow"><span class="k">Breakout-retest ${esc(d.timing_interval || '5m')}</span><span class="v mono" style="font-size:11.5px">${activeText(d.BREAKOUT_RETEST_FILTER_ENABLED)}, retest 1-${fmt(d.BREAKOUT_RETEST_MAX_BARS,0)} candle, toleransi ${fmt(d.BREAKOUT_RETEST_TOLERANCE_ATR,2)} ATR, sentuhan maks ${fmt(d.BREAKOUT_RETEST_MAX_TOUCHES,0)}${d.BREAKOUT_RETEST_REQUIRE_BULLISH ? ', wajib bullish' : ''}</span></div>
-              <div class="posrow"><span class="k">Filter tambahan</span><span class="v mono" style="font-size:11.5px">Demand Daily ${activeText(d.DIRECTION_ZONE_FILTER_ENABLED)}, volume M5 ${activeText(d.ROLLING_VOLUME_FILTER_ENABLED)}, demand M5 ${activeText(d.DEMAND_ZONE_FILTER_ENABLED)}</span></div>`;
+              <div class="posrow"><span class="k">Filter tambahan</span><span class="v mono" style="font-size:11.5px">Volume M5 ${activeText(d.ROLLING_VOLUME_FILTER_ENABLED)}, demand M5 ${activeText(d.DEMAND_ZONE_FILTER_ENABLED)}</span></div>`;
           }
           document.getElementById('btDays').value = d.default_days;
           document.getElementById('btExitMode').value = d.USE_ATR_EXIT ? 'atr' : 'fixed';
@@ -5477,9 +5368,8 @@
                      TIME_STOP:'WAKTU',
                      END_OF_DATA:'DATA HABIS', DATA_END:'DATA SIMBOL HABIS',
                      RISK_LIMIT_TRIGGERED:'BATAS RISIKO',
-                     FILTER_DIRECTION:'GERBANG ARAH DAILY',
-                     FILTER_DAILY_ZONE:'GERBANG ZONA DEMAND DAILY',
-                     FILTER_ZONE:'GERBANG ZONA DAN TREN H1',
+                     FILTER_DIRECTION:'GERBANG ARAH M15',
+                     FILTER_DIRECTION_ZONE:'GERBANG ZONA DEMAND M15',
                      FILTER_TIMING:'GERBANG TREN M5',
                      FILTER_BREAKOUT_RETEST:'GERBANG BREAKOUT-RETEST M5'};
         return esc(map[key] || key);
@@ -5498,8 +5388,8 @@
         const cardTone = v => v>0?'good':(v<0?'bad':'');
         const re = s.risk_events || {};
         const riskTotal = (re.dd_stop||0) + (re.forced_close||0) + (s.chase_skips||0);
-        const gateSkips = (s.direction_skips||0) + (s.daily_zone_skips||0)
-          + (s.zone_skips||0) + (s.timing_skips||0) + (s.breakout_skips||0);
+        const gateSkips = (s.direction_skips||0) + (s.direction_zone_skips||0)
+          + (s.timing_skips||0) + (s.breakout_skips||0);
         const cardsHtml = `
           <div class="card ${cardTone(s.total_return_pct)}">
             <div class="label">Return bersih</div>
@@ -5524,7 +5414,7 @@
           <div class="card ${riskTotal||gateSkips?'warn':''}">
             <div class="label">Filter dan kontrol akun</div>
             <div class="value mono">${fmt(riskTotal+gateSkips,0)}</div>
-            <div class="sub">DD stop ${fmt(re.dd_stop||0,0)} · tutup paksa ${fmt(re.forced_close||0,0)} · chase dilewati ${fmt(s.chase_skips||0,0)} · arah ${esc(((res.direction||{}).interval)||'1d')} ${fmt(((res.direction||{}).skips)||0,0)} · zona harian ${esc(((res.daily_zone||{}).interval)||'1d')} ${fmt(((res.daily_zone||{}).skips)||0,0)} · zona ${esc(((res.zone||{}).interval)||'1h')} ${fmt(((res.zone||{}).skips)||0,0)} · timing ${esc(((res.timing||{}).interval)||'5m')} ${fmt(((res.timing||{}).skips)||0,0)}</div></div>
+            <div class="sub">DD stop ${fmt(re.dd_stop||0,0)} · tutup paksa ${fmt(re.forced_close||0,0)} · chase dilewati ${fmt(s.chase_skips||0,0)} · arah ${esc(((res.direction||{}).interval)||'15m')} ${fmt(((res.direction||{}).skips)||0,0)} · zona arah ${esc(((res.direction_zone||{}).interval)||'15m')} ${fmt(((res.direction_zone||{}).skips)||0,0)} · timing ${esc(((res.timing||{}).interval)||'5m')} ${fmt(((res.timing||{}).skips)||0,0)}</div></div>
           <div class="card">
             <div class="label">Candle diproses</div>
             <div class="value mono">${fmt(res.bars_total,0)}</div>
@@ -5547,7 +5437,6 @@
           : `<div class="posrow"><span class="k">Mode exit</span><span class="v mono">Persentase tetap</span></div>
              <div class="posrow"><span class="k">SL / TP / BE (trig,lock) / Trail (start,step)</span><span class="v mono" style="font-size:11.5px">${esc(p.SL_PCT)}% / ${esc(p.TP_PCT)}% / ${esc(p.BE_TRIGGER_PCT)}%,${esc(p.BE_LOCK_PCT)}% / ${esc(p.TRAILING_START_PCT)}%,${esc(p.TRAILING_STEP_PCT)}%</span></div>`;
         const arahInfo = res.direction || null;
-        const zonaInfo = res.zone || null;
         const timingInfo = res.timing || null;
         const breakoutInfo = res.breakout_retest || null;
         const rollingInfo = res.rolling_volume || null;
@@ -5565,18 +5454,13 @@
           return 'aktif ' + esc(g.interval || labelInterval)
             + ', lookback ' + fmt(g.lookback_bars, 0) + ' candle'
             + (g.require_inside ? ', wajib di dalam zona' : ', jarak maks ' + fmt(g.max_distance_pct, 1) + '%')
-            + (g.ema_fast == null ? '' : ', EMA ' + fmt(g.ema_fast, 0) + '/' + fmt(g.ema_slow, 0)
-              + ', ADX ' + fmt(g.adx_period, 0) + ' >= ' + fmt(g.adx_min, 1)
-              + ', tren ' + fmt(g.trend_lookback_bars, 0) + ' candle')
             + ', disaring ' + fmt(g.skips, 0) + ' dari ' + fmt(g.scans, 0) + ' sinyal';
         };
-        const zonaHarianInfo = res.daily_zone || null;
+        const zonaArahInfo = res.direction_zone || null;
         const arahRow = arahInfo ? `
-          <div class="posrow"><span class="k">Layer arah ${esc(arahInfo.interval || '1d')}</span><span class="v mono" style="font-size:11.5px">${emaAdxText(arahInfo, '1d')}</span></div>` : '';
-        const zonaHarianRow = zonaHarianInfo ? `
-          <div class="posrow"><span class="k">Layer zona demand ${esc(zonaHarianInfo.interval || '1d')}</span><span class="v mono" style="font-size:11.5px">${zoneText(zonaHarianInfo, '1d')}</span></div>` : '';
-        const zonaRow = zonaInfo ? `
-          <div class="posrow"><span class="k">Layer zona ${esc(zonaInfo.interval || '1h')}</span><span class="v mono" style="font-size:11.5px">${zoneText(zonaInfo, '1h')}</span></div>` : '';
+          <div class="posrow"><span class="k">Layer arah ${esc(arahInfo.interval || '15m')}</span><span class="v mono" style="font-size:11.5px">${emaAdxText(arahInfo, '15m')}</span></div>` : '';
+        const zonaArahRow = zonaArahInfo ? `
+          <div class="posrow"><span class="k">Layer zona demand ${esc(zonaArahInfo.interval || '15m')}</span><span class="v mono" style="font-size:11.5px">${zoneText(zonaArahInfo, '15m')}</span></div>` : '';
         const timingRow = timingInfo ? `
           <div class="posrow"><span class="k">Layer timing ${esc(timingInfo.interval || '5m')}</span><span class="v mono" style="font-size:11.5px">${emaAdxText(timingInfo, '5m')}</span></div>` : '';
         const breakoutRow = breakoutInfo ? `
@@ -5591,8 +5475,7 @@
           <div class="posrow"><span class="k">Titik waktu diproses</span><span class="v mono">${fmt(res.bars_total,0)} bar ${esc(res.interval)}</span></div>
           ${exitRows}
           ${arahRow}
-          ${zonaHarianRow}
-          ${zonaRow}
+          ${zonaArahRow}
           ${timingRow}
           ${breakoutRow}
           ${rollingRow}
@@ -5608,7 +5491,7 @@
         document.getElementById('btTradeCount').textContent = trades.length ? '('+trades.length+' trade)' : '';
         const tb = document.getElementById('btTradeBody');
         if(!trades.length){
-          tb.innerHTML = '<tr><td colspan="9" class="empty">Tidak ada entry yang sah pada rentang ini. Periksa diagnostik D1, H1, dan M5, perbanyak simbol, atau perpanjang rentang hari.</td></tr>';
+          tb.innerHTML = '<tr><td colspan="9" class="empty">Tidak ada entry yang sah pada rentang ini. Periksa diagnostik M15 dan M5, perbanyak simbol, atau perpanjang rentang hari.</td></tr>';
         } else {
           tb.innerHTML = trades.map(t=>`
             <tr>

@@ -32,8 +32,6 @@ class PositionState:
         self, entry_price: float, levels: dict, entry_time: int = 0
     ) -> None:
         self.entry_price = float(entry_price)
-        # Waktu entry dalam ms epoch. 0 berarti tidak diketahui, sehingga time
-        # stop otomatis nonaktif untuk posisi itu (perilaku lama tetap aman).
         self.entry_time = int(entry_time or 0)
         self.levels = {
             "sl": float(levels["sl_pct"]),
@@ -115,9 +113,6 @@ def evaluate_candle_exit(
             if not trail_armed_before
             else min(pos.trailing_stop, candle.open)
         )
-    # TIME STOP dievaluasi paling akhir: SL/BE/TRAIL tetap menang pada bar yang
-    # sama, jadi hierarki exit yang lama tidak berubah sama sekali. Exit memakai
-    # harga close bar ini karena alasan penutupan adalah waktu, bukan level harga.
     if time_stop_due(pos.entry_time, candle.close_time, cap_ms, bar_ms):
         return TIME_STOP_REASON, candle.close
     return None
@@ -324,7 +319,6 @@ def same_coin_block_record(
 
 
 class DirectionLookup:
-    """Layer arah: candle Daily."""
 
     def __init__(self, direction_klines: Sequence[Kline], config: dict) -> None:
         from strategy import indicators as strategy_mod
@@ -362,32 +356,7 @@ class DirectionLookup:
         )
 
 
-class ZoneLookup:
-    """Layer zona: candle H1."""
-
-    def __init__(self, zone_klines: Sequence[Kline], config: dict) -> None:
-        from strategy import indicators as strategy_mod
-
-        self.config = config
-        self.interval = strategy_mod.zone_interval(config)
-        self.window = strategy_mod.zone_window_bars(config)
-        self.klines = list(zone_klines)
-        self.close_times = [int(k.close_time) for k in self.klines]
-
-    def window_at(self, signal_close_time_ms: int) -> list:
-        idx = bisect_right(self.close_times, int(signal_close_time_ms))
-        return self.klines[max(0, idx - self.window) : idx]
-
-    def zone_at(self, signal_close_time_ms: int) -> dict:
-        from strategy import indicators as strategy_mod
-
-        return strategy_mod.evaluate_zone(
-            self.window_at(signal_close_time_ms), self.config
-        )
-
-
 class TimingLookup:
-    """Layer timing: seri candle konfirmasi (M5) yang sama dengan simulasi."""
 
     def __init__(self, timing_klines: Sequence[Kline], config: dict) -> None:
         from strategy import indicators as strategy_mod
@@ -433,14 +402,6 @@ def build_direction_klines(
     return strategy_mod.aggregate_klines(list(klines), target, source)
 
 
-def build_zone_klines(klines: Sequence[Kline], config: dict, interval: str) -> list[Kline]:
-    from strategy import indicators as strategy_mod
-
-    target = strategy_mod.zone_interval_minutes(config)
-    source = _source_minutes(interval, "zona")
-    return strategy_mod.aggregate_klines(list(klines), target, source)
-
-
 def make_direction_lookup(
     klines: Sequence[Kline],
     config: dict,
@@ -461,23 +422,6 @@ def make_direction_lookup(
         else build_direction_klines(klines, config, interval)
     )
     return DirectionLookup(bars, config)
-
-
-def make_zone_lookup(
-    klines: Sequence[Kline],
-    config: dict,
-    interval: str,
-    *,
-    sudah_dirangkai: bool = False,
-) -> Optional[ZoneLookup]:
-    from strategy import indicators as strategy_mod
-
-    if not strategy_mod.zone_enabled(config):
-        return None
-    bars = (
-        list(klines) if sudah_dirangkai else build_zone_klines(klines, config, interval)
-    )
-    return ZoneLookup(bars, config)
 
 
 def make_timing_lookup(
@@ -509,14 +453,6 @@ def direction_warmup_ms(config: dict, interval: str) -> int:
     from strategy import indicators as strategy_mod
 
     return strategy_mod.direction_warmup_bars(
-        config, interval
-    ) * strategy_mod.interval_to_ms(interval)
-
-
-def zone_warmup_ms(config: dict, interval: str) -> int:
-    from strategy import indicators as strategy_mod
-
-    return strategy_mod.zone_warmup_bars(
         config, interval
     ) * strategy_mod.interval_to_ms(interval)
 

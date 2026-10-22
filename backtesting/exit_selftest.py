@@ -1,22 +1,3 @@
-"""Selftest offline fitur time stop MAX_HOLD_HOURS dan aturan exit ATR.
-
-Tujuan: membuktikan tiga hal tanpa menyentuh jaringan sama sekali.
-
-1. Aturan time stop bekerja sesuai desain (unit test murni).
-2. Saat MAX_HOLD_HOURS = 0 atau kuncinya tidak ada, seluruh hasil backtest
-   IDENTIK dengan sebelumnya (bukti tidak ada regresi).
-3. Saat aktif, setiap posisi benar benar selesai di dalam batas, exit berbasis
-   harga (SL, BE, trailing) tetap menang, dan aturan yang dipakai bot live sama
-   dengan aturan yang dipakai mesin backtest.
-
-Semua candle dibuat sintetis oleh backtesting.synthetic_data, jadi hasilnya
-deterministik dan tidak butuh internet.
-
-Pemakaian:
-    python -m backtesting.exit_selftest
-    python -m backtesting.backtest --selftest
-    python -m trading.pump_scanner_bot --selftest
-"""
 
 from __future__ import annotations
 
@@ -37,12 +18,6 @@ HARGA_AWAL = 100.0
 
 
 def config_dasar(cap_jam: float | None = CAP_CONTOH, ekor: str = "datar") -> dict:
-    """Config backtest satu simbol dengan semua gerbang timeframe dimatikan.
-
-    Layer arah Daily, layer zona H1, layer timing M5, filter BTC, dan
-    filter volume dimatikan supaya rangkaian candle sintetis pasti menghasilkan
-    entry. Yang diuji di sini adalah aturan EXIT, bukan aturan entry.
-    """
     cfg = deepcopy(PUMP_CONFIG)
     cfg.update(
         {
@@ -51,7 +26,6 @@ def config_dasar(cap_jam: float | None = CAP_CONTOH, ekor: str = "datar") -> dic
             "CONFIG_UPDATE_MODE": "test",
             "DIRECTION_FILTER_ENABLED": False,
             "DIRECTION_ZONE_FILTER_ENABLED": False,
-            "ZONE_FILTER_ENABLED": False,
             "TIMING_FILTER_ENABLED": False,
             "BREAKOUT_RETEST_FILTER_ENABLED": False,
             "BTC_FILTER_ENABLED": False,
@@ -79,7 +53,6 @@ def config_dasar(cap_jam: float | None = CAP_CONTOH, ekor: str = "datar") -> dic
 
 def jalankan(ekor: str = "datar", cap_jam: float | None = CAP_CONTOH,
              panjang_ekor: int = PANJANG_EKOR):
-    """Jalankan backtest sintetis. Kembalikan hasil backtest."""
     cfg = config_dasar(cap_jam, ekor)
     klines = sd.seri_dengan_setup(
         harga=HARGA_AWAL, panjang_ekor=panjang_ekor, ekor=ekor
@@ -90,7 +63,6 @@ def jalankan(ekor: str = "datar", cap_jam: float | None = CAP_CONTOH,
 
 
 def jejak_trade(hasil) -> list:
-    """Sidik jari daftar trade untuk perbandingan antar konfigurasi."""
     return [
         (
             int(t.entry_time),
@@ -104,7 +76,6 @@ def jejak_trade(hasil) -> list:
 
 
 def _ctx_now_ms(nilai: int) -> Callable[[], None]:
-    """Ganti jam dinding bot live dengan nilai tetap, lalu kembalikan seperti semula."""
     from infrastructure.storage import state as state_mod
 
     asli = state_mod.now_ms
@@ -112,15 +83,10 @@ def _ctx_now_ms(nilai: int) -> Callable[[], None]:
     return lambda: setattr(state_mod, "now_ms", asli)
 
 
-# --------------------------------------------------------------------- cek
-
-
 def cek_aturan_time_stop() -> str:
-    """Batas keputusan time_stop_due, termasuk kasus yang harus inert."""
     entry = 1_700_000_000_000
     cap = int(CAP_CONTOH * MS_PER_JAM)
     kasus = [
-        # (umur posisi ms, harapan, keterangan)
         (0, False, "baru saja masuk"),
         (cap - 2 * BAR_MS_5M, False, "dua bar sebelum batas"),
         (cap - BAR_MS_5M - 1, False, "lebih awal dari bar terakhir"),
@@ -153,7 +119,6 @@ def cek_aturan_time_stop() -> str:
 
 
 def cek_konversi_max_hold() -> str:
-    """Konversi jam ke ms dan penolakan nilai yang tidak aman."""
     assert strategy.max_hold_ms({"MAX_HOLD_HOURS": CAP_CONTOH}, "5m") == int(
         CAP_CONTOH * MS_PER_JAM
     )
@@ -181,7 +146,6 @@ def cek_konversi_max_hold() -> str:
 
 
 def cek_time_stop_menutup_posisi() -> str:
-    """Cap 24 jam menutup posisi mengendap tepat di bar terakhir di dalam batas."""
     hasil = jalankan("datar")
     assert hasil.trades, "rangkaian sintetis tidak menghasilkan trade sama sekali"
     time_stop = [t for t in hasil.trades if t.reason == strategy.TIME_STOP_REASON]
@@ -207,7 +171,6 @@ def cek_time_stop_menutup_posisi() -> str:
 
 
 def cek_batas_berjenjang() -> str:
-    """Beberapa nilai cap sekaligus: umur posisi selalu di dalam batasnya."""
     ringkas = []
     for cap in (48.0, 24.0, 12.0, 6.0, 2.0):
         hasil = jalankan("datar", cap)
@@ -220,7 +183,6 @@ def cek_batas_berjenjang() -> str:
 
 
 def cek_time_stop_nonaktif_aman() -> str:
-    """MAX_HOLD_HOURS=0 harus identik dengan config lama yang tidak punya kunci itu."""
     ringkas = []
     for ekor in ("datar", "invalidasi", "naik"):
         tanpa_kunci = jalankan(ekor, None, panjang_ekor=400)
@@ -253,7 +215,6 @@ def cek_time_stop_nonaktif_aman() -> str:
 
 
 def cek_prioritas_exit_harga() -> str:
-    """SL, BE, dan trailing tetap menang atas time stop."""
     turun = jalankan("invalidasi", CAP_CONTOH, panjang_ekor=400)
     naik = jalankan("naik", CAP_CONTOH, panjang_ekor=400)
     for nama, hasil in (("turun", turun), ("naik", naik)):
@@ -275,7 +236,6 @@ def cek_prioritas_exit_harga() -> str:
 
 
 def cek_kapital_berputar() -> str:
-    """Time stop membebaskan modal sehingga frekuensi trade naik."""
     tanpa_cap = jalankan("datar", None)
     dengan_cap = jalankan("datar", CAP_CONTOH)
     assert len(dengan_cap.trades) > len(tanpa_cap.trades), (
@@ -289,7 +249,6 @@ def cek_kapital_berputar() -> str:
 
 
 def cek_paritas_aturan_live() -> str:
-    """Keputusan time stop bot live identik dengan aturan yang dipakai backtest."""
     import trading.pump_scanner_bot as bot
 
     cfg = config_dasar(CAP_CONTOH)
@@ -339,7 +298,6 @@ def cek_paritas_aturan_live() -> str:
 
 
 def cek_integrasi_parameter() -> str:
-    """Kunci MAX_HOLD_HOURS terpasang di semua lapisan konfigurasi."""
     from config.settings_schema import PARAMETER_SCHEMA, relation_violations, validate_candidate
 
     assert not CONFIG_LOAD_ERRORS, f"config runtime punya error: {CONFIG_LOAD_ERRORS}"
@@ -418,7 +376,6 @@ CEK: tuple[tuple[str, Callable[[], str]], ...] = (
 
 
 def run(verbose: bool = True) -> tuple[bool, list[str]]:
-    """Jalankan semua pemeriksaan. Kembalikan (semua_lulus, baris_laporan)."""
     baris: list[str] = []
     gagal = 0
     for nama, fungsi in CEK:
@@ -427,7 +384,7 @@ def run(verbose: bool = True) -> tuple[bool, list[str]]:
         except AssertionError as exc:
             gagal += 1
             teks = f"[GAGAL] {nama}: {exc}"
-        except Exception as exc:  # kesalahan tak terduga tetap dilaporkan, bukan crash
+        except Exception as exc:
             gagal += 1
             teks = f"[ERROR] {nama}: {type(exc).__name__}: {exc}"
         else:

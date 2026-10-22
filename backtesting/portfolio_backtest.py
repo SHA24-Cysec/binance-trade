@@ -84,10 +84,8 @@ class PortfolioResult:
     chase_skips: int = 0
     direction_skips: int = 0
     direction_scans: int = 0
-    daily_zone_skips: int = 0
-    daily_zone_scans: int = 0
-    zone_skips: int = 0
-    zone_scans: int = 0
+    direction_zone_skips: int = 0
+    direction_zone_scans: int = 0
     timing_skips: int = 0
     timing_scans: int = 0
     breakout_skips: int = 0
@@ -264,13 +262,6 @@ def fetch_native_klines(
     max_workers: int = 1,
     progress_cb: Optional[Callable[[float, str], None]] = None,
 ) -> dict[str, list[Kline]]:
-    """Ambil candle timeframe tinggi langsung dari bursa.
-
-    Layer arah (Daily) dan layer zona (H1) memakai candle asli bursa, sama
-    seperti bot live. Backtest yang merangkai candle dari M5 akan butuh
-    warmup 288 kali lebih panjang untuk layer Daily, jadi jalur native ini
-    dipakai sebagai jalur utama.
-    """
     unique = [str(sym) for sym in dict.fromkeys(symbols or ())]
     if not unique:
         return {}
@@ -312,7 +303,6 @@ def build_native_lookups(
     config: dict,
     factory,
 ) -> dict:
-    """Bangun objek lookup dari candle timeframe tinggi native."""
     lookups: dict = {}
     for sym, klines in (series_by_symbol or {}).items():
         if not klines:
@@ -332,18 +322,11 @@ def fetch_native_lookups(
     cache: Optional[KlineCache] = None,
     max_workers: int = 1,
     progress_cb: Optional[Callable[[float, str], None]] = None,
-) -> tuple[dict, dict]:
-    """Ambil candle Daily dan H1 langsung dari bursa lalu bangun lookup-nya.
-
-    Layer arah dan layer zona di bot live memakai candle asli bursa. Backtest
-    memakai jalur yang sama supaya hasil simulasi tidak bergantung pada
-    agregasi M5 yang butuh warmup sangat panjang.
-    """
+) -> dict:
     arah_of: dict = {}
-    zona_of: dict = {}
     unique = [str(sym) for sym in dict.fromkeys(symbols or ())]
     if not unique:
-        return arah_of, zona_of
+        return arah_of
 
     if strategy.direction_enabled(config) or strategy.direction_zone_enabled(
         config
@@ -351,7 +334,7 @@ def fetch_native_lookups(
         itv = strategy.direction_interval(config)
         need_ms = (
             strategy.direction_window_bars(config)
-            * strategy.INTERVAL_MINUTES.get(itv, 1440)
+            * strategy.INTERVAL_MINUTES.get(itv, 15)
             * 60_000
         )
         series = fetch_native_klines(
@@ -372,32 +355,7 @@ def fetch_native_lookups(
             ),
         )
 
-    if strategy.zone_enabled(config):
-        itv = strategy.zone_interval(config)
-        need_ms = (
-            strategy.zone_window_bars(config)
-            * strategy.INTERVAL_MINUTES.get(itv, 60)
-            * 60_000
-        )
-        series = fetch_native_klines(
-            client,
-            unique,
-            itv,
-            int(start_ms) - int(need_ms),
-            int(end_ms),
-            cache,
-            max_workers,
-            progress_cb,
-        )
-        zona_of = build_native_lookups(
-            series,
-            config,
-            lambda klines, cfg: parity.make_zone_lookup(
-                klines, cfg, itv, sudah_dirangkai=True
-            ),
-        )
-
-    return arah_of, zona_of
+    return arah_of
 
 
 def build_timeline(
@@ -436,12 +394,9 @@ class EntrySignalCache(dict):
         self.direction_scans = 0
         self.direction_skips = 0
         self.direction_events: list = []
-        self.daily_zone_scans = 0
-        self.daily_zone_skips = 0
-        self.daily_zone_events: list = []
-        self.zone_scans = 0
-        self.zone_skips = 0
-        self.zone_events: list = []
+        self.direction_zone_scans = 0
+        self.direction_zone_skips = 0
+        self.direction_zone_events: list = []
         self.timing_scans = 0
         self.timing_skips = 0
         self.timing_events: list = []
@@ -479,32 +434,6 @@ def build_direction_lookups(
     return lookups
 
 
-def build_zone_lookups(
-    store: KlineStore, symbols: list, config: dict, interval: str
-) -> dict:
-    from strategy import indicators as strategy_mod
-
-    if not strategy_mod.zone_enabled(config):
-        return {}
-    target = strategy_mod.zone_interval_minutes(config)
-    source = strategy_mod.INTERVAL_MINUTES.get(str(interval))
-    if source is None:
-        raise BacktestError(
-            f"Interval simulasi '{interval}' tidak dikenal sehingga candle zona "
-            f"'{strategy_mod.zone_interval(config)}' tidak bisa dirangkai."
-        )
-    lookups: dict = {}
-    for sym in symbols:
-        klines = store.klines(sym)
-        if not klines:
-            continue
-        lookups[sym] = parity.ZoneLookup(
-            strategy_mod.aggregate_klines(klines, target, source), config
-        )
-        del klines
-    return lookups
-
-
 def build_timing_lookups(
     store: KlineStore, symbols: list, config: dict, interval: str
 ) -> dict:
@@ -526,18 +455,16 @@ def build_timing_lookups(
 
 def unpack_prebuilt(prebuilt: Optional[tuple]):
     if prebuilt is None:
-        return None, None, None, None, None
-    if len(prebuilt) >= 5:
-        return prebuilt[0], prebuilt[1], prebuilt[2], prebuilt[3], prebuilt[4]
-    if len(prebuilt) == 4:
-        return prebuilt[0], prebuilt[1], prebuilt[2], prebuilt[3], None
+        return None, None, None, None
+    if len(prebuilt) >= 4:
+        return prebuilt[0], prebuilt[1], prebuilt[2], prebuilt[3]
     if len(prebuilt) == 3:
-        return prebuilt[0], prebuilt[1], prebuilt[2], None, None
-    return prebuilt[0], prebuilt[1], None, None, None
+        return prebuilt[0], prebuilt[1], prebuilt[2], None
+    return prebuilt[0], prebuilt[1], None, None
 
 
 def _siapkan_arah(prebuilt, store, series_of, config, interval):
-    _, _, arah_of, _, _ = unpack_prebuilt(prebuilt)
+    _, _, arah_of, _ = unpack_prebuilt(prebuilt)
     if arah_of is not None:
         return arah_of
     if not (
@@ -548,17 +475,8 @@ def _siapkan_arah(prebuilt, store, series_of, config, interval):
     return build_direction_lookups(store, list(series_of), config, interval)
 
 
-def _siapkan_zona(prebuilt, store, series_of, config, interval):
-    _, _, _, zona_of, _ = unpack_prebuilt(prebuilt)
-    if zona_of is not None:
-        return zona_of
-    if not config.get("ZONE_FILTER_ENABLED", False):
-        return {}
-    return build_zone_lookups(store, list(series_of), config, interval)
-
-
 def _siapkan_timing(prebuilt, store, series_of, config, interval):
-    _, _, _, _, timing_of = unpack_prebuilt(prebuilt)
+    _, _, _, timing_of = unpack_prebuilt(prebuilt)
     if timing_of is not None:
         return timing_of
     if not config.get("TIMING_FILTER_ENABLED", False):
@@ -591,7 +509,7 @@ def precompute_entry_signals(
     if not symbols:
         raise BacktestError("Tidak ada data yang lolos policy semesta bersama.")
 
-    _pb_timeline, _pb_series, arah_of, zona_of, timing_of = unpack_prebuilt(prebuilt)
+    _pb_timeline, _pb_series, arah_of, timing_of = unpack_prebuilt(prebuilt)
     if _pb_timeline is None or _pb_series is None:
         timeline, series_of = build_timeline(store, interval, symbols)
     else:
@@ -606,21 +524,20 @@ def precompute_entry_signals(
     bar_ms = INTERVAL_MINUTES.get(interval, 5) * MS_PER_MIN
     btc_lookup = parity.make_btc_lookup(btc_klines, config, bar_ms)
     gate_cfg = parity.gate_config(config, btc_lookup)
-    native_htf = prebuilt is not None and (arah_of is not None or zona_of is not None)
+    native_htf = prebuilt is not None and arah_of is not None
     if not native_htf:
         arah_of = _siapkan_arah(prebuilt, store, series_of, config, interval)
-        zona_of = _siapkan_zona(prebuilt, store, series_of, config, interval)
     if not timing_of:
         timing_of = _siapkan_timing(prebuilt, store, series_of, config, interval)
-    if (arah_of or zona_of) and not native_htf:
+    if arah_of and not native_htf:
         butuh_warmup = parity.gate_warmup_ms(config, interval)
         if int(warmup_ms) < butuh_warmup:
             logger.warning(
-                "Warmup %d ms dinaikkan menjadi %d ms karena layer timeframe tinggi "
-                "yang aktif (arah + zona) butuh paling sedikit %d candle %s "
-                "sebagai pemanasan.",
+                "Warmup %d ms dinaikkan menjadi %d ms karena layer arah %s "
+                "butuh paling sedikit %d candle %s sebagai pemanasan.",
                 warmup_ms,
                 butuh_warmup,
+                strategy.direction_interval(config),
                 strategy.gate_warmup_bars(config, interval),
                 interval,
             )
@@ -695,27 +612,15 @@ def precompute_entry_signals(
                     continue
             if bool(config.get("DIRECTION_ZONE_FILTER_ENABLED", False)):
                 lock = arah_of.get(sym) if arah_of else None
-                signals.daily_zone_scans += 1
+                signals.direction_zone_scans += 1
                 if (
                     lock is None
                     or signal_candle is None
                     or not lock.zone_at(signal_candle.close_time)["ok"]
                 ):
-                    signals.daily_zone_skips += 1
-                    if len(signals.daily_zone_events) < max_skipped_records:
-                        signals.daily_zone_events.append((int(t_now), sym))
-                    continue
-            if bool(config.get("ZONE_FILTER_ENABLED", False)):
-                lock = zona_of.get(sym) if zona_of else None
-                signals.zone_scans += 1
-                if (
-                    lock is None
-                    or signal_candle is None
-                    or not lock.zone_at(signal_candle.close_time)["ok"]
-                ):
-                    signals.zone_skips += 1
-                    if len(signals.zone_events) < max_skipped_records:
-                        signals.zone_events.append((int(t_now), sym))
+                    signals.direction_zone_skips += 1
+                    if len(signals.direction_zone_events) < max_skipped_records:
+                        signals.direction_zone_events.append((int(t_now), sym))
                     continue
             if bool(config.get("TIMING_FILTER_ENABLED", False)):
                 lock = timing_of.get(sym) if timing_of else None
@@ -808,7 +713,7 @@ def run_portfolio_backtest(
         raise BacktestError("Tidak ada data yang lolos policy semesta bersama.")
     lolos_policy = len(symbols)
 
-    timeline, series_of, arah_of, zona_of, timing_of = unpack_prebuilt(prebuilt)
+    timeline, series_of, arah_of, timing_of = unpack_prebuilt(prebuilt)
     if timeline is None:
         timeline, series_of = build_timeline(store, interval, symbols)
     if not timeline:
@@ -845,32 +750,20 @@ def run_portfolio_backtest(
         _pre_warnings.append(
             "Status TRADING historis tidak tersedia dari candle Binance. Policy status hanya dapat diverifikasi dari metadata saat ini bila caller menyediakannya."
         )
-    native_htf = prebuilt is not None and (arah_of is not None or zona_of is not None)
+    native_htf = prebuilt is not None and arah_of is not None
     if not native_htf:
         arah_of = _siapkan_arah(prebuilt, store, series_of, config, interval)
-        zona_of = _siapkan_zona(prebuilt, store, series_of, config, interval)
     if not timing_of:
         timing_of = _siapkan_timing(prebuilt, store, series_of, config, interval)
-    if (arah_of or zona_of) and not native_htf:
+    if arah_of and not native_htf:
         _butuh_gerbang = parity.gate_warmup_ms(config, interval)
         if int(warmup_ms) < _butuh_gerbang:
-            _bagian = []
-            if arah_of:
-                _bagian.append(
-                    f"layer arah {config.get('DIRECTION_INTERVAL', '1d')} butuh "
-                    f"{strategy.direction_window_bars(config)} candle tertutup "
-                    "(termasuk jendela zona demand harian)"
-                )
-            if zona_of:
-                _bagian.append(
-                    f"layer zona {config.get('ZONE_INTERVAL', '1h')} butuh "
-                    f"{strategy.zone_window_bars(config)} candle "
-                    f"{config.get('ZONE_INTERVAL', '1h')} tertutup"
-                )
             _pre_warnings.append(
                 f"Warmup {warmup_ms} ms dinaikkan menjadi {_butuh_gerbang} ms karena "
-                f"{' dan '.join(_bagian)} sebelum bar entry pertama. Unduhan data harus "
-                "mencakup rentang warmup ini."
+                f"layer arah {config.get('DIRECTION_INTERVAL', '15m')} butuh "
+                f"{strategy.direction_window_bars(config)} candle tertutup "
+                "(termasuk jendela zona demand arah) sebelum bar entry pertama. "
+                "Unduhan data harus mencakup rentang warmup ini."
             )
             warmup_ms = _butuh_gerbang
     _butuh = strategy.required_lookback_bars(config)
@@ -919,10 +812,8 @@ def run_portfolio_backtest(
     chase_skips = 0
     direction_skips = 0
     direction_scans = 0
-    daily_zone_skips = 0
-    daily_zone_scans = 0
-    zone_skips = 0
-    zone_scans = 0
+    direction_zone_skips = 0
+    direction_zone_scans = 0
     timing_skips = 0
     timing_scans = 0
     breakout_skips = 0
@@ -979,20 +870,18 @@ def run_portfolio_backtest(
             )
         direction_scans += int(getattr(entry_signal_cache, "direction_scans", 0))
         direction_skips += int(getattr(entry_signal_cache, "direction_skips", 0))
-        daily_zone_scans += int(
-            getattr(entry_signal_cache, "daily_zone_scans", 0)
+        direction_zone_scans += int(
+            getattr(entry_signal_cache, "direction_zone_scans", 0)
         )
-        daily_zone_skips += int(
-            getattr(entry_signal_cache, "daily_zone_skips", 0)
+        direction_zone_skips += int(
+            getattr(entry_signal_cache, "direction_zone_skips", 0)
         )
-        zone_scans += int(getattr(entry_signal_cache, "zone_scans", 0))
-        zone_skips += int(getattr(entry_signal_cache, "zone_skips", 0))
         timing_scans += int(getattr(entry_signal_cache, "timing_scans", 0))
         timing_skips += int(getattr(entry_signal_cache, "timing_skips", 0))
         breakout_scans += int(getattr(entry_signal_cache, "breakout_scans", 0))
         breakout_skips += int(getattr(entry_signal_cache, "breakout_skips", 0))
         for waktu_event, simbol_event in _event_dalam_jendela(
-            getattr(entry_signal_cache, "daily_zone_events", [])
+            getattr(entry_signal_cache, "direction_zone_events", [])
         ):
             if len(skipped) >= max_skipped_records:
                 break
@@ -1000,7 +889,7 @@ def run_portfolio_backtest(
                 SkippedSignal(
                     time=waktu_event,
                     symbol=simbol_event,
-                    reason="FILTER_DAILY_ZONE",
+                    reason="FILTER_DIRECTION_ZONE",
                     holding=None,
                 )
             )
@@ -1014,19 +903,6 @@ def run_portfolio_backtest(
                     time=waktu_event,
                     symbol=simbol_event,
                     reason="FILTER_DIRECTION",
-                    holding=None,
-                )
-            )
-        for waktu_event, simbol_event in _event_dalam_jendela(
-            getattr(entry_signal_cache, "zone_events", [])
-        ):
-            if len(skipped) >= max_skipped_records:
-                break
-            skipped.append(
-                SkippedSignal(
-                    time=waktu_event,
-                    symbol=simbol_event,
-                    reason="FILTER_ZONE",
                     holding=None,
                 )
             )
@@ -1272,33 +1148,18 @@ def run_portfolio_backtest(
                         continue
                 if bool(config.get("DIRECTION_ZONE_FILTER_ENABLED", False)):
                     lock = arah_of.get(sym) if arah_of else None
-                    daily_zone_scans += 1
+                    direction_zone_scans += 1
                     if (
                         lock is None
                         or not lock.zone_at(kl[i].close_time)["ok"]
                     ):
-                        daily_zone_skips += 1
+                        direction_zone_skips += 1
                         if len(skipped) < max_skipped_records:
                             skipped.append(
                                 SkippedSignal(
                                     time=t_now,
                                     symbol=sym,
-                                    reason="FILTER_DAILY_ZONE",
-                                    holding=None,
-                                )
-                            )
-                        continue
-                if bool(config.get("ZONE_FILTER_ENABLED", False)):
-                    lock = zona_of.get(sym) if zona_of else None
-                    zone_scans += 1
-                    if lock is None or not lock.zone_at(kl[i].close_time)["ok"]:
-                        zone_skips += 1
-                        if len(skipped) < max_skipped_records:
-                            skipped.append(
-                                SkippedSignal(
-                                    time=t_now,
-                                    symbol=sym,
-                                    reason="FILTER_ZONE",
+                                    reason="FILTER_DIRECTION_ZONE",
                                     holding=None,
                                 )
                             )
@@ -1493,28 +1354,19 @@ def run_portfolio_backtest(
                     [
                         f"{direction_skips} dari {direction_scans} sinyal konfirmasi "
                         f"dilewati oleh layer arah "
-                        f"{config.get('DIRECTION_INTERVAL', '1d')}, sama seperti bot live."
+                        f"{config.get('DIRECTION_INTERVAL', '15m')}, sama seperti bot live."
                     ]
                     if arah_of and direction_skips
                     else []
                 )
                 + (
                     [
-                        f"{daily_zone_skips} dari {daily_zone_scans} sinyal konfirmasi "
+                        f"{direction_zone_skips} dari {direction_zone_scans} sinyal konfirmasi "
                         f"dilewati zona demand "
-                        f"{config.get('DIRECTION_INTERVAL', '1d')}, memakai candle "
+                        f"{config.get('DIRECTION_INTERVAL', '15m')}, memakai candle "
                         "arah yang sama, bukan candle konfirmasi."
                     ]
-                    if arah_of and daily_zone_skips
-                    else []
-                )
-                + (
-                    [
-                        f"{zone_skips} dari {zone_scans} sinyal konfirmasi "
-                        f"dilewati oleh layer zona "
-                        f"{config.get('ZONE_INTERVAL', '1h')}, sama seperti bot live."
-                    ]
-                    if zona_of and zone_skips
+                    if arah_of and direction_zone_skips
                     else []
                 )
                 + (
@@ -1552,10 +1404,8 @@ def run_portfolio_backtest(
         chase_skips=chase_skips,
         direction_skips=direction_skips,
         direction_scans=direction_scans,
-        daily_zone_skips=daily_zone_skips,
-        daily_zone_scans=daily_zone_scans,
-        zone_skips=zone_skips,
-        zone_scans=zone_scans,
+        direction_zone_skips=direction_zone_skips,
+        direction_zone_scans=direction_zone_scans,
         timing_skips=timing_skips,
         timing_scans=timing_scans,
         breakout_skips=breakout_skips,
@@ -1731,10 +1581,8 @@ def summarize_portfolio(result: PortfolioResult) -> dict:
         "chase_skips": int(result.chase_skips),
         "direction_skips": int(getattr(result, "direction_skips", 0)),
         "direction_scans": int(getattr(result, "direction_scans", 0)),
-        "daily_zone_skips": int(getattr(result, "daily_zone_skips", 0)),
-        "daily_zone_scans": int(getattr(result, "daily_zone_scans", 0)),
-        "zone_skips": int(getattr(result, "zone_skips", 0)),
-        "zone_scans": int(getattr(result, "zone_scans", 0)),
+        "direction_zone_skips": int(getattr(result, "direction_zone_skips", 0)),
+        "direction_zone_scans": int(getattr(result, "direction_zone_scans", 0)),
         "timing_skips": int(getattr(result, "timing_skips", 0)),
         "timing_scans": int(getattr(result, "timing_scans", 0)),
         "breakout_skips": int(getattr(result, "breakout_skips", 0)),
@@ -1789,7 +1637,6 @@ def selftest() -> bool:
         "MODE": "PAPER",
         "DIRECTION_FILTER_ENABLED": False,
         "DIRECTION_ZONE_FILTER_ENABLED": False,
-        "ZONE_FILTER_ENABLED": False,
         "TIMING_FILTER_ENABLED": False,
         "BREAKOUT_RETEST_FILTER_ENABLED": False,
         "DEMAND_ZONE_FILTER_ENABLED": False,

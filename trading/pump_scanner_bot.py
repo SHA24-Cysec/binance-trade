@@ -118,7 +118,6 @@ class HtfKlineCache:
 
 
 class DirectionCache(HtfKlineCache):
-    """Cache candle Daily untuk layer arah."""
 
     def interval(self) -> str:
         return strategy.direction_interval(self._config)
@@ -130,19 +129,6 @@ class DirectionCache(HtfKlineCache):
         return strategy.evaluate_direction(
             self.window_klines(symbol, now_ms), self._config
         )
-
-
-class ZoneCache(HtfKlineCache):
-    """Cache candle H1 untuk layer zona."""
-
-    def interval(self) -> str:
-        return strategy.zone_interval(self._config)
-
-    def window_bars(self) -> int:
-        return strategy.zone_window_bars(self._config)
-
-    def verdict(self, symbol: str, now_ms: int) -> dict:
-        return strategy.evaluate_zone(self.window_klines(symbol, now_ms), self._config)
 
 
 DEFAULT_STATE = {
@@ -4695,14 +4681,6 @@ _MAX_HOLD_WARNED: set = set()
 
 
 def _max_hold_cap_ms(config: dict) -> int:
-    """Batas time stop dalam ms (0 = nonaktif), dari MAX_HOLD_HOURS.
-
-    Dipanggil setiap poll, jadi hasilnya di-cache per (nilai, interval). Aturan
-    dan validasinya memakai fungsi yang sama dengan backtest
-    (strategy.indicators.max_hold_ms) supaya live dan backtest tidak menyimpang.
-    Nilai yang tidak valid tidak boleh mematikan bot: time stop dinonaktifkan
-    dan peringatannya dicatat sekali.
-    """
     raw = config.get("MAX_HOLD_HOURS")
     interval = str(config.get("CONFIRM_INTERVAL", "5m") or "5m")
     kunci = (repr(raw), interval)
@@ -4721,14 +4699,6 @@ def _max_hold_cap_ms(config: dict) -> int:
 
 
 def _time_stop_due(config: dict, state: dict) -> bool:
-    """True bila umur posisi sudah mencapai batas MAX_HOLD_HOURS.
-
-    Umur dihitung dari state['entry_time'] (transactTime dari bursa) ke waktu
-    poll sekarang, dengan aturan yang sama persis seperti backtest: exit pada
-    evaluasi terakhir yang masih di dalam batas, sehingga umur posisi tidak
-    pernah melewati MAX_HOLD_HOURS. Posisi tanpa entry_time (state lama) tidak
-    ditutup paksa oleh aturan ini.
-    """
     cap_ms = _max_hold_cap_ms(config)
     if cap_ms <= 0:
         return False
@@ -5000,17 +4970,9 @@ def run(
                 strategy.direction_interval(config),
                 jendela_arah,
             )
-        if int(config.get("DIRECTION_LOOKBACK_BARS", 0) or 0) < 30:
-            logger.warning(
-                "DIRECTION_LOOKBACK_BARS=%s: koin yang baru listing belum punya riwayat "
-                "harian yang cukup untuk diuji arah, jadi gerbang arah akan menolaknya "
-                "(fail closed).",
-                config.get("DIRECTION_LOOKBACK_BARS"),
-            )
     if (
         config.get("DIRECTION_FILTER_ENABLED", False)
         or config.get("DIRECTION_ZONE_FILTER_ENABLED", False)
-        or config.get("ZONE_FILTER_ENABLED", False)
     ):
         try:
             strategy.gate_warmup_bars(config, config["CONFIRM_INTERVAL"])
@@ -5023,8 +4985,8 @@ def run(
             "Layer arah AKTIF (%s): entry lolos hanya kalau candle %s terakhir yang sudah "
             "tutup memenuhi close > EMA%d, EMA%d > EMA%d, dan ADX%d >= %g. Kalau candle arah "
             "gagal diambil atau riwayatnya kurang, kandidat DITOLAK (fail closed).",
-            config.get("DIRECTION_INTERVAL", "1d"),
-            config.get("DIRECTION_INTERVAL", "1d"),
+            config.get("DIRECTION_INTERVAL", "15m"),
+            config.get("DIRECTION_INTERVAL", "15m"),
             int(config.get("DIRECTION_EMA_FAST", 20) or 20),
             int(config.get("DIRECTION_EMA_FAST", 20) or 20),
             int(config.get("DIRECTION_EMA_SLOW", 50) or 50),
@@ -5033,53 +4995,23 @@ def run(
         )
     else:
         logger.info(
-            "Layer arah NONAKTIF: entry tidak memakai arah Daily sebagai penyaring.",
+            "Layer arah NONAKTIF: entry tidak memakai arah M15 sebagai penyaring.",
         )
     if config.get("DIRECTION_ZONE_FILTER_ENABLED", False):
         logger.info(
             "Layer zona demand %s AKTIF: entry hanya boleh kalau harga %s zona demand "
-            "harian (lookback %d candle, tebal zona min %.2f%%, %s, close_pos min %.2f). "
+            "%s (lookback %d candle, tebal zona min %.2f%%, %s, close_pos min %.2f). "
             "Memakai seri candle arah yang sama, tanpa unduhan tambahan.",
-            config.get("DIRECTION_INTERVAL", "1d"),
+            config.get("DIRECTION_INTERVAL", "15m"),
             "wajib berada di dalam"
             if config.get("DIRECTION_ZONE_REQUIRE_INSIDE_ZONE", False)
             else "masih di dalam atau dekat",
+            config.get("DIRECTION_INTERVAL", "15m"),
             strategy.direction_zone_lookback_bars(config),
-            float(config.get("DIRECTION_ZONE_BUFFER_PCT", 2.0) or 0.0),
+            float(config.get("DIRECTION_ZONE_BUFFER_PCT", 1.2) or 0.0),
             "jarak maks %.2f%% di atas atap zona"
-            % float(config.get("DIRECTION_ZONE_MAX_DISTANCE_PCT", 5.0) or 0.0),
+            % float(config.get("DIRECTION_ZONE_MAX_DISTANCE_PCT", 7.0) or 0.0),
             float(config.get("DIRECTION_ZONE_MIN_CLOSE_POSITION", 0.35) or 0.0),
-        )
-    if config.get("ZONE_FILTER_ENABLED", False):
-        logger.info(
-            "Layer zona AKTIF (%s): entry lolos hanya kalau candle %s terakhir yang "
-            "sudah tutup bereaksi %s zona demand %s (lookback %d candle, %s, tebal zona "
-            "min %.2f%%, close_pos min %.2f), close > EMA%d > EMA%d, dan ADX%d >= %g. "
-            "Kalau candle gagal diambil atau riwayatnya kurang, kandidat DITOLAK (fail closed).",
-            config.get("ZONE_INTERVAL", "1h"),
-            config.get("ZONE_INTERVAL", "1h"),
-            "di dalam"
-            if config.get("ZONE_REQUIRE_INSIDE_ZONE", False)
-            else "di dekat",
-            config.get("ZONE_INTERVAL", "1h"),
-            strategy.zone_lookback_bars(config),
-            "harga wajib berada di antara dasar dan atap zona"
-            if config.get("ZONE_REQUIRE_INSIDE_ZONE", False)
-            else (
-                "jarak maks %.2f%% dari atap zona"
-                % float(config.get("ZONE_MAX_DISTANCE_PCT", 4.0) or 0.0)
-            ),
-            float(config.get("ZONE_BUFFER_PCT", 1.5) or 0.0),
-            float(config.get("ZONE_MIN_CLOSE_POSITION", 0.35) or 0.0),
-            int(config.get("ZONE_EMA_FAST", 20) or 20),
-            int(config.get("ZONE_EMA_SLOW", 50) or 50),
-            int(config.get("ZONE_ADX_PERIOD", 14) or 14),
-            float(config.get("ZONE_ADX_MIN", 25.0) or 0.0),
-        )
-    else:
-        logger.info(
-            "Layer zona %s NONAKTIF.",
-            config.get("ZONE_INTERVAL", "1h"),
         )
     if config.get("TIMING_FILTER_ENABLED", False):
         logger.info(
@@ -5242,17 +5174,14 @@ def run(
         }
 
     direction_cache = DirectionCache(client, config)
-    zone_cache = ZoneCache(client, config)
     butuh_candle_arah = bool(
         config.get("DIRECTION_FILTER_ENABLED", False)
     ) or bool(config.get("DIRECTION_ZONE_FILTER_ENABLED", False))
-    butuh_candle_zona = bool(config.get("ZONE_FILTER_ENABLED", False))
     direction_provider = direction_cache.provider if butuh_candle_arah else None
-    zone_provider = zone_cache.provider if butuh_candle_zona else None
     if direction_provider is None:
         logger.warning(
             "Layer arah NONAKTIF (DIRECTION_FILTER_ENABLED=False). "
-            "Entry tidak pernah memakai arah Daily sebagai penyaring.",
+            "Entry tidak pernah memakai arah M15 sebagai penyaring.",
         )
     else:
         logger.info(
@@ -5262,7 +5191,7 @@ def run(
             int(config.get("DIRECTION_EMA_FAST", 20)),
             int(config.get("DIRECTION_EMA_SLOW", 50)),
             int(config.get("DIRECTION_ADX_PERIOD", 14)),
-            float(config.get("DIRECTION_ADX_MIN", 25.0) or 0.0),
+            float(config.get("DIRECTION_ADX_MIN", 32.0) or 0.0),
             strategy.direction_window_bars(config),
         )
     if bool(config.get("DIRECTION_ZONE_FILTER_ENABLED", False)):
@@ -5279,26 +5208,10 @@ def run(
             if config.get("DIRECTION_ZONE_REQUIRE_INSIDE_ZONE", False)
             else (
                 "jarak maks %.2f%% di atas atap zona"
-                % float(config.get("DIRECTION_ZONE_MAX_DISTANCE_PCT", 5.0) or 0.0)
+                % float(config.get("DIRECTION_ZONE_MAX_DISTANCE_PCT", 7.0) or 0.0)
             ),
             strategy.direction_zone_lookback_bars(config),
             strategy.direction_interval(config),
-        )
-    if zone_provider is None:
-        logger.warning(
-            "Layer zona NONAKTIF (ZONE_FILTER_ENABLED=False). "
-            "Entry tidak pernah memakai zona demand dan tren H1 sebagai penyaring.",
-        )
-    else:
-        logger.info(
-            "Layer zona dan tren %s AKTIF: jendela %d candle tertutup, close > EMA%d > "
-            "EMA%d dan ADX%d >= %g (fail closed bila data gagal diambil).",
-            strategy.zone_interval(config),
-            strategy.zone_window_bars(config),
-            int(config.get("ZONE_EMA_FAST", 20)),
-            int(config.get("ZONE_EMA_SLOW", 50)),
-            int(config.get("ZONE_ADX_PERIOD", 14)),
-            float(config.get("ZONE_ADX_MIN", 25.0) or 0.0),
         )
     if not bool(config.get("TIMING_FILTER_ENABLED", False)):
         logger.info(
@@ -5314,7 +5227,7 @@ def run(
             int(config.get("TIMING_EMA_FAST", 20)),
             int(config.get("TIMING_EMA_SLOW", 50)),
             int(config.get("TIMING_ADX_PERIOD", 14)),
-            float(config.get("TIMING_ADX_MIN", 25.0) or 0.0),
+            float(config.get("TIMING_ADX_MIN", 18.0) or 0.0),
             strategy.timing_window_bars(config),
         )
 
@@ -5541,7 +5454,6 @@ def run(
                         klines_fetcher_many=klines_fetcher_many,
                         prewarm_fn=client.prewarm_book_ticker,
                         direction_provider=direction_provider,
-                        zone_provider=zone_provider,
                         diagnostics=scan_diagnostics,
                         confirm_close_time_ms=batas_konfirmasi,
                     )
@@ -5582,15 +5494,12 @@ def run(
                                 )
                                 if nilai.get("adx") is not None:
                                     trend_info += " (ADX %.1f)" % float(nilai["adx"])
-                            if best.zone is not None:
-                                nilai = best.zone.get("values") or {}
-                                trend_info += " | zona dan tren %s: %s" % (
-                                    best.zone.get("interval")
-                                    or strategy.zone_interval(config),
-                                    best.zone.get("reason"),
+                            if best.direction_zone is not None:
+                                trend_info += " | zona demand %s: %s" % (
+                                    best.direction_zone.get("interval")
+                                    or strategy.direction_interval(config),
+                                    best.direction_zone.get("reason"),
                                 )
-                                if nilai.get("adx") is not None:
-                                    trend_info += " (ADX %.1f)" % float(nilai["adx"])
                             if best.timing is not None:
                                 nilai = best.timing.get("values") or {}
                                 trend_info += " | timing %s: %s" % (

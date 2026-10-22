@@ -279,6 +279,8 @@ class MarketWebSocket:
         )
 
     def _on_error(self, _app, error) -> None:
+        if "451" in str(error) and self.ws_base_url != "wss://data-stream.binance.vision":
+            self.ws_base_url = "wss://data-stream.binance.vision"
         logger.debug("WebSocket error: %s", error)
 
     def _on_close(self, _app, status_code, msg) -> None:

@@ -8,7 +8,7 @@ from typing import Callable, Optional, Sequence
 
 from backtesting import backtest as bt
 from backtesting import parity
-from strategy.indicators import Kline, direction_window_bars, zone_window_bars
+from strategy.indicators import Kline, direction_window_bars
 
 
 def parity_trend_window(config: dict) -> int:
@@ -253,28 +253,20 @@ def run_grid_search(
     )
 
     interval_sim = str(base_config.get("CONFIRM_INTERVAL", "5m") or "5m")
-    butuh_arah = bool(base_config.get("DIRECTION_FILTER_ENABLED", False))
-    butuh_zona = bool(base_config.get("ZONE_FILTER_ENABLED", False))
+    butuh_arah = bool(
+        base_config.get("DIRECTION_FILTER_ENABLED", False)
+        or base_config.get("DIRECTION_ZONE_FILTER_ENABLED", False)
+    )
     try:
         butuh_warmup = parity.gate_warmup_bars(base_config, interval_sim)
     except ValueError as exc:
         raise GridSearchError(str(exc)) from exc
     if int(warmup_bars) < butuh_warmup:
-        bagian = []
-        if butuh_arah:
-            bagian.append(
-                f"layer arah {base_config.get('DIRECTION_INTERVAL', '1d')} "
-                f"butuh {parity_trend_window(base_config)} candle tertutup"
-            )
-        if butuh_zona:
-            bagian.append(
-                f"layer zona {base_config.get('ZONE_INTERVAL', '1h')} "
-                f"butuh {zone_window_bars(base_config)} candle "
-                f"{base_config.get('ZONE_INTERVAL', '1h')} tertutup"
-            )
         hasil_grid.peringatan.append(
             f"Warmup {warmup_bars} bar dinaikkan menjadi {butuh_warmup} bar karena "
-            f"{' dan '.join(bagian)}. Unduhan data harus mencakup rentang warmup ini."
+            f"layer arah {base_config.get('DIRECTION_INTERVAL', '15m')} butuh "
+            f"{parity_trend_window(base_config)} candle tertutup. "
+            "Unduhan data harus mencakup rentang warmup ini."
         )
         warmup_bars = butuh_warmup
 
@@ -301,12 +293,6 @@ def run_grid_search(
             parity.build_direction_klines(kl_uji, base_config, interval_sim)
             if kl_uji
             else []
-        )
-    zona_latih = zona_uji = None
-    if butuh_zona:
-        zona_latih = parity.build_zone_klines(kl_latih, base_config, interval_sim)
-        zona_uji = (
-            parity.build_zone_klines(kl_uji, base_config, interval_sim) if kl_uji else []
         )
 
     if kl_uji and hasil_grid.bar_uji < 50:
@@ -341,7 +327,6 @@ def run_grid_search(
                 warmup_bars,
                 btc_klines=btc_klines,
                 direction_klines=arah_latih,
-                zone_klines=zona_latih,
             )
             s_latih = bt.summarize(r_latih)
         except Exception as exc:
@@ -380,7 +365,6 @@ def run_grid_search(
                     warmup_bars,
                     btc_klines=btc_klines,
                     direction_klines=arah_uji,
-                    zone_klines=zona_uji,
                 )
                 s_uji = bt.summarize(r_uji)
                 item.uji = s_uji
@@ -494,32 +478,42 @@ def run_portfolio_grid_search(
         )
 
     native_arah = None
-    native_zona = None
     if native_prebuilt is not None:
-        _, _, native_arah, native_zona, _ = pbt.unpack_prebuilt(native_prebuilt)
-    native_htf = native_arah is not None or native_zona is not None
+        _, _, native_arah, _ = pbt.unpack_prebuilt(native_prebuilt)
+    native_htf = native_arah is not None
     arah_of = (
         native_arah
         if native_arah is not None
         else pbt.build_direction_lookups(store, list(series_of), base_config, interval)
     )
-    zona_of = (
-        native_zona
-        if native_zona is not None
-        else pbt.build_zone_lookups(store, list(series_of), base_config, interval)
-    )
     timing_of = pbt.build_timing_lookups(store, list(series_of), base_config, interval)
-    if (arah_of or zona_of) and not native_htf:
+    if arah_of and not native_htf:
         butuh_warmup = parity.gate_warmup_ms(base_config, interval)
         if int(warmup_ms) < butuh_warmup:
             hasil_grid.peringatan.append(
                 f"Warmup {warmup_ms} ms dinaikkan menjadi {butuh_warmup} ms karena layer "
-                f"timeframe tinggi yang aktif (arah + zona) butuh paling sedikit "
+                f"arah {base_config.get('DIRECTION_INTERVAL', '15m')} butuh paling sedikit "
                 f"{parity.gate_warmup_bars(base_config, interval)} "
                 f"candle {interval} sebagai pemanasan."
             )
             warmup_ms = butuh_warmup
-    prebuilt = (timeline, series_of, arah_of, zona_of, timing_of)
+    prebuilt = (timeline, series_of, arah_of, timing_of)
+    try:
+        entry_cache_shared = pbt.precompute_entry_signals(
+            store,
+            base_config,
+            interval,
+            warmup_ms=warmup_ms,
+            prebuilt=prebuilt,
+            cancel_cb=cancel_cb,
+            btc_klines=btc_klines,
+        )
+    except pbt.BacktestError as exc:
+        if "dibatalkan" in str(exc).lower():
+            hasil_grid.dibatalkan = True
+            return hasil_grid
+        raise GridSearchError(str(exc)) from exc
+
     dilewati = 0
     total = len(kombinasi)
 
@@ -553,6 +547,7 @@ def run_portfolio_grid_search(
                 progress_cb=_prog_latih,
                 cancel_cb=cancel_cb,
                 btc_klines=btc_klines,
+                entry_signal_cache=entry_cache_shared,
             )
             s_latih = pbt.summarize_portfolio(r_latih)
             item.latih = s_latih
@@ -584,6 +579,7 @@ def run_portfolio_grid_search(
                         progress_cb=_prog_uji,
                         cancel_cb=cancel_cb,
                         btc_klines=btc_klines,
+                        entry_signal_cache=entry_cache_shared,
                     )
                     s_uji = pbt.summarize_portfolio(r_uji)
                     item.uji = s_uji
@@ -889,7 +885,6 @@ def selftest() -> bool:
         "MODE": "PAPER",
         "DIRECTION_FILTER_ENABLED": False,
         "DIRECTION_ZONE_FILTER_ENABLED": False,
-        "ZONE_FILTER_ENABLED": False,
         "TIMING_FILTER_ENABLED": False,
         "BREAKOUT_RETEST_FILTER_ENABLED": False,
         "DEMAND_ZONE_FILTER_ENABLED": False,
@@ -949,7 +944,6 @@ def selftest() -> bool:
         "MODE": "PAPER",
         "DIRECTION_FILTER_ENABLED": True,
         "DIRECTION_ZONE_FILTER_ENABLED": True,
-        "ZONE_FILTER_ENABLED": True,
         "TIMING_FILTER_ENABLED": False,
         "BREAKOUT_RETEST_FILTER_ENABLED": False,
         "DEMAND_ZONE_FILTER_ENABLED": False,
@@ -961,9 +955,9 @@ def selftest() -> bool:
         "SL_PCT": 2.0,
         "TP_PCT": 4.0,
     })
-    klines_panjang = sd.seri_5m_trend(harga=100.0, jam_trend=1560)
-    hasil_htf = run_grid_search(klines_panjang, cfg_htf, {"SL_PCT": [1.5, 2.5]}, 300, min_trades=1)
-    check("run_grid_search menaikkan warmup gerbang timeframe tinggi", any("layer arah" in w and "layer zona" in w for w in hasil_htf.peringatan), [w[:80] for w in hasil_htf.peringatan])
+    klines_panjang = sd.seri_5m_trend(harga=100.0, jam_trend=120)
+    hasil_htf = run_grid_search(klines_panjang, cfg_htf, {"SL_PCT": [1.5, 2.5]}, 100, min_trades=1)
+    check("run_grid_search menaikkan warmup gerbang arah M15", any("layer arah" in w for w in hasil_htf.peringatan), [w[:80] for w in hasil_htf.peringatan])
 
     print("\nHASIL: " + ("SEMUA LULUS" if ok_all else "ADA YANG GAGAL"))
     return ok_all

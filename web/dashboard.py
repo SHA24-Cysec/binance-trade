@@ -133,7 +133,7 @@ _idr_rate_provider = IdrRateProvider(PUMP_CONFIG)
 def get_idr_rate(force: bool = False) -> dict:
     try:
         return _idr_rate_provider.refresh() if force else _idr_rate_provider.get()
-    except Exception as exc:  # noqa: BLE001 - jalur tampilan tidak boleh meledak
+    except Exception as exc:
         logger.warning("Penyedia kurs IDR gagal total: %s", exc)
         return {
             "enabled": bool(PUMP_CONFIG.get("IDR_DISPLAY_ENABLED", True)),
@@ -868,18 +868,6 @@ BT_PARAM_KEYS = (
     "DIRECTION_ZONE_MAX_DISTANCE_PCT",
     "DIRECTION_ZONE_MIN_CLOSE_POSITION",
     "DIRECTION_ZONE_REQUIRE_INSIDE_ZONE",
-    "ZONE_REQUIRE_INSIDE_ZONE",
-    "ZONE_FILTER_ENABLED",
-    "ZONE_INTERVAL",
-    "ZONE_LOOKBACK_BARS",
-    "ZONE_BUFFER_PCT",
-    "ZONE_MAX_DISTANCE_PCT",
-    "ZONE_MIN_CLOSE_POSITION",
-    "ZONE_EMA_FAST",
-    "ZONE_EMA_SLOW",
-    "ZONE_ADX_PERIOD",
-    "ZONE_ADX_MIN",
-    "ZONE_TREND_LOOKBACK_BARS",
     "TIMING_FILTER_ENABLED",
     "TIMING_EMA_FAST",
     "TIMING_EMA_SLOW",
@@ -924,54 +912,35 @@ def _bt_simulation_interval(cfg: dict) -> str:
 
 
 def _bt_native_htf_intervals(cfg: dict) -> list[str]:
-    """Interval timeframe tinggi yang diambil langsung dari bursa."""
     out: list[str] = []
     if bool(cfg.get("DIRECTION_FILTER_ENABLED", False)) or bool(
         cfg.get("DIRECTION_ZONE_FILTER_ENABLED", False)
     ):
-        out.append(str(cfg.get("DIRECTION_INTERVAL", "1d") or "1d"))
-    if bool(cfg.get("ZONE_FILTER_ENABLED", False)):
-        out.append(str(cfg.get("ZONE_INTERVAL", "1h") or "1h"))
+        out.append(str(cfg.get("DIRECTION_INTERVAL", "15m") or "15m"))
     return out
 
 
 def _bt_native_prebuilt(prep: dict, cfg: dict):
-    """Menyusun prebuilt dari candle timeframe tinggi native.
-
-    Kalau permintaan native tidak menghasilkan satu candle pun, backtest
-    dihentikan dengan pesan jelas. Tanpa ini seluruh kandidat ditolak
-    lapisan arah/zona dan hasilnya 0 trade yang terlihat seperti "strategi
-    tidak pernah sinyal".
-    """
     arah = prep.get("native_arah")
-    zona = prep.get("native_zona")
-    if arah is None or zona is None:
+    if arah is None:
         return None
     missing = []
     if (
         bool(cfg.get("DIRECTION_FILTER_ENABLED", False))
         or bool(cfg.get("DIRECTION_ZONE_FILTER_ENABLED", False))
     ) and not arah:
-        missing.append(str(cfg.get("DIRECTION_INTERVAL", "1d") or "1d"))
-    if bool(cfg.get("ZONE_FILTER_ENABLED", False)) and not zona:
-        missing.append(str(cfg.get("ZONE_INTERVAL", "1h") or "1h"))
+        missing.append(str(cfg.get("DIRECTION_INTERVAL", "15m") or "15m"))
     if missing:
         raise bt.BacktestError(
-            "Candle timeframe tinggi native tidak berhasil diambil untuk "
+            "Candle arah native tidak berhasil diambil untuk "
             + ", ".join(missing)
             + ". Simulasi dihentikan supaya tidak menampilkan 0 trade yang "
             "menyesatkan. Periksa koneksi ke Binance lalu jalankan ulang."
         )
-    return (None, None, arah, zona, None)
+    return (None, None, arah, None)
 
 
 def _bt_simulation_warmup_bars(cfg: dict) -> int:
-    """Jumlah candle simulasi yang harus diunduh sebelum rentang uji.
-
-    Bila layer arah atau layer zona aktif, candle Daily dan H1 diambil
-    langsung dari bursa, jadi pemanasan agregasi yang panjang tidak
-    diperlukan pada rentang simulasi.
-    """
     interval = _bt_simulation_interval(cfg)
     dasar = max(
         bt.bars_per_day(interval) + 30,
@@ -998,36 +967,21 @@ def _bt_estimate_requests(days: int, max_symbols: int, cfg: dict) -> int:
 
 def _bt_direction_warmup_note(cfg: dict, interval: str) -> str:
     arah_active = bool(cfg.get("DIRECTION_FILTER_ENABLED", False))
-    daily_zone_active = bool(cfg.get("DIRECTION_ZONE_FILTER_ENABLED", False))
-    if not arah_active and not daily_zone_active:
-        return "Gerbang Daily nonaktif, jadi candle harian tidak diambil."
+    direction_zone_active = bool(cfg.get("DIRECTION_ZONE_FILTER_ENABLED", False))
+    if not arah_active and not direction_zone_active:
+        return "Gerbang arah M15 nonaktif, jadi candle arah tidak diambil."
     try:
-        hari = pbt.parity.direction_warmup_ms(cfg, interval) / float(bt.MS_PER_DAY)
+        jam = pbt.parity.direction_warmup_ms(cfg, interval) / 3_600_000.0
     except ValueError:
         return (
-            "Gerbang Daily aktif, tetapi intervalnya tidak sepadan dengan interval "
+            "Gerbang arah M15 aktif, tetapi intervalnya tidak sepadan dengan interval "
             "simulasi sehingga backtest ini akan menolak berjalan."
         )
     return (
-        f"Gerbang Daily memakai candle {cfg.get('DIRECTION_INTERVAL', '1d')} asli dari "
+        f"Gerbang arah memakai candle {cfg.get('DIRECTION_INTERVAL', '15m')} asli dari "
         "bursa, sama seperti bot live, sehingga tidak menambah warmup pada rentang "
         f"simulasi {interval}. Kalau memakai jalur agregasi, pemanasan gerbang ini "
-        f"butuh sekitar {hari:.1f} hari pertama."
-    )
-
-
-def _bt_zone_warmup_note(cfg: dict, interval: str) -> str:
-    if not bool(cfg.get("ZONE_FILTER_ENABLED", False)):
-        return "Layer zona sedang NONAKTIF, jadi candle zona tidak diambil."
-    try:
-        jam = pbt.parity.zone_warmup_ms(cfg, interval) / 3_600_000
-    except ValueError as exc:
-        return f"Layer zona tidak bisa disimulasikan: {exc}"
-    return (
-        f"Layer zona memakai candle {cfg.get('ZONE_INTERVAL', '1h')} asli dari bursa, "
-        "sama persis seperti bot live. Warmup lapisan ini sekitar "
-        f"{jam:.2f} jam pada jalur agregasi dan otomatis ikut diunduh bila jalur "
-        "agregasi dipakai. Lihat penghitung sinyal yang disaring pada hasil."
+        f"butuh sekitar {jam:.1f} jam pertama."
     )
 
 
@@ -1066,9 +1020,10 @@ def _bt_prepare_universe(
     bt.bars_per_day(interval)
     bar_ms = bt.INTERVAL_MINUTES[interval] * 60_000
     warmup_ms = bt.MS_PER_DAY + 30 * bar_ms
-    if not (bool(cfg.get("DIRECTION_FILTER_ENABLED", False)) or bool(
-        cfg.get("ZONE_FILTER_ENABLED", False)
-    )):
+    if not (
+        bool(cfg.get("DIRECTION_FILTER_ENABLED", False))
+        or bool(cfg.get("DIRECTION_ZONE_FILTER_ENABLED", False))
+    ):
         try:
             butuh_gerbang_ms = pbt.parity.gate_warmup_ms(cfg, interval)
         except ValueError as exc:
@@ -1076,12 +1031,10 @@ def _bt_prepare_universe(
         if butuh_gerbang_ms > warmup_ms:
             logger.info(
                 "Warmup backtest dinaikkan dari %.1f jam menjadi %.1f jam karena "
-                "layer arah %s dan layer zona %s butuh paling sedikit %d candle %s "
-                "sebagai pemanasan.",
+                "layer arah %s butuh paling sedikit %d candle %s sebagai pemanasan.",
                 warmup_ms / 3_600_000.0,
                 butuh_gerbang_ms / 3_600_000.0,
-                cfg.get("DIRECTION_INTERVAL", "1d"),
-                cfg.get("ZONE_INTERVAL", "1h"),
+                cfg.get("DIRECTION_INTERVAL", "15m"),
                 pbt.parity.gate_warmup_bars(cfg, interval),
                 interval,
             )
@@ -1183,16 +1136,13 @@ def _bt_prepare_universe(
             )
 
         arah_of = {}
-        zona_of = {}
-        native_htf_aktif = (
-            bool(cfg.get("DIRECTION_FILTER_ENABLED", False))
-            or bool(cfg.get("DIRECTION_ZONE_FILTER_ENABLED", False))
-            or bool(cfg.get("ZONE_FILTER_ENABLED", False))
-        )
+        native_htf_aktif = bool(
+            cfg.get("DIRECTION_FILTER_ENABLED", False)
+        ) or bool(cfg.get("DIRECTION_ZONE_FILTER_ENABLED", False))
         if native_htf_aktif:
             set_progress(
                 0.81,
-                "mengambil candle timeframe tinggi native (Daily/H1)...",
+                f"mengambil candle arah native ({cfg.get('DIRECTION_INTERVAL', '15m')})...",
             )
 
             def htf_progress(frac, sym):
@@ -1202,7 +1152,7 @@ def _bt_prepare_universe(
                     f"/{len(symbols_with_data)})",
                 )
 
-            arah_of, zona_of = pbt.fetch_native_lookups(
+            arah_of = pbt.fetch_native_lookups(
                 klien,
                 list(symbols_with_data),
                 cfg,
@@ -1212,10 +1162,10 @@ def _bt_prepare_universe(
                 max_workers=4,
                 progress_cb=htf_progress,
             )
-            if not arah_of and not zona_of:
+            if not arah_of:
                 logger.warning(
-                    "Tidak ada candle timeframe tinggi native yang berhasil "
-                    "diambil. Layer arah dan layer zona akan menolak semua "
+                    "Tidak ada candle arah native yang berhasil diambil. "
+                    "Layer arah dan zona demand arah akan menolak semua "
                     "kandidat karena riwayat tidak cukup."
                 )
 
@@ -1261,7 +1211,6 @@ def _bt_prepare_universe(
         "btc_klines": btc_klines,
         "btc_error": btc_error,
         "native_arah": arah_of,
-        "native_zona": zona_of,
     }
 
 
@@ -1403,7 +1352,7 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
             "summary": summary,
             "direction": {
                 "enabled": bool(cfg.get("DIRECTION_FILTER_ENABLED", False)),
-                "interval": cfg.get("DIRECTION_INTERVAL", "1d"),
+                "interval": cfg.get("DIRECTION_INTERVAL", "15m"),
                 "ema_fast": int(cfg.get("DIRECTION_EMA_FAST", 20) or 20),
                 "ema_slow": int(cfg.get("DIRECTION_EMA_SLOW", 50) or 50),
                 "adx_period": int(cfg.get("DIRECTION_ADX_PERIOD", 14) or 14),
@@ -1412,17 +1361,17 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "skips": int(getattr(result, "direction_skips", 0)),
                 "scans": int(getattr(result, "direction_scans", 0)),
             },
-            "daily_zone": {
+            "direction_zone": {
                 "enabled": bool(cfg.get("DIRECTION_ZONE_FILTER_ENABLED", False)),
-                "interval": cfg.get("DIRECTION_INTERVAL", "1d"),
+                "interval": cfg.get("DIRECTION_INTERVAL", "15m"),
                 "lookback_bars": int(
-                    cfg.get("DIRECTION_ZONE_LOOKBACK_BARS", 20) or 20
+                    cfg.get("DIRECTION_ZONE_LOOKBACK_BARS", 28) or 28
                 ),
                 "zone_buffer_pct": float(
-                    cfg.get("DIRECTION_ZONE_BUFFER_PCT", 2.0) or 0.0
+                    cfg.get("DIRECTION_ZONE_BUFFER_PCT", 1.2) or 0.0
                 ),
                 "max_distance_pct": float(
-                    cfg.get("DIRECTION_ZONE_MAX_DISTANCE_PCT", 5.0) or 0.0
+                    cfg.get("DIRECTION_ZONE_MAX_DISTANCE_PCT", 7.0) or 0.0
                 ),
                 "min_close_position": float(
                     cfg.get("DIRECTION_ZONE_MIN_CLOSE_POSITION", 0.35) or 0.0
@@ -1430,26 +1379,8 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "require_inside": bool(
                     cfg.get("DIRECTION_ZONE_REQUIRE_INSIDE_ZONE", False)
                 ),
-                "skips": int(getattr(result, "daily_zone_skips", 0)),
-                "scans": int(getattr(result, "daily_zone_scans", 0)),
-            },
-            "zone": {
-                "enabled": bool(cfg.get("ZONE_FILTER_ENABLED", False)),
-                "interval": cfg.get("ZONE_INTERVAL", "1h"),
-                "lookback_bars": int(cfg.get("ZONE_LOOKBACK_BARS", 72) or 72),
-                "zone_buffer_pct": float(cfg.get("ZONE_BUFFER_PCT", 1.5) or 0.0),
-                "max_distance_pct": float(cfg.get("ZONE_MAX_DISTANCE_PCT", 4.0) or 0.0),
-                "require_inside": bool(cfg.get("ZONE_REQUIRE_INSIDE_ZONE", False)),
-                "min_close_position": float(cfg.get("ZONE_MIN_CLOSE_POSITION", 0.35) or 0.0),
-                "ema_fast": int(cfg.get("ZONE_EMA_FAST", 20) or 20),
-                "ema_slow": int(cfg.get("ZONE_EMA_SLOW", 50) or 50),
-                "adx_period": int(cfg.get("ZONE_ADX_PERIOD", 14) or 14),
-                "adx_min": float(cfg.get("ZONE_ADX_MIN", 25.0) or 0.0),
-                "trend_lookback_bars": int(
-                    cfg.get("ZONE_TREND_LOOKBACK_BARS", 60) or 60
-                ),
-                "skips": int(getattr(result, "zone_skips", 0)),
-                "scans": int(getattr(result, "zone_scans", 0)),
+                "skips": int(getattr(result, "direction_zone_skips", 0)),
+                "scans": int(getattr(result, "direction_zone_scans", 0)),
             },
             "timing": {
                 "enabled": bool(cfg.get("TIMING_FILTER_ENABLED", False)),
@@ -1562,7 +1493,7 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "diterapkan sesuai konfigurasi, tanpa batas maksimum kenaikan.",
                 "Layer arah (DIRECTION_FILTER_ENABLED) SUDAH disimulasikan memakai aturan "
                 "yang sama dengan bot live: DIRECTION_LOOKBACK_BARS candle "
-                + str(cfg.get("DIRECTION_INTERVAL", "1d"))
+                + str(cfg.get("DIRECTION_INTERVAL", "15m"))
                 + " terakhir yang sudah tutup pada saat candle sinyal ditutup, lalu close > "
                 "EMA cepat, EMA cepat > EMA lambat, dan ADX >= DIRECTION_ADX_MIN. Candle "
                 "arah diambil langsung dari bursa, sama persis seperti bot live, dan "
@@ -1570,7 +1501,9 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "backtest memakai candle yang benar-benar ada di bursa pada rentang itu, "
                 "sedangkan live memakai candle terbaru yang sudah tutup. "
                 + _bt_direction_warmup_note(cfg, prep["interval"])
+                + " "
                 + _bt_demand_limitations(cfg, prep["interval"])
+                + " "
                 + _bt_timing_note(cfg, prep["interval"])
                 + " Filter live yang SUDAH disimulasikan dari candle: filter BTC (BTC_MAX_DROP_PCT, "
                 "memakai candle BTC historis), MAX_CHASE_PCT, MIN_SECONDS_BETWEEN_TRADES, "
@@ -1746,8 +1679,8 @@ def _bt_run_grid_job(
                 "Split latih/uji di sini satu kali berdasarkan urutan waktu (bukan "
                 "walk-forward bergulir). Untuk keyakinan lebih, ulangi dengan beberapa "
                 "rasio dan rentang hari yang berbeda.",
-                "Yang disapu grid hanya parameter EXIT. Layer arah (DIRECTION_*), layer "
-                "zona (ZONE_*), layer timing (TIMING_*), breakout-retest (BREAKOUT_*), "
+                "Yang disapu grid hanya parameter EXIT. Layer arah dan zona demand M15 "
+                "(DIRECTION_*), layer timing (TIMING_*), breakout-retest (BREAKOUT_*), "
                 "rolling volume (ROLLING_*), demand M5 (DEMAND_*), dan USE_ATR_EXIT tidak "
                 "ikut disapu: nilainya diambil dari konfigurasi backtest dan tetap sama pada "
                 "semua kombinasi. Lookup timeframe tinggi digunakan ulang. Untuk "
@@ -1807,24 +1740,17 @@ def _bt_run_grid_job(
 
 def _bt_demand_limitations(cfg: dict, interval: str) -> str:
     return (
-        "Layer zona H1 juga SUDAH disimulasikan dengan aturan yang sama seperti bot "
-        "live: memakai candle "
-        + str(cfg.get("ZONE_INTERVAL", "1h"))
-        + " yang sudah tutup untuk memeriksa demand zone, EMA"
-        + str(int(cfg.get("ZONE_EMA_FAST", 20) or 20))
-        + "/"
-        + str(int(cfg.get("ZONE_EMA_SLOW", 50) or 50))
-        + ", dan ADX"
-        + str(int(cfg.get("ZONE_ADX_PERIOD", 14) or 14))
-        + " minimal "
-        + f"{float(cfg.get('ZONE_ADX_MIN', 25.0) or 0.0):g}. "
-        "Lapisan ini diperiksa SETELAH layer arah, dan "
+        "Layer zona demand arah (DIRECTION_ZONE_FILTER_ENABLED) juga SUDAH "
+        "disimulasikan dengan aturan yang sama seperti bot live pada candle "
+        + str(cfg.get("DIRECTION_INTERVAL", "15m"))
+        + " yang sudah tutup (lookback "
+        + str(int(cfg.get("DIRECTION_ZONE_LOOKBACK_BARS", 28) or 28))
+        + " candle). Lapisan ini diperiksa SETELAH layer arah, dan "
         "fail closed bila candle tidak cukup. Penghitung "
         "\"disaring X dari Y sinyal\" pada ringkasan hanya menghitung sinyal yang "
         "SUDAH lolos gerbang sebelumnya: angka 0 berarti lapisan itu tidak pernah "
         "diperiksa (karena gerbang di atasnya menolak lebih dulu), bukan berarti "
-        "lapisan itu meloloskan semuanya. "
-        + _bt_zone_warmup_note(cfg, interval)
+        "lapisan itu meloloskan semuanya."
     )
 
 
@@ -1833,22 +1759,21 @@ def _bt_min_days_note(cfg: dict, interval: str) -> tuple[int, str]:
     arah_aktif = bool(cfg.get("DIRECTION_FILTER_ENABLED", False)) or bool(
         cfg.get("DIRECTION_ZONE_FILTER_ENABLED", False)
     )
-    zona_aktif = bool(cfg.get("ZONE_FILTER_ENABLED", False))
     timing_aktif = bool(cfg.get("TIMING_FILTER_ENABLED", False))
     breakout_aktif = bool(cfg.get("BREAKOUT_RETEST_FILTER_ENABLED", False))
     rolling_aktif = bool(cfg.get("ROLLING_VOLUME_FILTER_ENABLED", False))
     demand_aktif = bool(cfg.get("DEMAND_ZONE_FILTER_ENABLED", False))
     m5_aktif = any((timing_aktif, breakout_aktif, rolling_aktif, demand_aktif))
-    if not arah_aktif and not zona_aktif and not m5_aktif:
+    if not arah_aktif and not m5_aktif:
         return dasar, ""
 
     native_htf = bool(_bt_native_htf_intervals(cfg))
     minimal = dasar
     catatan = ""
-    if arah_aktif or zona_aktif:
+    if arah_aktif:
         catatan = (
-            "Layer arah (Daily) dan layer zona (H1) memakai candle asli bursa, "
-            "sama seperti bot live, jadi riwayat timeframe tinggi tidak menambah "
+            f"Layer arah ({cfg.get('DIRECTION_INTERVAL', '15m')}) memakai candle asli bursa, "
+            "sama seperti bot live, jadi riwayat arah tidak menambah "
             "batas minimum hari pada rentang simulasi. Riwayat yang dibutuhkan "
             "tetap diunduh otomatis sebelum rentang uji."
         )
@@ -1860,7 +1785,7 @@ def _bt_min_days_note(cfg: dict, interval: str) -> tuple[int, str]:
         if jam_gerbang > 0:
             minimal = max(minimal, int(math.ceil(jam_gerbang / 24.0)) + 1)
             catatan += (
-                f" Tanpa candle timeframe tinggi native, gerbang Daily dan H1 harus "
+                f" Tanpa candle arah native, gerbang {cfg.get('DIRECTION_INTERVAL', '15m')} harus "
                 f"dirangkai dari candle {interval} sehingga butuh sekitar "
                 f"{jam_gerbang:.2f} jam pemanasan."
             )
@@ -2349,32 +2274,26 @@ def api_backtest_defaults():
     out["direction_enabled"] = bool(
         PUMP_CONFIG.get("DIRECTION_FILTER_ENABLED", False)
     )
-    out["direction_interval"] = str(PUMP_CONFIG.get("DIRECTION_INTERVAL", "1d"))
+    out["direction_interval"] = str(PUMP_CONFIG.get("DIRECTION_INTERVAL", "15m"))
     out["direction_lookback_bars"] = int(
         PUMP_CONFIG.get("DIRECTION_LOOKBACK_BARS", 60) or 60
     )
     out["direction_zone_enabled"] = bool(
         PUMP_CONFIG.get("DIRECTION_ZONE_FILTER_ENABLED", False)
     )
-    out["direction_zone_interval"] = str(PUMP_CONFIG.get("DIRECTION_INTERVAL", "1d"))
+    out["direction_zone_interval"] = str(PUMP_CONFIG.get("DIRECTION_INTERVAL", "15m"))
     out["direction_zone_lookback_bars"] = int(
-        PUMP_CONFIG.get("DIRECTION_ZONE_LOOKBACK_BARS", 20) or 20
+        PUMP_CONFIG.get("DIRECTION_ZONE_LOOKBACK_BARS", 28) or 28
     )
     out["direction_zone_max_distance_pct"] = float(
-        PUMP_CONFIG.get("DIRECTION_ZONE_MAX_DISTANCE_PCT", 5.0) or 0.0
+        PUMP_CONFIG.get("DIRECTION_ZONE_MAX_DISTANCE_PCT", 7.0) or 0.0
     )
     out["direction_zone_require_inside"] = bool(
         PUMP_CONFIG.get("DIRECTION_ZONE_REQUIRE_INSIDE_ZONE", False)
     )
-    out["zone_require_inside"] = bool(
-        PUMP_CONFIG.get("ZONE_REQUIRE_INSIDE_ZONE", False)
-    )
     out["demand_require_inside"] = bool(
         PUMP_CONFIG.get("DEMAND_REQUIRE_INSIDE_ZONE", False)
     )
-    out["zone_enabled"] = bool(PUMP_CONFIG.get("ZONE_FILTER_ENABLED", False))
-    out["zone_interval"] = str(PUMP_CONFIG.get("ZONE_INTERVAL", "1h"))
-    out["zone_lookback_bars"] = int(PUMP_CONFIG.get("ZONE_LOOKBACK_BARS", 72) or 72)
     out["timing_enabled"] = bool(PUMP_CONFIG.get("TIMING_FILTER_ENABLED", False))
     out["timing_interval"] = str(PUMP_CONFIG.get("CONFIRM_INTERVAL", "5m"))
     out["timing_lookback_bars"] = int(PUMP_CONFIG.get("TIMING_LOOKBACK_BARS", 60) or 60)
