@@ -247,15 +247,6 @@ PARAMETER_SCHEMA: dict[str, dict] = {
             "1d",
         ],
     ),
-    "PUMP_MIN_24H_CHANGE_PCT": _field(
-        "Monitoring Pasar",
-        "Minimum pump 24 jam",
-        "Kenaikan harga minimum dalam 24 jam untuk menjadi kandidat. Nilai tepat pada ambang diterima. Tidak ada batas maksimum kenaikan.",
-        "float",
-        minimum=0,
-        maximum=1000,
-        unit="%",
-    ),
     "BTC_FILTER_ENABLED": _field(
         "Monitoring Pasar",
         "Filter kondisi BTC",
@@ -280,83 +271,30 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         maximum=1000,
         unit="candle",
     ),
-    "USE_ATR_EXIT": _field(
+    "CONFLUENCE_SL_BUFFER_PCT": _field(
         "SL dan TP",
-        "Gunakan exit ATR",
-        "Gunakan jarak exit adaptif berdasarkan ATR; jika mati, gunakan persen lama.",
-        "bool",
-        dangerous=True,
+        "Buffer SL Confluence",
+        "Buffer tambahan di bawah struktur Order Block / POI / Swing Low / Sweep Low untuk mengunci level Stop Loss struktural.",
+        "float",
+        minimum=0.0,
+        maximum=10.0,
+        unit="%",
     ),
-    "ATR_PERIOD": _field(
+    "CONFLUENCE_MIN_RR_RATIO": _field(
         "SL dan TP",
-        "Periode ATR",
-        "Periode ATR Wilder.",
-        "int",
-        minimum=2,
-        maximum=200,
-        unit="candle",
-    ),
-    "ATR_MULT_SL": _field(
-        "SL dan TP",
-        "Pengali ATR Stop Loss",
-        "Jarak Stop Loss dalam ATR.",
+        "Minimum Risk:Reward Confluence",
+        "Rasio imbal hasil terhadap risiko minimum (target BSL $$$ dibagi jarak SL struktural) agar setup diizinkan entry.",
         "float",
         minimum=0.1,
-        maximum=20,
-        unit="x",
-        dangerous=True,
-    ),
-    "ATR_MULT_TP": _field(
-        "SL dan TP",
-        "Pengali ATR Take Profit",
-        "Jarak Take Profit dalam ATR.",
-        "float",
-        minimum=0.1,
-        maximum=50,
-        unit="x",
-    ),
-    "ATR_MULT_TRAIL": _field(
-        "SL dan TP",
-        "Pengali ATR trailing",
-        "Jarak trailing dalam ATR.",
-        "float",
-        minimum=0.1,
-        maximum=20,
-        unit="x",
-    ),
-    "ATR_MULT_BE_TRIGGER": _field(
-        "Breakeven dan Trailing",
-        "Pengali ATR trigger BE",
-        "Profit ATR untuk mengaktifkan breakeven.",
-        "float",
-        minimum=0,
-        maximum=20,
-        unit="x",
-    ),
-    "ATR_MULT_BE_LOCK": _field(
-        "Breakeven dan Trailing",
-        "Pengali ATR lock BE",
-        "Profit ATR yang dikunci.",
-        "float",
-        minimum=0,
-        maximum=20,
-        unit="x",
-    ),
-    "ATR_MULT_TRAIL_START": _field(
-        "Breakeven dan Trailing",
-        "Pengali ATR mulai trailing",
-        "Profit ATR untuk mengaktifkan trailing.",
-        "float",
-        minimum=0,
-        maximum=50,
+        maximum=20.0,
         unit="x",
     ),
     "MAX_HOLD_HOURS": _field(
         "SL dan TP",
         "Batas waktu tahan (time stop)",
         "Tutup posisi otomatis saat umurnya mencapai batas ini. 0 = nonaktif. "
-        "Exit harga (SL, breakeven, trailing) tetap diprioritaskan pada bar yang "
-        "sama, jadi time stop hanya menutup posisi yang mengendap tanpa arah.",
+        "Exit harga (Stop Loss struktural dan Take Profit BSL $$$) tetap diprioritaskan "
+        "pada bar yang sama, jadi time stop hanya menutup posisi yang mengendap tanpa arah.",
         "float",
         minimum=0,
         maximum=720,
@@ -409,43 +347,17 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         maximum=3650,
         unit="hari",
     ),
-    "USE_TP": _field(
-        "SL dan TP",
-        "Aktifkan Take Profit",
-        "Menutup posisi saat target tercapai.",
-        "bool",
-        dangerous=True,
-    ),
-    "TP_PCT": _field(
-        "SL dan TP",
-        "Take Profit",
-        "Target profit tetap.",
-        "float",
-        minimum=0.01,
-        maximum=1000,
-        unit="%",
-    ),
-    "USE_STOP_LOSS": _field(
-        "SL dan TP",
-        "Aktifkan Stop Loss",
-        "Jaring pengaman kerugian per trade.",
-        "bool",
-        dangerous=True,
-    ),
     "USE_NATIVE_OCO": _field(
         "SL dan TP",
         "OCO exchange-side LIVE",
-        "Pasang OCO SELL native berisi TP limit dan SL limit pada posisi yang terdeteksi. "
-        "Kaki SL mengikuti level Breakeven atau Trailing Stop bila level itu sudah melewati "
-        "SL awal, dan order dipasang ulang saat level naik.",
+        "Pasang OCO SELL native berisi TP limit (BSL $$$) dan SL limit struktural pada posisi yang terdeteksi.",
         "bool",
         dangerous=True,
     ),
     "USE_NATIVE_STOP_LOSS": _field(
         "SL dan TP",
         "Stop Loss exchange-side fallback",
-        "Fallback STOP_LOSS market native bila pemasangan OCO tidak didukung. Harga stop "
-        "mengikuti Breakeven atau Trailing Stop yang sudah aktif dan dipasang ulang saat naik.",
+        "Fallback STOP_LOSS market native bila pemasangan OCO tidak didukung.",
         "bool",
         dangerous=True,
     ),
@@ -458,64 +370,6 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         maximum=5,
         unit="%",
         dangerous=True,
-    ),
-    "SL_PCT": _field(
-        "SL dan TP",
-        "Stop Loss",
-        "Batas rugi tetap.",
-        "float",
-        minimum=0.01,
-        maximum=100,
-        unit="%",
-        dangerous=True,
-    ),
-    "USE_BREAKEVEN": _field(
-        "Breakeven dan Trailing",
-        "Aktifkan breakeven",
-        "Mengunci posisi setelah profit minimum.",
-        "bool",
-    ),
-    "BE_TRIGGER_PCT": _field(
-        "Breakeven dan Trailing",
-        "Trigger breakeven",
-        "Profit untuk mengaktifkan breakeven tetap.",
-        "float",
-        minimum=0,
-        maximum=1000,
-        unit="%",
-    ),
-    "BE_LOCK_PCT": _field(
-        "Breakeven dan Trailing",
-        "Profit terkunci BE",
-        "Profit minimum setelah BE aktif.",
-        "float",
-        minimum=0,
-        maximum=1000,
-        unit="%",
-    ),
-    "USE_TRAILING": _field(
-        "Breakeven dan Trailing",
-        "Aktifkan trailing",
-        "Mengikuti kenaikan harga dengan stop dinamis.",
-        "bool",
-    ),
-    "TRAILING_START_PCT": _field(
-        "Breakeven dan Trailing",
-        "Mulai trailing",
-        "Profit untuk mengaktifkan trailing tetap.",
-        "float",
-        minimum=0,
-        maximum=1000,
-        unit="%",
-    ),
-    "TRAILING_STEP_PCT": _field(
-        "Breakeven dan Trailing",
-        "Jarak trailing",
-        "Jarak stop dari harga tertinggi.",
-        "float",
-        minimum=0.01,
-        maximum=100,
-        unit="%",
     ),
     "TAKER_FEE_PCT": _field(
         "Fee dan Filter",
@@ -701,7 +555,7 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "CONFIRM_INTERVAL": _field(
         "Scan",
         "Interval konfirmasi",
-        "Interval candle konfirmasi untuk eksekusi entry M5. DIRECTION_INTERVAL wajib kelipatan bulat dari nilai ini dan tidak boleh lebih pendek agar candle arah dapat dirangkai dari data konfirmasi; saat HTF_FILTER_ENABLED aktif, HTF_INTERVAL juga wajib kompatibel dan tidak lebih pendek dari interval konfirmasi.",
+        "Interval candle konfirmasi untuk pemicu eksekusi entry M5. CONFLUENCE_STRUCTURE_INTERVAL wajib kelipatan bulat dari nilai ini dan tidak boleh lebih pendek agar candle struktur POI dapat dirangkai tanpa look-ahead.",
         "str",
         editor="select",
         options=[
@@ -722,9 +576,9 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "CONFIRM_LOOKBACK_BARS": _field(
         "Scan",
         "Jumlah candle konfirmasi",
-        "Jumlah candle tertutup untuk breakout-retest, EMA, ADX, serta filter tambahan M5. Limit endpoint klines 1000 per panggilan.",
+        "Jumlah candle tertutup untuk pemicu eksekusi The Confluence Code. Limit endpoint klines 1000 per panggilan.",
         "int",
-        minimum=3,
+        minimum=15,
         maximum=1000,
         unit="candle",
     ),
@@ -899,97 +753,6 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         unit="%",
         dangerous=True,
     ),
-    "ROLLING_VOLUME_CONFIRMATION_BARS": _field(
-        "Konfirmasi Volume",
-        "Candle volume konfirmasi",
-        "Jumlah candle terakhir yang wajib memenuhi lonjakan volume.",
-        "int",
-        minimum=1,
-        maximum=20,
-        unit="candle",
-    ),
-    "ROLLING_VOLUME_FILTER_ENABLED": _field(
-        "Konfirmasi Volume",
-        "Filter volume rolling",
-        "Wajibkan volume candle konfirmasi melampaui rata-rata candle sebelumnya.",
-        "bool",
-    ),
-    "ROLLING_VOLUME_LOOKBACK_BARS": _field(
-        "Konfirmasi Volume",
-        "Lookback volume rolling",
-        "Jumlah candle sebelumnya untuk menghitung rata-rata volume.",
-        "int",
-        minimum=2,
-        maximum=500,
-        unit="candle",
-    ),
-    "ROLLING_VOLUME_SURGE_MULT": _field(
-        "Konfirmasi Volume",
-        "Pengali volume rolling",
-        "Volume candle konfirmasi minimal sekian kali rata-rata sebelumnya.",
-        "float",
-        minimum=0.1,
-        maximum=100,
-        unit="x",
-    ),
-    "DEMAND_ZONE_FILTER_ENABLED": _field(
-        "Konfirmasi Demand",
-        "Filter zona demand chart",
-        "Wajibkan harga berada di area demand (support atau base akumulasi) dengan reaksi dorongan beli yang sah pada candle konfirmasi. Berlaku di LIVE, PAPER, dan backtest.",
-        "bool",
-    ),
-    "DEMAND_LOOKBACK_BARS": _field(
-        "Konfirmasi Demand",
-        "Lookback zona demand",
-        "Jumlah candle tertutup yang memetakan dasar zona demand. Dasarnya dicari di "
-        "seluruh jendela ini (swing support), dan hanya candle yang menutup di area "
-        "dasar itu yang dihitung sebagai akumulasi; candle yang close-nya sudah "
-        "melayang dianggap kaki naik dan tidak ikut jadi dasar. Makin besar nilai ini, "
-        "makin jauh ke belakang bot mencari dasarnya, sehingga makin banyak entry yang "
-        "dianggap sudah terlalu jauh dari demand (lebih ketat).",
-        "int",
-        minimum=3,
-        maximum=500,
-        unit="candle",
-    ),
-    "DEMAND_ZONE_BUFFER_PCT": _field(
-        "Konfirmasi Demand",
-        "Lebar zona demand",
-        "Tebal zona demand di atas level dasarnya. Berfungsi ganda: menentukan candle "
-        "mana yang masih dianggap bagian dari area dasar (candle yang menutup tidak "
-        "lebih tinggi dari buffer di atas level dasar) dan menentukan "
-        "ketebalan minimum zona bila area dasarnya sendiri sempit.",
-        "float",
-        minimum=0.05,
-        maximum=20,
-        unit="%",
-    ),
-    "DEMAND_REQUIRE_INSIDE_ZONE": _field(
-        "Konfirmasi Demand",
-        "Wajib di dalam zona demand M5",
-        "True berarti close candle konfirmasi harus berada di antara dasar dan atap zona demand M5, dan DEMAND_MAX_DISTANCE_PCT tidak dipakai lagi. Ini yang membuat bot hanya entry di dalam area demand, bukan di atasnya.",
-        "bool",
-    ),
-    "DEMAND_MAX_DISTANCE_PCT": _field(
-        "Konfirmasi Demand",
-        "Jarak maksimum dari zona demand",
-        "Batas jarak harga penutupan sinyal di atas BATAS ATAS zona demand "
-        "(zone_high), bukan dari dasarnya, agar bot tidak membeli terlalu jauh dari "
-        "area demand (anti-pucuk). Toleransi riil dari dasar zona jadi sekitar "
-        "DEMAND_ZONE_BUFFER_PCT + DEMAND_MAX_DISTANCE_PCT.",
-        "float",
-        minimum=0.1,
-        maximum=50,
-        unit="%",
-    ),
-    "DEMAND_MIN_CLOSE_POSITION": _field(
-        "Konfirmasi Demand",
-        "Posisi close minimum pada candle",
-        "Posisi penutupan minimum di dalam rentang high-low candle sinyal (0.0 di low, 1.0 di high) sebagai bukti dorongan demand pembeli.",
-        "float",
-        minimum=0.0,
-        maximum=1.0,
-    ),
     "TOP_N_CANDIDATES_TO_CONFIRM": _field(
         "Scan",
         "Jumlah kandidat konfirmasi",
@@ -998,317 +761,149 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         minimum=1,
         maximum=1000,
     ),
-    "HTF_FILTER_ENABLED": _field(
-        "Tren H1",
-        "Gerbang tren H1",
-        "Default nonaktif agar penarikan kode tidak mengubah perilaku LIVE diam-diam. Jika diaktifkan, entry hanya lolos bila candle H1 tertutup memenuhi close > EMA cepat > EMA lambat dan ADX minimal. Data gagal atau riwayat kurang menolak entry. Aktifkan manual hanya setelah backtest A/B dan uji PAPER lolos.",
+    "CONFLUENCE_FILTER_ENABLED": _field(
+        "Confluence Code",
+        "Filter The Confluence Code",
+        "Aktifkan gerbang entry The Confluence Code (Volume Profile -> Fibonacci -> Liquidity -> FVG -> Order Block). Jika nonaktif, kandidat yang lolos seleksi 24 jam dan proteksi orderbook langsung memenuhi syarat entry.",
         "bool",
     ),
-    "HTF_INTERVAL": _field(
-        "Tren H1",
-        "Interval tren HTF",
-        "Timeframe gerbang tren tinggi untuk strategi tiga timeframe; ditetapkan 1h agar tetap H1.",
+    "CONFLUENCE_STRUCTURE_INTERVAL": _field(
+        "Confluence Code",
+        "Interval struktur POI Confluence",
+        "Timeframe candle tertutup untuk memetakan struktur impuls BoS, Volume Profile, Fibonacci, FVG, dan Order Block (default 15m).",
         "str",
         editor="select",
-        options=["1h"],
+        options=[
+            "1m",
+            "3m",
+            "5m",
+            "15m",
+            "30m",
+            "1h",
+            "2h",
+            "4h",
+            "6h",
+            "8h",
+            "12h",
+            "1d",
+        ],
     ),
-    "HTF_EMA_FAST": _field(
-        "Tren H1",
-        "EMA cepat H1",
-        "Periode EMA cepat pada candle H1. Wajib lebih kecil dari EMA lambat.",
+    "CONFLUENCE_LOOKBACK_BARS": _field(
+        "Confluence Code",
+        "Lookback struktur Confluence",
+        "Jumlah candle tertutup yang dianalisis untuk mencari struktur impuls BoS dan zona POI.",
         "int",
-        minimum=2,
+        minimum=15,
         maximum=500,
         unit="candle",
     ),
-    "HTF_EMA_SLOW": _field(
-        "Tren H1",
-        "EMA lambat H1",
-        "Periode EMA lambat pada candle H1; maksimal 999 candle agar kebutuhan data tetap di bawah batas limit klines per panggilan.",
-        "int",
-        minimum=3,
-        maximum=999,
-        unit="candle",
-    ),
-    "HTF_ADX_PERIOD": _field(
-        "Tren H1",
-        "Periode ADX H1",
-        "Periode ADX Wilder pada candle H1. Butuh sekitar dua kali periode ini candle agar ADX terdefinisi.",
-        "int",
-        minimum=2,
-        maximum=200,
-        unit="candle",
-    ),
-    "HTF_ADX_MIN": _field(
-        "Tren H1",
-        "Ambang ADX H1",
-        "Nilai default 30 adalah titik awal konservatif, BUKAN angka final, dan WAJIB dikalibrasi lewat backtest A/B sebelum gerbang H1 diaktifkan. Nilai 0 menonaktifkan cek kekuatan ADX.",
+    "CONFLUENCE_MIN_IMPULSE_PCT": _field(
+        "Confluence Code",
+        "Impuls minimum BoS",
+        "Kenaikan persentase minimum dari Swing Low (1) ke Swing High (0) yang menembus struktur tertinggi sebelumnya (Break of Structure).",
         "float",
-        minimum=0,
-        maximum=100,
+        minimum=0.1,
+        maximum=100.0,
+        unit="%",
     ),
-    "HTF_LOOKBACK_BARS": _field(
-        "Tren H1",
-        "Jendela candle H1",
-        "Jumlah candle H1 tertutup untuk menghitung EMA dan ADX. Bila kurang dari kebutuhan indikator, bot memakai kebutuhan minimum dan menolak entry selama riwayat belum cukup.",
-        "int",
-        minimum=20,
-        maximum=999,
-        unit="candle",
+    "CONFLUENCE_ZONE_TOLERANCE_RATIO": _field(
+        "Confluence Code",
+        "Toleransi klaster POI",
+        "Toleransi lebar klaster terhadap rentang impuls untuk menyatukan irisan Volume Profile, Fibonacci, FVG, dan Order Block.",
+        "float",
+        minimum=0.0,
+        maximum=0.50,
+        unit="rasio",
     ),
-    "HTF_RESISTANCE_FILTER_ENABLED": _field(
-        "Resistance H1",
-        "Filter ruang ke resistance H1",
-        "Default nonaktif. Pada langkah konfigurasi ini, kunci masih belum dihubungkan ke scanner atau backtest; mengubahnya belum mengubah perilaku. Saat integrasi selesai, filter hanya valid bersama HTF_FILTER_ENABLED dan akan menolak entry bila ruang dari close sinyal M5 ke pivot swing-high H1 terdekat di atas harga kurang dari ambang. Jangan menganggap filter aktif sebelum integrasi dan uji A/B serta PAPER selesai.",
+    "VP_FILTER_ENABLED": _field(
+        "Confluence Code",
+        "1. Volume Profile (HVN/POC)",
+        "Wajibkan terdapat High Volume Node (HVN) atau Point of Control (POC) dari Fixed Range Volume Profile di zona diskon retracement.",
         "bool",
     ),
-    "HTF_RESISTANCE_LOOKBACK_BARS": _field(
-        "Resistance H1",
-        "Lookback resistance H1",
-        "Jumlah candle H1 tertutup untuk mencari pivot resistance. Harus tersedia di dalam HTF_LOOKBACK_BARS agar tidak membutuhkan jendela data tambahan.",
+    "VP_BINS": _field(
+        "Confluence Code",
+        "Jumlah bin Volume Profile",
+        "Jumlah pembagian level harga (price bins) pada Fixed Range Volume Profile di rentang impuls.",
         "int",
         minimum=5,
-        maximum=999,
-        unit="candle",
+        maximum=100,
+        unit="bin",
     ),
-    "HTF_RESISTANCE_PIVOT_WING_BARS": _field(
-        "Resistance H1",
-        "Sayap pivot resistance H1",
-        "Jumlah candle tertutup di kiri dan kanan untuk mengonfirmasi swing-high. Pivot terbaru belum boleh dipakai sebelum seluruh candle di sisi kanan tutup.",
+    "VP_HVN_TOP_RATIO": _field(
+        "Confluence Code",
+        "Rasio HVN Volume Profile",
+        "Proporsi bin ber-volume tertinggi yang dikategorikan sebagai High Volume Node (misal 0.40 = 40% teratas).",
+        "float",
+        minimum=0.05,
+        maximum=1.0,
+        unit="rasio",
+    ),
+    "FIB_FILTER_ENABLED": _field(
+        "Confluence Code",
+        "2. Fibonacci Retracement",
+        "Wajibkan harga retracement dan zona POI berada di area diskon Fibonacci dari kaki impuls BoS.",
+        "bool",
+    ),
+    "FIB_RETRACEMENT_MIN": _field(
+        "Confluence Code",
+        "Batas atas Fibonacci (Min)",
+        "Level retracement Fibonacci minimum untuk zona diskon (default 0.50).",
+        "float",
+        minimum=0.10,
+        maximum=0.95,
+        unit="rasio",
+    ),
+    "FIB_RETRACEMENT_MAX": _field(
+        "Confluence Code",
+        "Batas bawah Fibonacci (Max)",
+        "Level retracement Fibonacci maksimum untuk zona diskon (default 0.786).",
+        "float",
+        minimum=0.15,
+        maximum=0.99,
+        unit="rasio",
+    ),
+    "LIQUIDITY_FILTER_ENABLED": _field(
+        "Confluence Code",
+        "3. Liquidity Sweep (SSL/BSL)",
+        "Wajibkan terbentuk Buy-Side Liquidity (BSL) di puncak impuls serta Sell-Side Liquidity (SSL) internal yang tersapu menuju zona POI.",
+        "bool",
+    ),
+    "LIQUIDITY_SWEEP_LOOKBACK_BARS": _field(
+        "Confluence Code",
+        "Lookback sapuan likuiditas",
+        "Jumlah candle terakhir pada timeframe konfirmasi untuk mendeteksi sapuan SSL dan sentuhan zona POI.",
         "int",
         minimum=1,
-        maximum=499,
+        maximum=30,
         unit="candle",
     ),
-    "HTF_RESISTANCE_MIN_ROOM_PCT": _field(
-        "Resistance H1",
-        "Ruang minimum ke resistance H1",
-        "Entry ditolak bila jarak dari close sinyal M5 ke resistance pivot H1 terdekat di atasnya kurang dari nilai ini. Default 1,5% hanya titik awal uji, bukan nilai final atau rekomendasi profit.",
-        "float",
-        minimum=0.0,
-        maximum=50.0,
-        unit="%",
-    ),
-    "DIRECTION_FILTER_ENABLED": _field(
-        "Arah M15",
-        "Filter arah M15",
-        "Layer pertama: tandai arah utama dari candle M15. Entry hanya boleh kalau candle arah terakhir sudah tutup di atas EMA cepat, EMA cepat di atas EMA lambat, dan ADX minimal. Data gagal diambil atau riwayat belum cukup berarti kandidat ditolak (fail closed).",
+    "FVG_FILTER_ENABLED": _field(
+        "Confluence Code",
+        "4. Bullish Fair Value Gap (FVG)",
+        "Wajibkan terdapat celah ketidakseimbangan harga bullish (candle[i-1].high < candle[i+1].low) yang belum tertembus penuh di zona diskon.",
         "bool",
     ),
-    "DIRECTION_INTERVAL": _field(
-        "Arah M15",
-        "Interval arah",
-        "Timeframe untuk layer arah. Default 15m (M15). Bot live mengambil candle ini langsung dari bursa, backtest memakai aturan yang sama.",
-        "str",
-        editor="select",
-        options=["15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d"],
-    ),
-    "DIRECTION_EMA_FAST": _field(
-        "Arah M15",
-        "Periode EMA cepat arah",
-        "EMA cepat pada candle arah M15. Default 20, sejajar dengan EMA cepat layer timing. Wajib lebih kecil dari EMA lambat.",
-        "int",
-        minimum=2,
-        maximum=500,
-        unit="candle",
-    ),
-    "DIRECTION_EMA_SLOW": _field(
-        "Arah M15",
-        "Periode EMA lambat arah",
-        "EMA lambat pada candle arah M15. Default 50, sejajar dengan EMA lambat layer timing; dipakai juga sebagai penentu panjang riwayat minimum. Maksimal 999 candle karena endpoint klines Binance membatasi 1000 candle per panggilan.",
-        "int",
-        minimum=3,
-        maximum=999,
-        unit="candle",
-    ),
-    "DIRECTION_ADX_PERIOD": _field(
-        "Arah M15",
-        "Periode ADX arah",
-        "Periode ADX Wilder pada candle arah M15. Butuh sekitar dua kali periode ini candle agar nilainya terdefinisi.",
-        "int",
-        minimum=2,
-        maximum=200,
-        unit="candle",
-    ),
-    "DIRECTION_ADX_MIN": _field(
-        "Arah M15",
-        "Ambang ADX arah",
-        "ADX minimum agar arah M15 dianggap kuat. Isi 0 untuk mematikan cek kekuatan arah dan hanya memakai susunan EMA.",
-        "float",
-        minimum=0,
-        maximum=100,
-    ),
-    "DIRECTION_LOOKBACK_BARS": _field(
-        "Arah M15",
-        "Jendela candle arah",
-        "Jumlah candle tertutup timeframe arah M15 yang dipakai menghitung EMA, ADX, dan zona demand M15. Nilai ini dipakai sama persis oleh bot live dan backtest.",
-        "int",
-        minimum=20,
-        maximum=999,
-        unit="candle",
-    ),
-    "DIRECTION_ZONE_FILTER_ENABLED": _field(
-        "Arah M15",
-        "Filter zona demand M15",
-        "Dijalankan tepat setelah arah pada seri candle M15 yang sama tanpa unduhan tambahan. Entry hanya boleh kalau harga masih berada di dalam atau dekat zona demand M15: close di atas dasar zona, candle sinyal bullish, close_pos di atas ambang, dan jarak dari atap zona tidak melewati batas (fail closed).",
+    "OB_FILTER_ENABLED": _field(
+        "Confluence Code",
+        "5. Bullish Order Block (OB)",
+        "Wajibkan terdapat Order Block institusional di pangkal dorongan impuls yang beririsan dengan zona diskon.",
         "bool",
     ),
-    "DIRECTION_ZONE_LOOKBACK_BARS": _field(
-        "Arah M15",
-        "Lookback zona demand M15",
-        "Jumlah candle M15 tertutup yang memetakan dasar zona demand. Default 28 candle (sekitar 7 jam struktur harga M15).",
-        "int",
-        minimum=3,
-        maximum=997,
-        unit="candle",
+    "CONFLUENCE_REQUIRE_BULLISH_REACTION": _field(
+        "Confluence Code",
+        "Wajib reaksi candle bullish",
+        "Wajibkan candle pemicu menutup bullish (close > open) di atas posisi penutupan minimum setelah menyentuh zona POI.",
+        "bool",
     ),
-    "DIRECTION_ZONE_BUFFER_PCT": _field(
-        "Arah M15",
-        "Tebal zona demand M15",
-        "Tebal minimum zona demand M15 di atas level dasarnya, dalam persen. Nilai ini juga menentukan candle mana yang dihitung sebagai dasar zona akumulasi.",
-        "float",
-        minimum=0.0,
-        maximum=20.0,
-        unit="%",
-    ),
-    "DIRECTION_ZONE_MAX_DISTANCE_PCT": _field(
-        "Arah M15",
-        "Jarak maksimum dari zona M15",
-        "Jarak maksimum close candle M15 di atas ATAP zona demand, dalam persen. Harus lebih besar atau sama dengan tebal zona agar tidak membeli di pucuk M15.",
-        "float",
-        minimum=0.0,
-        maximum=50.0,
-        unit="%",
-    ),
-    "DIRECTION_ZONE_MIN_CLOSE_POSITION": _field(
-        "Arah M15",
-        "Posisi close minimum candle M15",
-        "Posisi penutupan minimum di dalam rentang high-low candle sinyal M15 (0.0 di low, 1.0 di high) sebagai bukti dorongan pembeli di zona.",
+    "CONFLUENCE_MIN_CLOSE_POSITION": _field(
+        "Confluence Code",
+        "Posisi close reaksi minimum",
+        "Posisi penutupan minimum di dalam rentang high-low candle pemicu (0.55 = menutup di 45% bagian atas).",
         "float",
         minimum=0.0,
         maximum=1.0,
-    ),
-    "DIRECTION_ZONE_REQUIRE_INSIDE_ZONE": _field(
-        "Arah M15",
-        "Wajib di dalam zona demand M15",
-        "True berarti close candle M15 harus benar-benar berada di antara dasar dan atap zona demand; DIRECTION_ZONE_MAX_DISTANCE_PCT tidak dipakai lagi. False membuka toleransi di atas atap zona sebesar nilai kunci jarak itu.",
-        "bool",
-    ),
-    "TIMING_FILTER_ENABLED": _field(
-        "Timing M5",
-        "Filter timing M5",
-        "Layer kedua: gerbang tren mikro pada candle konfirmasi M5. Entry hanya boleh kalau candle M5 terakhir sudah tutup di atas EMA cepat, EMA cepat di atas EMA lambat, dan ADX minimal. Gerbang ini wajib lolos bersama breakout dan retest M5.",
-        "bool",
-    ),
-    "TIMING_EMA_FAST": _field(
-        "Timing M5",
-        "Periode EMA cepat timing",
-        "EMA cepat pada candle timing. Wajib lebih kecil dari EMA lambat.",
-        "int",
-        minimum=2,
-        maximum=500,
-        unit="candle",
-    ),
-    "TIMING_EMA_SLOW": _field(
-        "Timing M5",
-        "Periode EMA lambat timing",
-        "EMA lambat pada candle timing; dipakai juga sebagai penentu panjang riwayat minimum. Maksimal 999 candle karena endpoint klines Binance membatasi 1000 candle per panggilan.",
-        "int",
-        minimum=3,
-        maximum=999,
-        unit="candle",
-    ),
-    "TIMING_ADX_PERIOD": _field(
-        "Timing M5",
-        "Periode ADX timing",
-        "Periode ADX Wilder pada candle timing. Butuh sekitar dua kali periode ini candle agar nilainya terdefinisi.",
-        "int",
-        minimum=2,
-        maximum=200,
-        unit="candle",
-    ),
-    "TIMING_ADX_MIN": _field(
-        "Timing M5",
-        "Ambang ADX timing",
-        "ADX minimum agar tren mikro dianggap kuat. Isi 0 untuk mematikan cek kekuatan dan hanya memakai susunan EMA.",
-        "float",
-        minimum=0,
-        maximum=100,
-    ),
-    "TIMING_LOOKBACK_BARS": _field(
-        "Timing M5",
-        "Jendela candle timing",
-        "Jumlah candle tertutup timeframe konfirmasi yang dipakai menghitung EMA dan ADX di layer timing. Nilai ini dipakai sama persis oleh bot live dan backtest.",
-        "int",
-        minimum=20,
-        maximum=999,
-        unit="candle",
-    ),
-    "BREAKOUT_RETEST_FILTER_ENABLED": _field(
-        "Breakout Retest M5",
-        "Filter breakout dan retest",
-        "Entry memerlukan breakout tertutup di atas swing high terkonfirmasi, kemudian retest sah pada candle M5 terakhir.",
-        "bool",
-    ),
-    "BREAKOUT_LOOKBACK_BARS": _field(
-        "Breakout Retest M5",
-        "Lookback swing high",
-        "Jumlah candle sebelum breakout yang dipakai mencari swing high terakhir.",
-        "int",
-        minimum=5,
-        maximum=500,
-        unit="candle",
-    ),
-    "BREAKOUT_PIVOT_WING_BARS": _field(
-        "Breakout Retest M5",
-        "Sayap pivot swing high",
-        "Jumlah candle di kiri dan kanan yang harus lebih rendah agar sebuah high menjadi swing high terkonfirmasi.",
-        "int",
-        minimum=1,
-        maximum=20,
-        unit="candle",
-    ),
-    "BREAKOUT_ATR_PERIOD": _field(
-        "Breakout Retest M5",
-        "Periode ATR retest",
-        "Periode ATR yang menentukan lebar toleransi area retest.",
-        "int",
-        minimum=2,
-        maximum=200,
-        unit="candle",
-    ),
-    "BREAKOUT_RETEST_TOLERANCE_ATR": _field(
-        "Breakout Retest M5",
-        "Toleransi retest",
-        "Jarak di atas dan bawah level breakout yang masih dianggap area retest, dalam kelipatan ATR.",
-        "float",
-        minimum=0,
-        maximum=10,
-        unit="ATR",
-    ),
-    "BREAKOUT_RETEST_MAX_BARS": _field(
-        "Breakout Retest M5",
-        "Batas waktu retest",
-        "Jumlah maksimum candle setelah breakout untuk menunggu retest.",
-        "int",
-        minimum=1,
-        maximum=100,
-        unit="candle",
-    ),
-    "BREAKOUT_RETEST_MAX_TOUCHES": _field(
-        "Breakout Retest M5",
-        "Maksimum sentuhan retest",
-        "Jumlah maksimum candle yang menyentuh area breakout sebelum setup dianggap terlalu sering diuji.",
-        "int",
-        minimum=1,
-        maximum=20,
-        unit="sentuhan",
-    ),
-    "BREAKOUT_RETEST_REQUIRE_BULLISH": _field(
-        "Breakout Retest M5",
-        "Retest wajib bullish",
-        "Jika aktif, candle retest terakhir harus ditutup lebih tinggi daripada harga pembukaannya.",
-        "bool",
+        unit="rasio",
     ),
     "USE_RISK_PERCENT": _field(
         "Ukuran Posisi",
@@ -1441,6 +1036,7 @@ def _read_doc_unlocked() -> tuple[dict, list[str]]:
 
 REMOVED_PARAMETERS = frozenset(
     {
+        "PUMP_MIN_24H_CHANGE_PCT",
         "PUMP_MAX_24H_CHANGE_PCT",
         "MIN_CLOSE_POSITION_IN_RANGE",
         "SWING_LOOKBACK_BARS",
@@ -1520,6 +1116,72 @@ REMOVED_PARAMETERS = frozenset(
         "ZONE_ADX_PERIOD",
         "ZONE_ADX_MIN",
         "ZONE_TREND_LOOKBACK_BARS",
+        "ROLLING_VOLUME_CONFIRMATION_BARS",
+        "ROLLING_VOLUME_FILTER_ENABLED",
+        "ROLLING_VOLUME_LOOKBACK_BARS",
+        "ROLLING_VOLUME_SURGE_MULT",
+        "DEMAND_ZONE_FILTER_ENABLED",
+        "DEMAND_LOOKBACK_BARS",
+        "DEMAND_ZONE_BUFFER_PCT",
+        "DEMAND_REQUIRE_INSIDE_ZONE",
+        "DEMAND_MAX_DISTANCE_PCT",
+        "DEMAND_MIN_CLOSE_POSITION",
+        "HTF_FILTER_ENABLED",
+        "HTF_INTERVAL",
+        "HTF_EMA_FAST",
+        "HTF_EMA_SLOW",
+        "HTF_ADX_PERIOD",
+        "HTF_ADX_MIN",
+        "HTF_LOOKBACK_BARS",
+        "HTF_RESISTANCE_FILTER_ENABLED",
+        "HTF_RESISTANCE_LOOKBACK_BARS",
+        "HTF_RESISTANCE_PIVOT_WING_BARS",
+        "HTF_RESISTANCE_MIN_ROOM_PCT",
+        "DIRECTION_FILTER_ENABLED",
+        "DIRECTION_INTERVAL",
+        "DIRECTION_EMA_FAST",
+        "DIRECTION_EMA_SLOW",
+        "DIRECTION_ADX_PERIOD",
+        "DIRECTION_ADX_MIN",
+        "DIRECTION_LOOKBACK_BARS",
+        "DIRECTION_ZONE_FILTER_ENABLED",
+        "DIRECTION_ZONE_LOOKBACK_BARS",
+        "DIRECTION_ZONE_BUFFER_PCT",
+        "DIRECTION_ZONE_MAX_DISTANCE_PCT",
+        "DIRECTION_ZONE_MIN_CLOSE_POSITION",
+        "DIRECTION_ZONE_REQUIRE_INSIDE_ZONE",
+        "TIMING_FILTER_ENABLED",
+        "TIMING_EMA_FAST",
+        "TIMING_EMA_SLOW",
+        "TIMING_ADX_PERIOD",
+        "TIMING_ADX_MIN",
+        "TIMING_LOOKBACK_BARS",
+        "BREAKOUT_RETEST_FILTER_ENABLED",
+        "BREAKOUT_LOOKBACK_BARS",
+        "BREAKOUT_PIVOT_WING_BARS",
+        "BREAKOUT_ATR_PERIOD",
+        "BREAKOUT_RETEST_TOLERANCE_ATR",
+        "BREAKOUT_RETEST_MAX_BARS",
+        "BREAKOUT_RETEST_MAX_TOUCHES",
+        "BREAKOUT_RETEST_REQUIRE_BULLISH",
+        "USE_ATR_EXIT",
+        "ATR_PERIOD",
+        "ATR_MULT_SL",
+        "ATR_MULT_TP",
+        "ATR_MULT_TRAIL",
+        "ATR_MULT_BE_TRIGGER",
+        "ATR_MULT_BE_LOCK",
+        "ATR_MULT_TRAIL_START",
+        "USE_TP",
+        "TP_PCT",
+        "USE_STOP_LOSS",
+        "SL_PCT",
+        "USE_BREAKEVEN",
+        "BE_TRIGGER_PCT",
+        "BE_LOCK_PCT",
+        "USE_TRAILING",
+        "TRAILING_START_PCT",
+        "TRAILING_STEP_PCT",
     }
 )
 
@@ -1709,28 +1371,6 @@ def _flag_untuk_relasi(cfg: dict, key: str, default: bool) -> bool:
     return bool(cfg[key])
 
 
-def _periksa_jendela(
-    keluar: dict[str, str],
-    cfg: dict,
-    kunci_jendela: str,
-    kunci_ema_fast: str,
-    kunci_ema_slow: str,
-    kunci_adx: str,
-) -> None:
-    jendela = _angka_untuk_relasi(cfg, kunci_jendela)
-    if jendela is None:
-        return
-    fast = _angka_untuk_relasi(cfg, kunci_ema_fast) or 0
-    slow = _angka_untuk_relasi(cfg, kunci_ema_slow) or 0
-    adx = _angka_untuk_relasi(cfg, kunci_adx) or 0
-    butuh = max(fast, slow, 2 * adx + 1)
-    if jendela < butuh:
-        keluar[kunci_jendela] = (
-            f"minimal {int(butuh)} candle supaya EMA dan ADX terdefinisi "
-            f"(EMA {int(fast)}/{int(slow)}, ADX {int(adx)})"
-        )
-
-
 def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str]:
 
     def ambil(*keys: str) -> "list[float] | None":
@@ -1742,51 +1382,6 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
         return None if nilai is None else (nilai[0], nilai[1])
 
     keluar: dict[str, str] = {}
-    atr_aktif = _flag_untuk_relasi(cfg, "USE_ATR_EXIT", False)
-    cek_exit_atr = mode_aware is False or atr_aktif
-    cek_pct = mode_aware is False or not atr_aktif
-
-    if cek_exit_atr:
-        for kunci, pesan in (
-            (
-                ("ATR_MULT_TRAIL", "ATR_MULT_SL"),
-                "tidak boleh melebihi ATR_MULT_SL agar invariant trailing <= SL terjaga",
-            ),
-            (
-                ("ATR_MULT_BE_TRIGGER", "ATR_MULT_TRAIL_START"),
-                "tidak boleh melebihi trigger trailing",
-            ),
-            (
-                ("ATR_MULT_BE_LOCK", "ATR_MULT_BE_TRIGGER"),
-                "tidak boleh melebihi trigger breakeven",
-            ),
-        ):
-            nilai = pasangan(*kunci)
-            if nilai is not None and nilai[0] > nilai[1]:
-                keluar[kunci[0]] = pesan
-        nilai = pasangan("ATR_MULT_TP", "ATR_MULT_SL")
-        if nilai is not None and nilai[0] <= nilai[1]:
-            keluar["ATR_MULT_TP"] = (
-                "harus lebih besar dari ATR_MULT_SL agar rasio risk-reward tidak terbalik"
-            )
-
-    if cek_pct:
-        tp_on = _flag_untuk_relasi(cfg, "USE_TP", True)
-        sl_on = _flag_untuk_relasi(cfg, "USE_STOP_LOSS", True)
-        if tp_on and sl_on:
-            nilai = pasangan("TP_PCT", "SL_PCT")
-            if nilai is not None and nilai[0] <= nilai[1]:
-                keluar["TP_PCT"] = (
-                    "harus lebih besar dari SL_PCT agar rasio risk-reward tidak terbalik"
-                )
-        if sl_on:
-            nilai = _angka_untuk_relasi(cfg, "SL_PCT")
-            if nilai is not None and nilai <= 0:
-                keluar["SL_PCT"] = "harus lebih besar dari nol saat Stop Loss aktif"
-        if tp_on:
-            nilai = _angka_untuk_relasi(cfg, "TP_PCT")
-            if nilai is not None and nilai <= 0:
-                keluar["TP_PCT"] = "harus lebih besar dari nol saat Take Profit aktif"
 
     if "IDR_RATE_MODE" in cfg and "IDR_RATE_MANUAL" in cfg:
         mode_kurs = str(cfg.get("IDR_RATE_MODE", "AUTO") or "AUTO").strip().upper()
@@ -1796,164 +1391,40 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
                 "wajib diisi lebih besar dari nol saat IDR_RATE_MODE = MANUAL"
             )
 
-    saring_arah = mode_aware is False or _flag_untuk_relasi(
-        cfg, "DIRECTION_FILTER_ENABLED", False
-    )
-    if saring_arah:
-        nilai = pasangan("DIRECTION_EMA_SLOW", "DIRECTION_EMA_FAST")
-        if nilai is not None and nilai[0] <= nilai[1]:
-            keluar["DIRECTION_EMA_SLOW"] = (
-                "harus lebih besar dari DIRECTION_EMA_FAST agar susunan EMA tidak terbalik"
-            )
-        _periksa_jendela(
-            keluar,
-            cfg,
-            "DIRECTION_LOOKBACK_BARS",
-            "DIRECTION_EMA_FAST",
-            "DIRECTION_EMA_SLOW",
-            "DIRECTION_ADX_PERIOD",
-        )
+    confluence_aktif = _flag_untuk_relasi(cfg, "CONFLUENCE_FILTER_ENABLED", True)
+    cek_confluence = mode_aware is False or confluence_aktif
 
-    # Relasi HTF baru divalidasi saat gerbang diaktifkan agar flag default
-    # nonaktif tidak mengubah validasi konfigurasi atau perilaku lama.
-    if _flag_untuk_relasi(cfg, "HTF_FILTER_ENABLED", False):
-        nilai = pasangan("HTF_EMA_SLOW", "HTF_EMA_FAST")
-        if nilai is not None and nilai[0] <= nilai[1]:
-            keluar["HTF_EMA_SLOW"] = (
-                "harus lebih besar dari HTF_EMA_FAST agar susunan EMA tidak terbalik"
-            )
-        _periksa_jendela(
-            keluar,
-            cfg,
-            "HTF_LOOKBACK_BARS",
-            "HTF_EMA_FAST",
-            "HTF_EMA_SLOW",
-            "HTF_ADX_PERIOD",
-        )
-
-    if _flag_untuk_relasi(cfg, "HTF_RESISTANCE_FILTER_ENABLED", False):
-        if not _flag_untuk_relasi(cfg, "HTF_FILTER_ENABLED", False):
-            keluar["HTF_RESISTANCE_FILTER_ENABLED"] = (
-                "hanya dapat diaktifkan bersama HTF_FILTER_ENABLED agar flag HTF "
-                "mati tetap tidak menambah request atau mengubah perilaku"
-            )
-        lookback_resistance = _angka_untuk_relasi(
-            cfg, "HTF_RESISTANCE_LOOKBACK_BARS"
-        )
-        pivot_wing = _angka_untuk_relasi(cfg, "HTF_RESISTANCE_PIVOT_WING_BARS")
-        if (
-            lookback_resistance is not None
-            and pivot_wing is not None
-            and lookback_resistance < 2 * pivot_wing + 1
-        ):
-            keluar["HTF_RESISTANCE_LOOKBACK_BARS"] = (
-                f"minimal {int(2 * pivot_wing + 1)} candle untuk pivot "
-                f"dengan sayap {int(pivot_wing)}"
-            )
-        lookback_htf = _angka_untuk_relasi(cfg, "HTF_LOOKBACK_BARS")
-        if (
-            lookback_resistance is not None
-            and lookback_htf is not None
-            and lookback_resistance > lookback_htf
-        ):
-            keluar["HTF_RESISTANCE_LOOKBACK_BARS"] = (
-                "tidak boleh melebihi HTF_LOOKBACK_BARS agar memakai jendela H1 "
-                "yang sama tanpa request tambahan"
+    if cek_confluence:
+        fib_pair = pasangan("FIB_RETRACEMENT_MIN", "FIB_RETRACEMENT_MAX")
+        if fib_pair is not None and fib_pair[0] >= fib_pair[1]:
+            keluar["FIB_RETRACEMENT_MIN"] = (
+                "harus lebih kecil dari FIB_RETRACEMENT_MAX agar rentang zona diskon valid"
             )
 
-    saring_timing = mode_aware is False or _flag_untuk_relasi(
-        cfg, "TIMING_FILTER_ENABLED", False
-    )
-    if saring_timing:
-        nilai = pasangan("TIMING_EMA_SLOW", "TIMING_EMA_FAST")
-        if nilai is not None and nilai[0] <= nilai[1]:
-            keluar["TIMING_EMA_SLOW"] = (
-                "harus lebih besar dari TIMING_EMA_FAST agar susunan EMA tidak terbalik"
-            )
-        _periksa_jendela(
-            keluar,
-            cfg,
-            "TIMING_LOOKBACK_BARS",
-            "TIMING_EMA_FAST",
-            "TIMING_EMA_SLOW",
-            "TIMING_ADX_PERIOD",
-        )
-
-    saring_demand = mode_aware is False or _flag_untuk_relasi(
-        cfg, "DEMAND_ZONE_FILTER_ENABLED", False
-    )
-    if saring_demand and not _flag_untuk_relasi(
-        cfg, "DEMAND_REQUIRE_INSIDE_ZONE", False
-    ):
-        nilai = pasangan("DEMAND_MAX_DISTANCE_PCT", "DEMAND_ZONE_BUFFER_PCT")
-        if nilai is not None and nilai[0] < nilai[1]:
-            keluar["DEMAND_MAX_DISTANCE_PCT"] = (
-                "harus lebih besar atau sama dengan DEMAND_ZONE_BUFFER_PCT"
+        liq_pair = pasangan("LIQUIDITY_SWEEP_LOOKBACK_BARS", "CONFIRM_LOOKBACK_BARS")
+        if liq_pair is not None and liq_pair[0] >= liq_pair[1]:
+            keluar["LIQUIDITY_SWEEP_LOOKBACK_BARS"] = (
+                "harus lebih kecil dari CONFIRM_LOOKBACK_BARS"
             )
 
-    saring_zona_arah = mode_aware is False or _flag_untuk_relasi(
-        cfg, "DIRECTION_ZONE_FILTER_ENABLED", False
-    )
-    if saring_zona_arah:
-        if not _flag_untuk_relasi(cfg, "DIRECTION_ZONE_REQUIRE_INSIDE_ZONE", False):
-            nilai = pasangan(
-                "DIRECTION_ZONE_MAX_DISTANCE_PCT", "DIRECTION_ZONE_BUFFER_PCT"
+        try:
+            from strategy.indicators import INTERVAL_MINUTES as _INTERVAL_MINUTES
+
+            menit_konfirmasi = _INTERVAL_MINUTES.get(
+                str(cfg.get("CONFIRM_INTERVAL", "")).lower()
             )
-            if nilai is not None and nilai[0] < nilai[1]:
-                keluar["DIRECTION_ZONE_MAX_DISTANCE_PCT"] = (
-                    "harus lebih besar atau sama dengan DIRECTION_ZONE_BUFFER_PCT"
+            menit_struktur = _INTERVAL_MINUTES.get(
+                str(cfg.get("CONFLUENCE_STRUCTURE_INTERVAL", "")).lower()
+            )
+        except ImportError:
+            menit_konfirmasi = menit_struktur = None
+
+        if menit_struktur and menit_konfirmasi:
+            if menit_struktur % menit_konfirmasi != 0 or menit_struktur < menit_konfirmasi:
+                keluar["CONFLUENCE_STRUCTURE_INTERVAL"] = (
+                    "harus kelipatan bulat dari CONFIRM_INTERVAL dan tidak lebih pendek, "
+                    "agar backtest dapat merangkai candle struktur Confluence tanpa look-ahead"
                 )
-        jendela = _angka_untuk_relasi(cfg, "DIRECTION_LOOKBACK_BARS")
-        butuh = _angka_untuk_relasi(cfg, "DIRECTION_ZONE_LOOKBACK_BARS")
-        if jendela is not None and butuh is not None and jendela < butuh + 1:
-            keluar["DIRECTION_LOOKBACK_BARS"] = (
-                f"minimal {int(butuh) + 1} candle supaya zona demand arah punya "
-                "riwayat yang cukup pada jendela yang sama"
-            )
-
-    saring_breakout = mode_aware is False or _flag_untuk_relasi(
-        cfg, "BREAKOUT_RETEST_FILTER_ENABLED", False
-    )
-    if saring_breakout:
-        lookback = _angka_untuk_relasi(cfg, "BREAKOUT_LOOKBACK_BARS")
-        wing = _angka_untuk_relasi(cfg, "BREAKOUT_PIVOT_WING_BARS")
-        if lookback is not None and wing is not None and lookback < 2 * wing + 1:
-            keluar["BREAKOUT_LOOKBACK_BARS"] = (
-                f"minimal {int(2 * wing + 1)} candle untuk pivot dengan sayap {int(wing)}"
-            )
-
-    try:
-        from strategy.indicators import INTERVAL_MINUTES as _INTERVAL_MINUTES
-
-        menit_konfirmasi = _INTERVAL_MINUTES.get(
-            str(cfg.get("CONFIRM_INTERVAL", "")).lower()
-        )
-        menit_arah = _INTERVAL_MINUTES.get(
-            str(cfg.get("DIRECTION_INTERVAL", "")).lower()
-        )
-        menit_htf = _INTERVAL_MINUTES.get(
-            str(cfg.get("HTF_INTERVAL", "")).lower()
-        )
-    except ImportError:
-        menit_konfirmasi = menit_arah = menit_htf = None
-
-    if menit_arah and menit_konfirmasi:
-        if menit_arah % menit_konfirmasi != 0 or menit_arah < menit_konfirmasi:
-            keluar["DIRECTION_INTERVAL"] = (
-                "harus kelipatan bulat dari CONFIRM_INTERVAL dan tidak lebih pendek, "
-                "supaya backtest bisa merangkai candle arah dari candle konfirmasi"
-            )
-
-    if (
-        _flag_untuk_relasi(cfg, "HTF_FILTER_ENABLED", False)
-        and menit_htf
-        and menit_konfirmasi
-        and (menit_htf % menit_konfirmasi != 0 or menit_htf < menit_konfirmasi)
-    ):
-        keluar["HTF_INTERVAL"] = (
-            "harus kelipatan bulat dari CONFIRM_INTERVAL dan tidak lebih pendek, "
-            "agar backtest dapat merangkai candle HTF tanpa look-ahead"
-        )
 
     batas_tahan = _angka_untuk_relasi(cfg, "MAX_HOLD_HOURS")
     if batas_tahan is not None and batas_tahan > 0:
@@ -2011,111 +1482,24 @@ def validate_candidate(
         for kunci_relasi, pesan_relasi in relation_violations(cleaned).items():
             relation(kunci_relasi, False, pesan_relasi)
 
-        if cleaned["DIRECTION_FILTER_ENABLED"]:
-            _minimal = max(
-                int(cleaned["DIRECTION_EMA_SLOW"]),
-                2 * int(cleaned["DIRECTION_ADX_PERIOD"]) + 1,
-            )
-            if int(cleaned["DIRECTION_LOOKBACK_BARS"]) < _minimal:
-                warnings.append(
-                    f"DIRECTION_LOOKBACK_BARS {cleaned['DIRECTION_LOOKBACK_BARS']} lebih "
-                    f"kecil dari {_minimal} candle yang dibutuhkan EMA dan ADX arah. "
-                    "Gerbang arah memakai nilai minimum itu dan menolak entry selama "
-                    "riwayat belum cukup."
+        if cleaned.get("CONFLUENCE_FILTER_ENABLED"):
+            active_components = [
+                k
+                for k in (
+                    "VP_FILTER_ENABLED",
+                    "FIB_FILTER_ENABLED",
+                    "LIQUIDITY_FILTER_ENABLED",
+                    "FVG_FILTER_ENABLED",
+                    "OB_FILTER_ENABLED",
                 )
-            if cleaned["DIRECTION_ADX_MIN"] == 0:
+                if cleaned.get(k)
+            ]
+            if not active_components:
                 warnings.append(
-                    "DIRECTION_ADX_MIN nol: cek kekuatan arah mati, hanya susunan EMA "
-                    "yang menyaring entry sehingga pasar sideways lebih mudah diloloskan."
+                    "CONFLUENCE_FILTER_ENABLED aktif tetapi kelima komponen (Volume Profile, "
+                    "Fibonacci, Liquidity, FVG, Order Block) dinonaktifkan; hanya struktur "
+                    "impuls BoS yang diperiksa."
                 )
-        if cleaned["HTF_FILTER_ENABLED"]:
-            minimal_htf = max(
-                int(cleaned["HTF_EMA_SLOW"]),
-                2 * int(cleaned["HTF_ADX_PERIOD"]) + 1,
-            )
-            if int(cleaned["HTF_LOOKBACK_BARS"]) < minimal_htf:
-                warnings.append(
-                    f"HTF_LOOKBACK_BARS {cleaned['HTF_LOOKBACK_BARS']} lebih kecil dari "
-                    f"{minimal_htf} candle yang dibutuhkan EMA dan ADX H1. Gerbang H1 "
-                    "memakai minimum itu dan menolak entry selama riwayat belum cukup."
-                )
-            warnings.append(
-                f"HTF_ADX_MIN={cleaned['HTF_ADX_MIN']:g} adalah titik awal konservatif, "
-                "bukan angka final; wajib dikalibrasi dengan backtest A/B sebelum "
-                "gerbang H1 dipakai."
-            )
-            if cleaned["HTF_ADX_MIN"] == 0:
-                warnings.append(
-                    "HTF_ADX_MIN nol: cek kekuatan tren H1 praktis tidak menyaring, "
-                    "sehingga lebih banyak kondisi sideways dapat lolos."
-                )
-        if cleaned["HTF_RESISTANCE_FILTER_ENABLED"]:
-            warnings.append(
-                "Filter resistance H1 belum dihubungkan ke scanner/backtest pada "
-                "langkah ini; mengaktifkan kunci belum mengubah perilaku. Setelah "
-                "integrasi, nilai lookback, pivot, dan ruang minimum wajib diuji A/B "
-                "serta PAPER sebelum dipertimbangkan untuk LIVE."
-            )
-        for kunci_zona, kunci_ketat, label in (
-            ("DEMAND_ZONE_FILTER_ENABLED", "DEMAND_REQUIRE_INSIDE_ZONE", "M5"),
-            (
-                "DIRECTION_ZONE_FILTER_ENABLED",
-                "DIRECTION_ZONE_REQUIRE_INSIDE_ZONE",
-                "arah M15",
-            ),
-        ):
-            if cleaned.get(kunci_zona) and cleaned.get(kunci_ketat):
-                warnings.append(
-                    f"{kunci_ketat} aktif: close wajib berada di antara dasar dan atap "
-                    f"zona demand {label}, jadi kunci jarak maksimum gerbang itu tidak "
-                    "dipakai."
-                )
-        if cleaned.get("DIRECTION_ZONE_FILTER_ENABLED") and int(
-            cleaned["DIRECTION_LOOKBACK_BARS"]
-        ) < int(cleaned["DIRECTION_ZONE_LOOKBACK_BARS"]) + 1:
-            warnings.append(
-                f"DIRECTION_LOOKBACK_BARS {cleaned['DIRECTION_LOOKBACK_BARS']} lebih "
-                f"kecil dari {int(cleaned['DIRECTION_ZONE_LOOKBACK_BARS']) + 1} candle "
-                "yang dibutuhkan zona demand arah. Gerbang zona memakai jendela "
-                "terbesar agar tetap terisi, dan live serta backtest ikut memakainya."
-            )
-        if cleaned.get("BREAKOUT_RETEST_FILTER_ENABLED"):
-            from strategy.indicators import breakout_retest_required_bars
-
-            required_breakout = breakout_retest_required_bars(cleaned)
-            if int(cleaned["CONFIRM_LOOKBACK_BARS"]) < required_breakout:
-                warnings.append(
-                    f"CONFIRM_LOOKBACK_BARS {cleaned['CONFIRM_LOOKBACK_BARS']} lebih kecil "
-                    f"dari {required_breakout} candle yang dibutuhkan breakout-retest. "
-                    "Bot otomatis mengambil jendela minimum tersebut."
-                )
-        if cleaned.get("TIMING_FILTER_ENABLED"):
-            minimal_timing = max(
-                int(cleaned["TIMING_EMA_SLOW"]),
-                2 * int(cleaned["TIMING_ADX_PERIOD"]) + 1,
-            )
-            if int(cleaned["TIMING_LOOKBACK_BARS"]) < minimal_timing:
-                warnings.append(
-                    f"TIMING_LOOKBACK_BARS {cleaned['TIMING_LOOKBACK_BARS']} lebih kecil "
-                    f"dari {minimal_timing} candle yang dibutuhkan EMA dan ADX di layer "
-                    "timing. Gerbang memakai minimum itu dan menolak entry selama riwayat "
-                    "belum cukup."
-                )
-            if cleaned["TIMING_ADX_MIN"] == 0:
-                warnings.append(
-                    "TIMING_ADX_MIN nol: cek kekuatan tren mikro mati, hanya susunan "
-                    "EMA yang menyaring entry."
-                )
-        if cleaned["PUMP_MIN_24H_CHANGE_PCT"] == 0:
-            warnings.append(
-                "PUMP_MIN_24H_CHANGE_PCT nol: perubahan 24 jam yang datar atau "
-                "positif lolos batas minimum; perubahan negatif tetap ditolak."
-            )
-        if cleaned["PUMP_MIN_24H_CHANGE_PCT"] >= 50:
-            warnings.append(
-                "PUMP_MIN_24H_CHANGE_PCT sangat tinggi, kandidat bisa nol "
-                "untuk waktu yang lama."
-            )
         relation(
             "RATE_LIMIT_SAFETY_MARGIN",
             int(cleaned.get("RATE_LIMIT_SAFETY_MARGIN", 0))
@@ -2135,35 +1519,13 @@ def validate_candidate(
                 float(cleaned["MAX_POSITION_USDT"]) > 0,
                 "mode LIVE wajib memiliki plafon posisi lebih besar dari nol",
             )
-            relation(
-                "USE_STOP_LOSS",
-                bool(cleaned["USE_STOP_LOSS"]),
-                "mode LIVE wajib memakai Stop Loss",
-            )
             native_stop_available = bool(cleaned["USE_NATIVE_STOP_LOSS"])
-            native_oco_available = bool(cleaned["USE_NATIVE_OCO"] and cleaned["USE_TP"])
+            native_oco_available = bool(cleaned["USE_NATIVE_OCO"])
             relation(
                 "USE_NATIVE_STOP_LOSS",
                 native_stop_available or native_oco_available,
                 "mode LIVE wajib memiliki minimal satu proteksi exchange-side: native stop atau OCO",
             )
-            if cleaned["USE_NATIVE_OCO"]:
-                relation(
-                    "USE_TP",
-                    bool(cleaned["USE_TP"]),
-                    "USE_NATIVE_OCO memerlukan Take Profit aktif",
-                )
-                relation(
-                    "USE_STOP_LOSS",
-                    bool(cleaned["USE_STOP_LOSS"]),
-                    "USE_NATIVE_OCO memerlukan Stop Loss aktif",
-                )
-            if cleaned["USE_NATIVE_STOP_LOSS"]:
-                relation(
-                    "USE_STOP_LOSS",
-                    bool(cleaned["USE_STOP_LOSS"]),
-                    "USE_NATIVE_STOP_LOSS memerlukan Stop Loss aktif",
-                )
 
         if not cleaned["USE_EQUITY_STOP"]:
             pesan = (
@@ -2177,12 +1539,5 @@ def validate_candidate(
                 )
             pesan += " Mode LIVE akan menolak Resume Bot dengan kombinasi ini."
             warnings.append(pesan)
-
-        if cleaned["USE_STOP_LOSS"] and cleaned["SL_PCT"] >= 20:
-            warnings.append(
-                f"SL_PCT {cleaned['SL_PCT']:g}% sangat lebar: satu posisi dapat rugi "
-                f"sekitar {cleaned['SL_PCT']:g}% dari nilai posisi sebelum stop bekerja. "
-                "Pastikan ukuran posisi memang sekecil itu relatif terhadap modal."
-            )
 
     return cleaned, errors, warnings

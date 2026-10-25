@@ -553,159 +553,12 @@
       }
 
       
-      .eta-box {
-        position: relative;
-        overflow: hidden;
-        padding: 12px 13px 13px;
-        margin-bottom: 6px;
-        border: 1px solid var(--border);
-        border-radius: var(--radius);
-        background:
-          radial-gradient(
-            120% 140% at 0% 0%,
-            rgba(74, 222, 128, 0.08),
-            transparent 60%
-          ),
-          var(--panel2);
-        transition:
-          border-color 0.4s ease,
-          box-shadow 0.4s ease;
-      }
-      .eta-box.near {
-        border-color: rgba(74, 222, 128, 0.45);
-        animation: etaGlow 2.1s ease-in-out infinite;
-      }
-      @keyframes etaGlow {
-        0%,
-        100% {
-          box-shadow:
-            0 0 0 1px rgba(74, 222, 128, 0.1),
-            0 0 14px rgba(74, 222, 128, 0.1);
-        }
-        50% {
-          box-shadow:
-            0 0 0 1px rgba(74, 222, 128, 0.22),
-            0 0 26px rgba(74, 222, 128, 0.2);
-        }
-      }
-      .eta-head {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 10px;
-      }
       .eta-label {
         font-size: 10.5px;
         letter-spacing: 0.6px;
         text-transform: uppercase;
         color: var(--muted);
         font-weight: 700;
-      }
-      .eta-chip {
-        font-size: 10.5px;
-        font-weight: 700;
-        padding: 2px 8px;
-        border-radius: 999px;
-        border: 1px solid var(--border2);
-        color: var(--muted);
-        white-space: nowrap;
-        transition:
-          color 0.3s ease,
-          border-color 0.3s ease,
-          background 0.3s ease;
-      }
-      .eta-chip.run {
-        color: var(--accent);
-        border-color: rgba(74, 222, 128, 0.4);
-        background: rgba(74, 222, 128, 0.08);
-      }
-      .eta-chip.warn {
-        color: var(--amber);
-        border-color: rgba(245, 158, 11, 0.4);
-        background: rgba(245, 158, 11, 0.08);
-      }
-      .eta-chip.done {
-        color: #0b1a10;
-        border-color: transparent;
-        background: var(--accent);
-      }
-      .eta-time {
-        font-family: var(--mono);
-        font-variant-numeric: tabular-nums;
-        font-size: 29px;
-        font-weight: 800;
-        letter-spacing: -1px;
-        line-height: 1.15;
-        margin-top: 6px;
-        transition: color 0.35s ease;
-      }
-      .eta-time.dim {
-        color: var(--muted);
-        font-size: 19px;
-        letter-spacing: -0.3px;
-      }
-      .eta-sub {
-        font-size: 11.5px;
-        color: var(--muted);
-        margin-top: 3px;
-        line-height: 1.45;
-      }
-      .eta-track {
-        position: relative;
-        height: 9px;
-        margin-top: 12px;
-        border-radius: 6px;
-        background: var(--grid);
-        overflow: hidden;
-      }
-      .eta-fill {
-        position: absolute;
-        top: 0;
-        bottom: 0;
-        left: 0;
-        width: 0;
-        border-radius: 6px;
-        overflow: hidden;
-        background: linear-gradient(90deg, var(--accent2), var(--accent));
-        transition: width 0.9s cubic-bezier(0.22, 0.61, 0.36, 1);
-      }
-      .eta-fill::after {
-        content: "";
-        position: absolute;
-        inset: 0;
-        width: 70px;
-        background: linear-gradient(
-          90deg,
-          transparent,
-          rgba(255, 255, 255, 0.4),
-          transparent
-        );
-        animation: shimmer 1.6s linear infinite;
-      }
-      
-      .eta-track.loading::after {
-        content: "";
-        position: absolute;
-        top: 0;
-        bottom: 0;
-        left: 0;
-        width: 38%;
-        border-radius: 6px;
-        background: linear-gradient(
-          90deg,
-          transparent,
-          rgba(56, 189, 248, 0.5),
-          transparent
-        );
-        animation: etaSweep 1.5s ease-in-out infinite;
-      }
-      @keyframes etaSweep {
-        0% {
-          transform: translateX(-110%);
-        }
-        100% {
-          transform: translateX(285%);
-        }
       }
       .eta-marks {
         position: relative;
@@ -2358,7 +2211,7 @@
           <p class="mut" style="font-size: 12.5px; margin-bottom: 12px">
             Simulasi ini memindai <b>seluruh pasar</b> seperti bot asli:
             mengurutkan semua pair berdasarkan volume perdagangan 24 jam di setiap titik
-            waktu setelah lolos minimum kenaikan 24 jam sesuai konfigurasi,
+            waktu setelah lolos saringan likuiditas dan kondisi pasar sesuai konfigurasi,
             mengonfirmasi kandidat teratas satu per satu, mengambil
             <b>yang pertama lolos</b>, dan hanya memegang
             <b>satu posisi</b> pada satu waktu. Hasilnya menjawab "berapa hasil
@@ -2416,104 +2269,79 @@
                 id="btDays"
                 min="2"
                 value="30"
-                title="Hari pertama dipakai sebagai warmup statistik 24 jam, jadi minimal 2 hari. Layer arah dan zona demand M15 memakai candle asli bursa. Kebutuhan riwayat tren, breakout-retest, volume rolling, dan demand M5 dihitung otomatis oleh server."
+                title="Hari pertama dipakai sebagai warmup statistik 24 jam, jadi minimal 2 hari. Struktur POI Confluence memakai candle asli bursa bila multi-timeframe. Kebutuhan riwayat trigger dihitung otomatis oleh server."
                 oninput="btUpdateEstimate()"
               />
             </div>
             <div class="bt-field">
-              <label for="btHtfEnabled">Gerbang tren HTF</label>
+              <label for="btConfluenceEnabled">Filter The Confluence Code</label>
               <div style="display:flex;align-items:center;gap:8px;min-height:38px">
                 <input
                   type="checkbox"
-                  id="btHtfEnabled"
+                  id="btConfluenceEnabled"
+                  checked
                   style="width:16px;height:16px;max-width:16px;padding:0;accent-color:var(--accent)"
-                  onchange="btSyncResistanceAvailability(); btUpdateEstimate()"
+                  onchange="btSyncConfluenceAvailability(); btUpdateEstimate()"
                 />
-                <span class="mut" style="font-size:11.5px">Aktifkan H1 untuk simulasi ini saja</span>
+                <span class="mut" style="font-size:11.5px">Aktifkan 5 konfluensi (VP + Fib + Liquidity + FVG + OB)</span>
               </div>
             </div>
             <div class="bt-field">
-              <label for="btHtfResistanceEnabled">Filter ruang resistance H1</label>
+              <label for="btConfluenceReactionEnabled">Wajib Reaksi Bullish</label>
               <div style="display:flex;align-items:center;gap:8px;min-height:38px">
                 <input
                   type="checkbox"
-                  id="btHtfResistanceEnabled"
-                  disabled
+                  id="btConfluenceReactionEnabled"
+                  checked
                   style="width:16px;height:16px;max-width:16px;padding:0;accent-color:var(--accent)"
-                  onchange="btUpdateEstimate()"
+                  onchange="btRenderStrategySummary(); btUpdateEstimate()"
                 />
-                <span class="mut" id="btHtfResistanceHelp" style="font-size:11.5px">Simulasi saja; swing-high H1, ruang minimum 1,5%</span>
+                <span class="mut" id="btConfluenceReactionHelp" style="font-size:11.5px">Konfirmasi candle reaksi bullish setelah sapuan SSL</span>
               </div>
-            </div>
-            <div class="bt-field">
-              <label>Mode exit</label>
-              <select
-                id="btExitMode"
-                onchange="btUpdateExitMode()"
-                title="Pilih mode exit yang sama dengan bot live, atau bandingkan dengan mode lainnya."
-              >
-                <option value="atr" selected>ATR adaptif</option>
-                <option value="fixed">Persentase tetap</option>
-              </select>
-            </div>
-            <div class="bt-field" data-exit-mode="atr">
-              <label>ATR Period</label>
-              <input type="number" id="btAtrPeriod" min="1" step="1" />
-            </div>
-            <div class="bt-field" data-exit-mode="atr">
-              <label>ATR Multiplier SL</label>
-              <input type="number" id="btAtrSl" min="0.0001" step="0.1" />
-            </div>
-            <div class="bt-field" data-exit-mode="atr">
-              <label>ATR Multiplier TP</label>
-              <input type="number" id="btAtrTp" min="0.0001" step="0.1" />
-            </div>
-            <div class="bt-field" data-exit-mode="atr">
-              <label>ATR Multiplier BE Trigger</label>
-              <input type="number" id="btAtrBeTrig" min="0.0001" step="0.1" />
-            </div>
-            <div class="bt-field" data-exit-mode="atr">
-              <label>ATR Multiplier BE Lock</label>
-              <input type="number" id="btAtrBeLock" min="0" step="0.1" />
-            </div>
-            <div class="bt-field" data-exit-mode="atr">
-              <label>ATR Multiplier Trail Start</label>
-              <input type="number" id="btAtrTrStart" min="0.0001" step="0.1" />
-            </div>
-            <div class="bt-field" data-exit-mode="atr">
-              <label>ATR Multiplier Trail Step</label>
-              <input type="number" id="btAtrTrStep" min="0.0001" step="0.1" />
-            </div>
-            <div class="bt-field" data-exit-mode="fixed" hidden>
-              <label>Stop Loss %</label>
-              <input type="number" id="btSl" min="0.01" step="0.1" />
-            </div>
-            <div class="bt-field" data-exit-mode="fixed" hidden>
-              <label>Take Profit %</label>
-              <input type="number" id="btTp" min="0.01" step="0.1" />
-            </div>
-            <div class="bt-field" data-exit-mode="fixed" hidden>
-              <label>Trigger Breakeven %</label>
-              <input type="number" id="btBeTrig" min="0.01" step="0.1" />
-            </div>
-            <div class="bt-field" data-exit-mode="fixed" hidden>
-              <label>Kunci Breakeven %</label>
-              <input type="number" id="btBeLock" step="0.1" />
-            </div>
-            <div class="bt-field" data-exit-mode="fixed" hidden>
-              <label>Mulai Trailing %</label>
-              <input type="number" id="btTrStart" min="0.01" step="0.1" />
-            </div>
-            <div class="bt-field" data-exit-mode="fixed" hidden>
-              <label>Langkah Trailing %</label>
-              <input type="number" id="btTrStep" min="0.01" step="0.1" />
             </div>
             <div
               class="bt-field"
-              title="Time stop: posisi ditutup otomatis setelah umurnya mencapai batas ini. 0 = nonaktif. Berlaku di mode ATR maupun persen tetap, dan diperiksa setelah SL/BE/trailing."
+              title="Buffer tambahan (%) di bawah struktur Order Block / POI / Swing Low / Sweep Low untuk mengunci level Stop Loss struktural."
+            >
+              <label>Buffer SL Confluence (%)</label>
+              <input
+                type="number"
+                id="btConfluenceSlBuffer"
+                min="0"
+                max="10"
+                step="0.05"
+                value="0.20"
+                oninput="btRenderStrategySummary()"
+              />
+            </div>
+            <div
+              class="bt-field"
+              title="Rasio imbal hasil terhadap risiko minimum (target BSL $$$ dibagi jarak SL struktural) agar setup diizinkan entry."
+            >
+              <label>Min Risk:Reward Confluence</label>
+              <input
+                type="number"
+                id="btConfluenceMinRr"
+                min="0.1"
+                max="20"
+                step="0.1"
+                value="1.2"
+                oninput="btRenderStrategySummary()"
+              />
+            </div>
+            <div
+              class="bt-field"
+              title="Time stop: posisi ditutup otomatis setelah umurnya mencapai batas ini. 0 = nonaktif. Diperiksa setelah Stop Loss struktural dan Take Profit BSL $$$."
             >
               <label>Batas waktu tahan (jam)</label>
-              <input type="number" id="btMaxHold" min="0" max="720" step="0.5" />
+              <input
+                type="number"
+                id="btMaxHold"
+                min="0"
+                max="720"
+                step="0.5"
+                oninput="btRenderStrategySummary()"
+              />
             </div>
             <div class="bt-field bt-actions">
               <label>&nbsp;</label>
@@ -2541,9 +2369,7 @@
             class="mut"
             style="font-size: 11.5px; margin-top: 10px; line-height: 1.6"
           >
-            Mode ATR memakai multiplier ATR seperti bot live. Mode persentase
-            tetap memakai SL, TP, BE, dan trailing berbasis persen. Pilihan ini
-            hanya berlaku untuk simulasi backtest.
+            Exit mengikuti struktur The Confluence Code: Take Profit dikunci otomatis pada likuiditas puncak <b>BSL $$$</b> (Swing High / Fib 0) dan Stop Loss dikunci otomatis di bawah dasar <b>Order Block / POI / Sweep Low</b> ditambah buffer SL.
           </div>
           <div
             id="btStrategySummary"
@@ -2940,9 +2766,9 @@
           <h3>⚠️ Konfirmasi Jual Sekarang</h3>
           <p>
             Anda akan menutup posisi <b id="manualCloseSymbol">-</b> saat ini
-            juga dengan harga pasar, DI LUAR logika otomatis Stop Loss/Take
-            Profit/Breakeven/Trailing bot. Perintah ini akan diproses oleh bot
-            dalam beberapa detik. Yakin lanjutkan?
+            juga dengan harga pasar, DI LUAR logika otomatis Stop Loss struktural
+            (Order Block/POI) atau Take Profit (BSL $$$) bot. Perintah ini akan
+            diproses oleh bot dalam beberapa detik. Yakin lanjutkan?
           </p>
           <div class="modal-actions">
             <button class="modal-cancel" onclick="closeManualCloseModal()">
@@ -3448,172 +3274,24 @@
         }
 
         const c=s.config;
-        const exitAtr=c.exit_source==='ATR';
-        const fb=(!exitAtr && c.use_atr_exit && !p.has_position)?' (fallback)':'';
-        let modeTxt, noteTxt='';
-        if(exitAtr){
-          modeTxt='ATR';
-        }else if(c.use_atr_exit){
-          modeTxt=p.has_position?'PERSEN LAMA (posisi ini)':'ATR (belum ada posisi)';
-          noteTxt=p.has_position
-            ?'Posisi ini dibuka sebelum ATR aktif sehingga levelnya terkunci persen tetap. Posisi berikutnya memakai ATR mult SL '+esc(c.atr_mult_sl)+' / TP '+esc(c.atr_mult_tp)+'.'
-            :'USE_ATR_EXIT aktif: posisi berikutnya memakai ATR mult SL '+esc(c.atr_mult_sl)+' / TP '+esc(c.atr_mult_tp)+'. Persen di bawah hanya fallback bila ATR mati.';
-        }else{
-          modeTxt='PERSEN LAMA';
-        }
+        const modeTxt='CONFLUENCE STRUKTURAL';
+        const noteTxt=p.has_position
+          ? ('SL terkunci di bawah OB/POI ('+fmtP(c.sl_price)+') · TP terkunci di BSL $$$ ('+fmtP(c.tp_price)+').')
+          : ('Buffer SL struktural '+fmt(c.confluence_sl_buffer_pct, 2)+'% di bawah Order Block/POI · Target TP otomatis di BSL $$$ · Min R:R 1:'+fmt(c.confluence_min_rr_ratio, 2)+'.');
 
-        renderConfigPanel(s, exitAtr, fb, modeTxt, noteTxt);
+        renderConfigPanel(s, false, '', modeTxt, noteTxt);
       }
 
-      const ETA_WINDOW_MS = 180000;   
-      const ETA_MIN_SAMPLES = 5;      
-      const ETA_MIN_SPAN_MS = 10000;  
-      const ETA_GAP_RESET_MS = 20000; 
-      const ETA_MIN_SLOPE = 1e-5;     
-      const ETA_MAX_SECONDS = 86400;  
-      const ETA_ALPHA = 0.3;          
-
-      const _eta = {
-        symbol: null,
-        samples: [],
-        slope: null,
-        anchorAt: 0,
-        anchorSec: null,
-        state: 'nopos',
-        target: null
-      };
-
-      const ETA_LABEL = {
-        sl: 'Stop Loss',
-        be: 'Breakeven',
-        tr: 'Mulai Trailing',
-        tp: 'Take Profit'
-      };
-
-      function etaReset(symbol){
-        _eta.symbol = symbol || null;
-        _eta.samples = [];
-        _eta.slope = null;
-        _eta.anchorAt = 0;
-        _eta.anchorSec = null;
-        _eta.state = 'nopos';
-        _eta.target = null;
-      }
-
-      function etaPickTarget(pnl, lv, slope){
-        const falling = slope !== null && slope < -ETA_MIN_SLOPE;
-        if(falling && lv.sl !== null) return {key: 'sl', pct: -lv.sl, dir: -1};
-        const ups = [];
-        if(lv.be !== null && !lv.beOn && lv.be > pnl) ups.push({key: 'be', pct: lv.be, dir: 1});
-        if(lv.tr !== null && !lv.trOn && lv.tr > pnl) ups.push({key: 'tr', pct: lv.tr, dir: 1});
-        if(lv.tp !== null && lv.tp > pnl) ups.push({key: 'tp', pct: lv.tp, dir: 1});
-        if(ups.length){
-          ups.sort((a, b) => a.pct - b.pct);
-          return ups[0];
-        }
-
-        if(lv.tp !== null) return {key: 'tp', pct: lv.tp, dir: 1};
-        return null;
-      }
-
-      function etaSlopePctPerSec(){
-        const n = _eta.samples.length;
-        if(n < ETA_MIN_SAMPLES) return null;
-        const t0 = _eta.samples[0].t;
-        if(_eta.samples[n-1].t - t0 < ETA_MIN_SPAN_MS) return null;
-        let sx=0, sy=0, sxx=0, sxy=0;
-        for(let i=0;i<n;i++){
-          const x = (_eta.samples[i].t - t0)/1000;
-          const y = _eta.samples[i].v;
-          sx+=x; sy+=y; sxx+=x*x; sxy+=x*y;
-        }
-        const d = n*sxx - sx*sx;
-        if(!(Math.abs(d) > 1e-9)) return null;
-        const k = (n*sxy - sx*sy)/d;
-        return Number.isFinite(k) ? k : null;
-      }
-
-      function etaTrack(hasPos, symbol, pnlPct, lv){
-        const now = Date.now();
-        if(!hasPos){
-          if(_eta.symbol !== null || _eta.samples.length) etaReset(null);
-          _eta.state = 'nopos';
-          return;
-        }
-        if(symbol !== _eta.symbol) etaReset(symbol);
-        const v = Number(pnlPct);
-        if(pnlPct === null || pnlPct === undefined || !Number.isFinite(v)){
-          _eta.state = 'nodata';
-          _eta.anchorSec = null;
-          _eta.target = null;
-          return;
-        }
-        const last = _eta.samples.length ? _eta.samples[_eta.samples.length-1] : null;
-
-        if(last && now - last.t > ETA_GAP_RESET_MS){
-          _eta.samples.length = 0;
-          _eta.slope = null;
-        }
-        if(!last || now - last.t >= 400) _eta.samples.push({t: now, v: v});
-        while(_eta.samples.length && now - _eta.samples[0].t > ETA_WINDOW_MS) _eta.samples.shift();
-
-        const raw = etaSlopePctPerSec();
-        if(raw !== null){
-          _eta.slope = (_eta.slope === null) ? raw : (_eta.slope + ETA_ALPHA*(raw - _eta.slope));
-        }
-        const target = etaPickTarget(v, lv, _eta.slope);
-        _eta.target = target;
-
-        if(!lv.any){ _eta.state='noexit'; _eta.anchorSec=null; return; }
-
-        if(target === null){ _eta.state='done'; _eta.anchorSec=null; return; }
-        const remain = target.dir > 0 ? (target.pct - v) : (v - target.pct);
-        if(remain <= 0){ _eta.state='reached'; _eta.anchorSec=0; _eta.anchorAt=now; return; }
-        if(raw === null){ _eta.state='measuring'; _eta.anchorSec=null; return; }
-
-        const speed = target.dir > 0 ? _eta.slope : -_eta.slope;
-        if(!(speed > ETA_MIN_SLOPE)){
-          _eta.state = (speed < -ETA_MIN_SLOPE) ? 'away' : 'flat';
-          _eta.anchorSec = null;
-          return;
-        }
-        const sec = remain / speed;
-        if(!Number.isFinite(sec) || sec > ETA_MAX_SECONDS){ _eta.state='far'; _eta.anchorSec=null; return; }
-        _eta.state = 'eta';
-        _eta.anchorSec = sec;
-        _eta.anchorAt = now;
-      }
-
-      function etaSeconds(){
-        if(_eta.state !== 'eta' || _eta.anchorSec === null) return null;
-        return Math.max(0, _eta.anchorSec - (Date.now() - _eta.anchorAt)/1000);
-      }
-
-      function fmtEtaClock(sec){
-        if(sec === null || sec === undefined || !Number.isFinite(sec)) return '-';
-        const t = Math.max(0, Math.round(sec));
-        const h = Math.floor(t/3600), m = Math.floor((t%3600)/60), s = t%60;
-        const p = n => String(n).padStart(2,'0');
-        return h > 0 ? (h + ':' + p(m) + ':' + p(s)) : (p(m) + ':' + p(s));
-      }
-
-      function cfgLevelPct(raw, atr, entry){
+      function cfgLevelPct(raw){
         if(raw === null || raw === undefined || raw === '') return null;
         const n = Number(raw);
         if(!Number.isFinite(n) || n <= 0) return null;
-        if(atr){
-          const e = Number(entry);
-          if(!(e > 0)) return null;
-          return (n/e)*100;
-        }
         return n;
       }
 
       const _cfgLabels = {
-        sl: 'Stop Loss',
-        tp: 'Take Profit',
-        be: 'Trigger Breakeven',
-        tr: 'Mulai Trailing'
+        sl: 'Stop Loss Struktural (OB/POI)',
+        tp: 'Take Profit Struktural (BSL $$$)'
       };
       let _cfgUI = null;
 
@@ -3624,45 +3302,25 @@
         return !!flag;
       }
 
-      function cfgLevels(c, exitAtr, entry, beOn, trOn){
+      function cfgLevels(c){
+        const slVal = cfgLevelPct(c.sl_pct);
+        const tpVal = cfgLevelPct(c.tp_pct);
         const on = {
-          sl: cfgFlagOn(c.use_stop_loss, c.sl_pct),
-          tp: cfgFlagOn(c.use_tp, c.tp_pct),
-          be: cfgFlagOn(c.use_breakeven, c.be_trigger_pct),
-          tr: cfgFlagOn(c.use_trailing, c.trailing_start_pct)
+          sl: slVal !== null,
+          tp: tpVal !== null
         };
         const lv = {
-          sl: on.sl ? cfgLevelPct(c.sl_pct, exitAtr, entry) : null,
-          tp: on.tp ? cfgLevelPct(c.tp_pct, exitAtr, entry) : null,
-          be: on.be ? cfgLevelPct(c.be_trigger_pct, exitAtr, entry) : null,
-          tr: on.tr ? cfgLevelPct(c.trailing_start_pct, exitAtr, entry) : null,
-          on: on, beOn: !!beOn, trOn: !!trOn
+          sl: slVal,
+          tp: tpVal,
+          on: on
         };
-        lv.any = on.sl || on.tp || on.be || on.tr;
-        
-        const ups = [lv.tp, lv.tr, lv.be].filter(v => v !== null);
-        lv.maxUp = ups.length ? Math.max.apply(null, ups) : null;
+        lv.any = on.sl || on.tp;
+        lv.maxUp = lv.tp;
         return lv;
       }
 
-      function buildConfigPanel(box, sig, meter, noteHtml, keys, track){
-        let html = '';
-        if(meter){
-          html += '<div class="eta-box" id="cfgEtaBox">'
-            + '<div class="eta-head">'
-            + '<span class="eta-label" id="cfgEtaLabel">Estimasi level exit</span>'
-            + '<span class="eta-chip" id="cfgEtaChip">mengukur laju</span>'
-            + '</div>'
-            + '<div class="eta-time dim" id="cfgEtaTime">mengukur…</div>'
-            + '<div class="eta-sub" id="cfgEtaSub">mengumpulkan sampel harga live</div>';
-          
-          if(track){
-            html += '<div class="eta-track" id="cfgEtaTrack"><span class="eta-fill" id="cfgEtaFill"></span></div>'
-              + '<div class="eta-marks" id="cfgEtaMarks"></div>';
-          }
-          html += '</div>';
-        }
-        html += '<div class="posrow"><span class="k">Mode exit</span><span class="v mono" id="cfgMode"></span></div>';
+      function buildConfigPanel(box, sig, meter, noteHtml, keys, c){
+        let html = '<div class="posrow"><span class="k">Mode exit</span><span class="v mono" id="cfgMode"></span></div>';
         for(const key of keys){
           const label = _cfgLabels[key];
           if(meter){
@@ -3680,9 +3338,13 @@
           }
         }
         if(!keys.length){
-          html += '<div class="posrow"><span class="k">Level exit</span>'
-            + '<span class="v" style="font-size:11.5px;line-height:1.45">Semua level exit otomatis nonaktif. '
-            + 'Posisi hanya tertutup lewat penjualan manual atau rem drawdown.</span></div>';
+          const bufTxt = c && c.confluence_sl_buffer_pct !== undefined ? fmt(c.confluence_sl_buffer_pct, 2) + '%' : '0,20%';
+          const rrTxt = c && c.confluence_min_rr_ratio !== undefined ? '1:' + fmt(c.confluence_min_rr_ratio, 2) : '1:1,20';
+          const holdTxt = c && Number(c.max_hold_hours) > 0 ? fmt(c.max_hold_hours, 1) + ' jam' : 'nonaktif';
+          html += '<div class="posrow"><span class="k">Buffer SL Struktural</span><span class="v mono">' + bufTxt + ' di bawah OB/POI</span></div>'
+            + '<div class="posrow"><span class="k">Target TP Struktural</span><span class="v mono">BSL $$$ (Swing High / Fib 0)</span></div>'
+            + '<div class="posrow"><span class="k">Filter Min Risk:Reward</span><span class="v mono">' + rrTxt + '</span></div>'
+            + '<div class="posrow"><span class="k">Batas Waktu Tahan</span><span class="v mono">' + holdTxt + '</span></div>';
         }
         if(noteHtml){
           html += '<div class="posrow"><span class="k">Info</span>'
@@ -3690,18 +3352,8 @@
         }
         box.innerHTML = html;
 
-        const ui = {sig: sig, meter: meter, track: track, keys: keys, rows: {}, markSig: '', markEls: []};
+        const ui = {sig: sig, meter: meter, keys: keys, rows: {}};
         ui.mode = box.querySelector('#cfgMode');
-        if(meter){
-          ui.etaBox   = box.querySelector('#cfgEtaBox');
-          ui.etaLabel = box.querySelector('#cfgEtaLabel');
-          ui.etaChip  = box.querySelector('#cfgEtaChip');
-          ui.etaTime  = box.querySelector('#cfgEtaTime');
-          ui.etaSub   = box.querySelector('#cfgEtaSub');
-          ui.etaTrack = box.querySelector('#cfgEtaTrack');
-          ui.etaFill  = box.querySelector('#cfgEtaFill');
-          ui.etaMarks = box.querySelector('#cfgEtaMarks');
-        }
         box.querySelectorAll('[data-lvl]').forEach(el => {
           ui.rows[el.getAttribute('data-lvl')] = {
             root: el,
@@ -3738,15 +3390,6 @@
         }
       }
 
-      function paintEtaClock(){
-        if(!_cfgUI || !_cfgUI.meter || !_cfgUI.etaTime) return;
-        if(_eta.state !== 'eta') return;
-        const sec = etaSeconds();
-        _cfgUI.etaTime.textContent = '≈ ' + fmtEtaClock(sec);
-        _cfgUI.etaTime.classList.remove('dim');
-        if(_cfgUI.etaBox && sec !== null && sec <= 60) _cfgUI.etaBox.classList.add('near');
-      }
-
       const _hold = {sec: null, at: 0};
 
       function paintHold(){
@@ -3756,14 +3399,13 @@
       }
 
       function paintLiveBits(){
-        paintEtaClock();
         paintHold();
       }
       setInterval(paintLiveBits, 250);
 
       let _posUI = null;
 
-      function buildPositionPanel(pb, sig, hasPos, rail, beOn, trOn){
+      function buildPositionPanel(pb, sig, hasPos, rail){
         if(!hasPos){
           pb.innerHTML = '<div class="empty"><div class="big">💤</div>Tidak ada posisi terbuka.<br>Bot sedang memindai pasar…</div>';
           return {sig: sig, hasPos: false};
@@ -3780,7 +3422,7 @@
         if(rail){
           html += '<div class="pos-rail" id="posRail">'
             + '<div class="rail-head">'
-            + '<span class="eta-label">Posisi harga terhadap level exit</span>'
+            + '<span class="eta-label">Posisi harga terhadap level exit Confluence</span>'
             + '<span class="rail-chips" id="posRailChips"></span>'
             + '</div>'
             + '<div class="rail-track">'
@@ -3805,8 +3447,6 @@
           + row('Nilai posisi', 'posValue', 'v mono')
           + row('Volume 24 jam', 'posVol', 'v mono')
           + row('Lama hold', 'posHold', 'v');
-        if(beOn) html += row('Breakeven stop', 'posBeStop', 'v mono');
-        if(trOn) html += row('Trailing stop', 'posTrStop', 'v mono');
         pb.innerHTML = html;
 
         const q = id => pb.querySelector('#' + id);
@@ -3819,7 +3459,7 @@
           railLo: q('posRailLo'), railHi: q('posRailHi'), markSig: '', markEls: [],
           symEl: q('posSym'), entry: q('posEntry'), live: q('posLive'),
           qty: q('posQty'), value: q('posValue'), vol: q('posVol'),
-          hold: q('posHold'), beStop: q('posBeStop'), trStop: q('posTrStop')
+          hold: q('posHold')
         };
       }
 
@@ -3829,15 +3469,12 @@
         const p = s.position, c = s.config;
         const hasPos = !!p.has_position;
         const entry = Number(p.entry_price);
-        const exitAtr = c.exit_source === 'ATR';
-        const beOn = !!p.be_active, trOn = !!p.trailing_active;
 
-        const lv = cfgLevels(c, exitAtr, entry, beOn, trOn);
+        const lv = cfgLevels(c);
         const rail = hasPos && entry > 0 && (lv.sl !== null || lv.maxUp !== null);
 
-        const sig = [hasPos ? 'pos' : 'kosong', rail ? 'rail' : 'norail',
-          beOn ? 'be' : '', trOn ? 'tr' : ''].join('|');
-        if(!_posUI || _posUI.sig !== sig) _posUI = buildPositionPanel(pb, sig, hasPos, rail, beOn, trOn);
+        const sig = [hasPos ? 'pos' : 'kosong', rail ? 'rail' : 'norail'].join('|');
+        if(!_posUI || _posUI.sig !== sig) _posUI = buildPositionPanel(pb, sig, hasPos, rail);
         if(!hasPos){ _hold.sec = null; return; }
 
         const u = _posUI;
@@ -3869,8 +3506,6 @@
           ? (fmt(p.position_value) + ' ' + esc(s.quote) + idrInline(p.position_value)) : '-';
         u.vol.innerHTML = (p.volume_24h_quote !== null && p.volume_24h_quote !== undefined)
           ? (fmt(p.volume_24h_quote, 0) + ' ' + esc(s.quote) + idrInline(p.volume_24h_quote)) : '-';
-        if(u.beStop) u.beStop.textContent = fmtP(p.be_stop_price);
-        if(u.trStop) u.trStop.textContent = fmtP(p.trailing_stop_price);
 
         if(p.hold_minutes !== null && p.hold_minutes !== undefined){
           _hold.sec = Number(p.hold_minutes)*60;
@@ -3904,33 +3539,18 @@
         u.railDot.classList.toggle('neg', !up);
         u.railDot.classList.toggle('idle', live === null);
 
-        const topKey = lv.maxUp === null ? null
-          : (lv.tp === lv.maxUp ? 'tp' : (lv.tr === lv.maxUp ? 'tr' : 'be'));
-        const shortOf = {tp: 'TP', tr: 'Trail', be: 'BE'};
-        u.railLo.textContent = (lv.sl !== null ? 'SL ' : 'batas ') + fmtP(lo);
-        u.railHi.textContent = (topKey ? shortOf[topKey] : 'batas') + ' ' + fmtP(hi);
-
-        let chips = '';
-        if(beOn) chips += '<span class="lvl-chip">BE aktif</span>';
-        if(trOn) chips += '<span class="lvl-chip">Trailing aktif</span>';
-        u.railChips.innerHTML = chips;
+        u.railLo.textContent = (lv.sl !== null ? 'SL OB/POI ' : 'batas ') + fmtP(lo);
+        u.railHi.textContent = (lv.tp !== null ? 'TP BSL $$$ ' : 'batas ') + fmtP(hi);
+        u.railChips.innerHTML = '';
 
         const marks = [];
         if(lv.sl !== null){
           const px = entry*(1 - lv.sl/100);
           marks.push({label:'SL', at: at(px), passed: false});
         }
-        if(lv.be !== null){
-          const px = entry*(1 + lv.be/100);
-          marks.push({label:'BE', at: at(px), passed: beOn || (live !== null && live >= px)});
-        }
-        if(lv.tr !== null){
-          const px = entry*(1 + lv.tr/100);
-          marks.push({label:'Trail', at: at(px), passed: trOn || (live !== null && live >= px)});
-        }
         if(lv.tp !== null){
           const px = entry*(1 + lv.tp/100);
-          marks.push({label:'TP', at: at(px), passed: live !== null && live >= px});
+          marks.push({label:'TP BSL', at: at(px), passed: live !== null && live >= px});
         }
         marks.sort((a2, b2) => a2.at - b2.at);
         const msig = marks.map(m => m.label + ':' + m.at.toFixed(4)).join(',');
@@ -3948,28 +3568,23 @@
         });
       }
 
-      function renderConfigPanel(s, exitAtr, fb, modeTxt, noteHtml){
+      function renderConfigPanel(s, _exitAtr, fb, modeTxt, noteHtml){
         const box = document.getElementById('configBox');
         if(!box) return;
         const c = s.config, p = s.position;
         const entryPx = Number(p.entry_price);
         const pnlPct = (p.pnl_pct === null || p.pnl_pct === undefined || !Number.isFinite(Number(p.pnl_pct)))
           ? null : Number(p.pnl_pct);
-        const beOn = !!p.be_active, trOn = !!p.trailing_active;
-        const lv = cfgLevels(c, exitAtr, entryPx, beOn, trOn);
+        const lv = cfgLevels(c);
 
         const meter = !!p.has_position && entryPx > 0;
-        etaTrack(meter, p.symbol, pnlPct, lv);
-
-        const keys = ['sl', 'tp', 'be', 'tr'].filter(k => lv.on[k]);
-        const track = meter && lv.maxUp !== null && lv.maxUp > 0;
-        const sig = [meter ? 'meter' : 'plain', track ? 'track' : 'notrack',
-          keys.join(','), modeTxt, noteHtml || ''].join('|');
-        if(!_cfgUI || _cfgUI.sig !== sig) _cfgUI = buildConfigPanel(box, sig, meter, noteHtml, keys, track);
+        const keys = ['sl', 'tp'].filter(k => lv.on[k]);
+        const sig = [meter ? 'meter' : 'plain', keys.join(','), modeTxt, noteHtml || '', fmt(c.confluence_sl_buffer_pct, 2), fmt(c.confluence_min_rr_ratio, 2), fmt(c.max_hold_hours, 1)].join('|');
+        if(!_cfgUI || _cfgUI.sig !== sig) _cfgUI = buildConfigPanel(box, sig, meter, noteHtml, keys, c);
         if(_cfgUI.mode) _cfgUI.mode.textContent = modeTxt;
 
-        const raws = {sl: c.sl_pct, tp: c.tp_pct, be: c.be_trigger_pct, tr: c.trailing_start_pct};
-        const txt = key => fmtExitVsEntry(raws[key], exitAtr, entryPx, fb);
+        const raws = {sl: c.sl_pct, tp: c.tp_pct};
+        const txt = key => fmtExitVsEntry(raws[key], false, entryPx, fb);
         if(!meter){
           keys.forEach(k => cfgPaintRow(k, txt(k), null, ''));
           return;
@@ -3983,7 +3598,7 @@
             cfgPaintRow('sl', txt('sl'), null, waiting ? 'menunggu harga live' : 'nilai belum tersedia');
           } else {
             const prog = Math.max(0, Math.min(1, (-pnlPct)/lv.sl));
-            cfgPaintRow('sl', txt('sl'), prog, 'jarak ke SL ' + fmt(Math.max(0, pnlPct + lv.sl), 2) + '%',
+            cfgPaintRow('sl', txt('sl'), prog, 'jarak ke SL struktural ' + fmt(Math.max(0, pnlPct + lv.sl), 2) + '%',
               {hot: prog >= 0.6, chip: prog >= 0.8 ? 'rawan' : '', risk: true});
           }
         }
@@ -3993,146 +3608,10 @@
           } else {
             const prog = Math.max(0, Math.min(1, pnlPct/lv.tp));
             const done = pnlPct >= lv.tp;
-            cfgPaintRow('tp', txt('tp'), prog, done ? 'target tercapai' : ('sisa ' + gap(lv.tp)),
+            cfgPaintRow('tp', txt('tp'), prog, done ? 'target BSL tercapai' : ('sisa ' + gap(lv.tp)),
               {hot: prog >= 0.8, chip: done ? 'tercapai' : ''});
           }
         }
-        if(lv.on.be){
-          if(lv.be === null || (waiting && !beOn)){
-            cfgPaintRow('be', txt('be'), beOn ? 1 : null,
-              (waiting && !beOn) ? 'menunggu harga live' : (beOn ? 'breakeven aktif' : 'nilai belum tersedia'),
-              {chip: beOn ? 'aktif' : ''});
-          } else {
-            const prog = beOn ? 1 : Math.max(0, Math.min(1, pnlPct/lv.be));
-            const note = beOn ? ('stop terkunci di ' + fmtP(p.be_stop_price)) : ('sisa ' + gap(lv.be));
-            cfgPaintRow('be', txt('be'), prog, note, {hot: !beOn && prog >= 0.8, chip: beOn ? 'aktif' : ''});
-          }
-        }
-        if(lv.on.tr){
-          if(lv.tr === null || (waiting && !trOn)){
-            cfgPaintRow('tr', txt('tr'), trOn ? 1 : null,
-              (waiting && !trOn) ? 'menunggu harga live' : (trOn ? 'trailing aktif' : 'nilai belum tersedia'),
-              {chip: trOn ? 'aktif' : ''});
-          } else {
-            const prog = trOn ? 1 : Math.max(0, Math.min(1, pnlPct/lv.tr));
-            const note = trOn ? ('trailing stop di ' + fmtP(p.trailing_stop_price)) : ('sisa ' + gap(lv.tr));
-            cfgPaintRow('tr', txt('tr'), prog, note, {hot: !trOn && prog >= 0.8, chip: trOn ? 'aktif' : ''});
-          }
-        }
-
-        let prog = 0;
-        if(track){
-          prog = (pnlPct !== null) ? Math.max(0, Math.min(1, pnlPct/lv.maxUp)) : 0;
-          _cfgUI.etaFill.style.width = (prog*100).toFixed(1) + '%';
-          _cfgUI.etaTrack.classList.toggle('loading', _eta.state === 'measuring' || _eta.state === 'nodata');
-
-          const marks = [];
-          const addMark = (key, label) => {
-            if(lv[key] === null) return;
-            const hit = (key === 'be' && beOn) || (key === 'tr' && trOn)
-              || (pnlPct !== null && pnlPct >= lv[key]);
-            marks.push({label: label, at: Math.max(0, Math.min(1, lv[key]/lv.maxUp)), passed: hit});
-          };
-          addMark('be', 'BE');
-          addMark('tr', 'Trail');
-          addMark('tp', 'TP');
-          marks.sort((a, b) => a.at - b.at);
-          const msig = marks.map(m => m.label + ':' + m.at.toFixed(4)).join(',');
-          if(_cfgUI.markSig !== msig){
-            _cfgUI.etaMarks.innerHTML = marks.map(m => {
-              const edge = m.at >= 0.98 ? ' edge-r' : (m.at <= 0.02 ? ' edge-l' : '');
-              return '<span class="eta-mark'+edge+'" style="left:'+(m.at*100).toFixed(2)+'%">'+esc(m.label)+'</span>';
-            }).join('');
-            _cfgUI.markSig = msig;
-            _cfgUI.markEls = Array.prototype.slice.call(_cfgUI.etaMarks.querySelectorAll('.eta-mark'));
-          }
-          marks.forEach((m, i) => {
-            const el = _cfgUI.markEls[i];
-            if(el) el.classList.toggle('passed', !!m.passed);
-          });
-        }
-
-        const tg = _eta.target;
-        const tgShort = {sl: 'SL', be: 'BE', tr: 'Trailing', tp: 'TP'};
-        const tgLabel = tg ? ETA_LABEL[tg.key] : null;
-        const slopeMin = _eta.slope === null ? null : _eta.slope*60;
-        const lajuTxt = slopeMin === null ? '' : ('laju ' + sign(slopeMin) + fmt(slopeMin, 3) + '%/mnt');
-        const sisaTxt = (tg && pnlPct !== null)
-          ? ('sisa ' + fmt(Math.max(0, tg.dir > 0 ? (tg.pct - pnlPct) : (pnlPct - tg.pct)), 2) + '% ke ' + tgShort[tg.key])
-          : '';
-        const join = parts => parts.filter(Boolean).join(' · ');
-        let labelTxt = tgLabel ? ('Estimasi ke ' + tgLabel) : 'Estimasi level exit';
-        let chipTxt = 'mengukur laju', chipCls = '', timeTxt = 'mengukur…', dim = true, subTxt = '';
-
-        switch(_eta.state){
-          case 'eta': {
-            const risk = tg.dir < 0;
-            chipTxt = 'menuju ' + tgShort[tg.key];
-            chipCls = risk ? 'warn' : 'run';
-            timeTxt = '≈ ' + fmtEtaClock(etaSeconds());
-            dim = false;
-            subTxt = join([lajuTxt, sisaTxt]);
-            break;
-          }
-          case 'reached':
-            chipTxt = tg.dir < 0 ? 'SL tersentuh' : (tgShort[tg.key] + ' tercapai');
-            chipCls = tg.dir < 0 ? 'warn' : 'done';
-            timeTxt = '00:00';
-            dim = false;
-            subTxt = 'harga sudah menyentuh level ' + String(tgLabel || '').toLowerCase();
-            break;
-          case 'away':
-            chipTxt = 'harga menjauh'; chipCls = 'warn';
-            timeTxt = 'belum terukur';
-            subTxt = join([lajuTxt, sisaTxt]);
-            break;
-          case 'flat':
-            chipTxt = 'harga mendatar'; chipCls = 'warn';
-            timeTxt = 'belum terukur';
-            subTxt = join(['pergerakan terlalu kecil untuk diestimasi', sisaTxt]);
-            break;
-          case 'far':
-            chipTxt = 'lebih dari 24 jam'; chipCls = 'warn';
-            timeTxt = '> 24 jam';
-            subTxt = join([lajuTxt, sisaTxt]);
-            break;
-          case 'done':
-            labelTxt = 'Semua target naik terlewati';
-            chipTxt = trOn ? 'dikawal trailing' : 'tidak ada target';
-            chipCls = trOn ? 'done' : '';
-            timeTxt = trOn ? 'dikawal trailing' : 'tanpa target';
-            subTxt = trOn
-              ? join(['trailing stop di ' + fmtP(p.trailing_stop_price), lajuTxt])
-              : join(['tidak ada level naik yang tersisa', lajuTxt]);
-            break;
-          case 'noexit':
-            labelTxt = 'Tidak ada level exit aktif';
-            chipTxt = 'exit manual'; chipCls = 'warn';
-            timeTxt = 'tanpa target';
-            subTxt = 'semua saklar exit otomatis mati pada konfigurasi ini';
-            break;
-          case 'nodata':
-            chipTxt = 'menunggu harga'; chipCls = 'warn';
-            timeTxt = 'menunggu harga live';
-            subTxt = 'harga live belum tersedia dari server';
-            break;
-          default:
-            subTxt = join(['mengumpulkan sampel harga live', sisaTxt]);
-        }
-
-        _cfgUI.etaLabel.textContent = labelTxt;
-        _cfgUI.etaChip.textContent = chipTxt;
-        _cfgUI.etaChip.className = 'eta-chip' + (chipCls ? ' ' + chipCls : '');
-        _cfgUI.etaTime.textContent = timeTxt;
-        _cfgUI.etaTime.classList.toggle('dim', dim);
-        _cfgUI.etaSub.textContent = subTxt;
-
-        const etaSec = etaSeconds();
-        const naik = tg && tg.dir > 0;
-        const near = (_eta.state === 'reached' && naik)
-          || (track && prog >= 0.85)
-          || (_eta.state === 'eta' && naik && etaSec !== null && etaSec <= 60);
-        _cfgUI.etaBox.classList.toggle('near', near);
       }
 
       function showManualStatus(kind, msg){
@@ -4700,32 +4179,54 @@
 
       let btPolling = null;
 
-      function btSyncResistanceAvailability(){
-        const htf = !!document.getElementById('btHtfEnabled')?.checked;
-        const resistance = document.getElementById('btHtfResistanceEnabled');
-        const help = document.getElementById('btHtfResistanceHelp');
-        if(!resistance) return;
-        resistance.disabled = !htf;
-        if(help){
-          const cfg = _btDefaults || {};
-          const wing = cfg.HTF_RESISTANCE_PIVOT_WING_BARS || 2;
-          const lookback = cfg.HTF_RESISTANCE_LOOKBACK_BARS || 60;
-          const minimumRoom = (cfg.HTF_RESISTANCE_MIN_ROOM_PCT === undefined
-            || cfg.HTF_RESISTANCE_MIN_ROOM_PCT === null)
-            ? 1.5 : cfg.HTF_RESISTANCE_MIN_ROOM_PCT;
-          help.textContent = htf
-            ? 'Simulasi saja; pivot swing-high ' + wing + '/' + wing
-              + ', lookback ' + lookback + ' candle, ruang minimum ' + minimumRoom + '%'
-            : 'Aktifkan gerbang tren HTF untuk memakai filter ini';
-        }
+      function btRenderStrategySummary(){
+        const d = _btDefaults || {};
+        const strategySummary = document.getElementById('btStrategySummary');
+        if(!strategySummary) return;
+        const confOn = document.getElementById('btConfluenceEnabled')
+          ? !!document.getElementById('btConfluenceEnabled').checked
+          : (d.CONFLUENCE_FILTER_ENABLED !== false);
+        const reactOn = confOn && (document.getElementById('btConfluenceReactionEnabled')
+          ? !!document.getElementById('btConfluenceReactionEnabled').checked
+          : (d.CONFLUENCE_REQUIRE_BULLISH_REACTION !== false));
+        const activeText = value => value ? 'aktif' : 'nonaktif';
+        const structItv = d.CONFLUENCE_STRUCTURE_INTERVAL || '15m';
+        const trigItv = d.CONFIRM_INTERVAL || d.confirm_interval || '5m';
+        const flowText = !confOn
+          ? 'Filter The Confluence Code nonaktif (hanya gerbang pasar 24 jam)'
+          : (structItv !== trigItv)
+            ? esc(structItv) + ' Struktur POI (BoS + VP + Fib + FVG + OB) &rarr; ' + esc(trigItv) + ' Trigger (SSL Sweep + Reaksi Bullish)'
+            : 'Single-TF ' + esc(trigItv) + ' (BoS + VP + Fib + Liquidity + FVG + OB + Reaksi Bullish)';
+        strategySummary.innerHTML = `
+          <div class="posrow"><span class="k">Alur entry aktif</span><span class="v mono" style="font-size:11.5px">${flowText}</span></div>
+          <div class="posrow"><span class="k">Struktur BoS ${esc(structItv)}</span><span class="v mono" style="font-size:11.5px">${activeText(confOn)}, lookback ${fmt(d.CONFLUENCE_LOOKBACK_BARS || 60, 0)} candle, impuls min +${fmt(d.CONFLUENCE_MIN_IMPULSE_PCT || 1.2, 2)}%, toleransi zona ${fmt((d.CONFLUENCE_ZONE_TOLERANCE_RATIO || 0.06) * 100, 1)}%</span></div>
+          <div class="posrow"><span class="k">1. Volume Profile (${esc(structItv)})</span><span class="v mono" style="font-size:11.5px">${activeText(confOn && d.VP_FILTER_ENABLED !== false)}, ${fmt(d.VP_BINS || 20, 0)} bin harga, HVN top ${fmt((d.VP_HVN_TOP_RATIO || 0.40) * 100, 0)}%</span></div>
+          <div class="posrow"><span class="k">2. Fibonacci Diskon (${esc(structItv)})</span><span class="v mono" style="font-size:11.5px">${activeText(confOn && d.FIB_FILTER_ENABLED !== false)}, retracement ${fmt(d.FIB_RETRACEMENT_MIN || 0.50, 3)} s/d ${fmt(d.FIB_RETRACEMENT_MAX || 0.786, 3)}</span></div>
+          <div class="posrow"><span class="k">3. Liquidity Sweep (${esc(trigItv)})</span><span class="v mono" style="font-size:11.5px">${activeText(confOn && d.LIQUIDITY_FILTER_ENABLED !== false)}, sapuan SSL ${fmt(d.LIQUIDITY_SWEEP_LOOKBACK_BARS || 4, 0)} candle terakhir ke zona POI</span></div>
+          <div class="posrow"><span class="k">4. Fair Value Gap &amp; 5. Order Block (${esc(structItv)})</span><span class="v mono" style="font-size:11.5px">FVG ${activeText(confOn && d.FVG_FILTER_ENABLED !== false)} · Order Block ${activeText(confOn && d.OB_FILTER_ENABLED !== false)}</span></div>
+          <div class="posrow"><span class="k">Konfirmasi Reaksi (${esc(trigItv)})</span><span class="v mono" style="font-size:11.5px">${activeText(reactOn)}, posisi close min ${fmt(d.CONFLUENCE_MIN_CLOSE_POSITION || 0.55, 2)}, lookback ${fmt(d.CONFIRM_LOOKBACK_BARS || 60, 0)} candle</span></div>
+          <div class="posrow"><span class="k">Exit Struktural Confluence</span><span class="v mono" style="font-size:11.5px">TP di BSL $$$ · SL di bawah OB/POI (+buffer ${fmt(document.getElementById('btConfluenceSlBuffer')?.value || d.CONFLUENCE_SL_BUFFER_PCT || 0.20, 2)}%) · Min R:R 1:${fmt(document.getElementById('btConfluenceMinRr')?.value || d.CONFLUENCE_MIN_RR_RATIO || 1.2, 2)}</span></div>`;
       }
 
-      function btUpdateExitMode(){
-        const mode = document.getElementById('btExitMode').value;
-        document.querySelectorAll('[data-exit-mode]').forEach(el=>{
-          el.hidden = el.getAttribute('data-exit-mode') !== mode;
-        });
+      function btSyncConfluenceAvailability(){
+        const conf = !!document.getElementById('btConfluenceEnabled')?.checked;
+        const reaction = document.getElementById('btConfluenceReactionEnabled');
+        const help = document.getElementById('btConfluenceReactionHelp');
+        if(!reaction) return;
+        reaction.disabled = !conf;
+        if(help){
+          const cfg = _btDefaults || {};
+          const minPos = (cfg.CONFLUENCE_MIN_CLOSE_POSITION === undefined
+            || cfg.CONFLUENCE_MIN_CLOSE_POSITION === null)
+            ? 0.55 : cfg.CONFLUENCE_MIN_CLOSE_POSITION;
+          help.textContent = conf
+            ? 'Konfirmasi close > open dan posisi close >= ' + fmt(minPos, 2) + ' setelah sapuan SSL'
+            : 'Aktifkan filter The Confluence Code untuk memakai konfirmasi reaksi ini';
+        }
+        btRenderStrategySummary();
       }
+
+      function btUpdateExitMode(){}
 
       async function loadBacktestDefaults(){
         try{
@@ -4737,47 +4238,19 @@
             return;
           }
           _btDefaults = d;
-          const strategySummary = document.getElementById('btStrategySummary');
-          if(strategySummary){
-            const activeText = value => value ? 'aktif' : 'nonaktif';
-            const dirZoneMode = d.DIRECTION_ZONE_REQUIRE_INSIDE_ZONE
-              ? 'wajib di dalam zona'
-              : 'dekat zona, jarak maks ' + fmt(d.DIRECTION_ZONE_MAX_DISTANCE_PCT, 1) + '%';
-            const htfFlow = d.HTF_FILTER_ENABLED
-              ? esc(d.HTF_INTERVAL || '1h') + ' &rarr; '
-              : '';
-            strategySummary.innerHTML = `
-              <div class="posrow"><span class="k">Alur entry aktif</span><span class="v mono" style="font-size:11.5px">${htfFlow}${esc(d.DIRECTION_INTERVAL || '15m')} &rarr; tren M5 &rarr; breakout-retest M5</span></div>
-              <div class="posrow"><span class="k">Tren ${esc(d.HTF_INTERVAL || '1h')}</span><span class="v mono" style="font-size:11.5px">${activeText(d.HTF_FILTER_ENABLED)}, Close &gt; EMA${fmt(d.HTF_EMA_FAST,0)} &gt; EMA${fmt(d.HTF_EMA_SLOW,0)}, ADX${fmt(d.HTF_ADX_PERIOD,0)} &gt;= ${fmt(d.HTF_ADX_MIN,1)}${d.HTF_FILTER_ENABLED ? ' (ambang awal, perlu kalibrasi)' : ''}</span></div>
-              <div class="posrow"><span class="k">Resistance ${esc(d.HTF_INTERVAL || '1h')}</span><span class="v mono" style="font-size:11.5px">${activeText(d.HTF_RESISTANCE_FILTER_ENABLED)}, pivot swing-high ${fmt(d.HTF_RESISTANCE_PIVOT_WING_BARS,0)}/${fmt(d.HTF_RESISTANCE_PIVOT_WING_BARS,0)}, lookback ${fmt(d.HTF_RESISTANCE_LOOKBACK_BARS,0)} candle, ruang minimum ${fmt(d.HTF_RESISTANCE_MIN_ROOM_PCT,1)}%</span></div>
-              <div class="posrow"><span class="k">Arah ${esc(d.DIRECTION_INTERVAL || '15m')}</span><span class="v mono" style="font-size:11.5px">${activeText(d.DIRECTION_FILTER_ENABLED)}, Close &gt; EMA${fmt(d.DIRECTION_EMA_FAST,0)} &gt; EMA${fmt(d.DIRECTION_EMA_SLOW,0)}, ADX${fmt(d.DIRECTION_ADX_PERIOD,0)} &gt;= ${fmt(d.DIRECTION_ADX_MIN,1)}</span></div>
-              <div class="posrow"><span class="k">Zona demand ${esc(d.DIRECTION_INTERVAL || '15m')}</span><span class="v mono" style="font-size:11.5px">${activeText(d.DIRECTION_ZONE_FILTER_ENABLED)}, lookback ${fmt(d.DIRECTION_ZONE_LOOKBACK_BARS,0)} candle, ${dirZoneMode}</span></div>
-              <div class="posrow"><span class="k">Tren ${esc(d.timing_interval || '5m')}</span><span class="v mono" style="font-size:11.5px">${activeText(d.TIMING_FILTER_ENABLED)}, Close &gt; EMA${fmt(d.TIMING_EMA_FAST,0)} &gt; EMA${fmt(d.TIMING_EMA_SLOW,0)}, ADX${fmt(d.TIMING_ADX_PERIOD,0)} &gt;= ${fmt(d.TIMING_ADX_MIN,1)}</span></div>
-              <div class="posrow"><span class="k">Breakout-retest ${esc(d.timing_interval || '5m')}</span><span class="v mono" style="font-size:11.5px">${activeText(d.BREAKOUT_RETEST_FILTER_ENABLED)}, retest 1-${fmt(d.BREAKOUT_RETEST_MAX_BARS,0)} candle, toleransi ${fmt(d.BREAKOUT_RETEST_TOLERANCE_ATR,2)} ATR, sentuhan maks ${fmt(d.BREAKOUT_RETEST_MAX_TOUCHES,0)}${d.BREAKOUT_RETEST_REQUIRE_BULLISH ? ', wajib bullish' : ''}</span></div>
-              <div class="posrow"><span class="k">Filter tambahan</span><span class="v mono" style="font-size:11.5px">Volume M5 ${activeText(d.ROLLING_VOLUME_FILTER_ENABLED)}, demand M5 ${activeText(d.DEMAND_ZONE_FILTER_ENABLED)}</span></div>`;
-          }
           document.getElementById('btDays').value = d.default_days;
-          document.getElementById('btHtfEnabled').checked = !!d.HTF_FILTER_ENABLED;
-          document.getElementById('btHtfResistanceEnabled').checked = !!d.HTF_RESISTANCE_FILTER_ENABLED;
-          btSyncResistanceAvailability();
-          document.getElementById('btExitMode').value = d.USE_ATR_EXIT ? 'atr' : 'fixed';
-          document.getElementById('btAtrPeriod').value = d.ATR_PERIOD;
-          document.getElementById('btAtrSl').value = d.ATR_MULT_SL;
-          document.getElementById('btAtrTp').value = d.ATR_MULT_TP;
-          document.getElementById('btAtrBeTrig').value = d.ATR_MULT_BE_TRIGGER;
-          document.getElementById('btAtrBeLock').value = d.ATR_MULT_BE_LOCK;
-          document.getElementById('btAtrTrStart').value = d.ATR_MULT_TRAIL_START;
-          document.getElementById('btAtrTrStep').value = d.ATR_MULT_TRAIL;
-          document.getElementById('btSl').value = d.SL_PCT;
-          document.getElementById('btTp').value = d.TP_PCT;
-          document.getElementById('btBeTrig').value = d.BE_TRIGGER_PCT;
-          document.getElementById('btBeLock').value = d.BE_LOCK_PCT;
-          document.getElementById('btTrStart').value = d.TRAILING_START_PCT;
-          document.getElementById('btTrStep').value = d.TRAILING_STEP_PCT;
+          document.getElementById('btConfluenceEnabled').checked = d.CONFLUENCE_FILTER_ENABLED !== false;
+          document.getElementById('btConfluenceReactionEnabled').checked = d.CONFLUENCE_REQUIRE_BULLISH_REACTION !== false;
+          if(d.CONFLUENCE_SL_BUFFER_PCT !== undefined && d.CONFLUENCE_SL_BUFFER_PCT !== null){
+            document.getElementById('btConfluenceSlBuffer').value = d.CONFLUENCE_SL_BUFFER_PCT;
+          }
+          if(d.CONFLUENCE_MIN_RR_RATIO !== undefined && d.CONFLUENCE_MIN_RR_RATIO !== null){
+            document.getElementById('btConfluenceMinRr').value = d.CONFLUENCE_MIN_RR_RATIO;
+          }
           if(d.MAX_HOLD_HOURS !== undefined && d.MAX_HOLD_HOURS !== null){
             document.getElementById('btMaxHold').value = d.MAX_HOLD_HOURS;
           }
-          btUpdateExitMode();
+          btSyncConfluenceAvailability();
           if(d.default_days) document.getElementById('btDays').value = d.default_days;
           if(d.default_max_symbols) document.getElementById('btMaxSymbols').value = d.default_max_symbols;
           btUpdateEstimate();
@@ -4832,24 +4305,22 @@
         const days = parseInt(document.getElementById('btDays').value || '0', 10);
         const sym = parseInt(document.getElementById('btMaxSymbols').value || '0', 10);
         if(!(days >= 2) || !(sym >= 2)){ el.textContent = ''; return; }
-        const htfAktif = !!document.getElementById('btHtfEnabled')?.checked;
-        const resistanceAktif = htfAktif
-          && !!document.getElementById('btHtfResistanceEnabled')?.checked;
-        const warmupBars = htfAktif
-          ? ((_btDefaults && _btDefaults.warmup_bars_htf_enabled) || 0)
+        const confAktif = !!document.getElementById('btConfluenceEnabled')?.checked;
+        const warmupBars = confAktif
+          ? ((_btDefaults && _btDefaults.warmup_bars_confluence_enabled) || (_btDefaults && _btDefaults.warmup_bars) || 0)
           : ((_btDefaults && _btDefaults.warmup_bars) || 0);
         const barsPerDay = (_btDefaults && _btDefaults.bars_per_day) || 288;
         const barsPerSym = (days + 1) * barsPerDay + warmupBars;
         const reqPerSym = Math.ceil(barsPerSym / 1000);
-        const totalReq = sym * reqPerSym;
+        const htfIntervals = confAktif ? ((_btDefaults && _btDefaults.native_intervals) || []) : [];
+        const totalReq = sym * (reqPerSym + htfIntervals.length);
         const weight = totalReq * 2;
         const mins = weight / 3000;
         const warn = totalReq > 20000
           ? ' <b style="color:#f43f5e">Melebihi batas 20.000 request, kurangi simbol atau hari.</b>'
           : '';
-        const htfIntervals = (_btDefaults && _btDefaults.native_intervals) || [];
         const htfInfo = htfIntervals.length
-          ? ' Layer timeframe tinggi ('
+          ? ' Struktur POI ('
             + htfIntervals.join(' dan ')
             + ') diambil langsung dari bursa, butuh 1 request tambahan per simbol '
             + 'dan riwayat sekitar '
@@ -4857,18 +4328,10 @@
             + ' hari sebelumnya.'
           : '';
         const warmupInfo = ' Sudah termasuk pemanasan simulasi (±'
-          + (htfAktif
-              ? (warmupBars / barsPerDay).toFixed(1)
-              : ((_btDefaults && _btDefaults.warmup_days) || (warmupBars / barsPerDay).toFixed(1)))
-          + ' hari data tambahan per simbol).' + htfInfo
-          + (htfAktif
-              ? ' H1 dirangkai dari candle simulasi tertutup; tidak ada request H1 tambahan. ADX minimum adalah titik awal yang perlu dikalibrasi.'
-                + (resistanceAktif
-                    ? ' Resistance memakai jendela H1 yang sama dan close M5 tertutup; tidak menambah request atau warmup.'
-                    : '')
-              : '');
+          + (warmupBars / barsPerDay).toFixed(1)
+          + ' hari data tambahan per simbol).' + htfInfo;
         el.innerHTML = 'Perkiraan beban: <b>' + sym.toLocaleString(LOCALE) + '</b> simbol x <b>'
-          + reqPerSym + '</b> request = <b>' + totalReq.toLocaleString(LOCALE)
+          + (reqPerSym + htfIntervals.length) + '</b> request = <b>' + totalReq.toLocaleString(LOCALE)
           + '</b> request ke Binance (bobot ' + weight.toLocaleString(LOCALE)
           + '). Perkiraan waktu unduh minimal <b>' + (mins < 1 ? '<1' : Math.ceil(mins))
           + ' menit</b>.' + warmupInfo + warn;
@@ -4888,27 +4351,18 @@
         if(!(maxSym >= 2)){ btShowError('Jumlah simbol minimal 2, supaya ada persaingan antar-simbol untuk disimulasikan.'); return; }
         if(maxSym > 600){ btShowError('Jumlah simbol maksimal 600.'); return; }
 
-        const exitMode = document.getElementById('btExitMode').value;
         const payload = {
           days: days,
           max_symbols: maxSym,
-          HTF_FILTER_ENABLED: document.getElementById('btHtfEnabled').checked,
-          HTF_RESISTANCE_FILTER_ENABLED: document.getElementById('btHtfEnabled').checked
-            && document.getElementById('btHtfResistanceEnabled').checked,
-          USE_ATR_EXIT: exitMode === 'atr',
+          CONFLUENCE_FILTER_ENABLED: document.getElementById('btConfluenceEnabled').checked,
+          CONFLUENCE_REQUIRE_BULLISH_REACTION: document.getElementById('btConfluenceEnabled').checked
+            && document.getElementById('btConfluenceReactionEnabled').checked,
           MAX_HOLD_HOURS: document.getElementById('btMaxHold').value,
         };
-        const isiAtr = {
-          ATR_PERIOD: 'btAtrPeriod', ATR_MULT_SL: 'btAtrSl', ATR_MULT_TP: 'btAtrTp',
-          ATR_MULT_BE_TRIGGER: 'btAtrBeTrig', ATR_MULT_BE_LOCK: 'btAtrBeLock',
-          ATR_MULT_TRAIL_START: 'btAtrTrStart', ATR_MULT_TRAIL: 'btAtrTrStep',
+        const sumber = {
+          CONFLUENCE_SL_BUFFER_PCT: 'btConfluenceSlBuffer',
+          CONFLUENCE_MIN_RR_RATIO: 'btConfluenceMinRr',
         };
-        const isiPersen = {
-          SL_PCT: 'btSl', TP_PCT: 'btTp', BE_TRIGGER_PCT: 'btBeTrig',
-          BE_LOCK_PCT: 'btBeLock', TRAILING_START_PCT: 'btTrStart',
-          TRAILING_STEP_PCT: 'btTrStep',
-        };
-        const sumber = exitMode === 'atr' ? isiAtr : isiPersen;
         for(const [kunci, id] of Object.entries(sumber)){
           const nilai = document.getElementById(id).value;
           if(nilai !== '') payload[kunci] = nilai;
@@ -4980,32 +4434,15 @@
         if(!isPortfolio) btGridUpdateEstimate();
       }
 
-      const BT_GRID_PARAMS_ATR = [
-        ['ATR_PERIOD', 'ATR period'],
-        ['ATR_MULT_SL', 'ATR mult SL'],
-        ['ATR_MULT_TP', 'ATR mult TP'],
-        ['ATR_MULT_BE_TRIGGER', 'ATR mult BE pemicu'],
-        ['ATR_MULT_BE_LOCK', 'ATR mult BE kunci'],
-        ['ATR_MULT_TRAIL_START', 'ATR mult trail mulai'],
-        ['ATR_MULT_TRAIL', 'ATR mult trail langkah'],
-        ['MAX_HOLD_HOURS', 'Batas waktu tahan (jam)'],
-      ];
-      const BT_GRID_PARAMS_PERSEN = [
-        ['SL_PCT', 'SL %'],
-        ['TP_PCT', 'TP %'],
-        ['BE_TRIGGER_PCT', 'BE pemicu %'],
-        ['BE_LOCK_PCT', 'BE kunci %'],
-        ['TRAILING_START_PCT', 'Trailing mulai %'],
-        ['TRAILING_STEP_PCT', 'Trailing langkah %'],
+      const BT_GRID_PARAMS_CONFLUENCE = [
+        ['CONFLUENCE_SL_BUFFER_PCT', 'Buffer SL Confluence (%)'],
+        ['CONFLUENCE_MIN_RR_RATIO', 'Min Risk:Reward Confluence'],
         ['MAX_HOLD_HOURS', 'Batas waktu tahan (jam)'],
       ];
       let _btGridDefaults = null;
       const btGridMaxKombinasi = () =>
         (_btGridDefaults && _btGridDefaults.grid_max_kombinasi) || 150;
-      const btGridIsAtrMode = () =>
-        !(_btGridDefaults && _btGridDefaults.USE_ATR_EXIT === false);
-      const btGridParamsForMode = () =>
-        btGridIsAtrMode() ? BT_GRID_PARAMS_ATR : BT_GRID_PARAMS_PERSEN;
+      const btGridParamsForMode = () => BT_GRID_PARAMS_CONFLUENCE;
 
       function btGridAddRow(key, awal, langkah, akhir){
         const wrap = document.getElementById('btGridRows');
@@ -5140,8 +4577,7 @@
       function btGridSeedDefaultRow(){
         const wrap = document.getElementById('btGridRows');
         if(!wrap || wrap.children.length) return;
-        if(btGridIsAtrMode()) btGridAddRow('ATR_MULT_TP', 18, 6, 30);
-        else btGridAddRow('TP_PCT', 2, 2, 6);
+        btGridAddRow('CONFLUENCE_MIN_RR_RATIO', 1.0, 0.2, 2.0);
       }
 
       async function startGridBacktest(){
@@ -5214,29 +4650,19 @@
 
       let _btGridResultRows = [];
       const BT_GRID_PARAM_INPUT = {
-        ATR_PERIOD: 'btAtrPeriod', ATR_MULT_SL: 'btAtrSl', ATR_MULT_TP: 'btAtrTp',
-        ATR_MULT_BE_TRIGGER: 'btAtrBeTrig', ATR_MULT_BE_LOCK: 'btAtrBeLock',
-        ATR_MULT_TRAIL_START: 'btAtrTrStart', ATR_MULT_TRAIL: 'btAtrTrStep',
-        SL_PCT: 'btSl', TP_PCT: 'btTp', BE_TRIGGER_PCT: 'btBeTrig',
-        BE_LOCK_PCT: 'btBeLock', TRAILING_START_PCT: 'btTrStart',
-        TRAILING_STEP_PCT: 'btTrStep', MAX_HOLD_HOURS: 'btMaxHold',
+        CONFLUENCE_SL_BUFFER_PCT: 'btConfluenceSlBuffer',
+        CONFLUENCE_MIN_RR_RATIO: 'btConfluenceMinRr',
+        MAX_HOLD_HOURS: 'btMaxHold',
       };
 
       function btPakaiGridParams(idx){
         const row = _btGridResultRows[idx];
         if(!row || !row.params) return;
         const p = row.params;
-        const pakaiAtr = ('ATR_PERIOD' in p) || ('ATR_MULT_SL' in p) || ('ATR_MULT_TP' in p);
-        const pakaiPersen = ('SL_PCT' in p) || ('TP_PCT' in p);
-        if(pakaiAtr && !pakaiPersen){
-          document.getElementById('btExitMode').value = 'atr';
-        } else if(pakaiPersen && !pakaiAtr){
-          document.getElementById('btExitMode').value = 'fixed';
-        }
         for(const [k, inputId] of Object.entries(BT_GRID_PARAM_INPUT)){
           if(k in p) document.getElementById(inputId).value = p[k];
         }
-        if(typeof btUpdateExitMode === 'function') btUpdateExitMode();
+        btRenderStrategySummary();
         btSetMode('portfolio');
         toast('ok','Parameter dipakai','Kombinasi terpilih sudah diisikan ke form Simulasi Portofolio. Sesuaikan parameter lain bila perlu, lalu jalankan simulasi penuh.');
       }
@@ -5291,7 +4717,6 @@
         } else {
           tb.innerHTML = rows.map((r, i) => {
             const paramStr = Object.entries(r.params || {})
-              .filter(([k]) => k !== 'USE_ATR_EXIT')
               .map(([k, v]) => esc(k) + '=' + esc(v)).join(', ') || '(default)';
             const deg = (r.degradasi === null || r.degradasi === undefined) ? '-' :
               fmt(r.degradasi, 3);
@@ -5437,12 +4862,8 @@
                      TIME_STOP:'WAKTU',
                      END_OF_DATA:'DATA HABIS', DATA_END:'DATA SIMBOL HABIS',
                      RISK_LIMIT_TRIGGERED:'BATAS RISIKO',
-                     FILTER_HTF_TREND:'GERBANG TREN HTF',
-                     FILTER_HTF_RESISTANCE:'RESISTANCE H1',
-                     FILTER_DIRECTION:'GERBANG ARAH M15',
-                     FILTER_DIRECTION_ZONE:'GERBANG ZONA DEMAND M15',
-                     FILTER_TIMING:'GERBANG TREN M5',
-                     FILTER_BREAKOUT_RETEST:'GERBANG BREAKOUT-RETEST M5'};
+                     FILTER_CONFLUENCE_STRUCTURE:'STRUKTUR POI CONFLUENCE',
+                     FILTER_CONFLUENCE_TRIGGER:'TRIGGER CONFLUENCE (SSL/REAKSI)'};
         return esc(map[key] || key);
       }
 
@@ -5459,9 +4880,10 @@
         const cardTone = v => v>0?'good':(v<0?'bad':'');
         const re = s.risk_events || {};
         const riskTotal = (re.dd_stop||0) + (re.forced_close||0) + (s.chase_skips||0);
-        const gateSkips = (s.htf_skips||0) + (s.htf_resistance_skips||0)
-          + (s.direction_skips||0) + (s.direction_zone_skips||0)
-          + (s.timing_skips||0) + (s.breakout_skips||0);
+        const gateSkips = (s.confluence_structure_skips||s.structure_skips||0)
+          + (s.confluence_trigger_skips||s.trigger_skips||0);
+        const structObj = res.confluence_structure || {};
+        const trigObj = res.confluence_trigger || {};
         const cardsHtml = `
           <div class="card ${cardTone(s.total_return_pct)}">
             <div class="label">Return bersih</div>
@@ -5486,7 +4908,7 @@
           <div class="card ${riskTotal||gateSkips?'warn':''}">
             <div class="label">Filter dan kontrol akun</div>
             <div class="value mono">${fmt(riskTotal+gateSkips,0)}</div>
-            <div class="sub">DD stop ${fmt(re.dd_stop||0,0)} · tutup paksa ${fmt(re.forced_close||0,0)} · chase dilewati ${fmt(s.chase_skips||0,0)} · tren HTF ${esc(((res.htf||{}).interval)||'1h')} ${fmt(((res.htf||{}).skips)||0,0)}/${fmt(((res.htf||{}).scans)||0,0)} · resistance H1 ${fmt(((res.htf_resistance||{}).skips)||0,0)}/${fmt(((res.htf_resistance||{}).scans)||0,0)} · arah ${esc(((res.direction||{}).interval)||'15m')} ${fmt(((res.direction||{}).skips)||0,0)} · zona arah ${esc(((res.direction_zone||{}).interval)||'15m')} ${fmt(((res.direction_zone||{}).skips)||0,0)} · timing ${esc(((res.timing||{}).interval)||'5m')} ${fmt(((res.timing||{}).skips)||0,0)}</div></div>
+            <div class="sub">DD stop ${fmt(re.dd_stop||0,0)} · tutup paksa ${fmt(re.forced_close||0,0)} · chase dilewati ${fmt(s.chase_skips||0,0)} · struktur POI ${esc(structObj.interval||'15m')} ${fmt(structObj.skips||0,0)}/${fmt(structObj.scans||0,0)} · trigger ${esc(trigObj.interval||'5m')} ${fmt(trigObj.skips||0,0)}/${fmt(trigObj.scans||0,0)}</div></div>
           <div class="card">
             <div class="label">Candle diproses</div>
             <div class="value mono">${fmt(res.bars_total,0)}</div>
@@ -5500,66 +4922,19 @@
         const p = res.params_used;
         let reasonRows = Object.entries(s.reason_counts||{}).map(([k,v])=>
           `<div class="posrow"><span class="k">${btReasonLabel(k)}</span><span class="v mono">${fmt(v,0)}x</span></div>`).join('');
-        const exitRows = p.USE_ATR_EXIT
-          ? `<div class="posrow"><span class="k">Mode exit</span><span class="v mono">ATR adaptif</span></div>
-             <div class="posrow"><span class="k">ATR period</span><span class="v mono">${fmt(p.ATR_PERIOD,0)}</span></div>
-             <div class="posrow"><span class="k">ATR multiplier SL / TP</span><span class="v mono">${esc(p.ATR_MULT_SL)} / ${esc(p.ATR_MULT_TP)}</span></div>
-             <div class="posrow"><span class="k">ATR multiplier BE (trig,lock)</span><span class="v mono">${esc(p.ATR_MULT_BE_TRIGGER)},${esc(p.ATR_MULT_BE_LOCK)}</span></div>
-             <div class="posrow"><span class="k">ATR multiplier Trail (start,step)</span><span class="v mono">${esc(p.ATR_MULT_TRAIL_START)},${esc(p.ATR_MULT_TRAIL)}</span></div>`
-          : `<div class="posrow"><span class="k">Mode exit</span><span class="v mono">Persentase tetap</span></div>
-             <div class="posrow"><span class="k">SL / TP / BE (trig,lock) / Trail (start,step)</span><span class="v mono" style="font-size:11.5px">${esc(p.SL_PCT)}% / ${esc(p.TP_PCT)}% / ${esc(p.BE_TRIGGER_PCT)}%,${esc(p.BE_LOCK_PCT)}% / ${esc(p.TRAILING_START_PCT)}%,${esc(p.TRAILING_STEP_PCT)}%</span></div>`;
-        const htfInfo = res.htf || null;
-        const htfResistanceInfo = res.htf_resistance || null;
-        const arahInfo = res.direction || null;
-        const timingInfo = res.timing || null;
-        const breakoutInfo = res.breakout_retest || null;
-        const rollingInfo = res.rolling_volume || null;
-        const demandM5Info = res.demand_m5 || null;
-        const emaAdxText = (g, labelInterval) => {
-          if(!g || !g.enabled) return 'nonaktif';
-          return 'aktif ' + esc(g.interval || labelInterval)
-            + ', EMA ' + fmt(g.ema_fast, 0) + '/' + fmt(g.ema_slow, 0)
-            + ', ADX ' + fmt(g.adx_period, 0) + ' >= ' + fmt(g.adx_min, 1)
-            + ', lookback ' + fmt(g.lookback_bars, 0) + ' candle'
-            + ', disaring ' + fmt(g.skips, 0) + ' dari ' + fmt(g.scans, 0) + ' sinyal';
-        };
-        const zoneText = (g, labelInterval) => {
-          if(!g || !g.enabled) return 'nonaktif';
-          return 'aktif ' + esc(g.interval || labelInterval)
-            + ', lookback ' + fmt(g.lookback_bars, 0) + ' candle'
-            + (g.require_inside ? ', wajib di dalam zona' : ', jarak maks ' + fmt(g.max_distance_pct, 1) + '%')
-            + ', disaring ' + fmt(g.skips, 0) + ' dari ' + fmt(g.scans, 0) + ' sinyal';
-        };
-        const zonaArahInfo = res.direction_zone || null;
-        const htfRow = htfInfo ? `
-          <div class="posrow"><span class="k">Gerbang tren HTF ${esc(htfInfo.interval || '1h')}</span><span class="v mono" style="font-size:11.5px">${emaAdxText(htfInfo, '1h')}${htfInfo.enabled ? '; ADX minimum adalah titik awal yang wajib dikalibrasi' : ''}</span></div>` : '';
-        const htfResistanceRow = htfResistanceInfo ? `
-          <div class="posrow"><span class="k">Resistance HTF ${esc(htfResistanceInfo.interval || '1h')}</span><span class="v mono" style="font-size:11.5px">${htfResistanceInfo.enabled ? 'aktif, pivot swing-high sayap '+fmt(htfResistanceInfo.pivot_wing_bars,0)+'/' + fmt(htfResistanceInfo.pivot_wing_bars,0)+', lookback '+fmt(htfResistanceInfo.lookback_bars,0)+' candle, ruang minimum '+fmt(htfResistanceInfo.minimum_room_pct,2)+'% dari close M5, disaring '+fmt(htfResistanceInfo.skips,0)+' dari '+fmt(htfResistanceInfo.scans,0)+' sinyal' : 'nonaktif'}</span></div>` : '';
-        const arahRow = arahInfo ? `
-          <div class="posrow"><span class="k">Layer arah ${esc(arahInfo.interval || '15m')}</span><span class="v mono" style="font-size:11.5px">${emaAdxText(arahInfo, '15m')}</span></div>` : '';
-        const zonaArahRow = zonaArahInfo ? `
-          <div class="posrow"><span class="k">Layer zona demand ${esc(zonaArahInfo.interval || '15m')}</span><span class="v mono" style="font-size:11.5px">${zoneText(zonaArahInfo, '15m')}</span></div>` : '';
-        const timingRow = timingInfo ? `
-          <div class="posrow"><span class="k">Layer timing ${esc(timingInfo.interval || '5m')}</span><span class="v mono" style="font-size:11.5px">${emaAdxText(timingInfo, '5m')}</span></div>` : '';
-        const breakoutRow = breakoutInfo ? `
-          <div class="posrow"><span class="k">Breakout-retest ${esc(breakoutInfo.interval || '5m')}</span><span class="v mono" style="font-size:11.5px">${breakoutInfo.enabled ? 'aktif, swing '+fmt(breakoutInfo.lookback_bars,0)+' candle, pivot '+fmt(breakoutInfo.pivot_wing_bars,0)+'/'+fmt(breakoutInfo.pivot_wing_bars,0)+', retest maks '+fmt(breakoutInfo.max_bars,0)+' candle, toleransi '+fmt(breakoutInfo.tolerance_atr,2)+' ATR'+fmt(breakoutInfo.atr_period,0)+', sentuhan maks '+fmt(breakoutInfo.max_touches,0)+(breakoutInfo.require_bullish ? ', wajib bullish' : ', bullish opsional')+', disaring '+fmt(breakoutInfo.skips,0)+' dari '+fmt(breakoutInfo.scans,0)+' sinyal' : 'nonaktif'}</span></div>` : '';
-        const rollingRow = rollingInfo ? `
-          <div class="posrow"><span class="k">Volume rolling ${esc(rollingInfo.interval || '5m')}</span><span class="v mono" style="font-size:11.5px">${rollingInfo.enabled ? 'aktif, lookback '+fmt(rollingInfo.lookback_bars,0)+' candle, minimum '+fmt(rollingInfo.surge_mult,2)+'x, konfirmasi '+fmt(rollingInfo.confirmation_bars,0)+' candle' : 'nonaktif'}</span></div>` : '';
-        const demandM5Row = demandM5Info ? `
-          <div class="posrow"><span class="k">Demand ${esc(demandM5Info.interval || '5m')}</span><span class="v mono" style="font-size:11.5px">${demandM5Info.enabled ? 'aktif, lookback '+fmt(demandM5Info.lookback_bars,0)+' candle'+(demandM5Info.require_inside ? ', wajib di dalam zona' : ', jarak maks '+fmt(demandM5Info.max_distance_pct,1)+'%') : 'nonaktif'}</span></div>` : '';
+        const exitRows = `<div class="posrow"><span class="k">Mode exit</span><span class="v mono">Confluence Struktural (TP BSL $$$ · SL OB/POI)</span></div>
+             <div class="posrow"><span class="k">Buffer SL / Min R:R / Max Hold</span><span class="v mono" style="font-size:11.5px">${esc(p.CONFLUENCE_SL_BUFFER_PCT)}% / 1:${esc(p.CONFLUENCE_MIN_RR_RATIO)} / ${esc(p.MAX_HOLD_HOURS)} jam</span></div>`;
+        const structRow = res.confluence_structure ? `
+          <div class="posrow"><span class="k">Struktur POI Confluence (${esc(structObj.interval || '15m')})</span><span class="v mono" style="font-size:11.5px">${structObj.enabled ? 'aktif, lookback '+fmt(structObj.lookback_bars,0)+' candle, BoS min +'+fmt(structObj.min_impulse_pct,2)+'%, VP '+(structObj.vp_enabled?'ON':'OFF')+' ('+fmt(structObj.vp_bins,0)+' bin), Fib '+(structObj.fib_enabled?fmt(structObj.fib_min,3)+'-'+fmt(structObj.fib_max,3):'OFF')+', FVG '+(structObj.fvg_enabled?'ON':'OFF')+', OB '+(structObj.ob_enabled?'ON':'OFF')+', disaring '+fmt(structObj.skips,0)+' dari '+fmt(structObj.scans,0)+' sinyal' : 'nonaktif'}</span></div>` : '';
+        const trigRow = res.confluence_trigger ? `
+          <div class="posrow"><span class="k">Trigger Confluence (${esc(trigObj.interval || '5m')})</span><span class="v mono" style="font-size:11.5px">${trigObj.enabled ? 'aktif, SSL sweep '+(trigObj.liquidity_enabled?'ON ('+fmt(trigObj.sweep_lookback_bars,0)+' bar)':'OFF')+', reaksi bullish '+(trigObj.require_bullish_reaction?'wajib (close pos >= '+fmt(trigObj.min_close_position,2)+')':'opsional')+', disaring '+fmt(trigObj.skips,0)+' dari '+fmt(trigObj.scans,0)+' sinyal' : 'nonaktif'}</span></div>` : '';
         document.getElementById('btInfoBox').innerHTML = `
           <div class="posrow"><span class="k">Semesta simbol</span><span class="v mono">${fmt(res.universe_with_data,0)} berhasil / ${fmt(res.universe_requested,0)} diminta${res.symbols_failed_count? ' ('+fmt(res.symbols_failed_count,0)+' gagal)':''}</span></div>
           <div class="posrow"><span class="k">Rentang data</span><span class="v mono" style="font-size:11.5px">${esc(res.start_time||'-')} &rarr; ${esc(res.end_time||'-')}</span></div>
           <div class="posrow"><span class="k">Titik waktu diproses</span><span class="v mono">${fmt(res.bars_total,0)} bar ${esc(res.interval)}</span></div>
           ${exitRows}
-          ${htfRow}
-          ${htfResistanceRow}
-          ${arahRow}
-          ${zonaArahRow}
-          ${timingRow}
-          ${breakoutRow}
-          ${rollingRow}
-          ${demandM5Row}
+          ${structRow}
+          ${trigRow}
           <div style="border-top:1px solid var(--border);margin:4px 0"></div>
           ${reasonRows || '<div class="posrow"><span class="k mut">Tidak ada trade terjadi pada rentang & parameter ini.</span></div>'}
           ${(res.warnings&&res.warnings.length)? '<div style="border-top:1px solid var(--border);margin:4px 0"></div>'+res.warnings.map(w=>`<div class="posrow"><span class="k" style="color:var(--amber)">⚠ ${esc(w)}</span></div>`).join('') : ''}
@@ -5580,7 +4955,7 @@
               <td class="mono mut">${esc(t.exit_time)}</td>
               <td class="mono">${fmtP(t.entry_price)}</td>
               <td class="mono">${fmtP(t.exit_price)}</td>
-              <td class="mono mut">#${fmt(t.rank_at_entry,0)} <span style="opacity:.7">(${sign(t.pct24h_at_entry)}${fmt(t.pct24h_at_entry,1)}%)</span></td>
+              <td class="mono mut">#${fmt(t.rank_at_entry,0)}</td>
               <td class="mono">${Math.round(t.hold_minutes)} mnt</td>
               <td class="mono ${cls(t.pnl_pct)}">${sign(t.pnl_pct)}${fmt(t.pnl_pct)}%</td>
               <td><span class="tag ${btReasonTagClass(t.reason)}">${btReasonLabel(t.reason)}</span></td>

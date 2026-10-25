@@ -180,27 +180,13 @@ class HtfKlineCache:
         return self.window_klines(symbol, state_mod.now_ms())
 
 
-class DirectionCache(HtfKlineCache):
+class ConfluenceStructureCache(HtfKlineCache):
 
     def interval(self) -> str:
-        return strategy.direction_interval(self._config)
+        return strategy.confluence_structure_interval(self._config)
 
     def window_bars(self) -> int:
-        return strategy.direction_window_bars(self._config)
-
-    def verdict(self, symbol: str, now_ms: int) -> dict:
-        return strategy.evaluate_direction(
-            self.window_klines(symbol, now_ms), self._config
-        )
-
-
-class HtfTrendCache(HtfKlineCache):
-
-    def interval(self) -> str:
-        return strategy.htf_interval(self._config)
-
-    def window_bars(self) -> int:
-        return strategy.htf_window_bars(self._config)
+        return strategy.confluence_structure_window_bars(self._config)
 
     def require_latest_closed_bar(self) -> bool:
         return True
@@ -217,7 +203,7 @@ class HtfTrendCache(HtfKlineCache):
         return max(30.0, min(300.0, interval))
 
     def verdict(self, symbol: str, now_ms: int) -> dict:
-        return strategy.evaluate_htf(
+        return strategy.evaluate_confluence_structure(
             self.window_klines(symbol, now_ms), self._config
         )
 
@@ -227,16 +213,10 @@ DEFAULT_STATE = {
     "entry_price": 0.0,
     "qty": 0.0,
     "entry_time": 0,
-    "be_active": False,
-    "be_stop_price": 0.0,
-    "trailing_active": False,
-    "trailing_stop_price": 0.0,
+    "sl_price": 0.0,
+    "tp_price": 0.0,
     "sl_pct": 0.0,
     "tp_pct": 0.0,
-    "be_trigger_pct": 0.0,
-    "be_lock_pct": 0.0,
-    "trail_start_pct": 0.0,
-    "trail_step_pct": 0.0,
     "exit_source": "",
     "last_scan_time": 0,
     "symbol_block_until": {},
@@ -359,14 +339,10 @@ def load_pump_state(
         else:
             merged[key] = number
     for key in (
+        "sl_price",
+        "tp_price",
         "sl_pct",
         "tp_pct",
-        "be_trigger_pct",
-        "be_lock_pct",
-        "trail_start_pct",
-        "trail_step_pct",
-        "be_stop_price",
-        "trailing_stop_price",
         "dd_stop_until",
     ):
         value = merged.get(key, 0)
@@ -380,8 +356,6 @@ def load_pump_state(
         else:
             merged[key] = number
     for key in (
-        "be_active",
-        "trailing_active",
         "dd_stopped",
         "_limit_close_done",
         "_native_stop_exit_blocked",
@@ -623,27 +597,21 @@ def account_risk_gate(config: dict) -> "tuple[bool, str]":
 
 
 def describe_exit_mode(config: dict, state: dict) -> str:
-    atr_active = str(state.get("exit_source", "")).upper() == "ATR"
-    sl_pct = float(config.get("SL_PCT", 0) or 0)
-    tp_pct = float(config.get("TP_PCT", 0) or 0)
-    if atr_active:
+    buf = float(config.get("CONFLUENCE_SL_BUFFER_PCT", 0.20) or 0.0)
+    min_rr = float(config.get("CONFLUENCE_MIN_RR_RATIO", 1.2) or 1.2)
+    if state.get("current_symbol") and float(state.get("qty", 0) or 0) > 0:
+        sl_p = float(state.get("sl_pct", 0) or 0)
+        tp_p = float(state.get("tp_pct", 0) or 0)
+        sl_px = float(state.get("sl_price", 0) or 0)
+        tp_px = float(state.get("tp_price", 0) or 0)
         return (
-            f"ATR aktif pada posisi berjalan (jarak SL {float(state.get('sl_pct', 0) or 0):.6f}, "
-            f"TP {float(state.get('tp_pct', 0) or 0):.6f} dalam satuan harga)"
+            f"Confluence struktural aktif (SL={sl_px:.8g} [-{sl_p:.2f}%], "
+            f"TP BSL={tp_px:.8g} [+{tp_p:.2f}%], buffer={buf:.2f}%, min R:R=1:{min_rr:.2f})"
         )
-    if config.get("USE_ATR_EXIT", False):
-        if not state.get("current_symbol") or float(state.get("qty", 0) or 0) <= 0:
-            return (
-                "ATR aktif untuk posisi berikutnya "
-                f"(period {int(config.get('ATR_PERIOD', 14) or 14)}, "
-                f"mult SL {float(config.get('ATR_MULT_SL', 0) or 0):.4g}, "
-                f"mult TP {float(config.get('ATR_MULT_TP', 0) or 0):.4g})"
-            )
-        return (
-            f"persen tetap untuk posisi lama (SL {sl_pct:.2f}%, TP {tp_pct:.2f}%). "
-            "Posisi berikutnya memakai ATR karena USE_ATR_EXIT=True"
-        )
-    return f"persen tetap (SL {sl_pct:.2f}%, TP {tp_pct:.2f}%)"
+    return (
+        f"Confluence struktural (SL di bawah OB/POI +{buf:.2f}% buffer, "
+        f"TP di BSL $$$, min R:R 1:{min_rr:.2f})"
+    )
 
 
 def update_equity_controls(state: dict, equity: float, config: dict) -> bool:
@@ -1110,16 +1078,10 @@ def reset_position(state: dict) -> None:
     state["entry_price"] = 0.0
     state["qty"] = 0.0
     state["entry_time"] = 0
-    state["be_active"] = False
-    state["be_stop_price"] = 0.0
-    state["trailing_active"] = False
-    state["trailing_stop_price"] = 0.0
+    state["sl_price"] = 0.0
+    state["tp_price"] = 0.0
     state["sl_pct"] = 0.0
     state["tp_pct"] = 0.0
-    state["be_trigger_pct"] = 0.0
-    state["be_lock_pct"] = 0.0
-    state["trail_start_pct"] = 0.0
-    state["trail_step_pct"] = 0.0
     state["exit_source"] = ""
     state["pending_order"] = None
     state["native_stop"] = None
@@ -2026,8 +1988,6 @@ def _native_oco_enabled(config: dict) -> bool:
     return (
         str(config.get("MODE", "PAPER")).upper() == "LIVE"
         and bool(config.get("USE_NATIVE_OCO", False))
-        and bool(config.get("USE_STOP_LOSS", False))
-        and bool(config.get("USE_TP", False))
     )
 
 
@@ -2035,27 +1995,11 @@ def _native_stop_enabled(config: dict) -> bool:
     return (
         str(config.get("MODE", "PAPER")).upper() == "LIVE"
         and bool(config.get("USE_NATIVE_STOP_LOSS", False))
-        and bool(config.get("USE_STOP_LOSS", False))
     )
 
 
 def _native_protection_enabled(config: dict) -> bool:
     return _native_oco_enabled(config) or _native_stop_enabled(config)
-
-
-def _exit_distance(
-    state: dict,
-    config: dict,
-    state_key: str,
-    cfg_key: str,
-    atr_mode: bool,
-    entry: float,
-) -> float:
-    locked = abs(float(state.get(state_key) or 0.0))
-    if locked > 0:
-        return locked
-    pct = abs(float(config.get(cfg_key, 0.0) or 0.0))
-    return entry * pct / 100.0 if atr_mode else pct
 
 
 def _protection_stop_price(
@@ -2064,13 +2008,17 @@ def _protection_stop_price(
     entry = float(state.get("entry_price") or 0.0)
     if entry <= 0:
         return 0.0
-    atr_mode = str(state.get("exit_source", "")).upper() == "ATR"
-    sl = abs(float(_exit_distance(state, config, "sl_pct", "SL_PCT", atr_mode, entry)))
-    level = entry - sl if atr_mode else entry * (1.0 - sl / 100.0)
-    if state.get("be_active"):
-        level = max(level, float(state.get("be_stop_price") or 0.0))
-    if state.get("trailing_active"):
-        level = max(level, float(state.get("trailing_stop_price") or 0.0))
+    sl_px = float(state.get("sl_price") or 0.0)
+    if 0.0 < sl_px < entry:
+        level = sl_px
+    else:
+        sl_pct = abs(float(state.get("sl_pct") or 0.0))
+        if sl_pct <= 0.0:
+            fb = strategy.compute_confluence_exit_levels(
+                entry, config, fallback_allowed=True
+            )
+            sl_pct = float(fb["sl_pct"])
+        level = entry * (1.0 - sl_pct / 100.0)
     if level <= 0:
         return 0.0
     if filters is not None:
@@ -2082,10 +2030,18 @@ def _native_oco_levels(
     state: dict, filters: SymbolFilters | None, config: dict
 ) -> dict:
     entry = float(state.get("entry_price") or 0.0)
-    atr_mode = str(state.get("exit_source", "")).upper() == "ATR"
-    tp = _exit_distance(state, config, "tp_pct", "TP_PCT", atr_mode, entry)
     raw_sl = _protection_stop_price(state, config)
-    raw_tp = entry + tp if atr_mode else entry * (1.0 + tp / 100.0)
+    tp_px = float(state.get("tp_price") or 0.0)
+    if tp_px > entry > 0.0:
+        raw_tp = tp_px
+    else:
+        tp_pct = abs(float(state.get("tp_pct") or 0.0))
+        if tp_pct <= 0.0:
+            fb = strategy.compute_confluence_exit_levels(
+                max(entry, 1.0), config, fallback_allowed=True
+            )
+            tp_pct = float(fb["tp_pct"])
+        raw_tp = entry * (1.0 + tp_pct / 100.0)
     buffer_pct = max(
         0.01, float(config.get("NATIVE_OCO_LIMIT_BUFFER_PCT", 0.10) or 0.10)
     )
@@ -2184,14 +2140,11 @@ def _arm_native_oco(
     limit_min = float(filters.limit_min_notional)
     limit_max = float(filters.limit_max_notional)
     prices = (below_price, below_stop, above_price, above_stop)
-    stop_boleh_di_atas_entry = bool(
-        state.get("be_active") or state.get("trailing_active")
-    )
     valid = (
         bid is not None
         and all(filters.price_valid(value) for value in prices)
         and below_price < below_stop < bid < above_price <= above_stop
-        and (below_stop < entry or stop_boleh_di_atas_entry)
+        and below_stop < entry
         and entry < above_stop
         and (limit_min <= 0 or qty * below_price >= limit_min)
         and (limit_min <= 0 or qty * above_price >= limit_min)
@@ -2455,16 +2408,13 @@ def _arm_native_stop(
     qty = filters.round_qty(qty)
     bid = _executable_bid(client, symbol)
     stop_price = _native_stop_price(state, filters, config)
-    stop_boleh_di_atas_entry = bool(
-        state.get("be_active") or state.get("trailing_active")
-    )
     valid = (
         bid is not None
         and "STOP_LOSS" in filters.order_types
         and filters.market_qty_valid(qty)
         and filters.price_valid(stop_price)
         and 0 < stop_price
-        and (stop_price < entry or stop_boleh_di_atas_entry)
+        and stop_price < entry
         and stop_price < bid
         and (
             filters.min_notional <= 0
@@ -3902,17 +3852,13 @@ def _restore_pending_buy(
     _refresh_accounting_state(
         client, config, state, actual_remaining_qty=qty
     )
-    state["be_active"] = False
-    state["be_stop_price"] = 0.0
-    state["trailing_active"] = False
-    state["trailing_stop_price"] = 0.0
+    state["sl_price"] = 0.0
+    state["tp_price"] = 0.0
     for key in (
+        "sl_price",
+        "tp_price",
         "sl_pct",
         "tp_pct",
-        "be_trigger_pct",
-        "be_lock_pct",
-        "trail_start_pct",
-        "trail_step_pct",
         "exit_source",
     ):
         if key in levels:
@@ -4142,35 +4088,21 @@ def open_position(
     if not use_quote_order_qty:
         order_quote_qty = None
 
-    level_cfg = dict(config)
-    if candidate.setup is not None and candidate.setup.atr_value is not None:
-        level_cfg["_atr_value"] = candidate.setup.atr_value
-    elif bool(config.get("USE_ATR_EXIT", False)):
-        logger.warning(
-            "Entry %s dilewati: USE_ATR_EXIT aktif tetapi nilai ATR kandidat "
-            "tidak tersedia, level exit tidak dapat dikunci dengan aman.",
-            candidate.symbol,
-        )
-        return
-    preview = strategy.resolve_exit_levels(level_cfg)
-    if str(preview.get("source", "")).upper() == "ATR" and not (
-        0.0 < float(preview.get("sl_pct") or 0.0) < price_ref
-    ):
+    preview = strategy.resolve_exit_levels(
+        config, setup=candidate.setup, entry_price=price_ref
+    )
+    sl_distance = float(preview.get("sl_pct") or 0.0)
+    if not (0.0 < sl_distance < 100.0):
         logger.critical(
-            "Entry %s dilewati: jarak SL ATR %.10g tidak masuk akal terhadap "
-            "harga acuan %.10g. Cek ATR_MULT_SL/ATR kandidat.",
+            "Entry %s dilewati: jarak SL struktural %.10g%% tidak masuk akal terhadap "
+            "harga acuan %.10g.",
             candidate.symbol,
-            float(preview.get("sl_pct") or 0.0),
+            sl_distance,
             price_ref,
         )
         return
-    sl_distance = float(preview.get("sl_pct") or 0.0)
-    if str(preview.get("source", "")).upper() == "ATR":
-        risk_quote = qty * sl_distance
-        risk_basis = "jarak harga SL x qty"
-    else:
-        risk_quote = notional * sl_distance / 100.0
-        risk_basis = "notional x SL persen"
+    risk_quote = notional * sl_distance / 100.0
+    risk_basis = "notional x jarak SL struktural Confluence"
     exposure_pct = (notional / usdt_free * 100.0) if usdt_free > 0 else 0.0
     risk_pct_free = (risk_quote / usdt_free * 100.0) if usdt_free > 0 else 0.0
     log_risk = logger.info if risk_pct_free < 10.0 else logger.warning
@@ -4205,12 +4137,10 @@ def open_position(
         "client_order_id": client_order_id,
         "created_at": state_mod.now_ms(),
         "levels": {
+            "sl_price": float(preview.get("sl_price") or 0.0),
+            "tp_price": float(preview.get("tp_price") or 0.0),
             "sl_pct": preview["sl_pct"],
             "tp_pct": preview["tp_pct"],
-            "be_trigger_pct": preview["be_trigger_pct"],
-            "be_lock_pct": preview["be_lock_pct"],
-            "trail_start_pct": preview["trail_start_pct"],
-            "trail_step_pct": preview["trail_step_pct"],
             "exit_source": preview["source"],
         },
     }
@@ -4328,19 +4258,17 @@ def open_position(
     _refresh_accounting_state(
         client, config, state, actual_remaining_qty=state["qty"]
     )
+    filled_levels = strategy.resolve_exit_levels(
+        config, setup=candidate.setup, entry_price=fill_price
+    )
     state["last_trade_time"] = state_mod.now_ms()
-    state["be_active"] = False
-    state["be_stop_price"] = 0.0
-    state["trailing_active"] = False
-    state["trailing_stop_price"] = 0.0
-    state["sl_pct"] = preview["sl_pct"]
-    state["tp_pct"] = preview["tp_pct"]
-    state["be_trigger_pct"] = preview["be_trigger_pct"]
-    state["be_lock_pct"] = preview["be_lock_pct"]
-    state["trail_start_pct"] = preview["trail_start_pct"]
-    state["trail_step_pct"] = preview["trail_step_pct"]
-    state["exit_source"] = preview["source"]
+    state["sl_price"] = float(filled_levels.get("sl_price") or 0.0)
+    state["tp_price"] = float(filled_levels.get("tp_price") or 0.0)
+    state["sl_pct"] = filled_levels["sl_pct"]
+    state["tp_pct"] = filled_levels["tp_pct"]
+    state["exit_source"] = filled_levels["source"]
     state["sell_fail_count"] = 0
+    preview = filled_levels
 
     try:
         post_account = client.get_account()
@@ -4381,13 +4309,12 @@ def open_position(
     _clear_reconciliation(state)
     state_mod.save_state(config["STATE_FILE"], state)
     logger.info(
-        "BUY FILLED %s: qty=%.8f managed=%.8f @ avg %.6f | 24h=%.2f%% | "
+        "BUY FILLED %s: qty=%.8f managed=%.8f @ avg %.6f | "
         "vol24h=%.0f | alasan: %s",
         candidate.symbol,
         executed_qty,
         managed_qty,
         fill_price,
-        candidate.price_change_pct,
         candidate.quote_volume,
         candidate.confirm_reason,
     )
@@ -4836,36 +4763,19 @@ def manage_exit(
                 if state.get("_native_stop_exit_blocked"):
                     return
 
-    atr_mode = str(state.get("exit_source", "")).upper() == "ATR"
     entry = float(state["entry_price"])
-    sl = _exit_distance(state, config, "sl_pct", "SL_PCT", atr_mode, entry)
-    tp = _exit_distance(state, config, "tp_pct", "TP_PCT", atr_mode, entry)
-    be_trigger = _exit_distance(
-        state, config, "be_trigger_pct", "BE_TRIGGER_PCT", atr_mode, entry
-    )
-    be_lock = _exit_distance(
-        state, config, "be_lock_pct", "BE_LOCK_PCT", atr_mode, entry
-    )
-    trail_start = _exit_distance(
-        state, config, "trail_start_pct", "TRAILING_START_PCT", atr_mode, entry
-    )
-    trail_step = _exit_distance(
-        state, config, "trail_step_pct", "TRAILING_STEP_PCT", atr_mode, entry
-    )
-    if atr_mode:
-        pnl_unit = current_price - state["entry_price"]
-        sl_hit = current_price <= state["entry_price"] - sl
-        tp_hit = current_price >= state["entry_price"] + tp
-        be_trigger_hit = pnl_unit >= be_trigger
-        trail_start_hit = pnl_unit >= trail_start
-    else:
-        pnl_unit = (current_price / state["entry_price"] - 1.0) * 100.0
-        sl_hit = pnl_unit <= -sl
-        tp_hit = pnl_unit >= tp
-        be_trigger_hit = pnl_unit >= be_trigger
-        trail_start_hit = pnl_unit >= trail_start
+    sl_price = _protection_stop_price(state, config)
+    tp_price = float(state.get("tp_price") or 0.0)
+    if not (tp_price > entry):
+        tp_pct = abs(float(state.get("tp_pct") or 0.0))
+        if tp_pct <= 0.0:
+            fb = strategy.compute_confluence_exit_levels(
+                entry, config, fallback_allowed=True
+            )
+            tp_pct = float(fb["tp_pct"])
+        tp_price = entry * (1.0 + tp_pct / 100.0)
 
-    if config["USE_STOP_LOSS"] and sl_hit:
+    if sl_price > 0.0 and current_price <= sl_price:
         close_position(
             client,
             config,
@@ -4875,57 +4785,33 @@ def manage_exit(
             reference_price=current_price,
         )
         return
-    if config["USE_BREAKEVEN"] and not state["be_active"] and be_trigger_hit:
-        state["be_active"] = True
-        state["be_stop_price"] = (
-            state["entry_price"] + be_lock
-            if atr_mode
-            else state["entry_price"] * (1 + be_lock / 100.0)
-        )
-    if config["USE_TRAILING"]:
-        if not state["trailing_active"] and trail_start_hit:
-            state["trailing_active"] = True
-            state["trailing_stop_price"] = (
-                current_price - trail_step
-                if atr_mode
-                else current_price * (1 - trail_step / 100.0)
-            )
-        elif state["trailing_active"]:
-            candidate_stop = (
-                current_price - trail_step
-                if atr_mode
-                else current_price * (1 - trail_step / 100.0)
-            )
-            if candidate_stop > state["trailing_stop_price"]:
-                state["trailing_stop_price"] = candidate_stop
-    reasons = []
-    if config["USE_TP"] and tp_hit:
-        reasons.append("TAKE_PROFIT")
-    if state["be_active"] and current_price <= state["be_stop_price"]:
-        reasons.append("BREAKEVEN")
-    if state["trailing_active"] and current_price <= state["trailing_stop_price"]:
-        reasons.append("TRAILING_STOP")
-    if not reasons and _time_stop_due(config, state):
-        reasons.append(strategy.TIME_STOP_REASON)
-    if not reasons:
-        _maybe_amend_native_protection(
-            client,
-            config,
-            filters_cache.get(str(state.get("current_symbol") or "")),
-            state,
-            current_price,
-        )
-        if state.get("_native_stop_exit_blocked"):
-            return
-    if reasons:
+    if tp_price > 0.0 and current_price >= tp_price:
         close_position(
             client,
             config,
             filters_cache,
             state,
-            "+".join(reasons),
+            "TAKE_PROFIT",
             reference_price=current_price,
         )
+        return
+    if _time_stop_due(config, state):
+        close_position(
+            client,
+            config,
+            filters_cache,
+            state,
+            strategy.TIME_STOP_REASON,
+            reference_price=current_price,
+        )
+        return
+    _maybe_amend_native_protection(
+        client,
+        config,
+        filters_cache.get(str(state.get("current_symbol") or "")),
+        state,
+        current_price,
+    )
 
 
 def should_log_scan_diagnostics(
@@ -5047,97 +4933,48 @@ def run(
             need_setup,
             strategy.confirm_window_bars(config),
         )
-    if config.get("DIRECTION_FILTER_ENABLED", False):
-        butuh_arah = strategy.direction_required_bars(config)
-        jendela_arah = strategy.direction_window_bars(config)
-        if int(config.get("DIRECTION_LOOKBACK_BARS", 0) or 0) < butuh_arah:
-            logger.warning(
-                "DIRECTION_LOOKBACK_BARS=%s lebih kecil dari %d candle yang dibutuhkan EMA "
-                "dan ADX pada %s. Gerbang arah otomatis memakai %d candle, dan kandidat "
-                "tetap ditolak selama riwayat belum cukup. Perbaiki nilai config ini "
-                "supaya live dan backtest memakai jendela yang sama.",
-                config.get("DIRECTION_LOOKBACK_BARS"),
-                butuh_arah,
-                strategy.direction_interval(config),
-                jendela_arah,
-            )
-    if (
-        config.get("DIRECTION_FILTER_ENABLED", False)
-        or config.get("DIRECTION_ZONE_FILTER_ENABLED", False)
-    ):
+    if strategy.confluence_enabled(config):
         try:
             strategy.gate_warmup_bars(config, config["CONFIRM_INTERVAL"])
         except ValueError as exc:
             logger.warning(
                 "%s Backtest akan menolak kombinasi ini sampai diperbaiki.", exc
             )
-    if config.get("DIRECTION_FILTER_ENABLED", False):
+        komponen_aktif = []
+        if config.get("VP_FILTER_ENABLED", True):
+            komponen_aktif.append(
+                f"1.VolumeProfile(bins={int(config.get('VP_BINS', 20) or 20)}, top={float(config.get('VP_HVN_TOP_RATIO', 0.40) or 0.40):g})"
+            )
+        if config.get("FIB_FILTER_ENABLED", True):
+            komponen_aktif.append(
+                f"2.Fibonacci({float(config.get('FIB_RETRACEMENT_MIN', 0.50) or 0.50):g}-{float(config.get('FIB_RETRACEMENT_MAX', 0.786) or 0.786):g})"
+            )
+        if config.get("LIQUIDITY_FILTER_ENABLED", True):
+            komponen_aktif.append(
+                f"3.Liquidity(sweep_lb={int(config.get('LIQUIDITY_SWEEP_LOOKBACK_BARS', 4) or 4)})"
+            )
+        if config.get("FVG_FILTER_ENABLED", True):
+            komponen_aktif.append("4.BullishFVG")
+        if config.get("OB_FILTER_ENABLED", True):
+            komponen_aktif.append("5.BullishOB")
         logger.info(
-            "Layer arah AKTIF (%s): entry lolos hanya kalau candle %s terakhir yang sudah "
-            "tutup memenuhi close > EMA%d, EMA%d > EMA%d, dan ADX%d >= %g. Kalau candle arah "
-            "gagal diambil atau riwayatnya kurang, kandidat DITOLAK (fail closed).",
-            config.get("DIRECTION_INTERVAL", "15m"),
-            config.get("DIRECTION_INTERVAL", "15m"),
-            int(config.get("DIRECTION_EMA_FAST", 20) or 20),
-            int(config.get("DIRECTION_EMA_FAST", 20) or 20),
-            int(config.get("DIRECTION_EMA_SLOW", 50) or 50),
-            int(config.get("DIRECTION_ADX_PERIOD", 14) or 14),
-            float(config.get("DIRECTION_ADX_MIN", 0.0) or 0.0),
+            "Filter The Confluence Code AKTIF: struktur POI %s (%d candle tertutup, "
+            "impuls BoS >= %.2f%%) -> pemicu %s (%d candle tertutup, reaksi bullish=%s, "
+            "close_pos >= %.2f) | Komponen: %s.",
+            strategy.confluence_structure_interval(config),
+            strategy.confluence_structure_window_bars(config),
+            float(config.get("CONFLUENCE_MIN_IMPULSE_PCT", 1.2) or 1.2),
+            config.get("CONFIRM_INTERVAL", "5m"),
+            strategy.confirm_window_bars(config),
+            bool(config.get("CONFLUENCE_REQUIRE_BULLISH_REACTION", True)),
+            float(config.get("CONFLUENCE_MIN_CLOSE_POSITION", 0.55) or 0.55),
+            ", ".join(komponen_aktif) if komponen_aktif else "Hanya BoS",
         )
     else:
         logger.info(
-            "Layer arah NONAKTIF: entry tidak memakai arah M15 sebagai penyaring.",
+            "Filter The Confluence Code NONAKTIF: kandidat yang lolos gerbang 24 jam "
+            "dan proteksi orderbook langsung memenuhi syarat entry."
         )
-    if config.get("DIRECTION_ZONE_FILTER_ENABLED", False):
-        logger.info(
-            "Layer zona demand %s AKTIF: entry hanya boleh kalau harga %s zona demand "
-            "%s (lookback %d candle, tebal zona min %.2f%%, %s, close_pos min %.2f). "
-            "Memakai seri candle arah yang sama, tanpa unduhan tambahan.",
-            config.get("DIRECTION_INTERVAL", "15m"),
-            "wajib berada di dalam"
-            if config.get("DIRECTION_ZONE_REQUIRE_INSIDE_ZONE", False)
-            else "masih di dalam atau dekat",
-            config.get("DIRECTION_INTERVAL", "15m"),
-            strategy.direction_zone_lookback_bars(config),
-            float(config.get("DIRECTION_ZONE_BUFFER_PCT", 1.2) or 0.0),
-            "jarak maks %.2f%% di atas atap zona"
-            % float(config.get("DIRECTION_ZONE_MAX_DISTANCE_PCT", 7.0) or 0.0),
-            float(config.get("DIRECTION_ZONE_MIN_CLOSE_POSITION", 0.35) or 0.0),
-        )
-    if config.get("TIMING_FILTER_ENABLED", False):
-        logger.info(
-            "Layer timing AKTIF (%s): entry lolos hanya kalau candle %s terakhir yang sudah "
-            "tutup memenuhi close > EMA%d, EMA%d > EMA%d, dan ADX%d >= %g. Memakai seri "
-            "konfirmasi yang sama dengan breakout-retest %s.",
-            config.get("CONFIRM_INTERVAL", "5m"),
-            config.get("CONFIRM_INTERVAL", "5m"),
-            int(config.get("TIMING_EMA_FAST", 20) or 20),
-            int(config.get("TIMING_EMA_FAST", 20) or 20),
-            int(config.get("TIMING_EMA_SLOW", 50) or 50),
-            int(config.get("TIMING_ADX_PERIOD", 14) or 14),
-            float(config.get("TIMING_ADX_MIN", 0.0) or 0.0),
-            config.get("CONFIRM_INTERVAL", "5m"),
-        )
-    else:
-        logger.info(
-            "Layer timing %s NONAKTIF: tidak ada pemeriksaan tren mikro.",
-            config.get("CONFIRM_INTERVAL", "5m"),
-        )
-    if config.get("BREAKOUT_RETEST_FILTER_ENABLED", False):
-        logger.info(
-            "Breakout-retest AKTIF (%s): swing high lookback %d, pivot %d/%d, retest "
-            "maksimum %d candle, toleransi %.2f ATR, maksimum %d sentuhan, bullish=%s.",
-            config.get("CONFIRM_INTERVAL", "5m"),
-            int(config.get("BREAKOUT_LOOKBACK_BARS", 30) or 30),
-            int(config.get("BREAKOUT_PIVOT_WING_BARS", 2) or 2),
-            int(config.get("BREAKOUT_PIVOT_WING_BARS", 2) or 2),
-            int(config.get("BREAKOUT_RETEST_MAX_BARS", 12) or 12),
-            float(config.get("BREAKOUT_RETEST_TOLERANCE_ATR", 0.2) or 0.0),
-            int(config.get("BREAKOUT_RETEST_MAX_TOUCHES", 2) or 2),
-            bool(config.get("BREAKOUT_RETEST_REQUIRE_BULLISH", True)),
-        )
-    else:
-        logger.info("Breakout-retest %s NONAKTIF.", config.get("CONFIRM_INTERVAL", "5m"))
     logger.info("=" * 70)
 
     client = None
@@ -5264,76 +5101,30 @@ def run(
             for simbol, raw in raw_map.items()
         }
 
-    direction_cache = DirectionCache(client, config)
-    butuh_candle_arah = bool(
-        config.get("DIRECTION_FILTER_ENABLED", False)
-    ) or bool(config.get("DIRECTION_ZONE_FILTER_ENABLED", False))
-    direction_provider = direction_cache.provider if butuh_candle_arah else None
-    htf_cache = HtfTrendCache(client, config) if strategy.htf_enabled(config) else None
-    htf_provider = htf_cache.provider if htf_cache is not None else None
-    if htf_provider is not None:
-        logger.info(
-            "Gerbang tren HTF %s AKTIF: close > EMA%d > EMA%d dan ADX%d >= %g "
-            "(jendela %d candle tertutup; candle berjalan dikecualikan; jika data "
-            "gagal/kurang, entry ditolak demi keamanan; hasil per simbol di-cache).",
-            strategy.htf_interval(config),
-            int(config.get("HTF_EMA_FAST", 20)),
-            int(config.get("HTF_EMA_SLOW", 50)),
-            int(config.get("HTF_ADX_PERIOD", 14)),
-            float(config.get("HTF_ADX_MIN", 30.0) or 0.0),
-            strategy.htf_window_bars(config),
+    structure_cache = ConfluenceStructureCache(client, config)
+    structure_provider = (
+        structure_cache.provider
+        if (
+            strategy.confluence_enabled(config)
+            and strategy.confluence_structure_interval(config)
+            != str(config.get("CONFIRM_INTERVAL", "5m")).strip().lower()
         )
-    if direction_provider is None:
+        else None
+    )
+    if structure_provider is not None:
+        logger.info(
+            "Cache struktur POI Confluence %s AKTIF (%d candle tertutup, fail closed bila data gagal diambil).",
+            strategy.confluence_structure_interval(config),
+            strategy.confluence_structure_window_bars(config),
+        )
+    elif strategy.confluence_enabled(config):
+        logger.info(
+            "Struktur POI Confluence memakai timeframe konfirmasi %s langsung.",
+            config.get("CONFIRM_INTERVAL", "5m"),
+        )
+    else:
         logger.warning(
-            "Layer arah NONAKTIF (DIRECTION_FILTER_ENABLED=False). "
-            "Entry tidak pernah memakai arah M15 sebagai penyaring.",
-        )
-    else:
-        logger.info(
-            "Layer arah %s AKTIF: close > EMA%d > EMA%d dan ADX%d >= %g "
-            "(jendela %d candle tertutup, fail closed bila data gagal diambil).",
-            strategy.direction_interval(config),
-            int(config.get("DIRECTION_EMA_FAST", 20)),
-            int(config.get("DIRECTION_EMA_SLOW", 50)),
-            int(config.get("DIRECTION_ADX_PERIOD", 14)),
-            float(config.get("DIRECTION_ADX_MIN", 32.0) or 0.0),
-            strategy.direction_window_bars(config),
-        )
-    if bool(config.get("DIRECTION_ZONE_FILTER_ENABLED", False)):
-        logger.info(
-            "Layer zona demand %s AKTIF: close wajib di atas dasar zona%s, candle sinyal "
-            "bullish, close_pos >= %.2f, %s yang dipetakan dari %d candle %s tertutup "
-            "(fail closed bila data gagal diambil).",
-            strategy.direction_interval(config),
-            " dan tidak boleh di atas atap zona"
-            if config.get("DIRECTION_ZONE_REQUIRE_INSIDE_ZONE", False)
-            else "",
-            float(config.get("DIRECTION_ZONE_MIN_CLOSE_POSITION", 0.35) or 0.0),
-            "tanpa toleransi jarak"
-            if config.get("DIRECTION_ZONE_REQUIRE_INSIDE_ZONE", False)
-            else (
-                "jarak maks %.2f%% di atas atap zona"
-                % float(config.get("DIRECTION_ZONE_MAX_DISTANCE_PCT", 7.0) or 0.0)
-            ),
-            strategy.direction_zone_lookback_bars(config),
-            strategy.direction_interval(config),
-        )
-    if not bool(config.get("TIMING_FILTER_ENABLED", False)):
-        logger.info(
-            "Layer timing %s NONAKTIF: tidak ada pemeriksaan tren mikro M5.",
-            strategy.timing_interval(config),
-        )
-    else:
-        logger.info(
-            "Layer timing %s AKTIF: close > EMA%d > EMA%d dan ADX%d >= %g "
-            "(jendela %d candle tertutup; memakai seri konfirmasi yang sama "
-            "dengan breakout-retest M5).",
-            strategy.timing_interval(config),
-            int(config.get("TIMING_EMA_FAST", 20)),
-            int(config.get("TIMING_EMA_SLOW", 50)),
-            int(config.get("TIMING_ADX_PERIOD", 14)),
-            float(config.get("TIMING_ADX_MIN", 18.0) or 0.0),
-            strategy.timing_window_bars(config),
+            "Filter The Confluence Code NONAKTIF (CONFLUENCE_FILTER_ENABLED=False)."
         )
 
     exit_code = 0
@@ -5550,6 +5341,13 @@ def run(
                         )
                     except (KeyError, ValueError):
                         batas_konfirmasi = None
+                    active_structure_provider = (
+                        structure_cache.provider
+                        if strategy.confluence_enabled(scan_config)
+                        and strategy.confluence_structure_interval(scan_config)
+                        != str(scan_config.get("CONFIRM_INTERVAL", "5m")).strip().lower()
+                        else None
+                    )
                     scan_diagnostics = scanner.ScanDiagnostics()
                     best = scanner.find_best_candidate(
                         tickers,
@@ -5558,10 +5356,9 @@ def run(
                         tradable_symbols,
                         klines_fetcher_many=klines_fetcher_many,
                         prewarm_fn=client.prewarm_book_ticker,
-                        direction_provider=direction_provider,
+                        structure_provider=active_structure_provider,
                         diagnostics=scan_diagnostics,
                         confirm_close_time_ms=batas_konfirmasi,
-                        htf_provider=htf_provider,
                     )
                     if best:
                         book = client.get_book_ticker(best.symbol)
@@ -5590,48 +5387,20 @@ def run(
                                 max_chase,
                             )
                         if spread_pct <= config["MAX_SPREAD_PCT"] and chase_ok:
-                            trend_info = ""
-                            if best.htf_trend is not None:
-                                nilai = best.htf_trend.get("values") or {}
-                                trend_info = " | tren HTF %s: %s" % (
-                                    best.htf_trend.get("interval")
-                                    or strategy.htf_interval(config),
-                                    best.htf_trend.get("reason"),
+                            structure_info = ""
+                            if best.confluence_structure is not None:
+                                structure_info = " | struktur %s: %s" % (
+                                    best.confluence_structure.get("interval")
+                                    or strategy.confluence_structure_interval(config),
+                                    best.confluence_structure.get("reason"),
                                 )
-                                if nilai.get("adx") is not None:
-                                    trend_info += " (ADX %.1f)" % float(nilai["adx"])
-                            if best.direction is not None:
-                                nilai = best.direction.get("values") or {}
-                                trend_info += " | arah %s: %s" % (
-                                    best.direction.get("interval")
-                                    or strategy.direction_interval(config),
-                                    best.direction.get("reason"),
-                                )
-                                if nilai.get("adx") is not None:
-                                    trend_info += " (ADX %.1f)" % float(nilai["adx"])
-                            if best.direction_zone is not None:
-                                trend_info += " | zona demand %s: %s" % (
-                                    best.direction_zone.get("interval")
-                                    or strategy.direction_interval(config),
-                                    best.direction_zone.get("reason"),
-                                )
-                            if best.timing is not None:
-                                nilai = best.timing.get("values") or {}
-                                trend_info += " | timing %s: %s" % (
-                                    best.timing.get("interval")
-                                    or strategy.timing_interval(config),
-                                    best.timing.get("reason"),
-                                )
-                                if nilai.get("adx") is not None:
-                                    trend_info += " (ADX %.1f)" % float(nilai["adx"])
                             logger.info(
-                                "Kandidat terpilih: %s (vol24h=%.0f, 24h=%.2f%%, spread=%.3f%%) | %s%s",
+                                "Kandidat terpilih: %s (vol24h=%.0f, spread=%.3f%%) | %s%s",
                                 best.symbol,
                                 best.quote_volume,
-                                best.price_change_pct,
                                 spread_pct,
                                 best.confirm_reason,
-                                trend_info,
+                                structure_info,
                             )
                             min_age = float(config.get("MIN_LISTING_AGE_DAYS", 0) or 0)
                             if min_age > 0:
@@ -5684,11 +5453,14 @@ def run(
                             scan_diagnostics.checked_candidates,
                             scan_diagnostics.market_candidates,
                         )
-                    htf_rejection_logged = (
-                        strategy.htf_enabled(scan_config)
-                        and scan_diagnostics.rejection_counts.get("HTF_TREND", 0) > 0
+                    structure_rejection_logged = (
+                        strategy.confluence_enabled(scan_config)
+                        and scan_diagnostics.rejection_counts.get(
+                            "CONFLUENCE_STRUCTURE", 0
+                        )
+                        > 0
                     )
-                    if not best or htf_rejection_logged:
+                    if not best or structure_rejection_logged:
                         diagnostic_now_ms = state_mod.now_ms()
                         if should_log_scan_diagnostics(
                             scan_diagnostics,

@@ -24,20 +24,11 @@ def config_dasar(cap_jam: float | None = CAP_CONTOH, ekor: str = "datar") -> dic
             "_symbol": "",
             "MODE": "PAPER",
             "CONFIG_UPDATE_MODE": "test",
-            "DIRECTION_FILTER_ENABLED": False,
-            "DIRECTION_ZONE_FILTER_ENABLED": False,
-            "TIMING_FILTER_ENABLED": False,
-            "BREAKOUT_RETEST_FILTER_ENABLED": False,
+            "CONFLUENCE_FILTER_ENABLED": False,
             "BTC_FILTER_ENABLED": False,
-            "ROLLING_VOLUME_FILTER_ENABLED": False,
-            "DEMAND_ZONE_FILTER_ENABLED": False,
-            "PUMP_MIN_24H_CHANGE_PCT": -1000.0,
             "MIN_QUOTE_VOLUME_USDT_24H": 0.0,
-            "USE_ATR_EXIT": True,
-            "USE_TP": False,
-            "USE_STOP_LOSS": True,
-            "USE_BREAKEVEN": True,
-            "USE_TRAILING": True,
+            "CONFLUENCE_SL_BUFFER_PCT": 0.20,
+            "CONFLUENCE_MIN_RR_RATIO": 1.2,
             "USE_RISK_PERCENT": False,
             "POSITION_SIZE_USDT": 100.0,
             "MAX_POSITION_USDT": 100.0,
@@ -224,7 +215,7 @@ def cek_prioritas_exit_harga() -> str:
             f"TIME_STOP muncul di skenario harga {nama} padahal exit harga "
             f"seharusnya lebih dulu: {sorted(alasan)}"
         )
-        assert alasan & {"STOP_LOSS", "BREAKEVEN", "TRAILING_STOP"}, (
+        assert alasan & {"STOP_LOSS", "TAKE_PROFIT"}, (
             f"skenario {nama} tidak menghasilkan exit berbasis harga: {sorted(alasan)}"
         )
         maks = max(t.hold_minutes for t in hasil.trades) / 60.0
@@ -362,6 +353,76 @@ def cek_integrasi_parameter() -> str:
     )
 
 
+def cek_exit_struktural_confluence() -> str:
+    from config.settings_schema import PARAMETER_SCHEMA, REMOVED_PARAMETERS
+    from backtesting.entry_selftest import (
+        _build_confluence_m15_series,
+        _build_confluence_m5_trigger_series,
+    )
+    from market.market_scanner import detect_entry_setup
+
+    kunci_exit_lama = (
+        "USE_ATR_EXIT",
+        "ATR_PERIOD",
+        "ATR_MULT_SL",
+        "ATR_MULT_TP",
+        "ATR_MULT_TRAIL",
+        "ATR_MULT_BE_TRIGGER",
+        "ATR_MULT_BE_LOCK",
+        "ATR_MULT_TRAIL_START",
+        "USE_TP",
+        "TP_PCT",
+        "USE_STOP_LOSS",
+        "SL_PCT",
+        "USE_BREAKEVEN",
+        "BE_TRIGGER_PCT",
+        "BE_LOCK_PCT",
+        "USE_TRAILING",
+        "TRAILING_START_PCT",
+        "TRAILING_STEP_PCT",
+    )
+    for k in kunci_exit_lama:
+        assert k not in PUMP_CONFIG, f"{k} masih ada di PUMP_CONFIG"
+        assert k not in PARAMETER_SCHEMA, f"{k} masih ada di PARAMETER_SCHEMA"
+        assert k not in bt.OVERRIDE_CASTERS, f"{k} masih ada di OVERRIDE_CASTERS"
+        assert k in REMOVED_PARAMETERS, f"{k} belum masuk REMOVED_PARAMETERS"
+
+    for k_baru in ("CONFLUENCE_SL_BUFFER_PCT", "CONFLUENCE_MIN_RR_RATIO", "MAX_HOLD_HOURS"):
+        assert k_baru in PUMP_CONFIG, f"{k_baru} hilang dari PUMP_CONFIG"
+        assert k_baru in PARAMETER_SCHEMA, f"{k_baru} hilang dari PARAMETER_SCHEMA"
+        assert k_baru in bt.OVERRIDE_CASTERS, f"{k_baru} hilang dari OVERRIDE_CASTERS"
+
+    cfg = deepcopy(PUMP_CONFIG)
+    m15 = _build_confluence_m15_series()
+    m5 = _build_confluence_m5_trigger_series()
+    struktur = strategy.evaluate_confluence_structure(m15, cfg)
+    setup = detect_entry_setup(m5, cfg, structure_verdict=struktur)
+    assert setup.ok, f"setup Confluence harus lolos: {setup.reason}"
+    assert setup.sl_price is not None and setup.tp_price is not None
+    assert abs(setup.tp_price - float(struktur["bsl_level"])) < 1e-9, (
+        "TP struktural wajib terkunci di level BSL $$$ (Swing High / Fib 0)"
+    )
+    assert setup.sl_price < float(setup.signal_close) < setup.tp_price
+    assert setup.rr_ratio is not None and setup.rr_ratio >= cfg["CONFLUENCE_MIN_RR_RATIO"]
+
+    cfg_rr_ketat = deepcopy(cfg)
+    cfg_rr_ketat["CONFLUENCE_MIN_RR_RATIO"] = 5.0
+    setup_tolak = detect_entry_setup(m5, cfg_rr_ketat, structure_verdict=struktur)
+    assert not setup_tolak.ok and "R:R" in setup_tolak.reason, (
+        f"setup dengan R:R di bawah CONFLUENCE_MIN_RR_RATIO harus ditolak: {setup_tolak.reason}"
+    )
+
+    lv = strategy.resolve_exit_levels(cfg, setup=setup, entry_price=setup.signal_close)
+    assert lv["source"] == "CONFLUENCE"
+    assert abs(lv["tp_price"] - setup.tp_price) < 1e-9
+    assert abs(lv["sl_price"] - setup.sl_price) < 1e-9
+    return (
+        f"SL={lv['sl_price']:.4f} (-{lv['sl_pct']:.2f}%), "
+        f"TP BSL={lv['tp_price']:.4f} (+{lv['tp_pct']:.2f}%), "
+        f"R:R=1:{setup.rr_ratio:.2f}, {len(kunci_exit_lama)} parameter lama dihapus bersih"
+    )
+
+
 CEK: tuple[tuple[str, Callable[[], str]], ...] = (
     ("aturan_time_stop", cek_aturan_time_stop),
     ("konversi_max_hold", cek_konversi_max_hold),
@@ -372,6 +433,7 @@ CEK: tuple[tuple[str, Callable[[], str]], ...] = (
     ("kapital_berputar", cek_kapital_berputar),
     ("paritas_aturan_live", cek_paritas_aturan_live),
     ("integrasi_parameter", cek_integrasi_parameter),
+    ("exit_struktural_confluence", cek_exit_struktural_confluence),
 )
 
 

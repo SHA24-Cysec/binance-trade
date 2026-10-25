@@ -29,8 +29,37 @@ INTERVAL_MINUTES = {
     "12h": 720,
     "1d": 1440,
 }
-DIRECTION_DEFAULT_INTERVAL = "15m"
+
+STRUCTURE_DEFAULT_INTERVAL = "15m"
 TIMING_DEFAULT_INTERVAL = "5m"
+DIRECTION_DEFAULT_INTERVAL = STRUCTURE_DEFAULT_INTERVAL
+TREND_KLINE_LIMIT = 1000
+
+MS_PER_HOUR = 3_600_000
+TIME_STOP_REASON = "TIME_STOP"
+MAX_HOLD_HOURS_LIMIT = 720.0
+
+CONFLUENCE_DEFAULTS = {
+    "CONFLUENCE_FILTER_ENABLED": True,
+    "CONFLUENCE_STRUCTURE_INTERVAL": STRUCTURE_DEFAULT_INTERVAL,
+    "CONFLUENCE_LOOKBACK_BARS": 60,
+    "CONFLUENCE_MIN_IMPULSE_PCT": 1.2,
+    "CONFLUENCE_ZONE_TOLERANCE_RATIO": 0.06,
+    "VP_FILTER_ENABLED": True,
+    "VP_BINS": 20,
+    "VP_HVN_TOP_RATIO": 0.40,
+    "FIB_FILTER_ENABLED": True,
+    "FIB_RETRACEMENT_MIN": 0.50,
+    "FIB_RETRACEMENT_MAX": 0.786,
+    "LIQUIDITY_FILTER_ENABLED": True,
+    "LIQUIDITY_SWEEP_LOOKBACK_BARS": 4,
+    "FVG_FILTER_ENABLED": True,
+    "OB_FILTER_ENABLED": True,
+    "CONFLUENCE_REQUIRE_BULLISH_REACTION": True,
+    "CONFLUENCE_MIN_CLOSE_POSITION": 0.55,
+    "CONFLUENCE_SL_BUFFER_PCT": 0.20,
+    "CONFLUENCE_MIN_RR_RATIO": 1.2,
+}
 
 
 def interval_ratio(target: str, source: str) -> int:
@@ -111,46 +140,115 @@ def parse_klines(raw: list) -> list[Kline]:
     return out
 
 
+def _interval_from_config(config: dict, key: str, default: str) -> str:
+    raw = str(config.get(key, default) or default).strip().lower()
+    if raw not in INTERVAL_MINUTES:
+        raise ValueError(
+            f"{key} '{raw}' tidak dikenal. Pilihan: "
+            + ", ".join(sorted(INTERVAL_MINUTES, key=INTERVAL_MINUTES.get))
+        )
+    return raw
+
+
+def confirm_interval(config: dict) -> str:
+    return _interval_from_config(config, "CONFIRM_INTERVAL", TIMING_DEFAULT_INTERVAL)
+
+
+def confirm_interval_minutes(config: dict) -> int:
+    return int(INTERVAL_MINUTES[confirm_interval(config)])
+
+
+def confluence_enabled(config: dict) -> bool:
+    return bool(config.get("CONFLUENCE_FILTER_ENABLED", True))
+
+
+def confluence_structure_interval(config: dict) -> str:
+    return _interval_from_config(
+        config, "CONFLUENCE_STRUCTURE_INTERVAL", STRUCTURE_DEFAULT_INTERVAL
+    )
+
+
+def confluence_structure_interval_minutes(config: dict) -> int:
+    return int(INTERVAL_MINUTES[confluence_structure_interval(config)])
+
+
+def confluence_uses_mtf(config: dict) -> bool:
+    if not confluence_enabled(config):
+        return False
+    return confluence_structure_interval(config) != confirm_interval(config)
+
+
+def confluence_structure_required_bars(config: dict) -> int:
+    if not confluence_enabled(config):
+        return 0
+    lookback = int(config.get("CONFLUENCE_LOOKBACK_BARS", 60) or 60)
+    return max(20, min(TREND_KLINE_LIMIT - 1, lookback))
+
+
+def confluence_structure_window_bars(config: dict) -> int:
+    if not confluence_enabled(config):
+        return 0
+    return confluence_structure_required_bars(config)
+
+
+def confluence_trigger_required_bars(config: dict) -> int:
+    if not confluence_enabled(config):
+        return 0
+    sweep_bars = max(2, int(config.get("LIQUIDITY_SWEEP_LOOKBACK_BARS", 4) or 4))
+    if confluence_uses_mtf(config):
+        return max(30, sweep_bars + 12)
+    return max(confluence_structure_required_bars(config), sweep_bars + 15)
+
+
 def required_lookback_bars(config: dict) -> int:
-    rolling_enabled = bool(config.get("ROLLING_VOLUME_FILTER_ENABLED", False))
-    rolling_lookback = (
-        int(config.get("ROLLING_VOLUME_LOOKBACK_BARS", 20) or 20)
-        if rolling_enabled
-        else 0
-    )
-    confirmation_bars = (
-        int(config.get("ROLLING_VOLUME_CONFIRMATION_BARS", 1) or 1)
-        if rolling_enabled
-        else 0
-    )
-    demand_lookback = (
-        int(config.get("DEMAND_LOOKBACK_BARS", 20) or 20) + 1
-        if bool(config.get("DEMAND_ZONE_FILTER_ENABLED", False))
-        else 0
-    )
-    atr_period = max(1, int(config.get("ATR_PERIOD", 14) or 14))
-    timing_lookback = (
-        timing_window_bars(config)
-        if bool(config.get("TIMING_FILTER_ENABLED", False))
-        else 0
-    )
-    breakout_lookback = (
-        breakout_retest_required_bars(config)
-        if bool(config.get("BREAKOUT_RETEST_FILTER_ENABLED", False))
-        else 0
-    )
-    return max(
-        atr_period,
-        rolling_lookback + max(1, confirmation_bars) if rolling_enabled else 0,
-        demand_lookback,
-        timing_lookback,
-        breakout_lookback,
-    )
+    trigger_req = confluence_trigger_required_bars(config)
+    return max(14, trigger_req)
 
 
 def confirm_window_bars(config: dict) -> int:
-    lookback = int(config.get("CONFIRM_LOOKBACK_BARS", 48) or 48)
+    lookback = int(config.get("CONFIRM_LOOKBACK_BARS", 60) or 60)
     return max(1, min(1000, max(lookback, required_lookback_bars(config))))
+
+
+def confluence_warmup_bars(config: dict, interval: str) -> int:
+    if not confluence_enabled(config):
+        return 0
+    source_interval = str(interval).strip().lower()
+    source_minutes = INTERVAL_MINUTES.get(source_interval)
+    if source_minutes is None:
+        raise ValueError(
+            f"Interval simulasi '{interval}' tidak dikenal sehingga candle struktur "
+            "konfluensi tidak bisa dirangkai."
+        )
+    target_interval = confluence_structure_interval(config)
+    target_minutes = int(INTERVAL_MINUTES[target_interval])
+    if target_minutes % source_minutes:
+        raise ValueError(
+            f"CONFLUENCE_STRUCTURE_INTERVAL '{target_interval}' ({target_minutes} menit) "
+            f"harus kelipatan bulat dari interval simulasi '{interval}' ({source_minutes} menit) "
+            "supaya backtest bisa merangkai candle struktur dari data yang sudah diunduh."
+        )
+    rasio = target_minutes // source_minutes
+    return (confluence_structure_window_bars(config) + 1) * rasio + rasio
+
+
+def gate_warmup_bars(config: dict, interval: str) -> int:
+    return confluence_warmup_bars(config, interval)
+
+
+def gate_warmup_ms(config: dict, interval: str = "5m") -> int:
+    menit = int(INTERVAL_MINUTES.get(str(interval), 5))
+    return confluence_warmup_bars(config, str(interval)) * menit * 60_000
+
+
+def native_history_ms(config: dict) -> int:
+    if not confluence_enabled(config):
+        return 0
+    return int(
+        confluence_structure_window_bars(config)
+        * confluence_structure_interval_minutes(config)
+        * 60_000
+    )
 
 
 def resolve_position_notional(config: dict, quote_free: float) -> dict:
@@ -229,411 +327,260 @@ def atr(klines: list[Kline], period: int = 14) -> float | None:
     return result if math.isfinite(result) and result > 0 else None
 
 
-def breakout_retest_enabled(config: dict) -> bool:
-    return bool(config.get("BREAKOUT_RETEST_FILTER_ENABLED", False))
+def compute_confluence_exit_levels(
+    entry_price: float,
+    config: dict,
+    *,
+    poi_low: Optional[float] = None,
+    ob_low: Optional[float] = None,
+    swing_low: Optional[float] = None,
+    sweep_low: Optional[float] = None,
+    bsl_level: Optional[float] = None,
+    swing_high: Optional[float] = None,
+    fallback_allowed: bool = False,
+) -> dict:
+    ep = float(entry_price or 0.0)
+    buffer_pct = max(
+        0.0, float(config.get("CONFLUENCE_SL_BUFFER_PCT", 0.20) or 0.0)
+    )
+    min_rr = max(
+        0.1, float(config.get("CONFLUENCE_MIN_RR_RATIO", 1.2) or 1.2)
+    )
+    if not (math.isfinite(ep) and ep > 0.0):
+        ep = 100.0
 
-
-def breakout_retest_required_bars(config: dict) -> int:
-    if not breakout_retest_enabled(config):
-        return 0
-    lookback = max(5, int(config.get("BREAKOUT_LOOKBACK_BARS", 30) or 30))
-    wing = max(1, int(config.get("BREAKOUT_PIVOT_WING_BARS", 2) or 2))
-    max_bars = max(1, int(config.get("BREAKOUT_RETEST_MAX_BARS", 12) or 12))
-    atr_period = max(2, int(config.get("BREAKOUT_ATR_PERIOD", 14) or 14))
-    return max(
-        lookback + max_bars + 2 * wing + 2,
-        atr_period + max_bars + 2,
-        2 * wing + 4,
+    sw_lo = (
+        float(swing_low)
+        if swing_low is not None and math.isfinite(float(swing_low)) and float(swing_low) > 0.0
+        else 0.0
+    )
+    poi_valid = (
+        float(poi_low)
+        if poi_low is not None
+        and math.isfinite(float(poi_low))
+        and 0.0 < float(poi_low) < ep
+        and (sw_lo <= 0.0 or float(poi_low) > sw_lo + 1e-9)
+        else None
+    )
+    primary_floors = [
+        float(x)
+        for x in (poi_valid, sweep_low)
+        if x is not None and math.isfinite(float(x)) and 0.0 < float(x) < ep
+    ]
+    secondary_floors = [
+        float(x)
+        for x in (ob_low, swing_low)
+        if x is not None and math.isfinite(float(x)) and 0.0 < float(x) < ep
+    ]
+    sl_anchor = (
+        min(primary_floors)
+        if primary_floors
+        else (min(secondary_floors) if secondary_floors else None)
     )
 
+    ceil_candidates = [
+        float(x)
+        for x in (bsl_level, swing_high)
+        if x is not None and math.isfinite(float(x)) and float(x) > ep
+    ]
+    tp_anchor = max(ceil_candidates) if ceil_candidates else None
 
-def _is_pivot_high(klines: list[Kline], index: int, wing: int) -> bool:
-    if index < wing or index + wing >= len(klines):
-        return False
-    level = float(klines[index].high)
-    return all(
-        level > float(klines[pos].high)
-        for pos in range(index - wing, index + wing + 1)
-        if pos != index
-    )
-
-
-def evaluate_breakout_retest(klines: list[Kline], config: dict) -> dict:
-    interval = str(config.get("CONFIRM_INTERVAL", TIMING_DEFAULT_INTERVAL) or TIMING_DEFAULT_INTERVAL)
-    required = breakout_retest_required_bars(config)
-    kosong = {
-        "interval": interval,
-        "bars": len(klines or []),
-        "required": required,
-        "breakout_level": None,
-        "breakout_index": None,
-        "breakout_time": None,
-        "pivot_index": None,
-        "retest_touches": 0,
-        "retest_zone_low": None,
-        "retest_zone_high": None,
-        "breakout_atr": None,
-    }
-    if not breakout_retest_enabled(config):
-        return {
-            "ok": True,
-            "reason": f"filter breakout-retest {interval} nonaktif",
-            **kosong,
-        }
-    jendela = list(klines or [])[-required:]
-    kosong["bars"] = len(jendela)
-    if len(jendela) < required:
-        return {
-            "ok": False,
-            "reason": f"data breakout-retest {interval} kurang: {len(jendela)} dari minimum {required}",
-            **kosong,
-        }
-    for candle in jendela:
-        values = (
-            float(candle.open),
-            float(candle.high),
-            float(candle.low),
-            float(candle.close),
-        )
-        if (
-            not all(math.isfinite(value) and value > 0 for value in values)
-            or values[1] < values[2]
-        ):
+    if sl_anchor is not None and tp_anchor is not None:
+        sl_price = sl_anchor * max(0.0001, 1.0 - buffer_pct / 100.0)
+        tp_price = tp_anchor
+        if not (0.0 < sl_price < ep < tp_price):
             return {
                 "ok": False,
-                "reason": f"data OHLC breakout-retest {interval} tidak valid",
-                **kosong,
+                "stage": "EXIT_STRUCTURE",
+                "reason": (
+                    f"level SL/TP struktural tidak valid terhadap harga {ep:.6g} "
+                    f"(SL {sl_price:.6g}, TP {tp_price:.6g})"
+                ),
+                "sl_price": None,
+                "tp_price": None,
+                "sl_pct": None,
+                "tp_pct": None,
+                "rr_ratio": None,
+                "sl_buffer_pct": buffer_pct,
+                "min_rr_ratio": min_rr,
+                "source": "CONFLUENCE",
             }
-
-    lookback = max(5, int(config.get("BREAKOUT_LOOKBACK_BARS", 30) or 30))
-    wing = max(1, int(config.get("BREAKOUT_PIVOT_WING_BARS", 2) or 2))
-    max_bars = max(1, int(config.get("BREAKOUT_RETEST_MAX_BARS", 12) or 12))
-    atr_period = max(2, int(config.get("BREAKOUT_ATR_PERIOD", 14) or 14))
-    tolerance_atr = max(
-        0.0, float(config.get("BREAKOUT_RETEST_TOLERANCE_ATR", 0.2) or 0.0)
-    )
-    max_touches = max(
-        1, int(config.get("BREAKOUT_RETEST_MAX_TOUCHES", 2) or 2)
-    )
-    require_bullish = bool(config.get("BREAKOUT_RETEST_REQUIRE_BULLISH", True))
-    last_index = len(jendela) - 1
-    earliest_breakout = max(2 * wing + 1, last_index - max_bars)
-    breakout = None
-
-    for breakout_index in range(last_index - 1, earliest_breakout - 1, -1):
-        pivot_start = max(wing, breakout_index - lookback)
-        pivot_stop = breakout_index - wing
-        pivots = [
-            index
-            for index in range(pivot_start, pivot_stop)
-            if _is_pivot_high(jendela, index, wing)
-        ]
-        if not pivots:
-            continue
-        pivot_index = pivots[-1]
-        level = float(jendela[pivot_index].high)
-        breakout_close = float(jendela[breakout_index].close)
-        previous_close = float(jendela[breakout_index - 1].close)
-        if breakout_close > level and previous_close <= level:
-            breakout = (breakout_index, pivot_index, level)
-            break
-
-    if breakout is None:
-        return {
-            "ok": False,
-            "reason": f"belum ada breakout {interval} tertutup di atas swing high terkonfirmasi",
-            **kosong,
-        }
-
-    breakout_index, pivot_index, level = breakout
-    breakout_atr = atr(jendela[: breakout_index + 1], atr_period)
-    if breakout_atr is None:
-        return {
-            "ok": False,
-            "reason": f"ATR{atr_period} saat breakout {interval} belum terdefinisi",
-            **{
-                **kosong,
-                "breakout_level": level,
-                "breakout_index": breakout_index,
-                "breakout_time": int(jendela[breakout_index].close_time),
-            },
-        }
-
-    tolerance = float(breakout_atr) * tolerance_atr
-    zone_low = level - tolerance
-    zone_high = level + tolerance
-    post_breakout = jendela[breakout_index + 1 :]
-    latest = post_breakout[-1]
-    touches = sum(
-        1
-        for candle in post_breakout
-        if float(candle.low) <= zone_high and float(candle.high) >= zone_low
-    )
-    terisi = {
-        **kosong,
-        "breakout_level": level,
-        "breakout_index": breakout_index,
-        "breakout_time": int(jendela[breakout_index].close_time),
-        "pivot_index": pivot_index,
-        "retest_touches": touches,
-        "retest_zone_low": zone_low,
-        "retest_zone_high": zone_high,
-        "breakout_atr": float(breakout_atr),
-    }
-
-    if any(float(candle.close) < zone_low for candle in post_breakout[:-1]):
-        return {
-            "ok": False,
-            "reason": f"struktur breakout {interval} gagal sebelum retest: close turun di bawah {zone_low:.6g}",
-            **terisi,
-        }
-    if not zone_low <= float(latest.low) <= zone_high:
-        return {
-            "ok": False,
-            "reason": (
-                f"candle {interval} terakhir belum retest area {zone_low:.6g} sampai "
-                f"{zone_high:.6g} di sekitar breakout {level:.6g}"
-            ),
-            **terisi,
-        }
-    if float(latest.close) <= level:
-        return {
-            "ok": False,
-            "reason": f"retest {interval} belum bertahan: close {latest.close:.6g} tidak di atas level {level:.6g}",
-            **terisi,
-        }
-    if require_bullish and float(latest.close) <= float(latest.open):
-        return {
-            "ok": False,
-            "reason": f"candle retest {interval} belum bullish",
-            **terisi,
-        }
-    if touches > max_touches:
-        return {
-            "ok": False,
-            "reason": f"area breakout {interval} sudah disentuh {touches} kali, maksimum {max_touches}",
-            **terisi,
-        }
-
-    age = last_index - breakout_index
-    return {
-        "ok": True,
-        "reason": (
-            f"breakout-retest {interval} valid di {level:.6g}: breakout {age} candle lalu, "
-            f"retest {touches}/{max_touches}, toleransi {tolerance_atr:g} ATR"
-        ),
-        **terisi,
-    }
-
-
-def detect_demand_zone(klines: list[Kline], config: dict) -> dict:
-    if not bool(config.get("DEMAND_ZONE_FILTER_ENABLED", False)):
-        return {
-            "ok": True,
-            "reason": "filter zona demand nonaktif",
-            "zone_low": None,
-            "zone_high": None,
-            "distance_pct": None,
-            "close_position": None,
-        }
-
-    lookback = max(3, int(config.get("DEMAND_LOOKBACK_BARS", 20) or 20))
-    buffer_pct = max(0.0, float(config.get("DEMAND_ZONE_BUFFER_PCT", 0.8) or 0.0))
-    max_dist_pct = max(0.0, float(config.get("DEMAND_MAX_DISTANCE_PCT", 3.5) or 0.0))
-    inside = bool(config.get("DEMAND_REQUIRE_INSIDE_ZONE", False))
-    toleransi_pct = 0.0 if inside else max_dist_pct
-    min_close_pos = max(
-        0.0, min(1.0, float(config.get("DEMAND_MIN_CLOSE_POSITION", 0.45) or 0.0))
-    )
-
-    required = lookback + 1
-    if not klines or len(klines) < required:
-        return {
-            "ok": False,
-            "reason": f"data zona demand kurang: {len(klines) if klines else 0} dari minimum {required}",
-            "zone_low": None,
-            "zone_high": None,
-            "distance_pct": None,
-            "close_position": None,
-        }
-
-    prior = klines[-1 - lookback : -1]
-    signal = klines[-1]
-
-    for candle in prior + [signal]:
-        if (
-            not math.isfinite(candle.open)
-            or not math.isfinite(candle.high)
-            or not math.isfinite(candle.low)
-            or not math.isfinite(candle.close)
-            or candle.low <= 0
-            or candle.high < candle.low
-        ):
+        sl_pct = (ep - sl_price) / ep * 100.0
+        tp_pct = (tp_price - ep) / ep * 100.0
+        rr_ratio = (tp_pct / sl_pct) if sl_pct > 0.0 else 0.0
+        if rr_ratio + 1e-9 < min_rr:
             return {
                 "ok": False,
-                "reason": "data OHLC candle untuk zona demand tidak valid",
-                "zone_low": None,
-                "zone_high": None,
-                "distance_pct": None,
-                "close_position": None,
+                "stage": "RISK_REWARD",
+                "reason": (
+                    f"rasio R:R struktural {rr_ratio:.2f} di bawah minimum {min_rr:.2f} "
+                    f"(SL -{sl_pct:.2f}% @ {sl_price:.6g}, TP +{tp_pct:.2f}% @ BSL {tp_price:.6g})"
+                ),
+                "sl_price": sl_price,
+                "tp_price": tp_price,
+                "sl_pct": sl_pct,
+                "tp_pct": tp_pct,
+                "rr_ratio": rr_ratio,
+                "sl_buffer_pct": buffer_pct,
+                "min_rr_ratio": min_rr,
+                "source": "CONFLUENCE",
             }
-
-    window = prior
-    anchor = min(float(k.close) for k in window)
-    band = anchor * (1.0 + buffer_pct / 100.0)
-    shelf = [k for k in window if float(k.close) <= band]
-    if len(shelf) >= 2:
-        zone_low = max(
-            min(float(k.low) for k in shelf), anchor * (1.0 - buffer_pct / 100.0)
-        )
-        base_candles = shelf
-    else:
-        base_candles = window[-min(len(window), 6) :]
-        zone_low = min(float(k.low) for k in base_candles)
-    base_body = min(max(float(k.open), float(k.close)) for k in base_candles)
-    zone_high = max(base_body, zone_low * (1.0 + buffer_pct / 100.0))
-
-    sig_open = float(signal.open)
-    sig_high = float(signal.high)
-    sig_low = float(signal.low)
-    sig_close = float(signal.close)
-    prev_close = float(prior[-1].close)
-
-    candle_range = sig_high - sig_low
-    if candle_range > 0:
-        close_pos = (sig_close - sig_low) / candle_range
-    else:
-        close_pos = 1.0 if sig_close >= prev_close else 0.0
-
-    distance_pct = (
-        max(0.0, (sig_close / zone_high - 1.0) * 100.0) if zone_high > 0 else 0.0
-    )
-
-    if sig_close < zone_low:
         return {
-            "ok": False,
-            "reason": f"zona demand ditembus: close {sig_close:.6g} di bawah dasar demand {zone_low:.6g}",
-            "zone_low": zone_low,
-            "zone_high": zone_high,
-            "distance_pct": distance_pct,
-            "close_position": close_pos,
-        }
-
-    if sig_close < sig_open or sig_close < prev_close:
-        return {
-            "ok": False,
+            "ok": True,
+            "stage": "OK",
             "reason": (
-                f"reaksi demand lemah: candle sinyal bearish/turun "
-                f"(open={sig_open:.6g}, close={sig_close:.6g}, prev={prev_close:.6g})"
+                f"SL struktural {sl_price:.6g} (-{sl_pct:.2f}%), "
+                f"TP BSL {tp_price:.6g} (+{tp_pct:.2f}%), R:R 1:{rr_ratio:.2f}"
             ),
-            "zone_low": zone_low,
-            "zone_high": zone_high,
-            "distance_pct": distance_pct,
-            "close_position": close_pos,
+            "sl_price": sl_price,
+            "tp_price": tp_price,
+            "sl_pct": sl_pct,
+            "tp_pct": tp_pct,
+            "rr_ratio": rr_ratio,
+            "sl_buffer_pct": buffer_pct,
+            "min_rr_ratio": min_rr,
+            "source": "CONFLUENCE",
         }
 
-    if close_pos + 1e-9 < min_close_pos:
+    if not fallback_allowed:
+        if sl_anchor is None:
+            reason = f"level dasar SL struktural (POI/OB) tidak berada di bawah harga {ep:.6g}"
+        else:
+            reason = f"harga close {ep:.6g} sudah melewati target BSL struktural"
         return {
             "ok": False,
-            "reason": (
-                f"dorongan demand kurang: posisi close candle {close_pos:.2f} "
-                f"di bawah minimum {min_close_pos:.2f}"
-            ),
-            "zone_low": zone_low,
-            "zone_high": zone_high,
-            "distance_pct": distance_pct,
-            "close_position": close_pos,
+            "stage": "EXIT_STRUCTURE",
+            "reason": reason,
+            "sl_price": None,
+            "tp_price": None,
+            "sl_pct": None,
+            "tp_pct": None,
+            "rr_ratio": None,
+            "sl_buffer_pct": buffer_pct,
+            "min_rr_ratio": min_rr,
+            "source": "CONFLUENCE",
         }
 
-    if distance_pct > toleransi_pct:
-        return {
-            "ok": False,
-            "reason": (
-                f"harga terlalu jauh di atas zona demand: +{distance_pct:.2f}% "
-                f"di atas batas atas zona {zone_high:.6g}"
-                + (
-                    " (wajib di dalam zona)"
-                    if inside
-                    else f" (batas {max_dist_pct:g}%)"
-                )
-            ),
-            "zone_low": zone_low,
-            "zone_high": zone_high,
-            "distance_pct": distance_pct,
-            "close_position": close_pos,
-        }
-
+    sl_pct = max(2.0, buffer_pct * 10.0)
+    tp_pct = max(3.5, sl_pct * max(1.75, min_rr))
+    sl_price = ep * (1.0 - sl_pct / 100.0)
+    tp_price = ep * (1.0 + tp_pct / 100.0)
+    rr_ratio = tp_pct / sl_pct
     return {
         "ok": True,
+        "stage": "FALLBACK",
         "reason": (
-            f"demand zone valid [{zone_low:.6g}..{zone_high:.6g}], "
-            f"jarak +{distance_pct:.2f}%, close_pos {close_pos:.2f}"
-            + (", di dalam zona" if inside else "")
+            f"level exit struktural cadangan: SL -{sl_pct:.2f}%, "
+            f"TP +{tp_pct:.2f}%, R:R 1:{rr_ratio:.2f}"
         ),
-        "zone_low": zone_low,
-        "zone_high": zone_high,
-        "distance_pct": distance_pct,
-        "close_position": close_pos,
+        "sl_price": sl_price,
+        "tp_price": tp_price,
+        "sl_pct": sl_pct,
+        "tp_pct": tp_pct,
+        "rr_ratio": rr_ratio,
+        "sl_buffer_pct": buffer_pct,
+        "min_rr_ratio": min_rr,
+        "source": "CONFLUENCE",
     }
 
 
-def resolve_exit_levels(config: dict) -> dict:
-    use_atr = bool(config.get("USE_ATR_EXIT", False))
-    if use_atr:
-        period = max(1, int(config.get("ATR_PERIOD", 14) or 14))
-        sl = abs(float(config.get("ATR_MULT_SL", 1.5) or 0.0))
-        tp = abs(float(config.get("ATR_MULT_TP", 3.0) or 0.0))
-        trail = abs(float(config.get("ATR_MULT_TRAIL", 1.0) or 0.0))
-        be_trigger = abs(float(config.get("ATR_MULT_BE_TRIGGER", 1.0) or 0.0))
-        be_lock = abs(float(config.get("ATR_MULT_BE_LOCK", 0.1) or 0.0))
-        trail_start = abs(float(config.get("ATR_MULT_TRAIL_START", 1.5) or 0.0))
-        trail = min(trail, sl)
-        be_trigger = min(be_trigger, trail_start)
-        be_lock = min(be_lock, be_trigger)
-        atr_value = config.get("_atr_value")
-        if atr_value is not None:
-            atr_value = abs(float(atr_value))
-        scale = atr_value if atr_value is not None else 1.0
-        return {
-            "sl_pct": sl * scale,
-            "tp_pct": tp * scale,
-            "be_trigger_pct": be_trigger * scale,
-            "be_lock_pct": be_lock * scale,
-            "trail_start_pct": trail_start * scale,
-            "trail_step_pct": trail * scale,
-            "atr_period": period,
-            "atr_value": atr_value,
-            "atr_mult_sl": sl,
-            "atr_mult_tp": tp,
-            "atr_mult_trail": trail,
-            "source": "ATR",
-            "note": "Level exit berbasis ATR; invariant diterapkan",
-        }
+def resolve_exit_levels(
+    config: dict,
+    setup: Optional[object] = None,
+    entry_price: Optional[float] = None,
+) -> dict:
+    if setup is None:
+        setup = config.get("_setup")
+    ep_raw = (
+        entry_price
+        if entry_price is not None
+        else config.get("_entry_price")
+    )
+    ep = float(ep_raw) if ep_raw is not None and float(ep_raw) > 0 else 0.0
 
-    fixed_sl = abs(float(config.get("SL_PCT", 1.8)))
-    fixed_tp = abs(float(config.get("TP_PCT", 4.0)))
-    fixed_be_trigger = abs(float(config.get("BE_TRIGGER_PCT", 1.0)))
-    fixed_be_lock = abs(float(config.get("BE_LOCK_PCT", 0.15)))
-    fixed_trail_start = abs(float(config.get("TRAILING_START_PCT", 1.5)))
-    fixed_trail_step = abs(float(config.get("TRAILING_STEP_PCT", 0.6)))
-    fixed_trail_step = min(fixed_trail_step, fixed_sl)
-    fixed_be_trigger = min(fixed_be_trigger, fixed_trail_start)
-    fixed_be_lock = min(fixed_be_lock, fixed_be_trigger)
+    buffer_pct = max(
+        0.0, float(config.get("CONFLUENCE_SL_BUFFER_PCT", 0.20) or 0.0)
+    )
+    min_rr = max(
+        0.1, float(config.get("CONFLUENCE_MIN_RR_RATIO", 1.2) or 1.2)
+    )
+
+    sl_price = config.get("_sl_price")
+    tp_price = config.get("_tp_price")
+    sl_pct = config.get("_sl_pct")
+    tp_pct = config.get("_tp_pct")
+
+    if setup is not None:
+        if sl_price is None:
+            sl_price = getattr(setup, "sl_price", None)
+        if tp_price is None:
+            tp_price = getattr(setup, "tp_price", None)
+        if sl_pct is None:
+            sl_pct = getattr(setup, "sl_pct", None)
+        if tp_pct is None:
+            tp_pct = getattr(setup, "tp_pct", None)
+        if ep <= 0.0:
+            sig_c = getattr(setup, "signal_close", None)
+            if sig_c is not None and float(sig_c) > 0:
+                ep = float(sig_c)
+
+    if (
+        ep > 0.0
+        and sl_price is not None
+        and tp_price is not None
+        and 0.0 < float(sl_price) < ep < float(tp_price)
+    ):
+        sl_p = (ep - float(sl_price)) / ep * 100.0
+        tp_p = (float(tp_price) - ep) / ep * 100.0
+        sl_px = float(sl_price)
+        tp_px = float(tp_price)
+    elif (
+        sl_pct is not None
+        and tp_pct is not None
+        and 0.0 < float(sl_pct) < 100.0
+        and float(tp_pct) > 0.0
+    ):
+        sl_p = float(sl_pct)
+        tp_p = float(tp_pct)
+        sl_px = ep * (1.0 - sl_p / 100.0) if ep > 0.0 else None
+        tp_px = ep * (1.0 + tp_p / 100.0) if ep > 0.0 else None
+    else:
+        info = compute_confluence_exit_levels(
+            ep if ep > 0.0 else 100.0,
+            config,
+            poi_low=getattr(setup, "poi_low", None) if setup is not None else None,
+            ob_low=getattr(setup, "ob_low", None) if setup is not None else None,
+            swing_low=getattr(setup, "swing_low", None) if setup is not None else None,
+            sweep_low=getattr(setup, "sweep_low", None) if setup is not None else None,
+            bsl_level=getattr(setup, "bsl_level", None) if setup is not None else None,
+            swing_high=getattr(setup, "swing_high", None) if setup is not None else None,
+            fallback_allowed=True,
+        )
+        sl_p = float(info["sl_pct"])
+        tp_p = float(info["tp_pct"])
+        sl_px = float(info["sl_price"]) if ep > 0.0 else None
+        tp_px = float(info["tp_price"]) if ep > 0.0 else None
+
+    rr_ratio = (tp_p / sl_p) if sl_p > 0.0 else 0.0
     return {
-        "sl_pct": fixed_sl,
-        "tp_pct": fixed_tp,
-        "be_trigger_pct": fixed_be_trigger,
-        "be_lock_pct": fixed_be_lock,
-        "trail_start_pct": fixed_trail_start,
-        "trail_step_pct": fixed_trail_step,
-        "source": "FIXED",
-        "note": "Level exit tetap dari config; invariant diterapkan",
+        "sl_pct": sl_p,
+        "tp_pct": tp_p,
+        "sl_price": sl_px,
+        "tp_price": tp_px,
+        "rr_ratio": rr_ratio,
+        "sl_buffer_pct": buffer_pct,
+        "min_rr_ratio": min_rr,
+        "be_trigger_pct": 0.0,
+        "be_lock_pct": 0.0,
+        "trail_start_pct": 0.0,
+        "trail_step_pct": 0.0,
+        "source": "CONFLUENCE",
+        "note": (
+            f"Level exit struktural Confluence Code: SL -{sl_p:.2f}% "
+            f"(di bawah OB/POI, buffer {buffer_pct:g}%), "
+            f"TP +{tp_p:.2f}% (target BSL $$$), R:R 1:{rr_ratio:.2f}"
+        ),
     }
-
-
-MS_PER_HOUR = 3_600_000
-TIME_STOP_REASON = "TIME_STOP"
-MAX_HOLD_HOURS_LIMIT = 720.0
 
 
 def max_hold_ms(config: dict, interval: str) -> int:
@@ -675,247 +622,38 @@ def time_stop_due(entry_time: int, now_ms: int, cap_ms: int, bar_ms: int) -> boo
     return (now - entry) + int(bar_ms) > int(cap_ms)
 
 
-TREND_KLINE_LIMIT = 1000
-
-DIRECTION_DEFAULTS = {
-    "DIRECTION_FILTER_ENABLED": True,
-    "DIRECTION_INTERVAL": DIRECTION_DEFAULT_INTERVAL,
-    "DIRECTION_EMA_FAST": 20,
-    "DIRECTION_EMA_SLOW": 50,
-    "DIRECTION_ADX_PERIOD": 14,
-    "DIRECTION_ADX_MIN": 32.0,
-    "DIRECTION_LOOKBACK_BARS": 60,
-    "DIRECTION_ZONE_FILTER_ENABLED": True,
-    "DIRECTION_ZONE_LOOKBACK_BARS": 28,
-    "DIRECTION_ZONE_BUFFER_PCT": 1.2,
-    "DIRECTION_ZONE_MAX_DISTANCE_PCT": 7.0,
-    "DIRECTION_ZONE_MIN_CLOSE_POSITION": 0.35,
-    "DIRECTION_ZONE_REQUIRE_INSIDE_ZONE": False,
-}
-
-TIMING_DEFAULTS = {
-    "TIMING_FILTER_ENABLED": True,
-    "TIMING_EMA_FAST": 20,
-    "TIMING_EMA_SLOW": 50,
-    "TIMING_ADX_PERIOD": 14,
-    "TIMING_ADX_MIN": 18.0,
-    "TIMING_LOOKBACK_BARS": 60,
-}
-
-BREAKOUT_RETEST_DEFAULTS = {
-    "BREAKOUT_RETEST_FILTER_ENABLED": True,
-    "BREAKOUT_LOOKBACK_BARS": 30,
-    "BREAKOUT_PIVOT_WING_BARS": 2,
-    "BREAKOUT_ATR_PERIOD": 14,
-    "BREAKOUT_RETEST_TOLERANCE_ATR": 0.2,
-    "BREAKOUT_RETEST_MAX_BARS": 12,
-    "BREAKOUT_RETEST_MAX_TOUCHES": 2,
-    "BREAKOUT_RETEST_REQUIRE_BULLISH": True,
-}
-
-
-def _interval_from_config(config: dict, key: str, default: str) -> str:
-    raw = str(config.get(key, default) or default).strip().lower()
-    if raw not in INTERVAL_MINUTES:
-        raise ValueError(
-            f"{key} '{raw}' tidak dikenal. Pilihan: "
-            + ", ".join(sorted(INTERVAL_MINUTES, key=INTERVAL_MINUTES.get))
-        )
-    return raw
-
-
-def _ema_adx_params(config: dict, prefix: str, default_fast: int, default_slow: int) -> tuple:
-    fast = max(2, int(config.get(f"{prefix}_EMA_FAST", default_fast) or default_fast))
-    slow = max(3, int(config.get(f"{prefix}_EMA_SLOW", default_slow) or default_slow))
-    adx_period = max(2, int(config.get(f"{prefix}_ADX_PERIOD", 14) or 14))
-    adx_min = float(config.get(f"{prefix}_ADX_MIN", 25.0) or 0.0)
-    if adx_min < 0:
-        adx_min = 0.0
-    return fast, slow, adx_period, adx_min
-
-
-def direction_interval(config: dict) -> str:
-    return _interval_from_config(
-        config, "DIRECTION_INTERVAL", DIRECTION_DEFAULT_INTERVAL
-    )
-
-
-def direction_interval_minutes(config: dict) -> int:
-    return int(INTERVAL_MINUTES[direction_interval(config)])
-
-
-def direction_enabled(config: dict) -> bool:
-    return bool(config.get("DIRECTION_FILTER_ENABLED", False))
-
-
-def direction_required_bars(config: dict) -> int:
-    fast, slow, adx_period, _ = _ema_adx_params(config, "DIRECTION", 20, 50)
-    return max(fast, slow, 2 * adx_period + 1)
-
-
-def direction_window_bars(config: dict) -> int:
-    zona = direction_zone_window_bars(config)
-    if not direction_enabled(config):
-        return zona
-    diminta = int(config.get("DIRECTION_LOOKBACK_BARS", 60) or 60)
-    diminta = max(1, min(TREND_KLINE_LIMIT - 1, diminta))
-    return max(direction_required_bars(config), diminta, zona)
-
-
-def htf_interval(config: dict) -> str:
-    return _interval_from_config(config, "HTF_INTERVAL", "1h")
-
-
-def htf_enabled(config: dict) -> bool:
-    return bool(config.get("HTF_FILTER_ENABLED", False))
-
-
-def htf_required_bars(config: dict) -> int:
-    fast, slow, adx_period, _ = _ema_adx_params(config, "HTF", 20, 50)
-    return max(fast, slow, 2 * adx_period + 1)
-
-
-def htf_window_bars(config: dict) -> int:
-    if not htf_enabled(config):
-        return 0
-    diminta = int(config.get("HTF_LOOKBACK_BARS", 60) or 60)
-    diminta = max(1, min(TREND_KLINE_LIMIT - 1, diminta))
-    return max(
-        htf_required_bars(config),
-        diminta,
-        htf_resistance_window_bars(config),
-    )
-
-
-def htf_resistance_enabled(config: dict) -> bool:
-    return htf_enabled(config) and bool(
-        config.get("HTF_RESISTANCE_FILTER_ENABLED", False)
-    )
-
-
-def htf_resistance_window_bars(config: dict) -> int:
-    if not htf_resistance_enabled(config):
-        return 0
-    try:
-        wing = max(1, int(config.get("HTF_RESISTANCE_PIVOT_WING_BARS", 2) or 2))
-        requested = int(config.get("HTF_RESISTANCE_LOOKBACK_BARS", 60) or 60)
-    except (TypeError, ValueError):
-        wing, requested = 2, 60
-    minimum = 2 * wing + 1
-    requested = max(1, min(TREND_KLINE_LIMIT - 1, requested))
-    return max(minimum, requested)
-
-
-def direction_zone_enabled(config: dict) -> bool:
-    return bool(config.get("DIRECTION_ZONE_FILTER_ENABLED", False))
-
-
-def direction_zone_lookback_bars(config: dict) -> int:
-    lookback = int(config.get("DIRECTION_ZONE_LOOKBACK_BARS", 28) or 28)
-    return max(3, min(TREND_KLINE_LIMIT - 2, lookback))
-
-
-def direction_zone_window_bars(config: dict) -> int:
-    if not direction_zone_enabled(config):
-        return 0
-    return direction_zone_lookback_bars(config) + 1
-
-
-def direction_zone_gate_config(config: dict) -> dict:
-    return {
-        "DEMAND_ZONE_FILTER_ENABLED": direction_zone_enabled(config),
-        "DEMAND_LOOKBACK_BARS": direction_zone_lookback_bars(config),
-        "DEMAND_ZONE_BUFFER_PCT": max(
-            0.0, float(config.get("DIRECTION_ZONE_BUFFER_PCT", 1.2) or 0.0)
-        ),
-        "DEMAND_MAX_DISTANCE_PCT": max(
-            0.0, float(config.get("DIRECTION_ZONE_MAX_DISTANCE_PCT", 7.0) or 0.0)
-        ),
-        "DEMAND_REQUIRE_INSIDE_ZONE": bool(
-            config.get("DIRECTION_ZONE_REQUIRE_INSIDE_ZONE", False)
-        ),
-        "DEMAND_MIN_CLOSE_POSITION": float(
-            config.get("DIRECTION_ZONE_MIN_CLOSE_POSITION", 0.35) or 0.0
-        ),
-    }
-
-
-def evaluate_direction_zone(
-    klines: list[Kline],
-    config: dict,
-    signal_close_time_ms: Optional[int] = None,
-) -> dict:
-    interval = direction_interval(config)
-    wajib = direction_zone_window_bars(config)
-    if not direction_zone_enabled(config):
-        return {
-            "ok": True,
-            "reason": f"filter zona demand {interval} nonaktif",
-            "interval": interval,
-            "bars": 0,
-            "required": 0,
-            "zone_low": None,
-            "zone_high": None,
-            "distance_pct": None,
-            "close_position": None,
-        }
-    siap = [
-        k
-        for k in (klines or [])
-        if signal_close_time_ms is None
-        or int(k.close_time) <= int(signal_close_time_ms)
-    ]
-    jendela = siap[-wajib:] if wajib > 0 else siap
-    hasil = detect_demand_zone(jendela, direction_zone_gate_config(config))
-    hasil["interval"] = interval
-    hasil["bars"] = len(jendela)
-    hasil["required"] = wajib
-    return hasil
-
-
-def timing_interval(config: dict) -> str:
-    return _interval_from_config(config, "CONFIRM_INTERVAL", TIMING_DEFAULT_INTERVAL)
-
-
-def timing_interval_minutes(config: dict) -> int:
-    return int(INTERVAL_MINUTES[timing_interval(config)])
-
-
-def timing_enabled(config: dict) -> bool:
-    return bool(config.get("TIMING_FILTER_ENABLED", False))
-
-
-def timing_required_bars(config: dict) -> int:
-    if not timing_enabled(config):
-        return 0
-    fast, slow, adx_period, _ = _ema_adx_params(config, "TIMING", 20, 50)
-    return max(fast, slow, 2 * adx_period + 1)
-
-
-def timing_window_bars(config: dict) -> int:
-    if not timing_enabled(config):
-        return 0
-    diminta = int(config.get("TIMING_LOOKBACK_BARS", 60) or 60)
-    diminta = max(1, min(TREND_KLINE_LIMIT - 1, diminta))
-    return max(timing_required_bars(config), diminta)
+def _resolve_minutes(val: int | str) -> int:
+    if isinstance(val, str):
+        s = val.strip().lower()
+        if s in INTERVAL_MINUTES:
+            return int(INTERVAL_MINUTES[s])
+        return int(s)
+    return int(val)
 
 
 def aggregate_klines(
-    klines: list[Kline], target_minutes: int, source_minutes: Optional[int] = None
+    klines: list[Kline],
+    target_minutes: int | str,
+    source_minutes: Optional[int | str] = None,
 ) -> list[Kline]:
-    target_ms = int(target_minutes) * 60_000
+    target_m = _resolve_minutes(target_minutes)
     if source_minutes is None:
         if len(klines) >= 2:
-            source_minutes = max(
+            source_m = max(
                 1, (int(klines[1].open_time) - int(klines[0].open_time)) // 60_000
             )
         else:
-            source_minutes = int(target_minutes)
-    source_ms = int(source_minutes) * 60_000
+            source_m = target_m
+    else:
+        source_m = _resolve_minutes(source_minutes)
+    if isinstance(target_minutes, str) and isinstance(source_minutes, str) and target_m < source_m:
+        target_m, source_m = source_m, target_m
+    target_ms = target_m * 60_000
+    source_ms = source_m * 60_000
     if source_ms <= 0 or target_ms % source_ms:
         raise ValueError(
-            f"Interval sumber {source_minutes} menit tidak bisa dirangkai ke "
-            f"{target_minutes} menit (harus pembagi bulat)."
+            f"Interval sumber {source_m} menit tidak bisa dirangkai ke "
+            f"{target_m} menit (harus pembagi bulat)."
         )
     rasio = target_ms // source_ms
     if rasio <= 1:
@@ -948,678 +686,644 @@ def aggregate_klines(
     return hasil
 
 
-def ema_series(values: list[float], period: int) -> list[Optional[float]]:
-    period = int(period)
-    n = len(values)
-    out: list[Optional[float]] = [None] * n
-    if period <= 0 or n < period:
-        return out
-    try:
-        seed = sum(float(v) for v in values[:period]) / period
-    except (TypeError, ValueError):
-        return out
-    if not math.isfinite(seed):
-        return out
-    out[period - 1] = seed
-    faktor = 2.0 / (period + 1.0)
-    prev = seed
-    for i in range(period, n):
-        nilai = float(values[i])
-        if not math.isfinite(nilai):
-            return out
-        prev = nilai * faktor + prev * (1.0 - faktor)
-        if not math.isfinite(prev):
-            return out
-        out[i] = prev
-    return out
+def _valid_candle_series(klines: list[Kline]) -> bool:
+    if not klines:
+        return False
+    for candle in klines:
+        try:
+            o = float(candle.open)
+            h = float(candle.high)
+            l = float(candle.low)
+            c = float(candle.close)
+        except (AttributeError, TypeError, ValueError):
+            return False
+        if not all(math.isfinite(x) and x > 0 for x in (o, h, l, c)):
+            return False
+        if h < max(o, c, l) or l > min(o, c, h):
+            return False
+    return True
 
 
-def adx_series(klines: list[Kline], period: int = 14) -> list[Optional[float]]:
-    period = int(period)
-    n = len(klines)
-    out: list[Optional[float]] = [None] * n
-    if period <= 0 or n < 2 * period:
-        return out
-
-    tr = [0.0] * n
-    plus_dm = [0.0] * n
-    minus_dm = [0.0] * n
-    tr[0] = float(klines[0].high) - float(klines[0].low)
-    for i in range(1, n):
-        high = float(klines[i].high)
-        low = float(klines[i].low)
-        prev_high = float(klines[i - 1].high)
-        prev_low = float(klines[i - 1].low)
-        prev_close = float(klines[i - 1].close)
-        if not all(
-            math.isfinite(v) for v in (high, low, prev_high, prev_low, prev_close)
-        ):
-            return out
-        naik = high - prev_high
-        turun = prev_low - low
-        if naik > turun and naik > 0:
-            plus_dm[i] = naik
-        if turun > naik and turun > 0:
-            minus_dm[i] = turun
-        tr[i] = max(high - low, abs(high - prev_close), abs(low - prev_close))
-
-    def _dx(
-        tr_smooth: float, plus_smooth: float, minus_smooth: float
-    ) -> Optional[float]:
-        if tr_smooth <= 0 or not math.isfinite(tr_smooth):
-            return None
-        di_plus = 100.0 * plus_smooth / tr_smooth
-        di_minus = 100.0 * minus_smooth / tr_smooth
-        jumlah = di_plus + di_minus
-        if jumlah <= 0:
-            return 0.0
-        return 100.0 * abs(di_plus - di_minus) / jumlah
-
-    tr_smooth = sum(tr[1 : period + 1])
-    plus_smooth = sum(plus_dm[1 : period + 1])
-    minus_smooth = sum(minus_dm[1 : period + 1])
-
-    dx: list[Optional[float]] = [None] * n
-    dx[period] = _dx(tr_smooth, plus_smooth, minus_smooth)
-    for i in range(period + 1, n):
-        tr_smooth = tr_smooth - tr_smooth / period + tr[i]
-        plus_smooth = plus_smooth - plus_smooth / period + plus_dm[i]
-        minus_smooth = minus_smooth - minus_smooth / period + minus_dm[i]
-        dx[i] = _dx(tr_smooth, plus_smooth, minus_smooth)
-
-    seed_start = 2 * period - 1
-    if n <= seed_start:
-        return out
-    jendela = [dx[i] for i in range(period, seed_start + 1)]
-    if any(v is None for v in jendela):
-        return out
-    adx = sum(float(v) for v in jendela) / period
-    out[seed_start] = adx
-    for i in range(seed_start + 1, n):
-        nilai = dx[i]
-        if nilai is None:
-            return out
-        adx = (adx * (period - 1) + float(nilai)) / period
-        out[i] = adx
-    return out
-
-
-def evaluate_ema_adx(
-    klines: list[Kline],
-    *,
-    interval: str,
-    fast: int,
-    slow: int,
-    adx_period: int,
-    adx_min: float,
-    window: int,
-    required: int,
-    label: str,
-    nama_kunci_jendela: str,
-    signal_close_time_ms: Optional[int] = None,
-) -> dict:
-    if interval not in INTERVAL_MINUTES:
-        return {
-            "ok": False,
-            "reason": (
-                f"Interval '{interval}' tidak dikenal; pilihan: "
-                + ", ".join(sorted(INTERVAL_MINUTES, key=INTERVAL_MINUTES.get))
-            ),
-            "interval": interval,
-            "bars": 0,
-            "required": required,
-            "window": window,
-            "close": None,
-            "ema_fast": None,
-            "ema_slow": None,
-            "adx": None,
-            "checks": {},
-            "values": {},
-        }
-
-    jendela_penuh = max(1, int(window))
-    minimum = max(1, int(required))
-
-    siap = [
-        k
-        for k in (klines or [])
-        if signal_close_time_ms is None
-        or int(k.close_time) <= int(signal_close_time_ms)
-    ]
-    jendela = siap[-jendela_penuh:]
-
-    kosong = {
+def _empty_structure_result(interval: str, bars: int, required: int, window: int) -> dict:
+    return {
+        "ok": False,
+        "reason": "",
+        "stage": "CONFLUENCE_STRUCTURE",
         "interval": interval,
-        "bars": len(jendela),
-        "required": minimum,
-        "window": jendela_penuh,
-        "close": None,
-        "ema_fast": None,
-        "ema_slow": None,
-        "adx": None,
-        "checks": {},
+        "bars": bars,
+        "required": required,
+        "window": window,
+        "swing_low": None,
+        "swing_high": None,
+        "swing_low_time": None,
+        "swing_high_time": None,
+        "bsl_level": None,
+        "impulse_pct": None,
+        "fib_zone_low": None,
+        "fib_zone_high": None,
+        "vp_poc_price": None,
+        "vp_zone_low": None,
+        "vp_zone_high": None,
+        "fvg_zone_low": None,
+        "fvg_zone_high": None,
+        "ob_zone_low": None,
+        "ob_zone_high": None,
+        "poi_zone_low": None,
+        "poi_zone_high": None,
+        "checks": {
+            "bos_impulse": False,
+            "fibonacci": False,
+            "volume_profile": False,
+            "fvg": False,
+            "order_block": False,
+        },
         "values": {},
     }
-    if len(jendela) < minimum:
-        return {
-            "ok": False,
-            "reason": (
-                f"data candle {interval} kurang: {len(jendela)} dari minimum "
-                f"{minimum} (jendela {jendela_penuh}; naikkan {nama_kunci_jendela} "
-                "atau tunggu riwayat bertambah)"
-            ),
-            **kosong,
-        }
-
-    for candle in jendela:
-        if (
-            not math.isfinite(float(candle.close))
-            or float(candle.close) <= 0
-            or float(candle.high) < float(candle.low)
-        ):
-            return {"ok": False, "reason": f"candle {interval} tidak valid", **kosong}
-
-    closes = [float(k.close) for k in jendela]
-    ema_fast_series = ema_series(closes, fast)
-    ema_slow_series = ema_series(closes, slow)
-    adx_values = (
-        adx_series(jendela, adx_period) if adx_min > 0 else [None] * len(jendela)
-    )
-    ema_fast = ema_fast_series[-1]
-    ema_slow = ema_slow_series[-1]
-    adx_now = adx_values[-1]
-    close_now = closes[-1]
-
-    terisi = {
-        "interval": interval,
-        "bars": len(jendela),
-        "required": minimum,
-        "window": jendela_penuh,
-        "close": close_now,
-        "ema_fast": ema_fast,
-        "ema_slow": ema_slow,
-        "adx": adx_now,
-        "checks": {},
-        "values": {
-            "ema_fast": ema_fast,
-            "ema_slow": ema_slow,
-            "adx": adx_now,
-            "close": close_now,
-        },
-    }
-
-    if ema_fast is None or ema_slow is None:
-        return {
-            "ok": False,
-            "reason": (
-                f"EMA {interval} belum terdefinisi pada jendela "
-                f"{len(jendela)} candle (butuh EMA cepat {fast} dan "
-                f"EMA lambat {slow})"
-            ),
-            **terisi,
-        }
-
-    if adx_min > 0 and adx_now is None:
-        return {
-            "ok": False,
-            "reason": (
-                f"ADX {adx_period} {interval} tidak bisa dihitung dari "
-                "jendela ini (rentang harga nol atau data rusak)"
-            ),
-            **terisi,
-        }
-
-    harga_di_atas = close_now > float(ema_fast)
-    susunan_naik = float(ema_fast) > float(ema_slow)
-    trend_kuat = True if adx_min <= 0 else bool(float(adx_now) >= adx_min)
-
-    checks = {
-        "harga_di_atas_ema_cepat": harga_di_atas,
-        "ema_cepat_di_atas_ema_lambat": susunan_naik,
-        "adx_di_atas_ambang": trend_kuat,
-    }
-    ringkas = (
-        f"close {close_now:.6g} vs EMA{fast} {float(ema_fast):.6g} vs "
-        f"EMA{slow} {float(ema_slow):.6g}"
-        + (f", ADX{adx_period} {float(adx_now):.1f}" if adx_now is not None else "")
-    )
-
-    if not harga_di_atas:
-        return {
-            "ok": False,
-            "reason": (
-                f"{label} {interval} turun: close {close_now:.6g} di bawah "
-                f"EMA{fast} {float(ema_fast):.6g} ({ringkas})"
-            ),
-            **{**terisi, "checks": checks},
-        }
-    if not susunan_naik:
-        return {
-            "ok": False,
-            "reason": (
-                f"struktur {label} {interval} belum naik: EMA{fast} "
-                f"{float(ema_fast):.6g} di bawah EMA{slow} "
-                f"{float(ema_slow):.6g} ({ringkas})"
-            ),
-            **{**terisi, "checks": checks},
-        }
-    if not trend_kuat:
-        return {
-            "ok": False,
-            "reason": (
-                f"{label} {interval} lemah: ADX{adx_period} "
-                f"{float(adx_now):.1f} di bawah ambang {adx_min:g} ({ringkas})"
-            ),
-            **{**terisi, "checks": checks},
-        }
-
-    return {
-        "ok": True,
-        "reason": f"{label} {interval} naik dan kuat ({ringkas})",
-        **{**terisi, "checks": checks},
-    }
 
 
-def evaluate_direction(
+def evaluate_confluence_structure(
     klines: list[Kline],
     config: dict,
     signal_close_time_ms: Optional[int] = None,
+    *,
+    is_single_timeframe: bool = False,
 ) -> dict:
-    interval = direction_interval(config)
-    if not direction_enabled(config):
-        return {
-            "ok": True,
-            "reason": f"filter arah {interval} nonaktif",
-            "interval": interval,
-            "bars": 0,
-            "required": 0,
-            "window": 0,
-            "close": None,
-            "ema_fast": None,
-            "ema_slow": None,
-            "adx": None,
-            "checks": {},
-            "values": {},
-        }
-    fast, slow, adx_period, adx_min = _ema_adx_params(config, "DIRECTION", 20, 50)
-    return evaluate_ema_adx(
-        klines,
-        interval=interval,
-        fast=fast,
-        slow=slow,
-        adx_period=adx_period,
-        adx_min=adx_min,
-        window=direction_window_bars(config),
-        required=direction_required_bars(config),
-        label="arah",
-        nama_kunci_jendela="DIRECTION_LOOKBACK_BARS",
-        signal_close_time_ms=signal_close_time_ms,
+    interval = (
+        confirm_interval(config)
+        if is_single_timeframe
+        else confluence_structure_interval(config)
     )
+    window = confluence_structure_window_bars(config)
+    required = confluence_structure_required_bars(config)
+    if not confluence_enabled(config):
+        res = _empty_structure_result(interval, 0, 0, 0)
+        res["ok"] = True
+        res["reason"] = f"filter Confluence Code {interval} nonaktif"
+        res["stage"] = "DISABLED"
+        return res
 
-
-def evaluate_htf(
-    klines: list[Kline],
-    config: dict,
-    signal_close_time_ms: Optional[int] = None,
-) -> dict:
-    interval = htf_interval(config)
-    if not htf_enabled(config):
-        return {
-            "ok": True,
-            "reason": f"filter tren HTF {interval} nonaktif",
-            "interval": interval,
-            "bars": 0,
-            "required": 0,
-            "window": 0,
-            "close": None,
-            "ema_fast": None,
-            "ema_slow": None,
-            "adx": None,
-            "checks": {},
-            "values": {},
-        }
-    fast, slow, adx_period, adx_min = _ema_adx_params(config, "HTF", 20, 50)
-    window = htf_window_bars(config)
-    required = htf_required_bars(config)
-    interval_ms = interval_to_ms(interval)
     siap = [
         k
         for k in (klines or [])
         if signal_close_time_ms is None
         or int(k.close_time) <= int(signal_close_time_ms)
     ]
-    jendela = siap[-window:]
-    hasil = evaluate_ema_adx(
-        jendela,
-        interval=interval,
-        fast=fast,
-        slow=slow,
-        adx_period=adx_period,
-        adx_min=adx_min,
-        window=window,
-        required=required,
-        label="tren HTF",
-        nama_kunci_jendela="HTF_LOOKBACK_BARS",
+    jendela = siap[-window:] if window > 0 else siap
+    dasar = _empty_structure_result(interval, len(jendela), required, window)
+
+    if len(jendela) < required:
+        dasar["reason"] = (
+            f"data candle struktur {interval} kurang: {len(jendela)} dari minimum {required}"
+        )
+        dasar["stage"] = "HISTORY_CONFIRM"
+        return dasar
+
+    if not _valid_candle_series(jendela):
+        dasar["reason"] = f"data OHLC candle struktur {interval} tidak valid"
+        dasar["stage"] = "CONFLUENCE_STRUCTURE"
+        return dasar
+
+    hist = jendela[:-1] if is_single_timeframe else jendela
+    n = len(hist)
+    lo_end = n - 4 if is_single_timeframe else n - 3
+    if lo_end < 6:
+        dasar["reason"] = f"rentang candle {interval} belum cukup untuk struktur swing"
+        return dasar
+
+    lo_start = max(2, int(n * 0.08))
+    if lo_start >= lo_end:
+        lo_start = 1
+    lo_idx = min(range(lo_start, lo_end), key=lambda idx: float(hist[idx].low))
+    swing_low = float(hist[lo_idx].low)
+    swing_low_time = int(hist[lo_idx].open_time)
+
+    hi_end = n - 1 if not is_single_timeframe else n - 2
+    if lo_idx + 2 >= hi_end:
+        dasar["reason"] = f"belum terbentuk swing high setelah swing low pada {interval}"
+        return dasar
+
+    hi_idx = max(range(lo_idx + 2, hi_end), key=lambda idx: float(hist[idx].high))
+    swing_high = float(hist[hi_idx].high)
+    swing_high_time = int(hist[hi_idx].close_time)
+    impulse = swing_high - swing_low
+    impulse_pct = (impulse / swing_low * 100.0) if swing_low > 0 else 0.0
+
+    min_impulse_pct = max(
+        0.1, float(config.get("CONFLUENCE_MIN_IMPULSE_PCT", 1.2) or 1.2)
     )
+    prior_high = max(float(c.high) for c in hist[: lo_idx + 1])
+    bos_ok = swing_high > prior_high and impulse_pct >= min_impulse_pct
 
-    if len(jendela) >= required:
-        for sebelumnya, sekarang in zip(jendela, jendela[1:]):
-            if (
-                int(sekarang.open_time) - int(sebelumnya.open_time) != interval_ms
-                or int(sebelumnya.close_time) != int(sebelumnya.open_time) + interval_ms - 1
-                or int(sekarang.close_time) != int(sekarang.open_time) + interval_ms - 1
-            ):
-                return {
-                    **hasil,
-                    "ok": False,
-                    "reason": (
-                        f"data candle HTF {interval} memiliki celah atau waktu candle "
-                        "tidak valid (ditolak demi keamanan)"
-                    ),
-                }
+    dasar.update(
+        swing_low=swing_low,
+        swing_high=swing_high,
+        swing_low_time=swing_low_time,
+        swing_high_time=swing_high_time,
+        bsl_level=swing_high,
+        impulse_pct=impulse_pct,
+    )
+    if not bos_ok:
+        if swing_high <= prior_high:
+            dasar["reason"] = (
+                f"struktur {interval} belum Break of Structure (BoS): swing high "
+                f"{swing_high:.6g} belum menembus high sebelumnya {prior_high:.6g}"
+            )
+        else:
+            dasar["reason"] = (
+                f"impuls BoS {interval} terlalu lemah: +{impulse_pct:.2f}% "
+                f"di bawah minimum +{min_impulse_pct:g}%"
+            )
+        return dasar
 
-    if signal_close_time_ms is not None:
-        terakhir_seharusnya = (
-            ((int(signal_close_time_ms) + 1) // interval_ms) - 1
-        ) * interval_ms
-        if not jendela or int(jendela[-1].open_time) != terakhir_seharusnya:
-            return {
-                **hasil,
-                "ok": False,
-                "reason": (
-                    f"candle HTF {interval} tertutup terbaru tidak tersedia pada "
-                    f"waktu sinyal (open_time terakhir "
-                    f"{int(jendela[-1].open_time) if jendela else 'tidak ada'}, "
-                    f"seharusnya {terakhir_seharusnya}; ditolak demi keamanan)"
-                ),
-            }
-    return hasil
+    dasar["checks"]["bos_impulse"] = True
+
+    fib_on = bool(config.get("FIB_FILTER_ENABLED", True))
+    fib_min = float(config.get("FIB_RETRACEMENT_MIN", 0.50) or 0.50)
+    fib_max = float(config.get("FIB_RETRACEMENT_MAX", 0.786) or 0.786)
+    if fib_min > fib_max:
+        fib_min, fib_max = fib_max, fib_min
+    fib_min = max(0.1, min(0.95, fib_min))
+    fib_max = max(fib_min + 0.05, min(0.99, fib_max))
+
+    fib_zone_high = swing_high - impulse * fib_min if fib_on else swing_high
+    fib_zone_low = swing_high - impulse * fib_max if fib_on else swing_low
+    tol_ratio = max(
+        0.0, float(config.get("CONFLUENCE_ZONE_TOLERANCE_RATIO", 0.06) or 0.06)
+    )
+    tol = impulse * tol_ratio
+
+    pullback = hist[hi_idx + 1 :]
+    if not pullback:
+        dasar["reason"] = f"belum ada fase pullback setelah BoS pada {interval}"
+        return dasar
+
+    if any(float(c.close) < fib_zone_low - tol for c in pullback):
+        dasar["fib_zone_low"] = fib_zone_low
+        dasar["fib_zone_high"] = fib_zone_high
+        dasar["stage"] = "FIBONACCI"
+        dasar["reason"] = (
+            f"zona Fibonacci {interval} [{fib_zone_low:.6g}..{fib_zone_high:.6g}] "
+            "ditembus ke bawah oleh penutupan candle (struktur batal)"
+        )
+        return dasar
+
+    dasar["fib_zone_low"] = fib_zone_low
+    dasar["fib_zone_high"] = fib_zone_high
+    dasar["checks"]["fibonacci"] = True
+
+    vp_on = bool(config.get("VP_FILTER_ENABLED", True))
+    vp_bins = max(5, min(100, int(config.get("VP_BINS", 20) or 20)))
+    vp_top_ratio = max(
+        0.05, min(1.0, float(config.get("VP_HVN_TOP_RATIO", 0.40) or 0.40))
+    )
+    leg = hist[lo_idx : hi_idx + 1]
+    bin_size = impulse / vp_bins
+    bins = [0.0] * vp_bins
+    for candle in leg:
+        vol = (
+            float(candle.quote_volume)
+            if float(candle.quote_volume) > 0
+            else float(candle.volume)
+        )
+        if vol <= 0:
+            vol = 1.0
+        b0 = max(0, min(vp_bins - 1, int((float(candle.low) - swing_low) / bin_size)))
+        b1 = max(0, min(vp_bins - 1, int((float(candle.high) - swing_low) / bin_size)))
+        span = max(1, b1 - b0 + 1)
+        for b in range(b0, b1 + 1):
+            bins[b] += vol / span
+
+    ranked_bins = sorted(range(vp_bins), key=lambda b: bins[b], reverse=True)
+    poc_bin = ranked_bins[0]
+    vp_poc_price = swing_low + (poc_bin + 0.5) * bin_size
+    top_count = max(1, int(math.ceil(vp_bins * vp_top_ratio)))
+    hvn_bins = ranked_bins[:top_count]
+
+    vp_match = None
+    for b in hvn_bins:
+        b_lo = swing_low + b * bin_size
+        b_hi = b_lo + bin_size
+        if min(b_hi, fib_zone_high + tol) >= max(b_lo, fib_zone_low - tol):
+            vp_match = (b_lo, b_hi)
+            break
+
+    dasar["vp_poc_price"] = vp_poc_price
+    if vp_on:
+        if vp_match is None:
+            dasar["stage"] = "VOLUME_PROFILE"
+            dasar["reason"] = (
+                f"Volume Profile {interval}: tidak ada High Volume Node pada zona "
+                f"diskon Fibonacci [{fib_zone_low:.6g}..{fib_zone_high:.6g}] "
+                f"(POC berada di {vp_poc_price:.6g})"
+            )
+            return dasar
+        dasar["vp_zone_low"] = vp_match[0]
+        dasar["vp_zone_high"] = vp_match[1]
+    else:
+        dasar["vp_zone_low"] = fib_zone_low
+        dasar["vp_zone_high"] = fib_zone_high
+    dasar["checks"]["volume_profile"] = True
+
+    fvg_on = bool(config.get("FVG_FILTER_ENABLED", True))
+    fvg_match = None
+    for k in range(lo_idx + 1, hi_idx):
+        low_next = float(hist[k + 1].low)
+        high_prev = float(hist[k - 1].high)
+        if low_next > high_prev:
+            f_lo, f_hi = high_prev, low_next
+            if min(f_hi, fib_zone_high + tol) >= max(f_lo, fib_zone_low - tol):
+                fvg_match = (f_lo, f_hi)
+
+    if fvg_on:
+        if fvg_match is None:
+            dasar["stage"] = "FVG"
+            dasar["reason"] = (
+                f"Fair Value Gap (FVG) bullish {interval} tidak ditemukan pada "
+                f"zona diskon [{fib_zone_low:.6g}..{fib_zone_high:.6g}]"
+            )
+            return dasar
+        dasar["fvg_zone_low"] = fvg_match[0]
+        dasar["fvg_zone_high"] = fvg_match[1]
+    else:
+        dasar["fvg_zone_low"] = fib_zone_low
+        dasar["fvg_zone_high"] = fib_zone_high
+    dasar["checks"]["fvg"] = True
+
+    ob_on = bool(config.get("OB_FILTER_ENABLED", True))
+    ob_match = None
+    for k in range(lo_idx, hi_idx):
+        c = hist[k]
+        if float(c.close) <= float(c.open) or k == lo_idx:
+            horizon = hist[k + 1 : min(hi_idx + 1, k + 4)]
+            if horizon and max(float(x.close) for x in horizon) > float(c.high):
+                o_lo = float(c.low)
+                o_hi = max(float(c.open), float(c.close))
+                if min(o_hi, fib_zone_high + tol) >= max(o_lo, fib_zone_low - tol):
+                    ob_match = (o_lo, o_hi)
+
+    if ob_on:
+        if ob_match is None:
+            dasar["stage"] = "ORDER_BLOCK"
+            dasar["reason"] = (
+                f"Order Block (OB) bullish {interval} tidak ditemukan pada "
+                f"zona diskon [{fib_zone_low:.6g}..{fib_zone_high:.6g}]"
+            )
+            return dasar
+        dasar["ob_zone_low"] = ob_match[0]
+        dasar["ob_zone_high"] = ob_match[1]
+    else:
+        dasar["ob_zone_low"] = fib_zone_low
+        dasar["ob_zone_high"] = fib_zone_high
+    dasar["checks"]["order_block"] = True
+
+    poi_low = fib_zone_low - tol
+    poi_high = fib_zone_high + tol
+    dasar["poi_zone_low"] = poi_low
+    dasar["poi_zone_high"] = poi_high
+    dasar["poi_low"] = poi_low
+    dasar["poi_high"] = poi_high
+    dasar["fib_low"] = fib_zone_low
+    dasar["fib_high"] = fib_zone_high
+    dasar["vp_poc"] = vp_poc_price
+    dasar["vp_hvn_low"] = dasar["vp_zone_low"]
+    dasar["vp_hvn_high"] = dasar["vp_zone_high"]
+    dasar["fvg_low"] = dasar["fvg_zone_low"]
+    dasar["fvg_high"] = dasar["fvg_zone_high"]
+    dasar["ob_low"] = dasar["ob_zone_low"]
+    dasar["ob_high"] = dasar["ob_zone_high"]
+    dasar["values"] = {
+        "swing_low": swing_low,
+        "swing_high": swing_high,
+        "bsl_level": swing_high,
+        "fib_zone_low": fib_zone_low,
+        "fib_zone_high": fib_zone_high,
+        "vp_poc_price": vp_poc_price,
+        "vp_zone_low": dasar["vp_zone_low"],
+        "vp_zone_high": dasar["vp_zone_high"],
+        "fvg_zone_low": dasar["fvg_zone_low"],
+        "fvg_zone_high": dasar["fvg_zone_high"],
+        "ob_zone_low": dasar["ob_zone_low"],
+        "ob_zone_high": dasar["ob_zone_high"],
+        "poi_zone_low": poi_low,
+        "poi_zone_high": poi_high,
+    }
+    dasar["ok"] = True
+    dasar["stage"] = "OK"
+    dasar["reason"] = (
+        f"struktur konfluensi {interval} valid: BoS +{impulse_pct:.2f}%, "
+        f"POI [{poi_low:.6g}..{poi_high:.6g}], VP POC {vp_poc_price:.6g}, "
+        f"FVG [{dasar['fvg_zone_low']:.6g}..{dasar['fvg_zone_high']:.6g}], "
+        f"OB [{dasar['ob_zone_low']:.6g}..{dasar['ob_zone_high']:.6g}]"
+    )
+    return dasar
 
 
-def evaluate_htf_resistance(
+def evaluate_confluence_trigger(
     klines: list[Kline],
     config: dict,
-    signal_price: float,
+    structure: Optional[dict] = None,
     signal_close_time_ms: Optional[int] = None,
+    *,
+    structure_verdict: Optional[dict] = None,
 ) -> dict:
-    interval = htf_interval(config)
-    wing = max(1, int(config.get("HTF_RESISTANCE_PIVOT_WING_BARS", 2) or 2))
-    window = htf_resistance_window_bars(config)
-    kosong = {
-        "interval": interval,
-        "bars": 0,
-        "required": window,
-        "window": window,
-        "resistance_price": None,
-        "resistance_open_time": None,
-        "signal_price": None,
-        "distance_pct": None,
-        "minimum_room_pct": None,
-    }
-    if not htf_resistance_enabled(config):
-        return {
-            "ok": True,
-            "reason": f"filter resistance HTF {interval} nonaktif",
-            **kosong,
-        }
-
-    try:
-        minimum_room = float(config.get("HTF_RESISTANCE_MIN_ROOM_PCT", 1.5))
-        price = float(signal_price)
-    except (TypeError, ValueError):
-        return {
-            "ok": False,
-            "reason": "harga sinyal atau ambang ruang resistance HTF tidak valid",
-            **kosong,
-        }
-    if not math.isfinite(minimum_room) or minimum_room < 0:
-        return {
-            "ok": False,
-            "reason": "ambang ruang resistance HTF harus finite dan tidak negatif",
-            **kosong,
-        }
-    if not math.isfinite(price) or price <= 0:
-        return {
-            "ok": False,
-            "reason": "harga sinyal untuk resistance HTF harus finite dan lebih besar dari nol",
-            **kosong,
-        }
-    if window < 2 * wing + 1:
-        return {
-            "ok": False,
-            "reason": (
-                f"lookback resistance HTF {window} lebih kecil dari minimum "
-                f"{2 * wing + 1} candle untuk pivot dengan sayap {wing}"
-            ),
-            **kosong,
-        }
-
-    interval_ms = interval_to_ms(interval)
-    try:
-        siap = [
-            k
-            for k in (klines or [])
-            if signal_close_time_ms is None
-            or int(k.close_time) <= int(signal_close_time_ms)
-        ]
-    except (AttributeError, TypeError, ValueError, OverflowError):
-        return {
-            "ok": False,
-            "reason": f"waktu candle resistance HTF {interval} tidak valid",
-            **kosong,
-        }
-    jendela = siap[-window:]
-    dasar = {**kosong, "bars": len(jendela)}
-    if len(jendela) < window:
-        return {
-            "ok": False,
-            "reason": (
-                f"data resistance HTF {interval} kurang: {len(jendela)} "
-                f"dari minimum {window} candle tertutup"
-            ),
-            **dasar,
-        }
-
-    for index, candle in enumerate(jendela):
-        try:
-            open_time = int(candle.open_time)
-            close_time = int(candle.close_time)
-            values = tuple(
-                float(value)
-                for value in (candle.open, candle.high, candle.low, candle.close)
-            )
-        except (AttributeError, TypeError, ValueError, OverflowError):
-            return {
-                "ok": False,
-                "reason": f"data candle resistance HTF {interval} tidak valid",
-                **dasar,
-            }
-        candle_open, candle_high, candle_low, candle_close = values
-        if (
-            not all(math.isfinite(value) and value > 0 for value in values)
-            or candle_high < max(candle_open, candle_close, candle_low)
-            or candle_low > min(candle_open, candle_close, candle_high)
-            or close_time != open_time + interval_ms - 1
-            or (
-                index > 0
-                and open_time - int(jendela[index - 1].open_time) != interval_ms
-            )
-        ):
-            return {
-                "ok": False,
-                "reason": (
-                    f"data candle resistance HTF {interval} memiliki OHLC/waktu "
-                    "tidak valid atau celah (ditolak demi keamanan)"
-                ),
-                **dasar,
-            }
-
-    if signal_close_time_ms is not None:
-        terakhir_seharusnya = (
-            ((int(signal_close_time_ms) + 1) // interval_ms) - 1
-        ) * interval_ms
-        if int(jendela[-1].open_time) != terakhir_seharusnya:
-            return {
-                "ok": False,
-                "reason": (
-                    f"candle resistance HTF {interval} tertutup terbaru tidak "
-                    f"tersedia pada waktu sinyal (open_time terakhir "
-                    f"{int(jendela[-1].open_time)}, seharusnya "
-                    f"{terakhir_seharusnya}; ditolak demi keamanan)"
-                ),
-                **dasar,
-            }
-
-    level_di_atas = [
-        index
-        for index in range(wing, len(jendela) - wing)
-        if _is_pivot_high(jendela, index, wing)
-        and float(jendela[index].high) >= price
+    if structure is None and structure_verdict is not None:
+        structure = structure_verdict
+    interval = confirm_interval(config)
+    required = confluence_trigger_required_bars(config)
+    siap = [
+        k
+        for k in (klines or [])
+        if signal_close_time_ms is None
+        or int(k.close_time) <= int(signal_close_time_ms)
     ]
-    if not level_di_atas:
-        return {
-            "ok": True,
-            "reason": (
-                f"tidak ada pivot resistance HTF {interval} terkonfirmasi di atas "
-                "harga sinyal"
-            ),
-            **dasar,
-            "signal_price": price,
-            "minimum_room_pct": minimum_room,
-        }
+    window = confirm_window_bars(config)
+    jendela = siap[-window:] if window > 0 else siap
 
-    pivot_index = min(
-        level_di_atas,
-        key=lambda index: (float(jendela[index].high), -index),
+    kosong = {
+        "ok": False,
+        "reason": "",
+        "stage": "SETUP_CONFIRM",
+        "interval": interval,
+        "bars": len(jendela),
+        "required": required,
+        "window": window,
+        "ssl_level": None,
+        "sweep_low": None,
+        "bsl_level": None,
+        "close_position": None,
+        "signal_close": None,
+        "signal_close_time": None,
+        "poi_zone_low": None,
+        "poi_zone_high": None,
+        "sl_price": None,
+        "tp_price": None,
+        "sl_pct": None,
+        "tp_pct": None,
+        "rr_ratio": None,
+        "checks": {
+            "liquidity_sweep": False,
+            "bullish_reaction": False,
+            "risk_reward": False,
+        },
+        "structure": structure,
+    }
+
+    if not confluence_enabled(config):
+        kosong["ok"] = True
+        kosong["stage"] = "DISABLED"
+        kosong["reason"] = f"trigger Confluence Code {interval} nonaktif"
+        if jendela:
+            sig_c = float(jendela[-1].close)
+            kosong["signal_close"] = sig_c
+            kosong["signal_close_time"] = int(jendela[-1].close_time)
+            fb_exit = compute_confluence_exit_levels(
+                sig_c, config, fallback_allowed=True
+            )
+            kosong["sl_price"] = fb_exit["sl_price"]
+            kosong["tp_price"] = fb_exit["tp_price"]
+            kosong["sl_pct"] = fb_exit["sl_pct"]
+            kosong["tp_pct"] = fb_exit["tp_pct"]
+            kosong["rr_ratio"] = fb_exit["rr_ratio"]
+        return kosong
+
+    if len(jendela) < required:
+        kosong["stage"] = "HISTORY_CONFIRM"
+        kosong["reason"] = (
+            f"data candle {interval} kurang: {len(jendela)} dari minimum {required}"
+        )
+        return kosong
+
+    if not _valid_candle_series(jendela):
+        kosong["stage"] = "CANDLE_CONFIRM"
+        kosong["reason"] = f"data OHLC candle {interval} tidak valid"
+        return kosong
+
+    if structure is None:
+        structure = evaluate_confluence_structure(
+            jendela,
+            config,
+            signal_close_time_ms=signal_close_time_ms,
+            is_single_timeframe=True,
+        )
+        kosong["structure"] = structure
+
+    if not structure.get("ok"):
+        kosong["stage"] = str(structure.get("stage") or "CONFLUENCE_STRUCTURE")
+        kosong["reason"] = str(structure.get("reason") or "struktur konfluensi ditolak")
+        return kosong
+
+    raw_poi_low = structure.get("poi_zone_low", structure.get("poi_low"))
+    raw_poi_high = structure.get("poi_zone_high", structure.get("poi_high"))
+    if raw_poi_low is None or raw_poi_high is None:
+        poi_low = min(float(c.low) for c in jendela[:-1])
+        poi_high = max(float(c.high) for c in jendela[:-1])
+    else:
+        poi_low = float(raw_poi_low)
+        poi_high = float(raw_poi_high)
+    raw_fib_low = structure.get("fib_zone_low", structure.get("fib_low"))
+    fib_low = float(raw_fib_low) if raw_fib_low is not None else poi_low
+    swing_high_time = int(structure.get("swing_high_time") or 0)
+    raw_bsl = structure.get("bsl_level", structure.get("swing_high"))
+    bsl_level = float(raw_bsl) if raw_bsl is not None else max(float(c.high) for c in jendela)
+
+    sig = jendela[-1]
+    prev = jendela[-2]
+    sig_open = float(sig.open)
+    sig_high = float(sig.high)
+    sig_low = float(sig.low)
+    sig_close = float(sig.close)
+    rng = sig_high - sig_low
+    close_pos = ((sig_close - sig_low) / rng) if rng > 0 else 0.0
+
+    kosong.update(
+        bsl_level=bsl_level,
+        close_position=close_pos,
+        signal_close=sig_close,
+        signal_close_time=int(sig.close_time),
+        poi_zone_low=poi_low,
+        poi_zone_high=poi_high,
+        poi_low=poi_low,
+        poi_high=poi_high,
+        fib_low=fib_low,
+        fib_high=structure.get("fib_zone_high", structure.get("fib_high")),
+        vp_poc=structure.get("vp_poc_price", structure.get("vp_poc")),
+        vp_hvn_low=structure.get("vp_zone_low", structure.get("vp_hvn_low")),
+        vp_hvn_high=structure.get("vp_zone_high", structure.get("vp_hvn_high")),
+        fvg_low=structure.get("fvg_zone_low", structure.get("fvg_low")),
+        fvg_high=structure.get("fvg_zone_high", structure.get("fvg_high")),
+        ob_low=structure.get("ob_zone_low", structure.get("ob_low")),
+        ob_high=structure.get("ob_zone_high", structure.get("ob_high")),
+        swing_low=structure.get("swing_low"),
+        swing_high=structure.get("swing_high"),
+        impulse_pct=structure.get("impulse_pct"),
     )
-    resistance_price = float(jendela[pivot_index].high)
-    distance_pct = (resistance_price - price) / price * 100.0
-    terisi = {
-        **dasar,
-        "resistance_price": resistance_price,
-        "resistance_open_time": int(jendela[pivot_index].open_time),
-        "signal_price": price,
-        "distance_pct": distance_pct,
-        "minimum_room_pct": minimum_room,
-    }
-    if distance_pct < minimum_room:
-        return {
-            "ok": False,
-            "reason": (
-                f"harga terlalu dekat dengan resistance HTF {interval}: ruang "
-                f"{distance_pct:.2f}% di bawah batas {minimum_room:.2f}%"
-            ),
-            **terisi,
-        }
-    return {
-        "ok": True,
-        "reason": (
-            f"ruang ke resistance HTF {interval} terdekat {distance_pct:.2f}% "
-            f"memenuhi batas {minimum_room:.2f}%"
-        ),
-        **terisi,
-    }
+
+    liq_on = bool(config.get("LIQUIDITY_FILTER_ENABLED", True))
+    sweep_bars = max(2, int(config.get("LIQUIDITY_SWEEP_LOOKBACK_BARS", 4) or 4))
+    n_jendela = len(jendela)
+    sweep_start_idx = max(1, n_jendela - sweep_bars)
+    sweep_idx = min(
+        range(sweep_start_idx, n_jendela),
+        key=lambda idx: float(jendela[idx].low),
+    )
+    sweep_low = float(jendela[sweep_idx].low)
+    early_pb = [
+        c for c in jendela[:sweep_idx] if int(c.open_time) > swing_high_time
+    ]
+    if not early_pb:
+        fallback_start = max(0, sweep_idx - max(4, sweep_bars + 2))
+        early_pb = jendela[fallback_start:sweep_idx]
+    if not early_pb:
+        kosong["stage"] = "LIQUIDITY_SWEEP"
+        kosong["reason"] = f"belum terbentuk struktur likuiditas SSL pada {interval}"
+        return kosong
+
+    ssl_level = min(float(c.low) for c in early_pb)
+    kosong["ssl_level"] = ssl_level
+    kosong["sweep_low"] = sweep_low
+
+    if liq_on:
+        if sweep_low >= ssl_level:
+            kosong["stage"] = "LIQUIDITY_SWEEP"
+            kosong["reason"] = (
+                f"likuiditas SSL {interval} di {ssl_level:.6g} belum disapu "
+                f"(low terbaru {sweep_low:.6g})"
+            )
+            return kosong
+        if not (poi_low <= sweep_low <= poi_high):
+            kosong["stage"] = "LIQUIDITY_SWEEP"
+            kosong["reason"] = (
+                f"sapuan SSL {interval} ({sweep_low:.6g}) tidak menyentuh zona "
+                f"konfluensi POI [{poi_low:.6g}..{poi_high:.6g}]"
+            )
+            return kosong
+        if sig_close < fib_low:
+            kosong["stage"] = "LIQUIDITY_SWEEP"
+            kosong["reason"] = (
+                f"harga {interval} belum reclaim di atas dasar Fibonacci {fib_low:.6g} "
+                f"setelah sapuan SSL (close {sig_close:.6g})"
+            )
+            return kosong
+    kosong["checks"]["liquidity_sweep"] = True
+
+    react_on = bool(config.get("CONFLUENCE_REQUIRE_BULLISH_REACTION", True))
+    min_close_pos = max(
+        0.1, min(0.95, float(config.get("CONFLUENCE_MIN_CLOSE_POSITION", 0.55) or 0.55))
+    )
+    if react_on:
+        if sig_close <= sig_open:
+            kosong["stage"] = "REACTION_CONFIRM"
+            kosong["reason"] = (
+                f"candle reaksi {interval} belum bullish "
+                f"(open {sig_open:.6g}, close {sig_close:.6g})"
+            )
+            return kosong
+        if sig_close <= float(prev.high):
+            kosong["stage"] = "REACTION_CONFIRM"
+            kosong["reason"] = (
+                f"candle reaksi {interval} belum menembus high candle sebelumnya "
+                f"({sig_close:.6g} <= {float(prev.high):.6g})"
+            )
+            return kosong
+        if close_pos + 1e-9 < min_close_pos:
+            kosong["stage"] = "REACTION_CONFIRM"
+            kosong["reason"] = (
+                f"dorongan candle reaksi {interval} lemah: close_pos {close_pos:.2f} "
+                f"di bawah minimum {min_close_pos:.2f}"
+            )
+            return kosong
+    kosong["checks"]["bullish_reaction"] = True
+
+    exit_info = compute_confluence_exit_levels(
+        sig_close,
+        config,
+        poi_low=poi_low,
+        ob_low=kosong.get("ob_low"),
+        swing_low=kosong.get("swing_low"),
+        sweep_low=sweep_low,
+        bsl_level=bsl_level,
+        swing_high=kosong.get("swing_high"),
+        fallback_allowed=False,
+    )
+    kosong["sl_price"] = exit_info["sl_price"]
+    kosong["tp_price"] = exit_info["tp_price"]
+    kosong["sl_pct"] = exit_info["sl_pct"]
+    kosong["tp_pct"] = exit_info["tp_pct"]
+    kosong["rr_ratio"] = exit_info["rr_ratio"]
+    if not exit_info["ok"]:
+        kosong["stage"] = str(exit_info["stage"])
+        kosong["reason"] = str(exit_info["reason"])
+        return kosong
+    kosong["checks"]["risk_reward"] = True
+
+    kosong["ok"] = True
+    kosong["stage"] = "OK"
+    kosong["reason"] = (
+        f"SSL sweep {interval} valid ({sweep_low:.6g} < SSL {ssl_level:.6g}) "
+        f"di zona POI [{poi_low:.6g}..{poi_high:.6g}], "
+        f"reaksi bullish close {sig_close:.6g} (pos {close_pos:.2f}), "
+        f"SL {exit_info['sl_price']:.6g} (-{exit_info['sl_pct']:.2f}%), "
+        f"TP BSL {bsl_level:.6g} (+{exit_info['tp_pct']:.2f}%, R:R 1:{exit_info['rr_ratio']:.2f})"
+    )
+    return kosong
 
 
-def evaluate_timing(
-    klines: list[Kline],
+def evaluate_confluence_code(
+    trigger_klines: list[Kline],
     config: dict,
+    structure_klines: Optional[list[Kline]] = None,
     signal_close_time_ms: Optional[int] = None,
 ) -> dict:
-    interval = timing_interval(config)
-    if not timing_enabled(config):
-        return {
-            "ok": True,
-            "reason": f"filter timing {interval} nonaktif",
-            "interval": interval,
-            "bars": 0,
-            "required": 0,
-            "window": 0,
-            "close": None,
-            "ema_fast": None,
-            "ema_slow": None,
-            "adx": None,
-            "checks": {},
-            "values": {},
-        }
-    fast, slow, adx_period, adx_min = _ema_adx_params(config, "TIMING", 20, 50)
-    return evaluate_ema_adx(
-        klines,
-        interval=interval,
-        fast=fast,
-        slow=slow,
-        adx_period=adx_period,
-        adx_min=adx_min,
-        window=timing_window_bars(config),
-        required=timing_required_bars(config),
-        label="timing",
-        nama_kunci_jendela="TIMING_LOOKBACK_BARS",
+    if (
+        signal_close_time_ms is None
+        and trigger_klines
+    ):
+        signal_close_time_ms = int(trigger_klines[-1].close_time)
+
+    if confluence_uses_mtf(config):
+        if structure_klines is None:
+            src_min = confirm_interval_minutes(config)
+            tgt_min = confluence_structure_interval_minutes(config)
+            if tgt_min >= src_min and tgt_min % src_min == 0:
+                structure_klines = aggregate_klines(
+                    trigger_klines, tgt_min, src_min
+                )
+            else:
+                structure_klines = []
+        structure = evaluate_confluence_structure(
+            structure_klines,
+            config,
+            signal_close_time_ms=signal_close_time_ms,
+            is_single_timeframe=False,
+        )
+    else:
+        structure = evaluate_confluence_structure(
+            trigger_klines,
+            config,
+            signal_close_time_ms=signal_close_time_ms,
+            is_single_timeframe=True,
+        )
+
+    return evaluate_confluence_trigger(
+        trigger_klines,
+        config,
+        structure=structure,
         signal_close_time_ms=signal_close_time_ms,
     )
 
 
-def direction_warmup_bars(config: dict, interval: str) -> int:
-    if not direction_enabled(config) and not direction_zone_enabled(config):
-        return 0
-    source_minutes = int(INTERVAL_MINUTES.get(str(interval), 5))
-    target_minutes = direction_interval_minutes(config)
-    if target_minutes % source_minutes:
-        raise ValueError(
-            f"DIRECTION_INTERVAL '{direction_interval(config)}' ({target_minutes} "
-            f"menit) harus kelipatan bulat dari interval simulasi '{interval}' "
-            f"({source_minutes} menit) supaya backtest bisa merangkai candle "
-            "arah dari data yang sudah diunduh."
-        )
-    rasio = target_minutes // source_minutes
-    return (direction_window_bars(config) + 1) * rasio + rasio
+def btc_change_pct(klines: list[Kline], lookback_bars: int = 3) -> Optional[float]:
+    look = max(1, int(lookback_bars or 3))
+    if not klines or len(klines) < look + 1:
+        return None
+    prev_close = float(klines[-look - 1].close)
+    last_close = float(klines[-1].close)
+    if prev_close <= 0:
+        return None
+    return (last_close / prev_close - 1.0) * 100.0
 
 
-def htf_warmup_bars(config: dict, interval: str) -> int:
-    if not htf_enabled(config):
-        return 0
-    source_interval = str(interval).strip().lower()
-    source_minutes = INTERVAL_MINUTES.get(source_interval)
-    if source_minutes is None:
-        raise ValueError(
-            f"Interval simulasi '{interval}' tidak dikenal sehingga candle HTF "
-            "tidak bisa dirangkai."
-        )
-    target_interval = htf_interval(config)
-    target_minutes = int(INTERVAL_MINUTES[target_interval])
-    if target_minutes % source_minutes:
-        raise ValueError(
-            f"HTF_INTERVAL '{target_interval}' ({target_minutes} menit) harus "
-            f"kelipatan bulat dari interval simulasi '{interval}' "
-            f"({source_minutes} menit) supaya candle HTF bisa dirangkai dari "
-            "data yang sudah diunduh."
-        )
-    rasio = target_minutes // source_minutes
-    return (htf_window_bars(config) + 1) * rasio + rasio
+def compute_btc_drop_pct(klines: list[Kline], lookback_bars: int = 3) -> Optional[float]:
+    return btc_change_pct(klines, lookback_bars)
 
 
-def gate_warmup_bars(config: dict, interval: str) -> int:
-    return max(
-        direction_warmup_bars(config, interval),
-        htf_warmup_bars(config, interval),
-    )
-
-
-def native_history_ms(config: dict) -> int:
-    kebutuhan = []
-    if direction_enabled(config) or direction_zone_enabled(config):
-        kebutuhan.append(
-            int(
-                direction_window_bars(config)
-                * INTERVAL_MINUTES[direction_interval(config)]
-                * 60_000
-            )
-        )
-    if htf_enabled(config):
-        kebutuhan.append(
-            int(
-                htf_window_bars(config)
-                * INTERVAL_MINUTES[htf_interval(config)]
-                * 60_000
-            )
-        )
-    return max(kebutuhan, default=0)

@@ -1,51 +1,417 @@
 from __future__ import annotations
 
-import math
 from bisect import bisect_right
+import math
 from typing import Optional, Sequence
 
-from strategy.indicators import (
-    MAX_HOLD_HOURS_LIMIT,
-    TIME_STOP_REASON,
-    Kline,
-    max_hold_ms,
-    time_stop_due,
-)
+from market import market_scanner as scanner
+from strategy import indicators as strategy
+from strategy.indicators import Kline
 
+TIME_STOP_REASON = strategy.TIME_STOP_REASON
+RISK_LIMIT_REASON = "RISK_LIMIT_TRIGGERED"
+MAX_HOLD_HOURS_LIMIT = strategy.MAX_HOLD_HOURS_LIMIT
 MS_PER_MIN = 60_000
 
-RISK_LIMIT_REASON = "RISK_LIMIT_TRIGGERED"
+
+def max_hold_ms(config: dict, interval: str) -> int:
+    return strategy.max_hold_ms(config, interval)
+
+
+def chase_exceeded(
+    exec_entry_price: float,
+    signal_close: float,
+    max_chase_pct: float,
+) -> bool:
+    if max_chase_pct <= 0 or signal_close <= 0:
+        return False
+    chase_pct = (exec_entry_price / signal_close - 1.0) * 100.0
+    return chase_pct > max_chase_pct
+
+
+def next_entry_allowed(exit_close_time_ms: int, config: dict) -> int:
+    cooldown_ms = int(
+        float(config.get("COOLDOWN_MINUTES_AFTER_CLOSE", 0) or 0) * 60_000
+    )
+    min_between_ms = int(
+        float(config.get("MIN_SECONDS_BETWEEN_TRADES", 0) or 0) * 1000
+    )
+    wait_ms = max(cooldown_ms, min_between_ms)
+    return int(exit_close_time_ms) + max(0, wait_ms)
+
+
+def same_coin_block_hours(config: dict) -> float:
+    raw = config.get("SAME_COIN_BLOCK_HOURS", 0)
+    if raw is None or raw == "" or isinstance(raw, bool):
+        return 0.0
+    try:
+        hours = float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(hours) or hours <= 0:
+        return 0.0
+    return hours
+
+
+def same_coin_block_loss_only(config: dict) -> bool:
+    raw = config.get("SAME_COIN_BLOCK_LOSS_ONLY", True)
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        return raw.strip().lower() not in ("false", "0", "no", "tidak", "off")
+    return bool(raw)
+
+
+def same_coin_blocked(
+    symbol: str,
+    now_ms: int,
+    blocked_until: dict[str, int],
+) -> bool:
+    if not symbol:
+        return False
+    until = int(blocked_until.get(symbol, 0) or 0)
+    return until > 0 and int(now_ms) < until
+
+
+def same_coin_block_record(
+    blocked_until: dict[str, int],
+    symbol: str,
+    exit_close_time_ms: int,
+    pnl_quote: float,
+    config: dict,
+) -> None:
+    if not symbol:
+        return
+    hours = same_coin_block_hours(config)
+    if hours <= 0:
+        blocked_until.pop(symbol, None)
+        return
+    if same_coin_block_loss_only(config) and float(pnl_quote) >= 0.0:
+        blocked_until.pop(symbol, None)
+        return
+    blocked_until[symbol] = int(exit_close_time_ms) + int(hours * 3_600_000)
+
+
+class BtcDropLookup:
+
+    def __init__(
+        self,
+        btc_klines: list[Kline],
+        arg2: int = 3,
+        arg3: int = 0,
+    ) -> None:
+        self.klines = sorted(btc_klines, key=lambda k: k.open_time)
+        self.open_times = [k.open_time for k in self.klines]
+        if int(arg2) >= 10_000 and int(arg3) < 10_000:
+            bar_ms = int(arg2)
+            lookback_bars = int(arg3 or 3)
+        else:
+            lookback_bars = int(arg2 or 3)
+            bar_ms = int(arg3)
+        self.lookback = max(1, lookback_bars)
+        self.bar_ms = max(0, bar_ms)
+        self.max_stale_ms = self.bar_ms * 2 if self.bar_ms > 0 else 0
+
+    @property
+    def usable(self) -> bool:
+        return len(self.klines) >= self.lookback + 1
+
+    def drop_pct_at(self, open_time_ms: int) -> Optional[float]:
+        if not self.usable:
+            return None
+        idx = bisect_right(self.open_times, int(open_time_ms)) - 1
+        if idx < self.lookback:
+            return None
+        if (
+            self.max_stale_ms > 0
+            and int(open_time_ms) - self.open_times[idx] > self.max_stale_ms
+        ):
+            return None
+        window = self.klines[idx - self.lookback : idx + 1]
+        if self.bar_ms > 0:
+            expected_span = self.lookback * self.bar_ms
+            actual_span = window[-1].open_time - window[0].open_time
+            if actual_span > expected_span + self.bar_ms // 2:
+                return None
+        return strategy.compute_btc_drop_pct(window, self.lookback)
+
+
+def make_btc_lookup(
+    btc_klines: Optional[list[Kline]],
+    config: dict,
+    bar_ms: int = 0,
+) -> Optional[BtcDropLookup]:
+    if not config.get("BTC_FILTER_ENABLED", False) or not btc_klines:
+        return None
+    lookback = int(config.get("BTC_LOOKBACK_BARS", 3) or 3)
+    resolved_bar_ms = int(bar_ms or 0)
+    if resolved_bar_ms <= 0:
+        interval = str(
+            config.get("MARKET_DATA_INTERVAL")
+            or config.get("CONFIRM_INTERVAL")
+            or "5m"
+        )
+        try:
+            resolved_bar_ms = strategy.interval_to_ms(interval)
+        except ValueError:
+            resolved_bar_ms = 0
+    lookup = BtcDropLookup(btc_klines, lookback, resolved_bar_ms)
+    return lookup if lookup.usable else None
+
+
+def btc_filter_warning(
+    config: dict,
+    btc_lookup: Optional[BtcDropLookup],
+) -> Optional[str]:
+    if not config.get("BTC_FILTER_ENABLED", False):
+        return None
+    if btc_lookup is not None and btc_lookup.usable:
+        return None
+    return (
+        "BTC_FILTER_ENABLED aktif tetapi candle BTCUSDT tidak tersedia untuk "
+        "periode ini; filter BTC dinonaktifkan selama simulasi ini."
+    )
+
+
+def gate_config(config: dict, btc_lookup: Optional[BtcDropLookup]) -> dict:
+    if not config.get("BTC_FILTER_ENABLED", False):
+        return config
+    cfg = dict(config)
+    if btc_lookup is not None and btc_lookup.usable:
+        cfg["_btc_filter_fail_closed"] = True
+        return cfg
+    cfg["BTC_FILTER_ENABLED"] = False
+    return cfg
+
+
+class ConfluenceStructureLookup:
+
+    def __init__(
+        self,
+        structure_klines: list[Kline],
+        config: dict,
+        interval: str,
+        confirm_interval: str = "5m",
+    ) -> None:
+        self.klines = sorted(structure_klines, key=lambda k: k.open_time)
+        self.close_times = [k.close_time for k in self.klines]
+        self.interval = str(interval)
+        self.confirm_interval = str(confirm_interval)
+        self.window = strategy.confluence_structure_window_bars(config)
+        self.config = dict(config)
+        self._verdict_cache: dict[int, dict] = {}
+
+    @property
+    def usable(self) -> bool:
+        return len(self.klines) >= self.window
+
+    def verdict_at(self, close_time_ms: int) -> dict:
+        idx = bisect_right(self.close_times, int(close_time_ms)) - 1
+        if idx < 0:
+            return scanner.confluence_structure_verdict([], self.config)
+        if idx not in self._verdict_cache:
+            start = max(0, idx - self.window + 1)
+            window_slice = self.klines[start : idx + 1]
+            self._verdict_cache[idx] = scanner.confluence_structure_verdict(
+                window_slice, self.config
+            )
+        return self._verdict_cache[idx]
+
+
+def make_structure_lookup(
+    klines: Optional[list[Kline]],
+    config: dict,
+    confirm_interval: str = "5m",
+    *,
+    sudah_dirangkai: bool = False,
+) -> Optional[ConfluenceStructureLookup]:
+    if not strategy.confluence_enabled(config):
+        return None
+    if not klines:
+        return ConfluenceStructureLookup([], config, "15m", confirm_interval)
+    target_interval = strategy.confluence_structure_interval(config)
+    src_interval = str(
+        confirm_interval or config.get("CONFIRM_INTERVAL", "5m")
+    ).strip().lower()
+    if sudah_dirangkai or target_interval == src_interval:
+        struct_klines = list(klines)
+    else:
+        struct_klines = strategy.aggregate_klines(
+            klines,
+            strategy.INTERVAL_MINUTES[target_interval],
+            strategy.INTERVAL_MINUTES[src_interval],
+        )
+    return ConfluenceStructureLookup(
+        struct_klines, config, target_interval, src_interval
+    )
+
+
+class AccountRiskControls:
+
+    def __init__(self, config: dict, initial_equity: float) -> None:
+        self.use_equity_stop = bool(config.get("USE_EQUITY_STOP", False))
+        self.max_dd_pct = max(
+            0.0, float(config.get("MAX_DRAWDOWN_PERCENT", 0.0) or 0.0)
+        )
+        self.close_all_at_limit = bool(config.get("CLOSE_ALL_AT_LIMIT", False))
+        self.dd_cooldown_ms = int(
+            max(0.0, float(config.get("DD_COOLDOWN_HOURS", 0) or 0)) * 3_600_000
+        )
+        self.peak_equity = max(0.0, float(initial_equity))
+        self.max_drawdown_seen_pct = 0.0
+        self.paused_until_ms = 0
+        self.kill_switch_triggers = 0
+        self.cooldown_R_resets = 0
+        self.force_closes = 0
+        self._in_pause = False
+        self._limit_close_done = False
+        self.events = {
+            "dd_stop": 0,
+            "forced_close": 0,
+        }
+
+    def drawdown_pct(self, equity: float) -> float:
+        if self.peak_equity <= 0:
+            return 0.0
+        dd = (self.peak_equity - float(equity)) / self.peak_equity * 100.0
+        return max(0.0, dd)
+
+    def update(self, now_ms: int, equity: float) -> bool:
+        now_ms = int(now_ms)
+        eq = max(0.0, float(equity))
+
+        if self._in_pause:
+            if (
+                not self.use_equity_stop
+                or self.dd_cooldown_ms <= 0
+                or now_ms >= self.paused_until_ms
+            ):
+                self._in_pause = False
+                self.paused_until_ms = 0
+                self.peak_equity = eq
+                self.cooldown_R_resets += 1
+            else:
+                return True
+
+        if eq > self.peak_equity:
+            self.peak_equity = eq
+
+        dd = self.drawdown_pct(eq)
+        if dd > self.max_drawdown_seen_pct:
+            self.max_drawdown_seen_pct = dd
+
+        if (
+            self.use_equity_stop
+            and self.max_dd_pct > 0
+            and self.peak_equity > 0
+            and dd >= self.max_dd_pct
+        ):
+            self._in_pause = True
+            self.kill_switch_triggers += 1
+            self.events["dd_stop"] = self.kill_switch_triggers
+            if self.dd_cooldown_ms > 0:
+                self.paused_until_ms = now_ms + self.dd_cooldown_ms
+            else:
+                self.paused_until_ms = 0
+            return True
+
+        return False
+
+    def force_close_due(self, entries_paused: bool, has_open_position: bool) -> bool:
+        due = False
+        if (
+            self.close_all_at_limit
+            and entries_paused
+            and self._in_pause
+            and not self._limit_close_done
+            and has_open_position
+        ):
+            self._limit_close_done = True
+            self.force_closes += 1
+            self.events["forced_close"] = self.force_closes
+            due = True
+        if not entries_paused and self._limit_close_done:
+            self._limit_close_done = False
+        return due
+
+    def summary(self) -> dict:
+        return {
+            "use_equity_stop": self.use_equity_stop,
+            "max_drawdown_limit_pct": self.max_dd_pct,
+            "close_all_at_limit": self.close_all_at_limit,
+            "dd_cooldown_hours": self.dd_cooldown_ms / 3_600_000.0,
+            "max_drawdown_seen_pct": round(self.max_drawdown_seen_pct, 4),
+            "kill_switch_triggers": self.kill_switch_triggers,
+            "cooldown_resets": self.cooldown_R_resets,
+            "force_closes": self.force_closes,
+            "dd_stop": self.kill_switch_triggers,
+            "forced_close": self.force_closes,
+        }
 
 
 class PositionState:
-    __slots__ = (
-        "entry_price",
-        "levels",
-        "be_active",
-        "be_stop",
-        "trailing_active",
-        "trailing_stop",
-        "entry_time",
-    )
 
     def __init__(
-        self, entry_price: float, levels: dict, entry_time: int = 0
+        self,
+        entry_price: float,
+        levels_dict: dict,
+        entry_time: int = 0,
     ) -> None:
-        self.entry_price = float(entry_price)
+        ep = float(entry_price)
+        if not math.isfinite(ep) or ep <= 0:
+            raise ValueError(
+                f"PositionState membutuhkan entry_price > 0 dan berhingga, dapat {entry_price!r}"
+            )
+        src = str(levels_dict.get("source", "CONFLUENCE") or "CONFLUENCE").upper()
+        sl_p = float(levels_dict.get("sl_pct") or 0.0)
+        tp_p = float(levels_dict.get("tp_pct") or 0.0)
+        if not (0.0 < sl_p < 100.0):
+            raise ValueError(
+                f"Persen SL struktural ({sl_p}%) tidak valid; wajib di antara 0 dan 100."
+            )
+        if not (tp_p > 0.0 and math.isfinite(tp_p)):
+            raise ValueError(
+                f"Persen TP struktural ({tp_p}%) tidak valid; wajib > 0."
+            )
+        raw_sl_price = levels_dict.get("sl_price")
+        raw_tp_price = levels_dict.get("tp_price")
+        sl_price = (
+            float(raw_sl_price)
+            if raw_sl_price is not None and 0.0 < float(raw_sl_price) < ep
+            else ep * (1.0 - sl_p / 100.0)
+        )
+        tp_price = (
+            float(raw_tp_price)
+            if raw_tp_price is not None and float(raw_tp_price) > ep
+            else ep * (1.0 + tp_p / 100.0)
+        )
+        self.entry_price = ep
         self.entry_time = int(entry_time or 0)
-        self.levels = {
-            "sl": float(levels["sl_pct"]),
-            "tp": float(levels["tp_pct"]),
-            "be_trig": float(levels["be_trigger_pct"]),
-            "be_lock": float(levels["be_lock_pct"]),
-            "tr_start": float(levels["trail_start_pct"]),
-            "tr_step": float(levels["trail_step_pct"]),
-            "src": str(levels["source"]),
-        }
+        self.highest_price = self.entry_price
+        self.sl_price = sl_price
+        self.tp_price = tp_price
         self.be_active = False
         self.be_stop = 0.0
         self.trailing_active = False
         self.trailing_stop = 0.0
+        self.be_activated = False
+        self.trailing_activated = False
+        self.trailing_stop_price = 0.0
+        self.levels = {
+            "src": src,
+            "use_atr": False,
+            "sl": sl_p,
+            "tp": tp_p,
+            "sl_price": sl_price,
+            "tp_price": tp_price,
+            "rr_ratio": float(
+                levels_dict.get("rr_ratio") or (tp_p / sl_p if sl_p > 0 else 0.0)
+            ),
+            "be_trig": 0.0,
+            "be_lock": 0.0,
+            "tr_start": 0.0,
+            "tr_step": 0.0,
+        }
 
 
 def evaluate_candle_exit(
@@ -57,476 +423,47 @@ def evaluate_candle_exit(
 ) -> Optional[tuple[str, float]]:
     entry = pos.entry_price
     lv = pos.levels
-    atr_mode = lv["src"] == "ATR"
-    use_sl = bool(config["USE_STOP_LOSS"])
-    sl_price = (entry - lv["sl"]) if atr_mode else entry * (1 - lv["sl"] / 100.0)
+    sl_price = float(lv.get("sl_price") or (entry * (1.0 - lv["sl"] / 100.0)))
+    tp_price = float(lv.get("tp_price") or (entry * (1.0 + lv["tp"] / 100.0)))
 
-    carried_level = None
-    carried_reason = None
-    if pos.be_active:
-        carried_level, carried_reason = pos.be_stop, "BREAKEVEN"
-    if pos.trailing_active and (
-        carried_level is None or pos.trailing_stop > carried_level
-    ):
-        carried_level, carried_reason = pos.trailing_stop, "TRAILING_STOP"
-    gap_below_sl = use_sl and candle.open <= sl_price
-    if carried_level is not None and not gap_below_sl and candle.low <= carried_level:
-        return carried_reason, min(carried_level, candle.open)
+    if candle.high > pos.highest_price:
+        pos.highest_price = candle.high
 
-    pnl_high = (candle.high / entry - 1.0) * 100.0
-    pnl_low = (candle.low / entry - 1.0) * 100.0
-    pnl_high_unit = candle.high - entry if atr_mode else pnl_high
-    be_armed_before = pos.be_active
-    trail_armed_before = pos.trailing_active
-
-    if config["USE_BREAKEVEN"] and not pos.be_active and pnl_high_unit >= lv["be_trig"]:
-        pos.be_active = True
-        pos.be_stop = (
-            entry + lv["be_lock"] if atr_mode else entry * (1 + lv["be_lock"] / 100.0)
-        )
-    if config["USE_TRAILING"]:
-        cand_stop = (
-            candle.high - lv["tr_step"]
-            if atr_mode
-            else candle.high * (1 - lv["tr_step"] / 100.0)
-        )
-        if not pos.trailing_active and pnl_high_unit >= lv["tr_start"]:
-            pos.trailing_active = True
-            pos.trailing_stop = cand_stop
-        elif pos.trailing_active and cand_stop > pos.trailing_stop:
-            pos.trailing_stop = cand_stop
-
-    sl_triggered = (candle.low <= sl_price) if atr_mode else (pnl_low <= -lv["sl"])
-    if use_sl and sl_triggered:
+    if candle.low <= sl_price:
         return "STOP_LOSS", min(sl_price, candle.open)
-    tp_price = entry + lv["tp"] if atr_mode else entry * (1 + lv["tp"] / 100.0)
-    tp_hit = (candle.high >= tp_price) if atr_mode else (pnl_high >= lv["tp"])
-    if config["USE_TP"] and tp_hit:
+    if candle.high >= tp_price:
         return "TAKE_PROFIT", max(tp_price, candle.open)
-    if pos.be_active and candle.low <= pos.be_stop:
-        return "BREAKEVEN", (
-            pos.be_stop if not be_armed_before else min(pos.be_stop, candle.open)
-        )
-    if pos.trailing_active and candle.low <= pos.trailing_stop:
-        return "TRAILING_STOP", (
-            pos.trailing_stop
-            if not trail_armed_before
-            else min(pos.trailing_stop, candle.open)
-        )
-    if time_stop_due(pos.entry_time, candle.close_time, cap_ms, bar_ms):
+    if strategy.time_stop_due(pos.entry_time, candle.close_time, cap_ms, bar_ms):
         return TIME_STOP_REASON, candle.close
+
     return None
 
 
-class AccountRiskControls:
-
-    def __init__(self, config: dict, initial_equity: float) -> None:
-        self.use_equity_stop = bool(config.get("USE_EQUITY_STOP", False))
-        self.max_drawdown_pct = float(config.get("MAX_DRAWDOWN_PERCENT", 0.0) or 0.0)
-        self.dd_cooldown_ms = (
-            float(config.get("DD_COOLDOWN_HOURS", 0.0) or 0.0) * 3_600_000
-        )
-        self.close_all_at_limit = bool(config.get("CLOSE_ALL_AT_LIMIT", False))
-
-        self.peak_equity: Optional[float] = float(initial_equity)
-        self.dd_stopped = False
-        self.dd_stop_until = 0.0
-        self._limit_close_done = False
-        self.events = {
-            "dd_stop": 0,
-            "forced_close": 0,
-        }
-
-    def update(self, now_ms: int, equity: float) -> bool:
-        equity = float(equity)
-
-        if self.peak_equity is None or equity > self.peak_equity:
-            self.peak_equity = equity
-
-        if (
-            self.use_equity_stop
-            and self.max_drawdown_pct > 0
-            and not self.dd_stopped
-            and self.peak_equity
-        ):
-            dd_pct = (self.peak_equity - equity) / self.peak_equity * 100.0
-            if dd_pct >= self.max_drawdown_pct:
-                self.dd_stopped = True
-                self.dd_stop_until = now_ms + self.dd_cooldown_ms
-                self.events["dd_stop"] += 1
-
-        if self.dd_stopped:
-            if (
-                not self.use_equity_stop
-                or not self.dd_stop_until
-                or now_ms >= self.dd_stop_until
-            ):
-                self.dd_stopped = False
-                self.dd_stop_until = 0.0
-                self.peak_equity = equity
-
-        return bool(self.dd_stopped)
-
-    def force_close_due(self, entries_paused: bool, in_position: bool) -> bool:
-        limit_now = bool(self.dd_stopped)
-        due = False
-        if (
-            self.close_all_at_limit
-            and entries_paused
-            and limit_now
-            and not self._limit_close_done
-            and in_position
-        ):
-            self._limit_close_done = True
-            self.events["forced_close"] += 1
-            due = True
-        if not entries_paused and self._limit_close_done:
-            self._limit_close_done = False
-        return due
+def confluence_warmup_bars(config: dict, interval: str = "5m") -> int:
+    return strategy.confluence_warmup_bars(config, str(interval))
 
 
-class BtcDropLookup:
-
-    def __init__(
-        self, klines: Sequence[Kline], bar_ms: int, lookback_bars: int
-    ) -> None:
-        self._klines = sorted(klines, key=lambda k: int(k.open_time))
-        self._index = {int(k.open_time): i for i, k in enumerate(self._klines)}
-        self._bar_ms = int(bar_ms)
-        self._look = max(1, int(lookback_bars))
-
-    def drop_pct_at(self, open_time: int) -> Optional[float]:
-        idx = self._index.get(int(open_time))
-        if idx is None or idx < self._look:
-            return None
-        prev = self._klines[idx - self._look]
-        if int(prev.open_time) != int(open_time) - self._look * self._bar_ms:
-            return None
-        if prev.close <= 0:
-            return None
-        return (self._klines[idx].close / prev.close - 1.0) * 100.0
+def confluence_warmup_ms(config: dict, interval: str = "5m") -> int:
+    return strategy.gate_warmup_ms(config, str(interval))
 
 
-def make_btc_lookup(
-    btc_klines: Optional[Sequence[Kline]], config: dict, bar_ms: int
-) -> Optional[BtcDropLookup]:
-    if not config.get("BTC_FILTER_ENABLED", False) or not btc_klines:
-        return None
-    return BtcDropLookup(
-        btc_klines, bar_ms, int(config.get("BTC_LOOKBACK_BARS", 3) or 3)
-    )
+def gate_warmup_bars(config: dict, interval: str = "5m") -> int:
+    return strategy.gate_warmup_bars(config, str(interval))
 
 
-def btc_filter_warning(config: dict, lookup: Optional[BtcDropLookup]) -> Optional[str]:
-    if config.get("BTC_FILTER_ENABLED", False) and lookup is None:
-        return (
-            "BTC_FILTER_ENABLED aktif di config, tetapi candle BTCUSDT tidak "
-            "diberikan ke simulasi ini, sehingga filter BTC TIDAK diterapkan "
-            "(bot live menerapkannya)."
-        )
-    return None
+def gate_warmup_ms(config: dict, interval: str = "5m") -> int:
+    return strategy.gate_warmup_ms(config, str(interval))
 
 
-def gate_config(config: dict, lookup: Optional[BtcDropLookup]) -> dict:
-    if lookup is None:
-        return config
-    out = dict(config)
-    out["_btc_filter_fail_closed"] = True
-    return out
-
-
-def chase_exceeded(
-    exec_price: float, signal_close: Optional[float], max_chase_pct: float
-) -> bool:
-    if not max_chase_pct or max_chase_pct <= 0:
-        return False
-    if not signal_close or signal_close <= 0:
-        return False
-    return float(exec_price) > float(signal_close) * (
-        1.0 + float(max_chase_pct) / 100.0
-    )
-
-
-def next_entry_allowed(close_time_ms: int, config: dict) -> int:
-    cooldown_ms = int(config.get("COOLDOWN_MINUTES_AFTER_CLOSE", 0) or 0) * MS_PER_MIN
-    spacing_ms = int(float(config.get("MIN_SECONDS_BETWEEN_TRADES", 0) or 0) * 1000)
-    return int(close_time_ms) + max(cooldown_ms, spacing_ms)
-
-
-def same_coin_block_hours(config: dict) -> float:
-    try:
-        hours = float(config.get("SAME_COIN_BLOCK_HOURS", 0) or 0)
-    except (TypeError, ValueError):
-        return 0.0
-    if not math.isfinite(hours) or hours <= 0:
-        return 0.0
-    return hours
-
-
-def same_coin_block_loss_only(config: dict) -> bool:
-    return bool(config.get("SAME_COIN_BLOCK_LOSS_ONLY", True))
-
-
-def same_coin_block_until_ms(close_time_ms: int, pnl_quote: float, config: dict) -> int:
+def same_coin_block_until_ms(
+    close_time_ms: int, pnl_quote: float, config: dict
+) -> int:
     hours = same_coin_block_hours(config)
-    close_time_ms = int(close_time_ms)
     if hours <= 0:
-        return close_time_ms
-    try:
-        hasil = float(pnl_quote)
-    except (TypeError, ValueError):
-        hasil = float("-inf")
-    if not math.isfinite(hasil):
-        hasil = -1.0 if hasil < 0 else 1.0
-    if same_coin_block_loss_only(config) and hasil >= 0:
-        return close_time_ms
-    return close_time_ms + int(hours * 3_600_000)
-
-
-def same_coin_blocked(symbol: str, now_ms: int, blocks: dict) -> bool:
-    if not isinstance(blocks, dict) or not symbol:
-        return False
-    try:
-        until = float(blocks.get(str(symbol).upper(), 0) or 0)
-    except (TypeError, ValueError):
-        return False
-    if not math.isfinite(until):
-        return False
-    return until > int(now_ms)
-
-
-def same_coin_block_record(
-    blocks: dict, symbol: str, close_time_ms: int, pnl_quote: float, config: dict
-) -> None:
-    if not symbol or not isinstance(blocks, dict):
-        return
-    close_time_ms = int(close_time_ms)
-    until = same_coin_block_until_ms(close_time_ms, pnl_quote, config)
-    if until <= close_time_ms:
-        return
-    kedaluwarsa = []
-    for sym, nilai in blocks.items():
-        try:
-            batas = float(nilai or 0)
-        except (TypeError, ValueError):
-            kedaluwarsa.append(sym)
-            continue
-        if not math.isfinite(batas) or batas <= close_time_ms:
-            kedaluwarsa.append(sym)
-    for sym in kedaluwarsa:
-        blocks.pop(sym, None)
-    blocks[str(symbol).upper()] = until
-
-
-class DirectionLookup:
-
-    def __init__(self, direction_klines: Sequence[Kline], config: dict) -> None:
-        from strategy import indicators as strategy_mod
-
-        self.config = config
-        self.interval = strategy_mod.direction_interval(config)
-        self.window = strategy_mod.direction_window_bars(config)
-        self.required = strategy_mod.direction_required_bars(config)
-        self.zone_window = strategy_mod.direction_zone_window_bars(config)
-        self.klines = list(direction_klines)
-        self.close_times = [int(k.close_time) for k in self.klines]
-
-    def window_at(self, signal_close_time_ms: int) -> list:
-        idx = bisect_right(self.close_times, int(signal_close_time_ms))
-        return self.klines[max(0, idx - self.window) : idx]
-
-    def verdict_at(self, signal_close_time_ms: int) -> dict:
-        from strategy import indicators as strategy_mod
-
-        return strategy_mod.evaluate_direction(
-            self.window_at(signal_close_time_ms), self.config
-        )
-
-    def zone_window_at(self, signal_close_time_ms: int) -> list:
-        if self.zone_window <= 0:
-            return []
-        idx = bisect_right(self.close_times, int(signal_close_time_ms))
-        return self.klines[max(0, idx - self.zone_window) : idx]
-
-    def zone_at(self, signal_close_time_ms: int) -> dict:
-        from strategy import indicators as strategy_mod
-
-        return strategy_mod.evaluate_direction_zone(
-            self.zone_window_at(signal_close_time_ms), self.config
-        )
-
-
-class HtfLookup:
-
-    def __init__(self, htf_klines: Sequence[Kline], config: dict) -> None:
-        from strategy import indicators as strategy_mod
-
-        self.config = config
-        self.interval = strategy_mod.htf_interval(config)
-        self.window = strategy_mod.htf_window_bars(config)
-        self.required = strategy_mod.htf_required_bars(config)
-        self.klines = sorted(
-            list(htf_klines), key=lambda k: int(k.open_time)
-        )
-        self.close_times = [int(k.close_time) for k in self.klines]
-
-    def window_at(self, signal_close_time_ms: int) -> list:
-        idx = bisect_right(self.close_times, int(signal_close_time_ms))
-        return self.klines[max(0, idx - self.window) : idx]
-
-    def verdict_at(self, signal_close_time_ms: int) -> dict:
-        from strategy import indicators as strategy_mod
-
-        return strategy_mod.evaluate_htf(
-            self.window_at(signal_close_time_ms),
-            self.config,
-            signal_close_time_ms=signal_close_time_ms,
-        )
-
-    def resistance_at(self, signal_close_time_ms: int, signal_price: float) -> dict:
-        from strategy import indicators as strategy_mod
-
-        return strategy_mod.evaluate_htf_resistance(
-            self.window_at(signal_close_time_ms),
-            self.config,
-            signal_price=signal_price,
-            signal_close_time_ms=signal_close_time_ms,
-        )
-
-
-class TimingLookup:
-
-    def __init__(self, timing_klines: Sequence[Kline], config: dict) -> None:
-        from strategy import indicators as strategy_mod
-
-        self.config = config
-        self.interval = strategy_mod.timing_interval(config)
-        self.window = strategy_mod.timing_window_bars(config)
-        self.required = strategy_mod.timing_required_bars(config)
-        self.klines = list(timing_klines)
-        self.close_times = [int(k.close_time) for k in self.klines]
-
-    def window_at(self, signal_close_time_ms: int) -> list:
-        idx = bisect_right(self.close_times, int(signal_close_time_ms))
-        return self.klines[max(0, idx - self.window) : idx]
-
-    def verdict_at(self, signal_close_time_ms: int) -> dict:
-        from strategy import indicators as strategy_mod
-
-        return strategy_mod.evaluate_timing(
-            self.window_at(signal_close_time_ms), self.config
-        )
-
-
-def _source_minutes(interval: str, purpose: str) -> int:
-    from strategy import indicators as strategy_mod
-
-    source_minutes = strategy_mod.INTERVAL_MINUTES.get(str(interval))
-    if source_minutes is None:
-        raise ValueError(
-            f"Interval simulasi '{interval}' tidak dikenal sehingga candle {purpose} "
-            "tidak bisa dirangkai."
-        )
-    return source_minutes
-
-
-def build_direction_klines(
-    klines: Sequence[Kline], config: dict, interval: str
-) -> list[Kline]:
-    from strategy import indicators as strategy_mod
-
-    target = strategy_mod.direction_interval_minutes(config)
-    source = _source_minutes(interval, "arah")
-    return strategy_mod.aggregate_klines(list(klines), target, source)
-
-
-def make_direction_lookup(
-    klines: Sequence[Kline],
-    config: dict,
-    interval: str,
-    *,
-    sudah_dirangkai: bool = False,
-) -> Optional[DirectionLookup]:
-    from strategy import indicators as strategy_mod
-
-    if not (
-        strategy_mod.direction_enabled(config)
-        or strategy_mod.direction_zone_enabled(config)
-    ):
-        return None
-    bars = (
-        list(klines)
-        if sudah_dirangkai
-        else build_direction_klines(klines, config, interval)
-    )
-    return DirectionLookup(bars, config)
-
-
-def build_htf_klines(
-    klines: Sequence[Kline], config: dict, interval: str
-) -> list[Kline]:
-    from strategy import indicators as strategy_mod
-
-    target_interval = strategy_mod.htf_interval(config)
-    target = strategy_mod.INTERVAL_MINUTES.get(target_interval)
-    if target is None:
-        raise ValueError(
-            f"HTF_INTERVAL '{target_interval}' tidak dikenal untuk perangkaian candle."
-        )
-    source = _source_minutes(interval, "tren HTF")
-    return strategy_mod.aggregate_klines(list(klines), int(target), source)
-
-
-def make_htf_lookup(
-    klines: Sequence[Kline],
-    config: dict,
-    interval: str,
-    *,
-    sudah_dirangkai: bool = False,
-) -> Optional[HtfLookup]:
-    from strategy import indicators as strategy_mod
-
-    if not strategy_mod.htf_enabled(config):
-        return None
-    bars = (
-        list(klines)
-        if sudah_dirangkai
-        else build_htf_klines(klines, config, interval)
-    )
-    return HtfLookup(bars, config)
-
-
-def make_timing_lookup(
-    klines: Sequence[Kline],
-    config: dict,
-) -> Optional[TimingLookup]:
-    from strategy import indicators as strategy_mod
-
-    if not strategy_mod.timing_enabled(config):
-        return None
-    return TimingLookup(klines, config)
-
-
-def gate_warmup_bars(config: dict, interval: str) -> int:
-    from strategy import indicators as strategy_mod
-
-    return strategy_mod.gate_warmup_bars(config, interval)
-
-
-def gate_warmup_ms(config: dict, interval: str) -> int:
-    from strategy import indicators as strategy_mod
-
-    return strategy_mod.gate_warmup_bars(
-        config, interval
-    ) * strategy_mod.interval_to_ms(interval)
-
-
-def direction_warmup_ms(config: dict, interval: str) -> int:
-    from strategy import indicators as strategy_mod
-
-    return strategy_mod.direction_warmup_bars(
-        config, interval
-    ) * strategy_mod.interval_to_ms(interval)
+        return 0
+    if bool(config.get("SAME_COIN_BLOCK_LOSS_ONLY", True)) and float(pnl_quote) >= 0:
+        return 0
+    return int(close_time_ms) + int(round(hours * 3_600_000))
 
 
 def per_trade_metrics(trades: Sequence) -> dict:
@@ -564,3 +501,5 @@ def per_trade_metrics(trades: Sequence) -> dict:
         "payoff_ratio": payoff if payoff is None or math.isfinite(payoff) else None,
         "max_consecutive_losses": longest,
     }
+
+

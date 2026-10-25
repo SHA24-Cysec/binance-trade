@@ -5,7 +5,7 @@ import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from bisect import bisect_left
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Optional
 
 from strategy.indicators import Kline
@@ -50,7 +50,6 @@ class PortfolioTrade:
     tp_pct: float
     exit_source: str
     rank_at_entry: int
-    pct24h_at_entry: float
     candidates_at_entry: int
     position_notional: float = 0.0
     equity_before: float = 0.0
@@ -82,18 +81,10 @@ class PortfolioResult:
     final_equity: float = 0.0
     risk_events: dict = field(default_factory=dict)
     chase_skips: int = 0
-    direction_skips: int = 0
-    direction_scans: int = 0
-    htf_skips: int = 0
-    htf_scans: int = 0
-    htf_resistance_skips: int = 0
-    htf_resistance_scans: int = 0
-    direction_zone_skips: int = 0
-    direction_zone_scans: int = 0
-    timing_skips: int = 0
-    timing_scans: int = 0
-    breakout_skips: int = 0
-    breakout_scans: int = 0
+    confluence_structure_skips: int = 0
+    confluence_structure_scans: int = 0
+    confluence_trigger_skips: int = 0
+    confluence_trigger_scans: int = 0
     same_coin_skips: int = 0
     mark_to_market_open: bool = False
     mark_to_market_symbol: Optional[str] = None
@@ -327,17 +318,15 @@ def fetch_native_lookups(
     max_workers: int = 1,
     progress_cb: Optional[Callable[[float, str], None]] = None,
 ) -> dict:
-    arah_of: dict = {}
+    struktur_of: dict = {}
     unique = [str(sym) for sym in dict.fromkeys(symbols or ())]
     if not unique:
-        return arah_of
+        return struktur_of
 
-    if strategy.direction_enabled(config) or strategy.direction_zone_enabled(
-        config
-    ):
-        itv = strategy.direction_interval(config)
+    if strategy.confluence_enabled(config) and strategy.confluence_uses_mtf(config):
+        itv = strategy.confluence_structure_interval(config)
         need_ms = (
-            strategy.direction_window_bars(config)
+            strategy.confluence_structure_window_bars(config)
             * strategy.INTERVAL_MINUTES.get(itv, 15)
             * 60_000
         )
@@ -351,433 +340,331 @@ def fetch_native_lookups(
             max_workers,
             progress_cb,
         )
-        arah_of = build_native_lookups(
+        confirm_itv = str(config.get("CONFIRM_INTERVAL", "5m") or "5m")
+        struktur_of = build_native_lookups(
             series,
             config,
-            lambda klines, cfg: parity.make_direction_lookup(
-                klines, cfg, itv, sudah_dirangkai=True
+            lambda klines, cfg: parity.make_structure_lookup(
+                klines, cfg, confirm_itv, sudah_dirangkai=True
             ),
         )
 
-    return arah_of
+    return struktur_of
 
 
 def build_timeline(
     store: KlineStore,
     interval: str,
     symbols: Optional[list[str]] = None,
-    *,
+    config: Optional[dict] = None,
     include_ohlcv: bool = False,
-) -> tuple[list[int], dict[str, SymbolSeries]]:
+    structure_store: Optional[KlineStore] = None,
+) -> tuple:
     window = bars_per_day(interval)
-    daftar = list(symbols) if symbols is not None else store.symbols()
     series_of: dict[str, SymbolSeries] = {}
+    struktur_of: dict = {}
     all_times: set = set()
+    pakai_struktur = bool(config and strategy.confluence_enabled(config))
+    daftar = symbols if symbols is not None else store.symbols()
+    struct_symbols = (
+        set(structure_store.symbols()) if structure_store is not None else set()
+    )
 
     for sym in daftar:
-        klines = store.load_klines(sym)
-        if not klines:
+        kl = store.klines(sym)
+        if not kl:
             continue
-        stats = compute_rolling_24h_stats(klines, window)
-        series = SymbolSeries.build(sym, klines, stats, include_ohlcv=include_ohlcv)
+        stats = compute_rolling_24h_stats(kl, window)
+        series = SymbolSeries.build(sym, kl, stats, include_ohlcv=include_ohlcv)
         series_of[sym] = series
         all_times.update(series.open_times())
-        del klines, stats
+        if pakai_struktur:
+            if structure_store is not None and sym in struct_symbols:
+                struktur_of[sym] = parity.make_structure_lookup(
+                    structure_store.klines(sym),
+                    config,
+                    interval,
+                    sudah_dirangkai=True,
+                )
+            else:
+                struktur_of[sym] = parity.make_structure_lookup(
+                    kl, config, interval
+                )
 
     timeline = sorted(all_times)
-    return timeline, series_of
+    if config is None:
+        return timeline, series_of
+    return timeline, series_of, struktur_of
 
 
-EntrySignal = tuple[int, float, str, int, float, scanner.SetupResult]
-
-
-class EntrySignalCache(dict):
-
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.direction_scans = 0
-        self.direction_skips = 0
-        self.direction_events: list = []
-        self.htf_scans = 0
-        self.htf_skips = 0
-        self.htf_scans_by_time: dict[int, int] = {}
-        self.htf_skips_by_time: dict[int, int] = {}
-        self.htf_events: list = []
-        self.htf_resistance_scans = 0
-        self.htf_resistance_skips = 0
-        self.htf_resistance_scans_by_time: dict[int, int] = {}
-        self.htf_resistance_skips_by_time: dict[int, int] = {}
-        self.htf_resistance_events: list = []
-        self.direction_zone_scans = 0
-        self.direction_zone_skips = 0
-        self.direction_zone_events: list = []
-        self.timing_scans = 0
-        self.timing_skips = 0
-        self.timing_events: list = []
-        self.breakout_scans = 0
-        self.breakout_skips = 0
-        self.breakout_events: list = []
-
-
-def build_direction_lookups(
-    store: KlineStore, symbols: list, config: dict, interval: str
-) -> dict:
-    from strategy import indicators as strategy_mod
-
-    if not (
-        strategy_mod.direction_enabled(config)
-        or strategy_mod.direction_zone_enabled(config)
-    ):
-        return {}
-    target = strategy_mod.direction_interval_minutes(config)
-    source = strategy_mod.INTERVAL_MINUTES.get(str(interval))
-    if source is None:
-        raise BacktestError(
-            f"Interval simulasi '{interval}' tidak dikenal sehingga candle arah "
-            f"'{strategy_mod.direction_interval(config)}' tidak bisa dirangkai."
-        )
-    lookups: dict = {}
-    for sym in symbols:
-        klines = store.klines(sym)
-        if not klines:
-            continue
-        lookups[sym] = parity.DirectionLookup(
-            strategy_mod.aggregate_klines(klines, target, source), config
-        )
-        del klines
-    return lookups
-
-
-def build_htf_lookups(
-    store: KlineStore, symbols: list, config: dict, interval: str
-) -> dict:
-    if not strategy.htf_enabled(config):
-        return {}
-    try:
-        htf_interval = strategy.htf_interval(config)
-        strategy.htf_warmup_bars(config, interval)
-    except ValueError as exc:
-        raise BacktestError(str(exc)) from exc
-    if htf_interval != "1h":
-        raise BacktestError("Tahap A membatasi HTF_INTERVAL ke '1h' untuk portfolio backtest.")
-    lookups: dict = {}
-    for sym in symbols:
-        klines = store.klines(sym)
-        if not klines:
-            continue
-        lookup = parity.make_htf_lookup(klines, config, interval)
-        if lookup is not None:
-            lookups[sym] = lookup
-        del klines
-    return lookups
-
-
-def build_timing_lookups(
-    store: KlineStore, symbols: list, config: dict, interval: str
-) -> dict:
-    from strategy import indicators as strategy_mod
-
-    if not strategy_mod.timing_enabled(config):
-        return {}
-    lookups: dict = {}
-    for sym in symbols:
-        klines = store.klines(sym)
-        if not klines:
-            continue
-        lookup = parity.make_timing_lookup(klines, config)
-        if lookup is not None:
-            lookups[sym] = lookup
-        del klines
-    return lookups
-
-
-def unpack_prebuilt(prebuilt: Optional[tuple]):
+def unpack_prebuilt(prebuilt: Optional[tuple]) -> tuple:
     if prebuilt is None:
-        return None, None, None, None
-    if len(prebuilt) >= 4:
-        return prebuilt[0], prebuilt[1], prebuilt[2], prebuilt[3]
-    if len(prebuilt) == 3:
-        return prebuilt[0], prebuilt[1], prebuilt[2], None
-    return prebuilt[0], prebuilt[1], None, None
+        return None, None, None
+    if len(prebuilt) == 2:
+        return prebuilt[0], prebuilt[1], None
+    if len(prebuilt) >= 3:
+        return prebuilt[0], prebuilt[1], prebuilt[2]
+    raise ValueError(
+        f"prebuilt harus tuple 2 atau 3 elemen, bukan {len(prebuilt)}"
+    )
 
 
-def unpack_prebuilt_htf(prebuilt: Optional[tuple]):
-    if prebuilt is None or len(prebuilt) < 5:
-        return None
-    return prebuilt[4]
-
-
-def _siapkan_arah(prebuilt, store, series_of, config, interval):
-    _, _, arah_of, _ = unpack_prebuilt(prebuilt)
-    if arah_of is not None:
-        return arah_of
-    if not (
-        config.get("DIRECTION_FILTER_ENABLED", False)
-        or config.get("DIRECTION_ZONE_FILTER_ENABLED", False)
-    ):
+def _siapkan_struktur(
+    prebuilt: Optional[tuple],
+    store: KlineStore,
+    series_of: dict,
+    config: dict,
+    interval: str,
+    structure_store: Optional[KlineStore] = None,
+) -> dict:
+    if not strategy.confluence_enabled(config):
         return {}
-    return build_direction_lookups(store, list(series_of), config, interval)
+    _, _, struktur_bawaan = unpack_prebuilt(prebuilt)
+    if struktur_bawaan is not None:
+        return struktur_bawaan
+    if structure_store is not None:
+        tersedia = set(structure_store.symbols())
+        return {
+            sym: parity.make_structure_lookup(
+                (
+                    structure_store.klines(sym)
+                    if sym in tersedia
+                    else store.klines(sym)
+                ),
+                config,
+                interval,
+                sudah_dirangkai=(sym in tersedia),
+            )
+            for sym in series_of
+        }
+    return {
+        sym: parity.make_structure_lookup(store.klines(sym), config, interval)
+        for sym in series_of
+    }
 
 
-def _siapkan_timing(prebuilt, store, series_of, config, interval):
-    _, _, _, timing_of = unpack_prebuilt(prebuilt)
-    if timing_of is not None:
-        return timing_of
-    if not config.get("TIMING_FILTER_ENABLED", False):
-        return {}
-    return build_timing_lookups(store, list(series_of), config, interval)
+@dataclass
+class EntrySignalCache:
+    signals: dict = field(default_factory=dict)
+    confluence_structure_scans: int = 0
+    confluence_structure_skips: int = 0
+    confluence_trigger_scans: int = 0
+    confluence_trigger_skips: int = 0
+    confluence_structure_events: list = field(default_factory=list)
+    confluence_trigger_events: list = field(default_factory=list)
+    confluence_structure_scans_by_time: dict = field(default_factory=dict)
+    confluence_structure_skips_by_time: dict = field(default_factory=dict)
+    confluence_trigger_scans_by_time: dict = field(default_factory=dict)
+    confluence_trigger_skips_by_time: dict = field(default_factory=dict)
+    sl_buffer_pct: float = 0.20
+    min_rr_ratio: float = 1.2
 
+    def get(self, t_now: int, default=None):
+        return self.signals.get(t_now, default)
 
-def _siapkan_htf(prebuilt, store, series_of, config, interval):
-    if not strategy.htf_enabled(config):
-        return {}
-    try:
-        htf_interval = strategy.htf_interval(config)
-        strategy.htf_warmup_bars(config, interval)
-    except ValueError as exc:
-        raise BacktestError(str(exc)) from exc
-    if htf_interval != "1h":
-        raise BacktestError("Tahap A membatasi HTF_INTERVAL ke '1h' untuk portfolio backtest.")
-    htf_of = unpack_prebuilt_htf(prebuilt)
-    if htf_of is not None:
-        return htf_of
-    return build_htf_lookups(store, list(series_of), config, interval)
+    def __len__(self) -> int:
+        return len(self.signals)
+
+    def __iter__(self):
+        return iter(self.signals)
+
+    def __contains__(self, item) -> bool:
+        return item in self.signals
+
+    def __bool__(self) -> bool:
+        return True
+
+    def keys(self):
+        return self.signals.keys()
+
+    def items(self):
+        return self.signals.items()
+
+    def values(self):
+        return self.signals.values()
 
 
 def precompute_entry_signals(
     store: KlineStore,
     config: dict,
     interval: str,
-    warmup_ms: int = 0,
-    *,
+    warmup_ms: int | tuple = 0,
     prebuilt: Optional[tuple] = None,
+    btc_klines: Optional[list] = None,
     progress_cb: Optional[Callable[[float], None]] = None,
     cancel_cb: Optional[Callable[[], bool]] = None,
-    btc_klines: Optional[list[Kline]] = None,
+    structure_store: Optional[KlineStore] = None,
     max_skipped_records: int = 400,
 ) -> EntrySignalCache:
-    all_symbols = store.symbols()
-    if not all_symbols:
-        raise BacktestError("Tidak ada data candle untuk memproses sinyal.")
-
+    if isinstance(warmup_ms, tuple):
+        prebuilt = warmup_ms
+        warmup_ms = 0
+    warmup_ms_int = int(warmup_ms or 0)
     tradable_meta = config.get("_historical_tradable_symbols")
     symbols = [
         sym
-        for sym in all_symbols
+        for sym in store.symbols()
         if scanner.is_structurally_allowed_symbol(sym, config, tradable_meta)
     ]
     if not symbols:
-        raise BacktestError("Tidak ada data yang lolos policy semesta bersama.")
+        return EntrySignalCache({})
 
-    _pb_timeline, _pb_series, arah_of, timing_of = unpack_prebuilt(prebuilt)
-    if _pb_timeline is None or _pb_series is None:
-        timeline, series_of = build_timeline(store, interval, symbols)
+    timeline, series_of, struktur_of = unpack_prebuilt(prebuilt)
+    if timeline is None:
+        timeline, series_of, struktur_of = build_timeline(
+            store, interval, symbols, config, structure_store=structure_store
+        )
     else:
-        timeline, series_of = _pb_timeline, _pb_series
-    if not timeline:
-        raise BacktestError("Garis waktu kosong, tidak ada candle yang bisa diproses.")
-    symbols = [sym for sym in symbols if sym in series_of]
+        symbols = [sym for sym in symbols if sym in series_of]
+        if not struktur_of:
+            struktur_of = _siapkan_struktur(
+                prebuilt,
+                store,
+                series_of,
+                config,
+                interval,
+                structure_store=structure_store,
+            )
+
+    if not timeline or not symbols:
+        return EntrySignalCache({})
 
     lookback = strategy.confirm_window_bars(config)
     min_vol = float(config["MIN_QUOTE_VOLUME_USDT_24H"])
     top_n = int(config.get("TOP_N_CANDIDATES_TO_CONFIRM", 10))
+    store.set_cache_size(_resolve_symbol_cache_size(config, top_n))
+
     bar_ms = INTERVAL_MINUTES.get(interval, 5) * MS_PER_MIN
     btc_lookup = parity.make_btc_lookup(btc_klines, config, bar_ms)
     gate_cfg = parity.gate_config(config, btc_lookup)
-    native_htf = prebuilt is not None and arah_of is not None
-    if not native_htf:
-        arah_of = _siapkan_arah(prebuilt, store, series_of, config, interval)
-    htf_of = _siapkan_htf(prebuilt, store, series_of, config, interval)
-    if not timing_of:
-        timing_of = _siapkan_timing(prebuilt, store, series_of, config, interval)
-    if (arah_of and not native_htf) or strategy.htf_enabled(config):
-        butuh_warmup = parity.gate_warmup_ms(config, interval)
-        if int(warmup_ms) < butuh_warmup:
-            if strategy.htf_enabled(config):
-                logger.warning(
-                    "Warmup %d ms dinaikkan menjadi %d ms karena gerbang arah/HTF "
-                    "memerlukan candle tertutup %s sebagai pemanasan.",
-                    warmup_ms,
-                    butuh_warmup,
-                    interval,
-                )
-            else:
-                logger.warning(
-                    "Warmup %d ms dinaikkan menjadi %d ms karena layer arah %s "
-                    "butuh paling sedikit %d candle %s sebagai pemanasan.",
-                    warmup_ms,
-                    butuh_warmup,
-                    strategy.direction_interval(config),
-                    strategy.gate_warmup_bars(config, interval),
-                    interval,
-                )
-            warmup_ms = butuh_warmup
-    first_allowed_time = timeline[0] + int(warmup_ms)
+    first_allowed_time = timeline[0] + warmup_ms_int
 
     papan_input = []
     for sym in symbols:
-        ot, _ct, pct_arr, vol_arr, ready_arr = series_of[sym].board_arrays()
-        papan_input.append((sym, ot, pct_arr, vol_arr, ready_arr, len(ot)))
+        ot, ct, pct_arr, vol_arr, ready_arr = series_of[sym].board_arrays()
+        papan_input.append((sym, ot, ct, pct_arr, vol_arr, ready_arr, len(ot)))
 
-    signals = EntrySignalCache()
+    signals = EntrySignalCache(
+        {},
+        sl_buffer_pct=float(config.get("CONFLUENCE_SL_BUFFER_PCT", 0.20) or 0.0),
+        min_rr_ratio=float(config.get("CONFLUENCE_MIN_RR_RATIO", 1.2) or 1.2),
+    )
     total_bars = len(timeline)
+
     for bi, t_now in enumerate(timeline):
+        if progress_cb and bi % 100 == 0:
+            progress_cb(bi / max(1, total_bars))
         if cancel_cb is not None and bi % 200 == 0 and cancel_cb():
             raise BacktestError("Backtest dibatalkan.")
-        if progress_cb and bi % 50 == 0:
-            progress_cb(bi / max(1, total_bars))
         if t_now < first_allowed_time:
             continue
 
         btc_drop = btc_lookup.drop_pct_at(t_now) if btc_lookup is not None else None
         board = []
-        for sym, ot, pct_arr, vol_arr, ready_arr, n_bar in papan_input:
+        for sym, ot, ct, pct_arr, vol_arr, ready_arr, n_bar in papan_input:
             pos = bisect_left(ot, t_now)
-            if pos >= n_bar or ot[pos] != t_now or not ready_arr[pos]:
+            if pos >= n_bar or ot[pos] != t_now:
+                continue
+            if not ready_arr[pos]:
                 continue
             vol24 = vol_arr[pos]
             if vol24 < min_vol:
                 continue
-            pct24 = pct_arr[pos]
-            gate_ok, _gate_reason = scanner.evaluate_market_gate(
-                pct24, vol24, gate_cfg, btc_drop_pct=btc_drop
+            gate_ok, _ = scanner.evaluate_market_gate(
+                vol24, gate_cfg, btc_drop_pct=btc_drop
             )
-            if gate_ok:
-                board.append((vol24, sym, pos, pct24))
-        board.sort(key=lambda x: -x[0])
+            if not gate_ok:
+                continue
+            board.append((vol24, sym, pos, ct[pos]))
+
         if not board:
             continue
+        board.sort(key=lambda x: -x[0])
 
-        lolos: list[EntrySignal] = []
-        for rank, (vol24, sym, index, pct24) in enumerate(board[:top_n], start=1):
-            if index + 1 < lookback:
+        lolos = []
+        for rank, (vol24, sym, i, close_time) in enumerate(
+            board[:top_n], start=1
+        ):
+            if i + 1 < lookback:
                 continue
-            symbol_series = series_of[sym]
-            try:
-                if symbol_series.has_ohlcv:
-                    window_klines = symbol_series.klines_slice(
-                        max(0, index - lookback + 1), index + 1
-                    )
-                    signal_candle = symbol_series.kline_at(index)
-                else:
-                    klines = store.klines(sym)
-                    window_klines = klines[max(0, index - lookback + 1) : index + 1]
-                    signal_candle = window_klines[-1]
-            except Exception as exc:
-                raise BacktestError(
-                    f"Evaluasi sinyal {sym} pada waktu {int(t_now)} "
-                    f"(bar {index}) gagal: {type(exc).__name__}: {str(exc)[:160]}"
-                ) from exc
-            if strategy.htf_enabled(config):
-                lock_htf = htf_of.get(sym) if htf_of else None
-                waktu_scan_htf = int(t_now)
-                signals.htf_scans += 1
-                signals.htf_scans_by_time[waktu_scan_htf] = (
-                    signals.htf_scans_by_time.get(waktu_scan_htf, 0) + 1
+            waktu_bar = int(t_now)
+            verdict_struktur = None
+            if struktur_of:
+                signals.confluence_structure_scans += 1
+                signals.confluence_structure_scans_by_time[waktu_bar] = (
+                    signals.confluence_structure_scans_by_time.get(waktu_bar, 0) + 1
                 )
-                if (
-                    lock_htf is None
-                    or signal_candle is None
-                    or not lock_htf.verdict_at(signal_candle.close_time)["ok"]
-                ):
-                    signals.htf_skips += 1
-                    signals.htf_skips_by_time[waktu_scan_htf] = (
-                        signals.htf_skips_by_time.get(waktu_scan_htf, 0) + 1
-                    )
-                    if len(signals.htf_events) < max_skipped_records:
-                        signals.htf_events.append((int(t_now), sym))
-                    continue
-            if strategy.htf_resistance_enabled(config):
-                waktu_scan_resistance = int(t_now)
-                signals.htf_resistance_scans += 1
-                signals.htf_resistance_scans_by_time[waktu_scan_resistance] = (
-                    signals.htf_resistance_scans_by_time.get(waktu_scan_resistance, 0) + 1
-                )
-                verdict_resistance = (
-                    lock_htf.resistance_at(signal_candle.close_time, signal_candle.close)
-                    if lock_htf is not None and signal_candle is not None
+                lock = struktur_of.get(sym)
+                verdict_struktur = (
+                    lock.verdict_at(close_time)
+                    if lock is not None
                     else {"ok": False}
                 )
-                if not verdict_resistance["ok"]:
-                    signals.htf_resistance_skips += 1
-                    signals.htf_resistance_skips_by_time[waktu_scan_resistance] = (
-                        signals.htf_resistance_skips_by_time.get(waktu_scan_resistance, 0) + 1
+                if not verdict_struktur["ok"]:
+                    signals.confluence_structure_skips += 1
+                    signals.confluence_structure_skips_by_time[waktu_bar] = (
+                        signals.confluence_structure_skips_by_time.get(
+                            waktu_bar, 0
+                        )
+                        + 1
                     )
-                    if len(signals.htf_resistance_events) < max_skipped_records:
-                        signals.htf_resistance_events.append((int(t_now), sym))
+                    if len(signals.confluence_structure_events) < max_skipped_records:
+                        signals.confluence_structure_events.append((waktu_bar, sym))
                     continue
-            if bool(config.get("DIRECTION_FILTER_ENABLED", False)):
-                lock = arah_of.get(sym) if arah_of else None
-                signals.direction_scans += 1
-                if (
-                    lock is None
-                    or signal_candle is None
-                    or not lock.verdict_at(signal_candle.close_time)["ok"]
-                ):
-                    signals.direction_skips += 1
-                    if len(signals.direction_events) < max_skipped_records:
-                        signals.direction_events.append((int(t_now), sym))
-                    continue
-            if bool(config.get("DIRECTION_ZONE_FILTER_ENABLED", False)):
-                lock = arah_of.get(sym) if arah_of else None
-                signals.direction_zone_scans += 1
-                if (
-                    lock is None
-                    or signal_candle is None
-                    or not lock.zone_at(signal_candle.close_time)["ok"]
-                ):
-                    signals.direction_zone_skips += 1
-                    if len(signals.direction_zone_events) < max_skipped_records:
-                        signals.direction_zone_events.append((int(t_now), sym))
-                    continue
-            if bool(config.get("TIMING_FILTER_ENABLED", False)):
-                lock = timing_of.get(sym) if timing_of else None
-                signals.timing_scans += 1
-                if (
-                    lock is None
-                    or signal_candle is None
-                    or not lock.verdict_at(signal_candle.close_time)["ok"]
-                ):
-                    signals.timing_skips += 1
-                    if len(signals.timing_events) < max_skipped_records:
-                        signals.timing_events.append((int(t_now), sym))
-                    continue
-            if strategy.breakout_retest_enabled(config):
-                signals.breakout_scans += 1
+
+            sym_series = series_of[sym]
+            start_w = max(0, i - lookback + 1)
+            if sym_series.has_ohlcv:
+                window_kl = sym_series.klines_slice(start_w, i + 1)
+            else:
+                kl = store.klines(sym)
+                window_kl = kl[start_w : i + 1]
+            if strategy.confluence_enabled(config):
+                signals.confluence_trigger_scans += 1
+                signals.confluence_trigger_scans_by_time[waktu_bar] = (
+                    signals.confluence_trigger_scans_by_time.get(waktu_bar, 0) + 1
+                )
             try:
-                setup = scanner.detect_entry_setup(window_klines, config)
+                setup = scanner.detect_entry_setup(
+                    window_kl,
+                    config,
+                    structure_verdict=verdict_struktur,
+                )
             except Exception as exc:
                 raise BacktestError(
                     f"Evaluasi sinyal {sym} pada waktu {int(t_now)} "
-                    f"(bar {index}) gagal: {type(exc).__name__}: {str(exc)[:160]}"
+                    f"(bar {i}) gagal: {type(exc).__name__}: {str(exc)[:160]}"
                 ) from exc
             if not setup.ok:
-                if setup.reason.startswith("breakout-retest ditolak"):
-                    signals.breakout_skips += 1
-                    if len(signals.breakout_events) < max_skipped_records:
-                        signals.breakout_events.append((int(t_now), sym))
+                if strategy.confluence_enabled(config):
+                    signals.confluence_trigger_skips += 1
+                    signals.confluence_trigger_skips_by_time[waktu_bar] = (
+                        signals.confluence_trigger_skips_by_time.get(waktu_bar, 0) + 1
+                    )
+                    if len(signals.confluence_trigger_events) < max_skipped_records:
+                        signals.confluence_trigger_events.append((waktu_bar, sym))
                 continue
-            lolos.append((rank, pct24, sym, index, vol24, setup))
+            lolos.append((rank, sym, i, vol24, setup))
 
         if not lolos:
             continue
+
         lolos.sort(
             key=lambda row: scanner.setup_quality_key(
-                row[5],
+                row[4],
                 scanner.Candidate(
-                    row[2],
-                    "",
                     row[1],
-                    row[4],
+                    "",
+                    row[3],
                     (
-                        series_of[row[2]].kline_at(row[3]).close
-                        if series_of[row[2]].has_ohlcv
-                        else store.klines(row[2])[row[3]].close
+                        series_of[row[1]].kline_at(row[2]).close
+                        if series_of[row[1]].has_ohlcv
+                        else store.klines(row[1])[row[2]].close
                     ),
                 ),
             )
         )
-        signals[int(t_now)] = (len(board), lolos)
+        signals.signals[int(t_now)] = (len(board), lolos)
 
     if progress_cb:
         progress_cb(1.0)
@@ -821,7 +708,7 @@ def run_portfolio_backtest(
         raise BacktestError("Tidak ada data yang lolos policy semesta bersama.")
     lolos_policy = len(symbols)
 
-    timeline, series_of, arah_of, timing_of = unpack_prebuilt(prebuilt)
+    timeline, series_of, struktur_of = unpack_prebuilt(prebuilt)
     if timeline is None:
         timeline, series_of = build_timeline(store, interval, symbols)
     if not timeline:
@@ -858,35 +745,24 @@ def run_portfolio_backtest(
         _pre_warnings.append(
             "Status TRADING historis tidak tersedia dari candle Binance. Policy status hanya dapat diverifikasi dari metadata saat ini bila caller menyediakannya."
         )
-    native_htf = prebuilt is not None and arah_of is not None
-    if not native_htf:
-        arah_of = _siapkan_arah(prebuilt, store, series_of, config, interval)
-    htf_of = _siapkan_htf(prebuilt, store, series_of, config, interval)
-    if not timing_of:
-        timing_of = _siapkan_timing(prebuilt, store, series_of, config, interval)
-    if (arah_of and not native_htf) or strategy.htf_enabled(config):
-        _butuh_gerbang = parity.gate_warmup_ms(config, interval)
+    native_struct = prebuilt is not None and struktur_of is not None
+    if not native_struct:
+        struktur_of = _siapkan_struktur(prebuilt, store, series_of, config, interval)
+    if struktur_of and not native_struct:
+        _butuh_gerbang = strategy.gate_warmup_ms(config, interval)
         if int(warmup_ms) < _butuh_gerbang:
-            if strategy.htf_enabled(config):
-                _pre_warnings.append(
-                    f"Warmup {warmup_ms} ms dinaikkan menjadi {_butuh_gerbang} ms karena "
-                    "gerbang arah/HTF membutuhkan riwayat candle tertutup sebelum bar "
-                    "entry pertama. Unduhan data harus mencakup rentang warmup ini."
-                )
-            else:
-                _pre_warnings.append(
-                    f"Warmup {warmup_ms} ms dinaikkan menjadi {_butuh_gerbang} ms karena "
-                    f"layer arah {config.get('DIRECTION_INTERVAL', '15m')} butuh "
-                    f"{strategy.direction_window_bars(config)} candle tertutup "
-                    "(termasuk jendela zona demand arah) sebelum bar entry pertama. "
-                    "Unduhan data harus mencakup rentang warmup ini."
-                )
+            _pre_warnings.append(
+                f"Warmup {warmup_ms} ms dinaikkan menjadi {_butuh_gerbang} ms karena "
+                f"struktur Confluence {strategy.confluence_structure_interval(config)} "
+                f"membutuhkan {strategy.confluence_structure_window_bars(config)} candle "
+                "tertutup sebelum bar entry pertama. Unduhan data harus mencakup rentang warmup ini."
+            )
             warmup_ms = _butuh_gerbang
     _butuh = strategy.required_lookback_bars(config)
     if int(config.get("CONFIRM_LOOKBACK_BARS", 0)) < _butuh:
         _pre_warnings.append(
             f"CONFIRM_LOOKBACK_BARS={config.get('CONFIRM_LOOKBACK_BARS')} lebih kecil dari "
-            f"{_butuh} candle yang dibutuhkan gerbang entry M5. Simulasi memakai "
+            f"{_butuh} candle yang dibutuhkan gerbang entry. Simulasi memakai "
             f"{lookback} candle agar deteksi tetap mungkin, tetapi perbaiki config supaya "
             "backtest dan bot live benar-benar memakai angka yang sama."
         )
@@ -922,22 +798,13 @@ def run_portfolio_backtest(
     position_notional = 0.0
     equity_before_entry = 0.0
     rank_at_entry = 0
-    pct24h_at_entry = 0.0
     cands_at_entry = 0
     next_entry_allowed_at = 0
     chase_skips = 0
-    direction_skips = 0
-    direction_scans = 0
-    htf_skips = 0
-    htf_scans = 0
-    htf_resistance_skips = 0
-    htf_resistance_scans = 0
-    direction_zone_skips = 0
-    direction_zone_scans = 0
-    timing_skips = 0
-    timing_scans = 0
-    breakout_skips = 0
-    breakout_scans = 0
+    confluence_structure_skips = 0
+    confluence_structure_scans = 0
+    confluence_trigger_skips = 0
+    confluence_trigger_scans = 0
     symbol_blocks: dict = {}
     same_coin_skips = 0
     max_chase_pct = float(config.get("MAX_CHASE_PCT", 0) or 0)
@@ -953,20 +820,6 @@ def run_portfolio_backtest(
 
     first_allowed_time = timeline[0] + warmup_ms
     total_bars = len(timeline)
-    if timing_of:
-        bar_uji_timing = max(
-            0.0,
-            (int(timeline[-1]) - int(first_allowed_time) + bar_ms)
-            / float(strategy.INTERVAL_MINUTES[strategy.timing_interval(config)] * MS_PER_MIN),
-        )
-        butuh_timing = strategy.timing_required_bars(config)
-        if bar_uji_timing < butuh_timing:
-            warnings.append(
-                f"Periode uji sekitar {bar_uji_timing:.0f} candle "
-                f"{strategy.timing_interval(config)}, lebih pendek dari {butuh_timing} "
-                "candle yang dibutuhkan EMA + ADX di layer timing. Perpanjang rentang "
-                "data agar filter teruji di beberapa siklus."
-            )
 
     papan_input = []
     for sym in symbols:
@@ -981,7 +834,7 @@ def run_portfolio_backtest(
                 continue
             yield waktu_event, simbol_event
 
-    def _jumlah_htf_dalam_jendela(daftar: dict) -> int:
+    def _jumlah_dalam_jendela(daftar: dict) -> int:
         return sum(
             int(jumlah)
             for waktu, jumlah in (daftar or {}).items()
@@ -989,92 +842,50 @@ def run_portfolio_backtest(
             and int(waktu) <= int(timeline[-1])
         )
 
-    def _event_htf_dalam_jendela(daftar: list):
-        for waktu_event, simbol_event in daftar:
-            if waktu_event < first_allowed_time or waktu_event > timeline[-1]:
-                continue
-            yield waktu_event, simbol_event
-
     if entry_signal_cache is not None:
         if start_ms is not None or end_ms is not None:
             warnings.append(
                 "Cache sinyal entry dipakai bersama jendela waktu. Daftar sinyal "
-                "yang dilewati filter disaring ke dalam jendela; hitungan HTF juga "
-                "disaring per waktu, sedangkan hitungan filter entry lain masih total "
-                "dari seluruh rentang cache."
+                "yang dilewati filter disaring ke dalam jendela waktu uji."
             )
-        direction_scans += int(getattr(entry_signal_cache, "direction_scans", 0))
-        direction_skips += int(getattr(entry_signal_cache, "direction_skips", 0))
-        htf_scan_map = getattr(entry_signal_cache, "htf_scans_by_time", None)
-        htf_skip_map = getattr(entry_signal_cache, "htf_skips_by_time", None)
-        if isinstance(htf_scan_map, dict):
-            htf_scans += _jumlah_htf_dalam_jendela(htf_scan_map)
-        else:
-            htf_scans += int(getattr(entry_signal_cache, "htf_scans", 0))
-        if isinstance(htf_skip_map, dict):
-            htf_skips += _jumlah_htf_dalam_jendela(htf_skip_map)
-        else:
-            htf_skips += int(getattr(entry_signal_cache, "htf_skips", 0))
-        htf_resistance_scan_map = getattr(
-            entry_signal_cache, "htf_resistance_scans_by_time", None
+        struct_scan_map = getattr(
+            entry_signal_cache, "confluence_structure_scans_by_time", None
         )
-        htf_resistance_skip_map = getattr(
-            entry_signal_cache, "htf_resistance_skips_by_time", None
+        struct_skip_map = getattr(
+            entry_signal_cache, "confluence_structure_skips_by_time", None
         )
-        if isinstance(htf_resistance_scan_map, dict):
-            htf_resistance_scans += _jumlah_htf_dalam_jendela(
-                htf_resistance_scan_map
-            )
+        if isinstance(struct_scan_map, dict) and struct_scan_map:
+            confluence_structure_scans += _jumlah_dalam_jendela(struct_scan_map)
         else:
-            htf_resistance_scans += int(
-                getattr(entry_signal_cache, "htf_resistance_scans", 0)
+            confluence_structure_scans += int(
+                getattr(entry_signal_cache, "confluence_structure_scans", 0)
             )
-        if isinstance(htf_resistance_skip_map, dict):
-            htf_resistance_skips += _jumlah_htf_dalam_jendela(
-                htf_resistance_skip_map
-            )
+        if isinstance(struct_skip_map, dict) and struct_skip_map:
+            confluence_structure_skips += _jumlah_dalam_jendela(struct_skip_map)
         else:
-            htf_resistance_skips += int(
-                getattr(entry_signal_cache, "htf_resistance_skips", 0)
+            confluence_structure_skips += int(
+                getattr(entry_signal_cache, "confluence_structure_skips", 0)
             )
-        for waktu_event, simbol_event in _event_htf_dalam_jendela(
-            getattr(entry_signal_cache, "htf_events", [])
-        ):
-            if len(skipped) >= max_skipped_records:
-                break
-            skipped.append(
-                SkippedSignal(
-                    time=waktu_event,
-                    symbol=simbol_event,
-                    reason="FILTER_HTF_TREND",
-                    holding=None,
-                )
-            )
-        for waktu_event, simbol_event in _event_htf_dalam_jendela(
-            getattr(entry_signal_cache, "htf_resistance_events", [])
-        ):
-            if len(skipped) >= max_skipped_records:
-                break
-            skipped.append(
-                SkippedSignal(
-                    time=waktu_event,
-                    symbol=simbol_event,
-                    reason="FILTER_HTF_RESISTANCE",
-                    holding=None,
-                )
-            )
-        direction_zone_scans += int(
-            getattr(entry_signal_cache, "direction_zone_scans", 0)
+        trig_scan_map = getattr(
+            entry_signal_cache, "confluence_trigger_scans_by_time", None
         )
-        direction_zone_skips += int(
-            getattr(entry_signal_cache, "direction_zone_skips", 0)
+        trig_skip_map = getattr(
+            entry_signal_cache, "confluence_trigger_skips_by_time", None
         )
-        timing_scans += int(getattr(entry_signal_cache, "timing_scans", 0))
-        timing_skips += int(getattr(entry_signal_cache, "timing_skips", 0))
-        breakout_scans += int(getattr(entry_signal_cache, "breakout_scans", 0))
-        breakout_skips += int(getattr(entry_signal_cache, "breakout_skips", 0))
+        if isinstance(trig_scan_map, dict) and trig_scan_map:
+            confluence_trigger_scans += _jumlah_dalam_jendela(trig_scan_map)
+        else:
+            confluence_trigger_scans += int(
+                getattr(entry_signal_cache, "confluence_trigger_scans", 0)
+            )
+        if isinstance(trig_skip_map, dict) and trig_skip_map:
+            confluence_trigger_skips += _jumlah_dalam_jendela(trig_skip_map)
+        else:
+            confluence_trigger_skips += int(
+                getattr(entry_signal_cache, "confluence_trigger_skips", 0)
+            )
         for waktu_event, simbol_event in _event_dalam_jendela(
-            getattr(entry_signal_cache, "direction_zone_events", [])
+            getattr(entry_signal_cache, "confluence_structure_events", [])
         ):
             if len(skipped) >= max_skipped_records:
                 break
@@ -1082,12 +893,12 @@ def run_portfolio_backtest(
                 SkippedSignal(
                     time=waktu_event,
                     symbol=simbol_event,
-                    reason="FILTER_DIRECTION_ZONE",
+                    reason="FILTER_CONFLUENCE_STRUCTURE",
                     holding=None,
                 )
             )
         for waktu_event, simbol_event in _event_dalam_jendela(
-            getattr(entry_signal_cache, "direction_events", [])
+            getattr(entry_signal_cache, "confluence_trigger_events", [])
         ):
             if len(skipped) >= max_skipped_records:
                 break
@@ -1095,33 +906,7 @@ def run_portfolio_backtest(
                 SkippedSignal(
                     time=waktu_event,
                     symbol=simbol_event,
-                    reason="FILTER_DIRECTION",
-                    holding=None,
-                )
-            )
-        for waktu_event, simbol_event in _event_dalam_jendela(
-            getattr(entry_signal_cache, "timing_events", [])
-        ):
-            if len(skipped) >= max_skipped_records:
-                break
-            skipped.append(
-                SkippedSignal(
-                    time=waktu_event,
-                    symbol=simbol_event,
-                    reason="FILTER_TIMING",
-                    holding=None,
-                )
-            )
-        for waktu_event, simbol_event in _event_dalam_jendela(
-            getattr(entry_signal_cache, "breakout_events", [])
-        ):
-            if len(skipped) >= max_skipped_records:
-                break
-            skipped.append(
-                SkippedSignal(
-                    time=waktu_event,
-                    symbol=simbol_event,
-                    reason="FILTER_BREAKOUT_RETEST",
+                    reason="FILTER_CONFLUENCE_TRIGGER",
                     holding=None,
                 )
             )
@@ -1184,13 +969,12 @@ def run_portfolio_backtest(
                 vol24 = vol_arr[pos]
                 if vol24 < min_vol:
                     continue
-                pct24 = pct_arr[pos]
                 gate_ok, _gate_reason = scanner.evaluate_market_gate(
-                    pct24, vol24, gate_cfg, btc_drop_pct=btc_drop
+                    vol24, gate_cfg, btc_drop_pct=btc_drop
                 )
                 if not gate_ok:
                     continue
-                board.append((vol24, sym, pos, pct24))
+                board.append((vol24, sym, pos))
             board.sort(key=lambda x: -x[0])
 
         if holding is not None:
@@ -1230,35 +1014,31 @@ def run_portfolio_backtest(
                 if verdict is not None:
                     exit_reason, exit_price = verdict
 
-            is_last = current_bi == total_bars - 1
+                if exit_reason is None:
+                    mtm_pnl_pct = (candle.close / entry_price - 1.0) * 100.0
+                    mtm_pnl_quote = position_notional * mtm_pnl_pct / 100.0
+                    mtm_equity = equity + mtm_pnl_quote
+                    entries_paused = controls.update(candle.close_time, mtm_equity)
+                    if controls.force_close_due(entries_paused, True):
+                        exit_reason = parity.RISK_LIMIT_REASON
+                        exit_price = candle.close
+
             if exit_reason is None:
-                mtm_pnl_pct = (candle.close / entry_price - 1.0) * 100.0
-                mtm_pnl_quote = position_notional * mtm_pnl_pct / 100.0
-                mtm_equity = equity + mtm_pnl_quote
-                entries_paused = controls.update(candle.close_time, mtm_equity)
-                if controls.force_close_due(entries_paused, True):
-                    exit_reason = parity.RISK_LIMIT_REASON
-                    exit_price = candle.close
-                elif is_last:
-                    mark_to_market_open = True
-                    mark_to_market_symbol = holding
-                    mark_to_market_pnl_pct = mtm_pnl_pct
-                    mark_to_market_pnl_quote = mtm_pnl_quote
-                    mark_to_market_hold_minutes = max(
-                        0.0, (candle.close_time - entry_time) / 60000.0
-                    )
-                    warnings.append(
-                        "Posisi terakhir masih terbuka pada akhir data. Nilainya dicatat "
-                        "sebagai mark-to-market, bukan sebagai trade tertutup."
-                    )
+                if mtm_equity > peak_equity:
+                    peak_equity = mtm_equity
+                elif peak_equity > 0:
+                    dd_now = (peak_equity - mtm_equity) / peak_equity * 100.0
+                    if dd_now > intra_drawdown_pct:
+                        intra_drawdown_pct = dd_now
 
             if exit_reason:
+                raw_exit_price = exit_price
                 exit_price = strategy.backtest_sell_execution_price(
-                    exit_price, execution_spread_pct, execution_slippage_pct
+                    raw_exit_price, execution_spread_pct, execution_slippage_pct
                 )
                 gross = (exit_price / entry_price - 1.0) * 100.0
-                pnl_pct = gross - fee_round_trip
-                pnl_quote = position_notional * pnl_pct / 100.0
+                net = gross - fee_round_trip
+                pnl_quote = position_notional * net / 100.0
                 equity_after = max(0.0, equity + pnl_quote)
                 trades.append(
                     PortfolioTrade(
@@ -1269,14 +1049,13 @@ def run_portfolio_backtest(
                         exit_price=exit_price,
                         reason=exit_reason,
                         hold_minutes=hold_minutes,
-                        pnl_pct=pnl_pct,
+                        pnl_pct=net,
                         gross_pnl_pct=gross,
                         fee_pct=fee_round_trip,
                         sl_pct=position.levels["sl"],
                         tp_pct=position.levels["tp"],
                         exit_source=position.levels["src"],
                         rank_at_entry=rank_at_entry,
-                        pct24h_at_entry=pct24h_at_entry,
                         candidates_at_entry=cands_at_entry,
                         position_notional=position_notional,
                         equity_before=equity_before_entry,
@@ -1285,162 +1064,195 @@ def run_portfolio_backtest(
                     )
                 )
                 equity = equity_after
-                position_notional = 0.0
+                if equity > peak_equity:
+                    peak_equity = equity
+                elif peak_equity > 0:
+                    dd_now = (peak_equity - equity) / peak_equity * 100.0
+                    if dd_now > intra_drawdown_pct:
+                        intra_drawdown_pct = dd_now
                 parity.same_coin_block_record(
                     symbol_blocks, holding, candle.close_time, pnl_quote, config
                 )
                 holding = None
                 position = None
+                position_notional = 0.0
                 next_entry_allowed_at = parity.next_entry_allowed(
                     candle.close_time, config
                 )
                 controls.update(candle.close_time, equity)
-            nilai_ekuitas = equity if exit_reason else mtm_equity
-            if nilai_ekuitas > peak_equity:
-                peak_equity = nilai_ekuitas
-            elif peak_equity > 0:
-                dd_sekarang = (peak_equity - nilai_ekuitas) / peak_equity * 100.0
-                if dd_sekarang > intra_drawdown_pct:
-                    intra_drawdown_pct = dd_sekarang
+                continue
+
+            if len(skipped) < max_skipped_records:
+                if entry_signal_cache is None:
+                    for _rank, (_vol24, sym, i) in enumerate(
+                        board[:top_n], start=1
+                    ):
+                        if sym == holding:
+                            continue
+                        kl = store.klines(sym)
+                        window_kl = kl[max(0, i - lookback + 1) : i + 1]
+                        verdict_struktur = None
+                        if struktur_of:
+                            lock = struktur_of.get(sym)
+                            verdict_struktur = (
+                                lock.verdict_at(kl[i].close_time)
+                                if lock is not None
+                                else {"ok": False}
+                            )
+                            if not verdict_struktur["ok"]:
+                                continue
+                        setup_skip = scanner.detect_entry_setup(
+                            window_kl,
+                            config,
+                            structure_verdict=verdict_struktur,
+                        )
+                        if setup_skip.ok:
+                            skipped.append(
+                                SkippedSignal(
+                                    time=t_now,
+                                    symbol=sym,
+                                    reason="POSISI_AKTIF",
+                                    holding=holding,
+                                )
+                            )
+                            break
+                else:
+                    cached = entry_signal_cache.get(int(t_now))
+                    if cached:
+                        for _rank, sym, _i, _vol24, _setup in cached[1]:
+                            if sym == holding:
+                                continue
+                            if parity.same_coin_blocked(sym, t_now, symbol_blocks):
+                                continue
+                            skipped.append(
+                                SkippedSignal(
+                                    time=t_now,
+                                    symbol=sym,
+                                    reason="POSISI_AKTIF",
+                                    holding=holding,
+                                )
+                            )
+                            break
             continue
 
-        entries_paused = controls.update(t_now + bar_ms - 1, equity)
+        entries_paused = controls.update(t_now, equity)
         if entries_paused:
             continue
-        if t_now < first_allowed_time or t_now < next_entry_allowed_at:
+        if t_now < first_allowed_time:
+            continue
+        if t_now < next_entry_allowed_at:
+            if len(skipped) < max_skipped_records:
+                if entry_signal_cache is None and board:
+                    for _vol24, sym, i in board[:top_n]:
+                        kl = store.klines(sym)
+                        window_kl = kl[max(0, i - lookback + 1) : i + 1]
+                        verdict_struktur = None
+                        if struktur_of:
+                            lock = struktur_of.get(sym)
+                            verdict_struktur = (
+                                lock.verdict_at(kl[i].close_time)
+                                if lock is not None
+                                else {"ok": False}
+                            )
+                            if not verdict_struktur["ok"]:
+                                continue
+                        if scanner.detect_entry_setup(
+                            window_kl, config, structure_verdict=verdict_struktur
+                        ).ok:
+                            skipped.append(
+                                SkippedSignal(
+                                    time=t_now,
+                                    symbol=sym,
+                                    reason="COOLDOWN",
+                                    holding=None,
+                                )
+                            )
+                            break
+                elif entry_signal_cache is not None:
+                    cached = entry_signal_cache.get(int(t_now))
+                    if cached:
+                        for _rank, sym, _i, _vol24, _setup in cached[1]:
+                            if parity.same_coin_blocked(sym, t_now, symbol_blocks):
+                                continue
+                            skipped.append(
+                                SkippedSignal(
+                                    time=t_now,
+                                    symbol=sym,
+                                    reason="COOLDOWN",
+                                    holding=None,
+                                )
+                            )
+                            break
             continue
 
         if entry_signal_cache is None:
-            eligible = board
-            if not eligible:
+            if not board:
                 continue
 
+            eligible = board[:top_n]
             lolos = []
-            for rank, (vol24, sym, i, pct) in enumerate(eligible[:top_n], start=1):
-                kl = store.klines(sym)
+            for rank, (vol24, sym, i) in enumerate(eligible, start=1):
                 if i + 1 < lookback:
                     continue
-                window_kl = kl[max(0, i - lookback + 1) : i + 1]
-                if strategy.htf_enabled(config):
-                    lock_htf = htf_of.get(sym) if htf_of else None
-                    htf_scans += 1
-                    if (
-                        lock_htf is None
-                        or not lock_htf.verdict_at(kl[i].close_time)["ok"]
-                    ):
-                        htf_skips += 1
-                        if len(skipped) < max_skipped_records:
-                            skipped.append(
-                                SkippedSignal(
-                                    time=t_now,
-                                    symbol=sym,
-                                    reason="FILTER_HTF_TREND",
-                                    holding=None,
-                                )
-                            )
-                        continue
-                if strategy.htf_resistance_enabled(config):
-                    htf_resistance_scans += 1
-                    verdict_resistance = (
-                        lock_htf.resistance_at(kl[i].close_time, kl[i].close)
-                        if lock_htf is not None
+                kl = store.klines(sym)
+                verdict_struktur = None
+                if struktur_of:
+                    confluence_structure_scans += 1
+                    lock = struktur_of.get(sym)
+                    verdict_struktur = (
+                        lock.verdict_at(kl[i].close_time)
+                        if lock is not None
                         else {"ok": False}
                     )
-                    if not verdict_resistance["ok"]:
-                        htf_resistance_skips += 1
+                    if not verdict_struktur["ok"]:
+                        confluence_structure_skips += 1
                         if len(skipped) < max_skipped_records:
                             skipped.append(
                                 SkippedSignal(
                                     time=t_now,
                                     symbol=sym,
-                                    reason="FILTER_HTF_RESISTANCE",
+                                    reason="FILTER_CONFLUENCE_STRUCTURE",
                                     holding=None,
                                 )
                             )
                         continue
-                if bool(config.get("DIRECTION_FILTER_ENABLED", False)):
-                    lock = arah_of.get(sym) if arah_of else None
-                    direction_scans += 1
-                    if (
-                        lock is None
-                        or not lock.verdict_at(kl[i].close_time)["ok"]
-                    ):
-                        direction_skips += 1
-                        if len(skipped) < max_skipped_records:
-                            skipped.append(
-                                SkippedSignal(
-                                    time=t_now,
-                                    symbol=sym,
-                                    reason="FILTER_DIRECTION",
-                                    holding=None,
-                                )
-                            )
-                        continue
-                if bool(config.get("DIRECTION_ZONE_FILTER_ENABLED", False)):
-                    lock = arah_of.get(sym) if arah_of else None
-                    direction_zone_scans += 1
-                    if (
-                        lock is None
-                        or not lock.zone_at(kl[i].close_time)["ok"]
-                    ):
-                        direction_zone_skips += 1
-                        if len(skipped) < max_skipped_records:
-                            skipped.append(
-                                SkippedSignal(
-                                    time=t_now,
-                                    symbol=sym,
-                                    reason="FILTER_DIRECTION_ZONE",
-                                    holding=None,
-                                )
-                            )
-                        continue
-                if bool(config.get("TIMING_FILTER_ENABLED", False)):
-                    lock = timing_of.get(sym) if timing_of else None
-                    timing_scans += 1
-                    if lock is None or not lock.verdict_at(kl[i].close_time)["ok"]:
-                        timing_skips += 1
-                        if len(skipped) < max_skipped_records:
-                            skipped.append(
-                                SkippedSignal(
-                                    time=t_now,
-                                    symbol=sym,
-                                    reason="FILTER_TIMING",
-                                    holding=None,
-                                )
-                            )
-                        continue
-                if strategy.breakout_retest_enabled(config):
-                    breakout_scans += 1
+                window_kl = kl[max(0, i - lookback + 1) : i + 1]
+                if strategy.confluence_enabled(config):
+                    confluence_trigger_scans += 1
                 try:
-                    setup = scanner.detect_entry_setup(window_kl, config)
+                    setup = scanner.detect_entry_setup(
+                        window_kl,
+                        config,
+                        structure_verdict=verdict_struktur,
+                    )
                 except Exception as exc:
                     raise BacktestError(
                         f"Evaluasi sinyal {sym} pada waktu {int(t_now)} "
                         f"(bar {i}) gagal: {type(exc).__name__}: {str(exc)[:160]}"
                     ) from exc
                 if not setup.ok:
-                    if setup.reason.startswith("breakout-retest ditolak"):
-                        breakout_skips += 1
+                    if strategy.confluence_enabled(config):
+                        confluence_trigger_skips += 1
                         if len(skipped) < max_skipped_records:
                             skipped.append(
                                 SkippedSignal(
                                     time=t_now,
                                     symbol=sym,
-                                    reason="FILTER_BREAKOUT_RETEST",
+                                    reason="FILTER_CONFLUENCE_TRIGGER",
                                     holding=None,
                                 )
                             )
                     continue
-                lolos.append((rank, pct, sym, i, vol24, setup))
+                lolos.append((rank, sym, i, vol24, setup))
 
             if not lolos:
                 continue
 
             lolos.sort(
                 key=lambda row: scanner.setup_quality_key(
-                    row[5],
+                    row[4],
                     scanner.Candidate(
-                        row[2], "", row[1], row[4], store.klines(row[2])[row[3]].close
+                        row[1], "", row[3], store.klines(row[1])[row[2]].close
                     ),
                 )
             )
@@ -1449,18 +1261,93 @@ def run_portfolio_backtest(
             cached_entry = entry_signal_cache.get(int(t_now))
             if cached_entry is None:
                 continue
-            eligible_count, lolos = cached_entry
-            if not lolos:
+            eligible_count, raw_lolos = cached_entry
+            if not raw_lolos:
                 continue
+            cfg_buf = float(config.get("CONFLUENCE_SL_BUFFER_PCT", 0.20) or 0.0)
+            cfg_rr = float(config.get("CONFLUENCE_MIN_RR_RATIO", 1.2) or 1.2)
+            same_exit_cfg = (
+                abs(cfg_buf - getattr(entry_signal_cache, "sl_buffer_pct", 0.20)) < 1e-9
+                and abs(cfg_rr - getattr(entry_signal_cache, "min_rr_ratio", 1.2)) < 1e-9
+            )
+            if same_exit_cfg:
+                lolos = list(raw_lolos)
+            else:
+                lolos = []
+                for r_rank, r_sym, r_i, r_vol24, r_setup in raw_lolos:
+                    if not strategy.confluence_enabled(config):
+                        fb = strategy.compute_confluence_exit_levels(
+                            float(r_setup.signal_close or 100.0),
+                            config,
+                            fallback_allowed=True,
+                        )
+                        lolos.append(
+                            (
+                                r_rank,
+                                r_sym,
+                                r_i,
+                                r_vol24,
+                                replace(
+                                    r_setup,
+                                    sl_price=fb["sl_price"],
+                                    tp_price=fb["tp_price"],
+                                    sl_pct=fb["sl_pct"],
+                                    tp_pct=fb["tp_pct"],
+                                    rr_ratio=fb["rr_ratio"],
+                                ),
+                            )
+                        )
+                        continue
+                    info = strategy.compute_confluence_exit_levels(
+                        float(r_setup.signal_close or 0.0),
+                        config,
+                        poi_low=r_setup.poi_low,
+                        ob_low=r_setup.ob_low,
+                        swing_low=r_setup.swing_low,
+                        sweep_low=r_setup.sweep_low,
+                        bsl_level=r_setup.bsl_level,
+                        swing_high=r_setup.swing_high,
+                        fallback_allowed=False,
+                    )
+                    if not info["ok"]:
+                        confluence_trigger_skips += 1
+                        if len(skipped) < max_skipped_records:
+                            skipped.append(
+                                SkippedSignal(
+                                    time=t_now,
+                                    symbol=r_sym,
+                                    reason="FILTER_CONFLUENCE_TRIGGER",
+                                    holding=None,
+                                )
+                            )
+                        continue
+                    lolos.append(
+                        (
+                            r_rank,
+                            r_sym,
+                            r_i,
+                            r_vol24,
+                            replace(
+                                r_setup,
+                                sl_price=info["sl_price"],
+                                tp_price=info["tp_price"],
+                                sl_pct=info["sl_pct"],
+                                tp_pct=info["tp_pct"],
+                                rr_ratio=info["rr_ratio"],
+                            ),
+                        )
+                    )
+                if not lolos:
+                    continue
         lolos_tersedia = []
         for row in lolos:
-            if parity.same_coin_blocked(row[2], t_now, symbol_blocks):
+            if parity.same_coin_blocked(row[1], t_now, symbol_blocks):
                 same_coin_skips += 1
                 if len(skipped) < max_skipped_records:
                     skipped.append(
                         SkippedSignal(
                             time=t_now,
-                            symbol=row[2],
+                            symbol=row[1],
                             reason="SAME_COIN_BLOCK",
                             holding=None,
                         )
@@ -1470,13 +1357,13 @@ def run_portfolio_backtest(
         lolos = lolos_tersedia
         if not lolos:
             continue
-        rank, pct, sym, i, _vol24, setup_terpilih = lolos[0]
+        rank, sym, i, _vol24, setup_terpilih = lolos[0]
         sizing = strategy.resolve_position_notional(config, equity)
         if sizing["notional"] <= 0 or sizing["notional"] > equity:
             continue
 
         if len(skipped) < max_skipped_records:
-            for _r2, _p2, sym2, _i2, _v2, _s2 in lolos:
+            for _r2, sym2, _i2, _v2, _s2 in lolos:
                 if sym2 == sym:
                     continue
                 skipped.append(
@@ -1517,28 +1404,6 @@ def run_portfolio_backtest(
         else:
             raw_entry_price = entry_candle.open
             entry_time_value = entry_candle.open_time
-        level_cfg = dict(config)
-        if bool(config.get("USE_ATR_EXIT", False)):
-            atr_val = setup_terpilih.atr_value
-            if atr_val is None:
-                warnings.append(
-                    f"Entry {sym} bar {i} dilewati: USE_ATR_EXIT aktif tetapi "
-                    "nilai ATR tidak tersedia, level exit tidak dapat dikunci "
-                    "dengan aman (paritas open_position)."
-                )
-                continue
-            level_cfg["_atr_value"] = atr_val
-        lv = strategy.resolve_exit_levels(level_cfg)
-        if str(lv.get("source", "")).upper() == "ATR" and not (
-            0.0 < float(lv.get("sl_pct") or 0.0) < raw_entry_price
-        ):
-            warnings.append(
-                f"Entry {sym} bar {i} dilewati: jarak SL ATR "
-                f"{float(lv.get('sl_pct') or 0.0):.10g} tidak masuk akal "
-                f"terhadap harga acuan {raw_entry_price:.10g} "
-                "(paritas open_position). Cek ATR_MULT_SL/ATR."
-            )
-            continue
         exec_entry_price = strategy.backtest_buy_execution_price(
             raw_entry_price, execution_spread_pct, execution_slippage_pct
         )
@@ -1553,6 +1418,9 @@ def run_portfolio_backtest(
                     )
                 )
             continue
+        lv = strategy.resolve_exit_levels(
+            config, setup=setup_terpilih, entry_price=exec_entry_price
+        )
         holding = sym
         position = parity.PositionState(
             exec_entry_price, lv, entry_time=entry_time_value
@@ -1562,8 +1430,65 @@ def run_portfolio_backtest(
         entry_price = exec_entry_price
         entry_time = entry_time_value
         rank_at_entry = rank
-        pct24h_at_entry = pct
         cands_at_entry = eligible_count
+        if entry_delay_bars > 0:
+            next_bi = bisect_left(timeline, entry_time_value)
+            if next_bi > bi:
+                bi = next_bi
+
+    if holding is not None and entry_price > 0:
+        held_series = series_of[holding]
+        last_idx = held_series.index_at_or_before(timeline[-1])
+        if last_idx is None:
+            last_idx = len(held_series) - 1
+        last_candle = (
+            held_series.kline_at(last_idx)
+            if entry_signal_cache is not None and held_series.has_ohlcv
+            else store.klines(holding)[last_idx]
+        )
+        mark_to_market_open = True
+        mark_to_market_symbol = holding
+        mark_to_market_pnl_pct = (last_candle.close / entry_price - 1.0) * 100.0
+        mark_to_market_pnl_quote = position_notional * mark_to_market_pnl_pct / 100.0
+        mark_to_market_hold_minutes = max(
+            0.0, (last_candle.close_time - entry_time) / 60000.0
+        )
+        warnings.append(
+            f"Posisi terakhir ({holding}) masih terbuka pada akhir data. "
+            f"Nilainya dicatat sebagai mark-to-market ({mark_to_market_pnl_pct:+.2f}%), "
+            f"bukan sebagai trade tertutup."
+        )
+
+    if same_coin_skips:
+        warnings.append(
+            f"{same_coin_skips} sinyal dilewati oleh blokir koin sama setelah loss "
+            f"(SAME_COIN_BLOCK_HOURS={parity.same_coin_block_hours(config):g} jam), "
+            "sama seperti bot live."
+        )
+    if chase_skips:
+        warnings.append(
+            f"{chase_skips} sinyal dilewati oleh filter MAX_CHASE_PCT "
+            f"({max_chase_pct:g}%), sama seperti bot live."
+        )
+    if confluence_structure_skips:
+        warnings.append(
+            f"{confluence_structure_skips} dari {confluence_structure_scans} kandidat top-N "
+            f"dilewati oleh struktur POI The Confluence Code "
+            f"({strategy.confluence_structure_interval(config)})."
+        )
+    if confluence_trigger_skips:
+        warnings.append(
+            f"{confluence_trigger_skips} dari {confluence_trigger_scans} struktur POI "
+            f"dilewati oleh pemicu eksekusi The Confluence Code ({interval})."
+        )
+    risk_summary = controls.summary()
+    if risk_summary["kill_switch_triggers"] > 0:
+        warnings.append(
+            f"Kill switch drawdown aktif {risk_summary['kill_switch_triggers']} kali "
+            f"(batas {risk_summary['max_drawdown_limit_pct']}%). "
+            f"Force close: {risk_summary['force_closes']}, "
+            f"reset cooldown: {risk_summary['cooldown_resets']}."
+        )
 
     if progress_cb:
         progress_cb(1.0)
@@ -1571,99 +1496,21 @@ def run_portfolio_backtest(
     return PortfolioResult(
         interval=interval,
         symbols_scanned=len(symbols),
-        symbols_with_data=len(symbols),
+        symbols_with_data=len(series_of),
         bars_total=total_bars,
-        start_time=timeline[0],
+        start_time=first_allowed_time,
         end_time=timeline[-1],
         trades=trades,
         skipped=skipped,
-        warnings=list(
-            dict.fromkeys(
-                warnings
-                + (
-                    [
-                        f"{direction_skips} dari {direction_scans} sinyal konfirmasi "
-                        f"dilewati oleh layer arah "
-                        f"{config.get('DIRECTION_INTERVAL', '15m')}, sama seperti bot live."
-                    ]
-                    if arah_of and direction_skips
-                    else []
-                )
-                + (
-                    [
-                        f"{htf_skips} dari {htf_scans} sinyal konfirmasi dilewati "
-                        f"gerbang tren HTF {strategy.htf_interval(config)}; evaluasi "
-                        "menggunakan hanya candle HTF tertutup yang tersedia pada waktu sinyal."
-                    ]
-                    if strategy.htf_enabled(config) and htf_skips
-                    else []
-                )
-                + (
-                    [
-                        f"{htf_resistance_skips} dari {htf_resistance_scans} sinyal konfirmasi "
-                        f"dilewati filter resistance HTF {strategy.htf_interval(config)}: ruang "
-                        f"ke pivot swing-high terdekat harus >= "
-                        f"{float(config.get('HTF_RESISTANCE_MIN_ROOM_PCT', 1.5) or 0.0):g}% "
-                        "dari close M5; hanya memakai candle H1 tertutup."
-                    ]
-                    if strategy.htf_resistance_enabled(config) and htf_resistance_skips
-                    else []
-                )
-                + (
-                    [
-                        f"{direction_zone_skips} dari {direction_zone_scans} sinyal konfirmasi "
-                        f"dilewati zona demand "
-                        f"{config.get('DIRECTION_INTERVAL', '15m')}, memakai candle "
-                        "arah yang sama, bukan candle konfirmasi."
-                    ]
-                    if arah_of and direction_zone_skips
-                    else []
-                )
-                + (
-                    [
-                        f"{timing_skips} dari {timing_scans} sinyal konfirmasi "
-                        f"dilewati oleh layer timing "
-                        f"{strategy.timing_interval(config)}, sama seperti bot live."
-                    ]
-                    if timing_of and timing_skips
-                    else []
-                )
-                + (
-                    [
-                        f"{breakout_skips} dari {breakout_scans} sinyal yang sudah lolos "
-                        f"tren M5 ditolak oleh breakout-retest "
-                        f"{strategy.timing_interval(config)}, sama seperti bot live."
-                    ]
-                    if breakout_skips
-                    else []
-                )
-                + (
-                    [
-                        f"{same_coin_skips} sinyal dilewati oleh blokir koin sama setelah "
-                        f"loss (SAME_COIN_BLOCK_HOURS="
-                        f"{parity.same_coin_block_hours(config):g} jam), sama seperti bot live."
-                    ]
-                    if same_coin_skips
-                    else []
-                )
-            )
-        ),
+        warnings=warnings,
         initial_equity=initial_equity,
-        final_equity=equity + mark_to_market_pnl_quote,
-        risk_events=dict(controls.events),
+        final_equity=equity,
+        risk_events=risk_summary,
         chase_skips=chase_skips,
-        direction_skips=direction_skips,
-        direction_scans=direction_scans,
-        htf_skips=htf_skips,
-        htf_scans=htf_scans,
-        htf_resistance_skips=htf_resistance_skips,
-        htf_resistance_scans=htf_resistance_scans,
-        direction_zone_skips=direction_zone_skips,
-        direction_zone_scans=direction_zone_scans,
-        timing_skips=timing_skips,
-        timing_scans=timing_scans,
-        breakout_skips=breakout_skips,
-        breakout_scans=breakout_scans,
+        confluence_structure_skips=confluence_structure_skips,
+        confluence_structure_scans=confluence_structure_scans,
+        confluence_trigger_skips=confluence_trigger_skips,
+        confluence_trigger_scans=confluence_trigger_scans,
         same_coin_skips=same_coin_skips,
         mark_to_market_open=mark_to_market_open,
         mark_to_market_symbol=mark_to_market_symbol,
@@ -1682,7 +1529,7 @@ def summarize_portfolio(result: PortfolioResult) -> dict:
     wins = [t for t in trades if t.pnl_pct > 0]
     losses = [t for t in trades if t.pnl_pct <= 0]
 
-    initial = result.initial_equity
+    initial = float(result.initial_equity or 0.0)
     equity = initial
     gross_equity = initial
     equity_curve = [0.0]
@@ -1744,7 +1591,7 @@ def summarize_portfolio(result: PortfolioResult) -> dict:
     for value in [initial] + [initial * (1.0 + v / 100.0) for v in equity_curve[1:]]:
         peak = max(peak, value)
         max_dd = max(max_dd, ((peak - value) / peak * 100.0) if peak > 0 else 0.0)
-    max_dd = max(max_dd, float(getattr(result, "intra_drawdown_pct", 0.0) or 0.0))
+    max_dd = max(max_dd, abs(float(getattr(result, "intra_drawdown_pct", 0.0) or 0.0)))
 
     gross_win = sum(t.pnl_pct for t in wins)
     gross_loss = abs(sum(t.pnl_pct for t in losses))
@@ -1755,15 +1602,49 @@ def summarize_portfolio(result: PortfolioResult) -> dict:
     )
 
     reason_counts: dict = {}
+    by_reason: dict = {}
     for t in trades:
         reason_counts[t.reason] = reason_counts.get(t.reason, 0) + 1
+        slot = by_reason.setdefault(t.reason, {"count": 0, "sum_pnl": 0.0, "wins": 0})
+        slot["count"] += 1
+        slot["sum_pnl"] += t.pnl_pct
+        if t.pnl_pct > 0:
+            slot["wins"] += 1
+    for _r, slot in by_reason.items():
+        c = slot["count"]
+        slot["avg_pnl_pct"] = round(slot["sum_pnl"] / c, 3) if c else 0.0
+        slot["win_rate"] = round(slot["wins"] / c * 100.0, 1) if c else 0.0
+        del slot["sum_pnl"]
 
     symbol_counts: dict = {}
     symbol_pnl: dict = {}
+    coin_map: dict = {}
     for t in trades:
         symbol_counts[t.symbol] = symbol_counts.get(t.symbol, 0) + 1
         symbol_pnl[t.symbol] = symbol_pnl.get(t.symbol, 0.0) + t.pnl_quote
+        slot = coin_map.setdefault(
+            t.symbol,
+            {"symbol": t.symbol, "trades": 0, "wins": 0, "sum_pnl": 0.0},
+        )
+        slot["trades"] += 1
+        slot["sum_pnl"] += t.pnl_pct
+        if t.pnl_pct > 0:
+            slot["wins"] += 1
     top_symbols = sorted(symbol_pnl.items(), key=lambda kv: kv[1], reverse=True)
+    by_coin = []
+    for sym, slot in coin_map.items():
+        c = slot["trades"]
+        by_coin.append(
+            {
+                "symbol": sym,
+                "trades": c,
+                "wins": slot["wins"],
+                "win_rate": round(slot["wins"] / c * 100.0, 1) if c else 0.0,
+                "total_pnl_pct": round(slot["sum_pnl"], 3),
+                "avg_pnl_pct": round(slot["sum_pnl"] / c, 3) if c else 0.0,
+            }
+        )
+    by_coin.sort(key=lambda x: x["total_pnl_pct"], reverse=True)
 
     span_ms = max(1, result.end_time - result.start_time)
     span_days = span_ms / (24 * 60 * 60 * 1000)
@@ -1772,6 +1653,7 @@ def summarize_portfolio(result: PortfolioResult) -> dict:
         mark_to_market_hold_minutes if mark_to_market_open else 0.0
     )
     exposure = (total_hold / (span_days * 24 * 60) * 100.0) if span_days > 0 else 0.0
+    trade_metrics = parity.per_trade_metrics(trades)
 
     return {
         "total_trades": total,
@@ -1791,6 +1673,7 @@ def summarize_portfolio(result: PortfolioResult) -> dict:
         "fee_drag_pct": gross_return - total_return,
         "total_fee_pct": sum(t.fee_pct for t in trades),
         "max_drawdown_pct": max_dd,
+        "avg_pnl_pct": trade_metrics["avg_trade_pct"],
         "avg_win_pct": (sum(t.pnl_pct for t in wins) / len(wins)) if wins else 0.0,
         "avg_loss_pct": (
             (sum(t.pnl_pct for t in losses) / len(losses)) if losses else 0.0
@@ -1798,12 +1681,15 @@ def summarize_portfolio(result: PortfolioResult) -> dict:
         "profit_factor": profit_factor,
         "avg_hold_minutes": (closed_hold_minutes / total) if total else 0.0,
         "reason_counts": reason_counts,
+        "by_reason": by_reason,
+        "by_coin": by_coin,
         "equity_curve": equity_curve,
         "initial_equity": initial,
         "realized_equity": realized_equity,
         "final_equity": final_equity,
         "total_pnl_quote": final_equity - initial,
         "unique_symbols": len(symbol_counts),
+        "unique_coins_traded": len(symbol_counts),
         "symbols_in_universe": result.symbols_with_data,
         "top_symbols": [
             {
@@ -1831,184 +1717,371 @@ def summarize_portfolio(result: PortfolioResult) -> dict:
         "exposure_pct": exposure,
         "span_days": span_days,
         "trades_per_day": (total / span_days) if span_days > 0 else 0.0,
-        "risk_events": dict(result.risk_events),
+        "risk_events": dict(result.risk_events or {}),
         "chase_skips": int(result.chase_skips),
-        "direction_skips": int(getattr(result, "direction_skips", 0)),
-        "direction_scans": int(getattr(result, "direction_scans", 0)),
-        "htf_skips": int(getattr(result, "htf_skips", 0)),
-        "htf_scans": int(getattr(result, "htf_scans", 0)),
-        "htf_resistance_skips": int(getattr(result, "htf_resistance_skips", 0)),
-        "htf_resistance_scans": int(getattr(result, "htf_resistance_scans", 0)),
-        "direction_zone_skips": int(getattr(result, "direction_zone_skips", 0)),
-        "direction_zone_scans": int(getattr(result, "direction_zone_scans", 0)),
-        "timing_skips": int(getattr(result, "timing_skips", 0)),
-        "timing_scans": int(getattr(result, "timing_scans", 0)),
-        "breakout_skips": int(getattr(result, "breakout_skips", 0)),
-        "breakout_scans": int(getattr(result, "breakout_scans", 0)),
-        "same_coin_skips": int(getattr(result, "same_coin_skips", 0)),
-        **parity.per_trade_metrics(trades),
+        "confluence_structure_skips": int(result.confluence_structure_skips),
+        "confluence_structure_scans": int(result.confluence_structure_scans),
+        "confluence_trigger_skips": int(result.confluence_trigger_skips),
+        "confluence_trigger_scans": int(result.confluence_trigger_scans),
+        "structure_skips": int(result.confluence_structure_skips),
+        "structure_scans": int(result.confluence_structure_scans),
+        "trigger_skips": int(result.confluence_trigger_skips),
+        "trigger_scans": int(result.confluence_trigger_scans),
+        "same_coin_skips": int(result.same_coin_skips),
+        **trade_metrics,
     }
 
 
-def _mk(t, o, h, low, c, qv=5_000_000.0):
-    ms = t * 5 * MS_PER_MIN
-    return Kline(
-        open_time=ms,
-        open=o,
-        high=h,
-        low=low,
-        close=c,
-        close_time=ms + 5 * MS_PER_MIN - 1,
-        volume=1000.0,
-        quote_volume=qv,
+def execute_portfolio_backtest(
+    client,
+    days: float,
+    base_config: dict,
+    max_symbols: int = 30,
+    overrides: Optional[dict] = None,
+    progress_cb: Optional[Callable[[float, str], None]] = None,
+    cancel_cb: Optional[Callable[[], bool]] = None,
+) -> dict:
+    from backtesting.backtest import (
+        MS_PER_DAY,
+        apply_overrides,
+        last_completed_candle_end_ms,
+        validate_params,
     )
+
+    if days <= 0 or days > 1825:
+        raise BacktestError("Rentang hari harus antara 0.5 sampai 1825 (5 tahun).")
+    max_symbols = max(3, min(int(max_symbols or 30), 200))
+
+    config = apply_overrides(base_config, overrides)
+    validate_params(config)
+
+    if progress_cb:
+        progress_cb(0.02, "Mengambil daftar seluruh pasangan USDT dari Binance...")
+
+    tickers = client.get_ticker_24hr_all()
+    try:
+        tradable = client.get_tradable_symbols(config.get("QUOTE_ASSET", "USDT"))
+    except Exception:
+        tradable = None
+    if tradable:
+        config["_historical_tradable_symbols"] = set(tradable)
+        config["_tradable_status_is_current_snapshot"] = True
+
+    universe = select_universe(
+        tickers, config, max_symbols=max_symbols, tradable_symbols=tradable
+    )
+    if not universe:
+        raise BacktestError(
+            "Tidak ada pasangan yang lolos filter volume 24 jam minimum. "
+            "Coba turunkan MIN_QUOTE_VOLUME_USDT_24H."
+        )
+
+    interval = config.get("CONFIRM_INTERVAL", "5m")
+    bar_minutes = INTERVAL_MINUTES[interval]
+    window_24h = bars_per_day(interval)
+    warmup_bars = max(window_24h, strategy.required_lookback_bars(config))
+    butuh_gerbang_ms = strategy.gate_warmup_ms(config, interval)
+    warmup_ms = max(warmup_bars * bar_minutes * MS_PER_MIN, butuh_gerbang_ms)
+
+    end_ms = last_completed_candle_end_ms(interval)
+    start_ms = end_ms - int(days * MS_PER_DAY) - warmup_ms
+
+    def dl_cb(p: float, sym: str):
+        if progress_cb:
+            progress_cb(
+                round(0.05 + p * 0.70, 3),
+                f"Mengunduh {sym} ({int(p * len(universe))}/{len(universe)} koin)",
+            )
+
+    store = new_backtest_store(config)
+    cache = open_kline_cache(config)
+    try:
+        ok_symbols, failed = fetch_universe_klines(
+            client,
+            universe,
+            interval,
+            start_ms,
+            end_ms,
+            store,
+            progress_cb=dl_cb,
+            cancel_cb=cancel_cb,
+            cache=cache,
+        )
+        if not ok_symbols:
+            raise BacktestError("Gagal mengunduh data untuk semua kandidat.")
+
+        btc_klines = None
+        if config.get("BTC_FILTER_ENABLED", False):
+            btc_symbol = "BTC" + str(config.get("QUOTE_ASSET", "USDT"))
+            if btc_symbol in ok_symbols:
+                btc_klines = store.klines(btc_symbol)
+            else:
+                try:
+                    btc_klines = _klines_untuk_simbol(
+                        client, btc_symbol, interval, start_ms, end_ms, cache
+                    )
+                except Exception:
+                    btc_klines = None
+
+        def sim_cb(p: float):
+            if progress_cb:
+                progress_cb(
+                    round(0.76 + p * 0.22, 3),
+                    f"Simulasi pasar bar demi bar ({int(p*100)}%)",
+                )
+
+        if progress_cb:
+            progress_cb(0.76, "Menyusun garis waktu dan menjalankan simulasi...")
+
+        result = run_portfolio_backtest(
+            store,
+            config,
+            interval,
+            warmup_ms=warmup_ms,
+            progress_cb=sim_cb,
+            cancel_cb=cancel_cb,
+            btc_klines=btc_klines,
+        )
+    finally:
+        if cache is not None:
+            cache.close()
+        store.close()
+    result.symbols_scanned = len(universe)
+    result.symbols_failed = failed
+
+    summary = summarize_portfolio(result)
+
+    if progress_cb:
+        progress_cb(1.0, "Selesai")
+
+    trades_out = [
+        {
+            "n": idx,
+            "symbol": t.symbol,
+            "entry_time": t.entry_time,
+            "entry_price": t.entry_price,
+            "exit_time": t.exit_time,
+            "exit_price": t.exit_price,
+            "reason": t.reason,
+            "hold_minutes": round(t.hold_minutes, 1),
+            "pnl_pct": round(t.pnl_pct, 3),
+            "gross_pnl_pct": round(t.gross_pnl_pct, 3),
+            "fee_pct": round(t.fee_pct, 3),
+            "sl_pct": round(t.sl_pct, 6),
+            "tp_pct": round(t.tp_pct, 6),
+            "exit_source": t.exit_source,
+            "rank_at_entry": t.rank_at_entry,
+            "candidates_at_entry": t.candidates_at_entry,
+            "position_notional": round(t.position_notional, 2),
+            "equity_before": round(t.equity_before, 2),
+            "equity_after": round(t.equity_after, 2),
+            "pnl_quote": round(t.pnl_quote, 2),
+        }
+        for idx, t in enumerate(result.trades, start=1)
+    ]
+
+    skipped_out = [
+        {
+            "time": s.time,
+            "symbol": s.symbol,
+            "reason": s.reason,
+            "holding": s.holding,
+        }
+        for s in result.skipped
+    ]
+
+    from backtesting.backtest import OVERRIDE_CASTERS
+
+    applied_params = {k: config.get(k) for k in OVERRIDE_CASTERS.keys()}
+    applied_params["MAX_SYMBOLS"] = max_symbols
+
+    spread_pct, slip_pct, delay_bars = entry_execution_params(config)
+    assumptions = [
+        f"Universe kandidat: {len(ok_symbols)} pasangan {config.get('QUOTE_ASSET', 'USDT')} ber-volume tertinggi (dari {len(universe)} yang diminta). "
+        "Diurutkan dari snapshot 24 jam saat ini (survivorship bias tetap ada karena Binance tidak menyediakan daftar listing historis).",
+        "Pada setiap bar, volume 24 jam dihitung bergulir dari 288 candle 5m sebelumnya, lalu diurutkan persis seperti scanner bot.",
+        "Hanya 1 posisi aktif pada satu waktu. Sinyal baru saat posisi masih terbuka atau saat cooldown dicatat sebagai 'dilewati'.",
+        (
+            f"Eksekusi entry menunggu {delay_bars} bar setelah sinyal lalu membeli pada harga open + "
+            f"setengah spread ({spread_pct / 2:.3f}%) + slippage ({slip_pct:.3f}%). "
+            f"Exit menjual dengan pengurangan spread/slippage yang sama."
+        ),
+        (
+            f"Ukuran posisi mengikuti pengaturan bot (modal awal simulasi "
+            f"{summary['initial_equity']:,.2f} {config.get('QUOTE_ASSET', 'USDT')}), "
+            f"cooldown selesai trade {config.get('COOLDOWN_MINUTES_AFTER_CLOSE', 0)} menit, "
+            f"jeda antar trade {config.get('MIN_SECONDS_BETWEEN_TRADES', 0)} detik, "
+            f"dan batas kejar harga {config.get('MAX_CHASE_PCT', 0)}%."
+        ),
+        "Evaluasi di dalam 1 candle memakai urutan konservatif: Stop Loss diperiksa lebih dulu daripada Take Profit.",
+        "Filter orderbook live tidak dapat disimulasikan karena Binance tidak menyediakan riwayat buku order; dampak likuiditas diwakili oleh parameter spread dan slippage di atas.",
+    ]
+    if failed:
+        assumptions.append(
+            f"{len(failed)} simbol dilewati karena data tidak tersedia/gagal diunduh."
+        )
+    if result.warnings:
+        assumptions.extend(result.warnings)
+
+    return {
+        "mode": "portfolio",
+        "symbol": f"PORTOFOLIO ({len(ok_symbols)} koin)",
+        "interval": interval,
+        "days": days,
+        "symbols_scanned": len(universe),
+        "symbols_with_data": len(ok_symbols),
+        "symbols_failed": failed,
+        "universe": ok_symbols,
+        "bars_total": result.bars_total,
+        "bars_usable": result.bars_total,
+        "start_time": result.start_time,
+        "end_time": result.end_time,
+        "summary": summary,
+        "trades": trades_out,
+        "skipped": skipped_out,
+        "params": applied_params,
+        "assumptions": assumptions,
+        "warnings": result.warnings,
+    }
 
 
 def selftest() -> bool:
     from copy import deepcopy
 
     from config.config import PUMP_CONFIG
-    from strategy.indicators import Kline as _Kline
     from backtesting.synthetic_data import seri_banyak_setup, seri_dengan_setup
 
     ok_all = True
 
-    def check(nama, kondisi, ekstra=""):
+    def check(nama: str, kondisi: bool, info: str = "") -> None:
         nonlocal ok_all
+        status = "LULUS" if kondisi else "GAGAL"
+        ekor = f" ({info})" if info else ""
+        print(f"  [{status}] {nama}{ekor}")
         if not kondisi:
             ok_all = False
-        print(("  LULUS " if kondisi else "  GAGAL ") + nama + (("  -> " + str(ekstra)) if ekstra else ""))
 
-    print("Selftest portfolio_backtest")
+    def _base_cfg() -> dict:
+        cfg = deepcopy(PUMP_CONFIG)
+        cfg.update(
+            {
+                "MODE": "PAPER",
+                "CONFLUENCE_FILTER_ENABLED": False,
+                "BTC_FILTER_ENABLED": False,
+                "MIN_QUOTE_VOLUME_USDT_24H": 0.0,
+                "CONFLUENCE_SL_BUFFER_PCT": 0.20,
+                "CONFLUENCE_MIN_RR_RATIO": 1.2,
+                "TAKER_FEE_PCT": 0.1,
+                "USE_BNB_FEE_DISCOUNT": False,
+                "USE_RISK_PERCENT": False,
+                "POSITION_SIZE_USDT": 100.0,
+                "MAX_POSITION_USDT": 0.0,
+                "BACKTEST_INITIAL_EQUITY_USDT": 1000.0,
+                "MAX_HOLD_HOURS": 0.0,
+                "COOLDOWN_MINUTES_AFTER_CLOSE": 0,
+                "MIN_SECONDS_BETWEEN_TRADES": 0,
+                "MAX_CHASE_PCT": 0.0,
+                "TOP_N_CANDIDATES_TO_CONFIRM": 10,
+            }
+        )
+        return cfg
 
-    a = [_mk(i, 100, 101, 99, 100) for i in range(5)]
-    b = [_mk(i, 50, 51, 49, 50) for i in range(3, 9)]
-    with KlineStore.from_klines({"AUSDT": a, "BUSDT": b}) as _store_tl:
-        tl, seri = build_timeline(_store_tl, "5m")
-        check("timeline gabungan unik & terurut", tl == sorted(set(tl)) and len(tl) == 9, len(tl))
-        check("SymbolSeries memetakan waktu ke posisi", seri["BUSDT"].index_at(b[0].open_time) == 0)
-        check("SymbolSeries menolak waktu yang tidak ada", seri["BUSDT"].index_at(b[0].open_time - 1) is None)
+    print("Menjalankan selftest portfolio_backtest...")
 
-    cfg = deepcopy(PUMP_CONFIG)
-    cfg.update({
-        "_symbol": "",
-        "MODE": "PAPER",
-        "DIRECTION_FILTER_ENABLED": False,
-        "DIRECTION_ZONE_FILTER_ENABLED": False,
-        "TIMING_FILTER_ENABLED": False,
-        "BREAKOUT_RETEST_FILTER_ENABLED": False,
-        "DEMAND_ZONE_FILTER_ENABLED": False,
-        "BTC_FILTER_ENABLED": False,
-        "ROLLING_VOLUME_FILTER_ENABLED": False,
-        "PUMP_MIN_24H_CHANGE_PCT": -1000.0,
-        "MIN_QUOTE_VOLUME_USDT_24H": 0.0,
-        "USE_ATR_EXIT": False,
-        "USE_TP": True,
-        "USE_STOP_LOSS": True,
-        "USE_BREAKEVEN": False,
-        "USE_TRAILING": False,
-        "SL_PCT": 2.0,
-        "TP_PCT": 3.0,
-        "TAKER_FEE_PCT": 0.1,
-        "USE_BNB_FEE_DISCOUNT": False,
-        "USE_RISK_PERCENT": False,
-        "POSITION_SIZE_USDT": 100.0,
-        "MAX_POSITION_USDT": 0.0,
-        "BACKTEST_INITIAL_EQUITY_USDT": 1000.0,
-        "MAX_HOLD_HOURS": 0.0,
-        "COOLDOWN_MINUTES_AFTER_CLOSE": 0,
-        "MIN_SECONDS_BETWEEN_TRADES": 0,
-        "MAX_CHASE_PCT": 0.0,
-        "BACKTEST_ENTRY_SPREAD_PCT": 0.0,
-        "BACKTEST_SLIPPAGE_PCT": 0.0,
-        "BACKTEST_ENTRY_DELAY_BARS": 1,
-    })
-
-    def _jalankan(data_dict, cfg_uji):
-        with KlineStore.from_klines(data_dict) as _st:
-            return run_portfolio_backtest(_st, cfg_uji, "5m", warmup_ms=0)
-
+    cfg = _base_cfg()
     up_a = seri_banyak_setup(harga=100.0, siklus=10, volume=9_000_000.0)
     up_b = seri_banyak_setup(harga=200.0, siklus=10, volume=5_000_000.0)
+    store = new_backtest_store(cfg)
+    try:
+        store.write_symbol("AAAUSDT", up_a)
+        store.write_symbol("BBBUSDT", up_b)
 
-    res = _jalankan({"AUSDT": up_a, "BUSDT": up_b}, cfg)
-    overlaps = 0
-    for i in range(len(res.trades)):
-        for j in range(i + 1, len(res.trades)):
-            t1, t2 = res.trades[i], res.trades[j]
-            if t1.entry_time < t2.exit_time and t2.entry_time < t1.exit_time:
-                overlaps += 1
-    check("tidak pernah dua posisi bersamaan", overlaps == 0, overlaps)
-    check("menghasilkan trade", len(res.trades) > 0, len(res.trades))
+        tl_2 = build_timeline(store, "5m")
+        check("build_timeline 2-tuple tanpa config", len(tl_2) == 2 and len(tl_2[0]) == len(up_a))
 
-    if res.trades:
-        t = res.trades[0]
-        check("fee pulang-pergi dipotong", abs((t.gross_pnl_pct - t.pnl_pct) - 0.2) < 1e-9, t.gross_pnl_pct - t.pnl_pct)
+        tl_3 = build_timeline(store, "5m", config=cfg)
+        check("build_timeline 3-tuple dengan config", len(tl_3) == 3 and tl_3[2] == {})
 
-    cfg_cd = dict(cfg)
-    cfg_cd["COOLDOWN_MINUTES_AFTER_CLOSE"] = 240
-    res_cd = _jalankan({"AUSDT": up_a, "BUSDT": up_b}, cfg_cd)
-    viol = 0
-    for i in range(1, len(res_cd.trades)):
-        gap_min = (res_cd.trades[i].entry_time - res_cd.trades[i - 1].exit_time) / 60000.0
-        if gap_min < 239.9:
-            viol += 1
-    check("cooldown dihormati", viol == 0, viol)
-    check("cooldown mengurangi jumlah trade", len(res_cd.trades) <= len(res.trades), f"{len(res_cd.trades)} vs {len(res.trades)}")
+        cfg_conf = _base_cfg()
+        cfg_conf["CONFLUENCE_FILTER_ENABLED"] = True
+        tl_conf = build_timeline(store, "5m", config=cfg_conf)
+        check(
+            "build_timeline mengisi struktur saat CONFLUENCE_FILTER_ENABLED=True",
+            len(tl_conf) == 3 and set(tl_conf[2].keys()) == {"AAAUSDT", "BBBUSDT"},
+        )
 
-    entry_pertama = res.trades[0].entry_time if res.trades else 0
-    seq_sl = []
-    tandai = False
-    for k in up_a:
-        if tandai:
-            seq_sl.append(_Kline(open_time=k.open_time, open=k.open, high=k.open * 1.12, low=k.open * 0.88, close=k.open, close_time=k.close_time, volume=k.volume, quote_volume=k.quote_volume))
-            tandai = False
-            continue
-        seq_sl.append(k)
-        if k.open_time == entry_pertama:
-            tandai = True
-    res_sl = _jalankan({"AUSDT": seq_sl}, cfg)
-    check("skenario SL-vs-TP benar-benar menghasilkan trade", len(res_sl.trades) > 0, len(res_sl.trades))
-    spanning = [t for t in res_sl.trades if t.entry_time == entry_pertama]
-    if spanning:
-        check("SL diprioritaskan saat SL & TP kena di satu candle", all(t.reason == "STOP_LOSS" for t in spanning), [t.reason for t in spanning][:4])
-    else:
-        check("SL diprioritaskan saat SL & TP kena di satu candle", False, "tidak ada trade yang melewati candle ekstrem")
+        u2 = unpack_prebuilt((tl_2[0], tl_2[1]))
+        u3 = unpack_prebuilt(tl_conf)
+        check("unpack_prebuilt menerima 2-tuple dan 3-tuple", u2[2] is None and u3[2] is not None)
 
-    from backtesting import backtest as _bt
+        warmup_ms = 300 * 5 * MS_PER_MIN
+        res_plain = run_portfolio_backtest(
+            store, cfg, "5m", warmup_ms=warmup_ms, prebuilt=tl_2
+        )
+        sig_cache = precompute_entry_signals(
+            store, cfg, "5m", prebuilt=tl_2
+        )
+        res_cached = run_portfolio_backtest(
+            store,
+            cfg,
+            "5m",
+            warmup_ms=warmup_ms,
+            prebuilt=tl_2,
+            entry_signal_cache=sig_cache,
+        )
+        jejak_plain = [
+            (t.symbol, t.entry_time, t.exit_time, round(t.pnl_pct, 8), t.reason)
+            for t in res_plain.trades
+        ]
+        jejak_cached = [
+            (t.symbol, t.entry_time, t.exit_time, round(t.pnl_pct, 8), t.reason)
+            for t in res_cached.trades
+        ]
+        check(
+            "run_portfolio_backtest menghasilkan trade",
+            len(res_plain.trades) > 0,
+            f"{len(res_plain.trades)} trade",
+        )
+        check(
+            "EntrySignalCache identik dengan jalur tanpa cache",
+            jejak_plain == jejak_cached,
+            f"plain={len(jejak_plain)}, cached={len(jejak_cached)}",
+        )
+    finally:
+        store.close()
 
-    cfg_par = dict(cfg)
+    from backtesting.backtest import run_backtest
+
+    par_cfg = _base_cfg()
     par_kl = seri_dengan_setup(harga=100.0, ekor="naik", panjang_ekor=20)
-    res_p1 = _bt.run_backtest(par_kl, dict(cfg_par, _symbol="AUSDT"), 0)
-    res_p2 = _jalankan({"AUSDT": par_kl}, cfg_par)
-    check("paritas entry satu simbol vs portofolio", [t.entry_time for t in res_p1.trades] == [t.entry_time for t in res_p2.trades], f"{[t.entry_time for t in res_p1.trades]} vs {[t.entry_time for t in res_p2.trades]}")
-    check("paritas alasan exit satu simbol vs portofolio", [t.reason for t in res_p1.trades] == [t.reason for t in res_p2.trades], f"{[t.reason for t in res_p1.trades]} vs {[t.reason for t in res_p2.trades]}")
+    par_store = new_backtest_store(par_cfg)
+    try:
+        par_store.write_symbol("SOLOUSDT", par_kl)
+        warmup_bars = 300
+        bt_res = run_backtest(par_kl, par_cfg, warmup_bars=warmup_bars)
+        pf_res = run_portfolio_backtest(
+            par_store,
+            par_cfg,
+            "5m",
+            warmup_ms=warmup_bars * 5 * MS_PER_MIN,
+        )
+        bt_jejak = [
+            (t.entry_time, t.exit_time, round(t.pnl_pct, 8), t.reason)
+            for t in bt_res.trades
+        ]
+        pf_jejak = [
+            (t.entry_time, t.exit_time, round(t.pnl_pct, 8), t.reason)
+            for t in pf_res.trades
+        ]
+        check(
+            "Paritas 1 simbol terhadap run_backtest",
+            len(bt_jejak) > 0 and bt_jejak == pf_jejak,
+            f"backtest={len(bt_jejak)}, portfolio={len(pf_jejak)}",
+        )
+    finally:
+        par_store.close()
 
-    cfg_vol = dict(cfg)
-    cfg_vol["MIN_QUOTE_VOLUME_USDT_24H"] = 1e15
-    res_vol = _jalankan({"AUSDT": up_a}, cfg_vol)
-    check("filter volume menyaring semua", len(res_vol.trades) == 0, len(res_vol.trades))
-    check("kontrol positif: data sama tanpa ambang volume tetap menghasilkan trade", len(_jalankan({"AUSDT": up_a}, cfg).trades) > 0)
-
-    s = summarize_portfolio(res)
-    check("total = menang + kalah", s["total_trades"] == s["wins"] + s["losses"])
-    check("kurva equity panjangnya benar", len(s["equity_curve"]) == s["total_trades"] + 1)
-    check("drawdown tidak negatif", s["max_drawdown_pct"] >= 0, s["max_drawdown_pct"])
-    check("return kotor >= bersih", s["gross_return_pct"] >= s["total_return_pct"] - 1e-9, f'{s["gross_return_pct"]:.3f} vs {s["total_return_pct"]:.3f}')
-    check("eksposur masuk akal (0-100%)", 0 <= s["exposure_pct"] <= 100, s["exposure_pct"])
-
-    tickers = [
-        {"symbol": "BTCUSDT", "priceChangePercent": "1.0", "quoteVolume": "9e9", "lastPrice": "60000"},
-        {"symbol": "USDCUSDT", "priceChangePercent": "0.0", "quoteVolume": "9e9", "lastPrice": "1"},
-        {"symbol": "BTCUPUSDT", "priceChangePercent": "5.0", "quoteVolume": "9e9", "lastPrice": "10"},
-        {"symbol": "ETHBTC", "priceChangePercent": "1.0", "quoteVolume": "9e9", "lastPrice": "0.05"},
-        {"symbol": "SOLUSDT", "priceChangePercent": "-3.0", "quoteVolume": "5e8", "lastPrice": "200"},
-    ]
-    uni = select_universe(tickers, {"QUOTE_ASSET": "USDT", "MIN_QUOTE_VOLUME_USDT_24H": 0, "EXTRA_EXCLUDE_SYMBOLS": []})
-    check("semesta buang stablecoin/leveraged/non-USDT", set(uni) == {"BTCUSDT", "SOLUSDT"}, uni)
-    check("select_universe tidak memakai ticker hari ini sebagai gerbang pump", "SOLUSDT" in uni)
-
-    print("\nHASIL: " + ("SEMUA LULUS" if ok_all else "ADA YANG GAGAL"))
+    print("HASIL: " + ("SEMUA LULUS" if ok_all else "ADA YANG GAGAL"))
     return ok_all
 
 

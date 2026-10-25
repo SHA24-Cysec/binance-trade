@@ -1,707 +1,966 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import itertools
 import math
 import time
-from dataclasses import dataclass, field
-from typing import Callable, Optional, Sequence
+from typing import Callable, Optional
 
-from backtesting import backtest as bt
-from backtesting import parity
-from strategy.indicators import Kline, direction_window_bars
+from strategy.indicators import Kline
 from strategy import indicators as strategy
-
-
-def parity_trend_window(config: dict) -> int:
-    return direction_window_bars(config)
-
-
-KUNCI_ATR = (
-    "ATR_PERIOD",
-    "ATR_MULT_SL",
-    "ATR_MULT_TP",
-    "ATR_MULT_BE_TRIGGER",
-    "ATR_MULT_BE_LOCK",
-    "ATR_MULT_TRAIL_START",
-    "ATR_MULT_TRAIL",
+from backtesting.backtest import (
+    BacktestError,
+    INTERVAL_MINUTES,
+    MS_PER_DAY,
+    MS_PER_MIN,
+    OVERRIDE_CASTERS,
+    apply_overrides,
+    bars_per_day,
+    fetch_full_klines,
+    last_completed_candle_end_ms,
+    run_backtest,
+    summarize,
+    validate_params,
 )
-KUNCI_PERSEN = (
-    "SL_PCT",
-    "TP_PCT",
-    "BE_TRIGGER_PCT",
-    "BE_LOCK_PCT",
-    "TRAILING_START_PCT",
-    "TRAILING_STEP_PCT",
+from backtesting.backtest_storage import KlineStore
+from backtesting.portfolio_backtest import (
+    build_timeline,
+    fetch_universe_klines,
+    new_backtest_store,
+    open_kline_cache,
+    precompute_entry_signals,
+    run_portfolio_backtest,
+    select_universe,
+    summarize_portfolio,
 )
-KUNCI_GRID_PORTOFOLIO = frozenset(
-    ("USE_ATR_EXIT", "MAX_HOLD_HOURS", *KUNCI_ATR, *KUNCI_PERSEN)
-)
+from config.settings_schema import relation_violations
+
 
 MAX_KOMBINASI = 2000
-
 MAX_KOMBINASI_PORTFOLIO = 150
+MIN_BAR_UJI = 36
 
 METRIK_TERSEDIA = (
     "total_return_pct",
     "profit_factor",
-    "return_per_drawdown",
     "win_rate",
+    "return_per_drawdown",
 )
 
 
-class GridSearchError(Exception):
+class GridSearchError(BacktestError):
     pass
 
 
 @dataclass
-class HasilKombinasi:
-
-    params: dict
-    latih: dict
+class BarisGrid:
+    params: dict = field(default_factory=dict)
+    latih: dict = field(default_factory=dict)
     uji: Optional[dict] = None
     skor_latih: float = 0.0
     skor_uji: Optional[float] = None
+    degradasi: Optional[float] = None
     andal: bool = True
     catatan: str = ""
 
-    @property
-    def degradasi(self) -> Optional[float]:
-        if self.skor_uji is None:
-            return None
-        return self.skor_latih - self.skor_uji
+
+HasilKombinasi = BarisGrid
 
 
 @dataclass
 class HasilGridSearch:
-    hasil: list[HasilKombinasi] = field(default_factory=list)
+    symbol: str = ""
+    interval: str = "5m"
+    metrik: str = "total_return_pct"
     total_kombinasi: int = 0
-    dilewati: int = 0
     dipangkas: int = 0
-    detik: float = 0.0
+    dilewati: int = 0
     bar_latih: int = 0
     bar_uji: int = 0
-    metrik: str = "total_return_pct"
+    detik: float = 0.0
+    hasil: list[BarisGrid] = field(default_factory=list)
     peringatan: list[str] = field(default_factory=list)
     dibatalkan: bool = False
 
 
+_KUNCI_SIMULASI_SAJA = {
+    "CONFLUENCE_SL_BUFFER_PCT",
+    "CONFLUENCE_MIN_RR_RATIO",
+    "MAX_HOLD_HOURS",
+}
+
+PARAMETER_GRID_DIIZINKAN = set(_KUNCI_SIMULASI_SAJA)
+PARAMETER_GRID_PORTOFOLIO = set(_KUNCI_SIMULASI_SAJA)
+KUNCI_GRID_PORTOFOLIO = frozenset(_KUNCI_SIMULASI_SAJA)
+
+
 def buat_rentang(
-    mulai: float, sampai: float, langkah: float, bulatkan: int = 6
+    mulai: float, sampai: float, langkah: float, bulatkan: int = 8
 ) -> list[float]:
     if langkah <= 0:
-        raise GridSearchError("Langkah rentang harus lebih besar dari nol.")
+        raise GridSearchError("Langkah rentang harus lebih besar dari 0.")
     if sampai < mulai:
-        raise GridSearchError(
-            "Nilai akhir rentang tidak boleh lebih kecil dari nilai awal."
-        )
+        raise GridSearchError("Nilai akhir rentang tidak boleh lebih kecil dari awal.")
     n = int(math.floor((sampai - mulai) / langkah + 1e-9)) + 1
-    return [round(mulai + i * langkah, bulatkan) for i in range(n)]
-
-
-def _pastikan_kunci_berefek(spec: dict) -> None:
-    tidak_dikenal = [k for k in spec if k not in bt.OVERRIDE_CASTERS]
-    if tidak_dikenal:
+    if n > MAX_KOMBINASI:
         raise GridSearchError(
-            "Parameter berikut tidak bisa dioptimasi oleh backtest sehingga "
-            "nilainya tidak akan berpengaruh: "
-            + ", ".join(sorted(tidak_dikenal))
-            + ". Parameter yang didukung: "
-            + ", ".join(sorted(bt.OVERRIDE_CASTERS))
-            + "."
+            f"Satu parameter menghasilkan {n} nilai (maks {MAX_KOMBINASI}). "
+            f"Perbesar langkah atau persempit rentang."
         )
-
-
-def _pastikan_grid_portofolio_hanya_exit(spec: dict) -> None:
-    tidak_didukung = sorted(set(spec) - KUNCI_GRID_PORTOFOLIO)
-    if tidak_didukung:
-        raise GridSearchError(
-            "Grid portofolio hanya boleh menyapu parameter exit karena lookup timeframe "
-            "tinggi dibangun dari konfigurasi entry dasar. Parameter entry yang ditolak: "
-            + ", ".join(tidak_didukung)
-            + "."
-        )
-
-
-def _normalkan_spec(spec: dict) -> dict[str, list]:
-    _pastikan_kunci_berefek(spec)
-    keluar: dict[str, list] = {}
-    for kunci, nilai in spec.items():
-        if isinstance(nilai, dict):
-            wajib = ("mulai", "sampai", "langkah")
-            if not all(k in nilai for k in wajib):
-                raise GridSearchError(
-                    f"Rentang '{kunci}' harus memuat {', '.join(wajib)}."
-                )
-            keluar[kunci] = buat_rentang(
-                float(nilai["mulai"]), float(nilai["sampai"]), float(nilai["langkah"])
-            )
-        elif isinstance(nilai, (list, tuple)):
-            if not nilai:
-                raise GridSearchError(f"Daftar nilai '{kunci}' kosong.")
-            keluar[kunci] = list(nilai)
-        else:
-            keluar[kunci] = [nilai]
-    if not keluar:
-        raise GridSearchError("Grid parameter kosong, tidak ada yang bisa diuji.")
-    return keluar
+    out = [round(mulai + i * langkah, int(bulatkan)) for i in range(n)]
+    if out and out[-1] > sampai + 1e-9:
+        out.pop()
+    return out
 
 
 def expand_grid(
-    spec: dict, max_kombinasi: Optional[int] = None, pakai_atr: Optional[bool] = None
+    spec: dict,
+    base_config: Optional[dict] = None,
+    max_kombinasi: Optional[int] = None,
+    pakai_atr: Optional[bool] = None,
 ) -> tuple[list[dict], int]:
+    if not spec or not isinstance(spec, dict):
+        raise GridSearchError("Spesifikasi grid kosong.")
+    if isinstance(base_config, int) and not isinstance(base_config, bool):
+        if isinstance(max_kombinasi, bool) and pakai_atr is None:
+            pakai_atr = max_kombinasi
+        max_kombinasi = base_config
+        base_config = None
     batas = MAX_KOMBINASI if max_kombinasi is None else int(max_kombinasi)
     if batas < 1:
         raise GridSearchError("Batas kombinasi harus lebih besar dari nol.")
-    dinormalkan = _normalkan_spec(spec)
-    kunci = list(dinormalkan)
-    total_mentah = 1
-    for k in kunci:
-        total_mentah *= len(dinormalkan[k])
-    if total_mentah > batas * 20:
-        raise GridSearchError(
-            f"Grid menghasilkan {total_mentah:,} kombinasi mentah. "
-            f"Terlalu besar untuk diproses. Persempit rentang atau perbesar langkah."
-        )
 
-    terlihat: set[tuple] = set()
-    kombinasi: list[dict] = []
+    kunci_urut = list(spec.keys())
+    daftar_nilai: list[list] = []
+    for k in kunci_urut:
+        if k not in OVERRIDE_CASTERS:
+            raise GridSearchError(f"Parameter '{k}' tidak dikenal oleh mesin backtest.")
+        if k not in PARAMETER_GRID_DIIZINKAN:
+            raise GridSearchError(
+                f"Parameter '{k}' tidak memengaruhi simulasi grid search yang sedang "
+                "berjalan dan tidak diizinkan."
+            )
+        mentah = spec[k]
+        if not isinstance(mentah, (list, tuple)) or len(mentah) == 0:
+            raise GridSearchError(f"Parameter '{k}' harus berupa daftar berisi >= 1 nilai.")
+        caster = OVERRIDE_CASTERS[k]
+        bersih = []
+        sudah = set()
+        for v in mentah:
+            try:
+                cv = caster(v)
+            except (ValueError, TypeError) as exc:
+                raise GridSearchError(f"Nilai '{k}={v}' tidak valid.") from exc
+            if isinstance(cv, float) and not math.isfinite(cv):
+                raise GridSearchError(f"Nilai '{k}={v}' harus angka berhingga.")
+            if caster is int and isinstance(v, str) and "." in v.strip():
+                raise GridSearchError(f"Nilai '{k}={v}' harus bilangan bulat.")
+            if caster is int and isinstance(v, float) and not v.is_integer():
+                raise GridSearchError(f"Nilai '{k}={v}' harus bilangan bulat.")
+            penanda = (type(cv), cv)
+            if penanda not in sudah:
+                sudah.add(penanda)
+                bersih.append(cv)
+        daftar_nilai.append(bersih)
+
+    mentah_total = 1
+    for d in daftar_nilai:
+        mentah_total *= len(d)
+        if mentah_total > batas * 20:
+            raise GridSearchError(
+                f"Grid terlalu besar ({mentah_total:,} kombinasi mentah, "
+                f"batas {batas}). Kurangi jumlah nilai atau parameter."
+            )
+
+    unik: list[dict] = []
+    terlihat: set = set()
     dipangkas = 0
 
-    for nilai in itertools.product(*(dinormalkan[k] for k in kunci)):
-        calon = dict(zip(kunci, nilai, strict=True))
-        if "USE_ATR_EXIT" in calon:
-            aktif = bool(calon["USE_ATR_EXIT"])
-        else:
-            aktif = pakai_atr
-        if aktif is None:
-            relevan = dict(calon)
-        else:
-            relevan = {
-                k: v
-                for k, v in calon.items()
-                if not (aktif and k in KUNCI_PERSEN)
-                and not (not aktif and k in KUNCI_ATR)
-            }
-        sidik = tuple(sorted(relevan.items(), key=lambda kv: kv[0]))
-        if sidik in terlihat:
+    for tup in itertools.product(*daftar_nilai):
+        efektif = dict(zip(kunci_urut, tup))
+        kunci_beku = tuple(sorted((k, type(v).__name__, v) for k, v in efektif.items()))
+        if kunci_beku in terlihat:
             dipangkas += 1
             continue
-        terlihat.add(sidik)
-        kombinasi.append(calon)
+        terlihat.add(kunci_beku)
+        unik.append(efektif)
 
-    if len(kombinasi) > batas:
+    if len(unik) > batas:
         raise GridSearchError(
-            f"Grid menghasilkan {len(kombinasi):,} kombinasi efektif, "
-            f"melebihi batas {batas:,}. Persempit rentang atau perbesar langkah."
+            f"Grid menghasilkan {len(unik)} kombinasi efektif "
+            f"(batas {batas}). Kurangi rentang nilai."
         )
-    return kombinasi, dipangkas
+
+    return unik, dipangkas
 
 
-def hitung_skor(ringkas: dict, metrik: str) -> float:
+def _pastikan_grid_portofolio_hanya_exit(spec: dict) -> None:
+    tidak_didukung = sorted(set(spec or {}) - PARAMETER_GRID_PORTOFOLIO)
+    if tidak_didukung:
+        raise GridSearchError(
+            "Grid search portofolio memakai cache sinyal entry agar setiap "
+            "kombinasi diuji cepat pada universe yang sama. Parameter non-exit "
+            f"tidak didukung di mode ini: {', '.join(tidak_didukung)}."
+        )
+
+
+def _kombinasi_masuk_akal(cfg: dict) -> tuple[bool, str]:
+    pelanggaran = relation_violations(cfg, mode_aware=True)
+    if pelanggaran:
+        kunci, pesan = next(iter(pelanggaran.items()))
+        return False, f"{kunci} {pesan}"
+    sl_buf = float(cfg.get("CONFLUENCE_SL_BUFFER_PCT", 0.20) or 0.0)
+    min_rr = float(cfg.get("CONFLUENCE_MIN_RR_RATIO", 1.2) or 0.0)
+    if not (0.0 <= sl_buf <= 10.0):
+        return False, "CONFLUENCE_SL_BUFFER_PCT harus di antara 0 dan 10"
+    if not (0.1 <= min_rr <= 20.0):
+        return False, "CONFLUENCE_MIN_RR_RATIO harus di antara 0.1 dan 20"
+    return True, ""
+
+
+def hitung_skor(summary: dict, metrik: str) -> float:
+    if metrik not in METRIK_TERSEDIA:
+        raise GridSearchError(
+            f"Metrik '{metrik}' tidak dikenal. Pilihan: {', '.join(METRIK_TERSEDIA)}"
+        )
     if metrik == "total_return_pct":
-        nilai = float(ringkas.get("total_return_pct", 0.0))
-    elif metrik == "profit_factor":
-        nilai = float(ringkas.get("profit_factor", 0.0))
+        nilai = float(summary.get("total_return_pct", 0.0) or 0.0)
     elif metrik == "win_rate":
-        nilai = float(ringkas.get("win_rate", 0.0))
-    elif metrik == "return_per_drawdown":
-        dd = abs(float(ringkas.get("max_drawdown_pct", 0.0)))
-        ret = float(ringkas.get("total_return_pct", 0.0))
-        nilai = ret / max(dd, 1.0)
+        nilai = float(summary.get("win_rate", 0.0) or 0.0)
+    elif metrik == "profit_factor":
+        pf = summary.get("profit_factor")
+        nilai = float("inf") if pf is None else float(pf or 0.0)
     else:
-        raise GridSearchError(
-            f"Metrik '{metrik}' tidak dikenal. Pilihan: {', '.join(METRIK_TERSEDIA)}."
-        )
+        ret = float(summary.get("total_return_pct", 0.0) or 0.0)
+        dd = abs(float(summary.get("max_drawdown_pct", 0.0) or 0.0))
+        if dd < 1.0:
+            dd = 1.0
+        nilai = ret / dd
+
     if math.isnan(nilai):
         return 0.0
     if math.isinf(nilai):
         return 1e9 if nilai > 0 else -1e9
-    return nilai
+    return round(nilai, 6)
+
+
+def _hitung_degradasi(skor_latih: float, skor_uji: Optional[float]) -> Optional[float]:
+    if skor_uji is None:
+        return None
+    if math.isnan(skor_latih) or math.isnan(skor_uji):
+        return None
+    return round(skor_latih - skor_uji, 6)
 
 
 def run_grid_search(
-    klines: Sequence[Kline],
+    klines: list[Kline],
     base_config: dict,
     spec: dict,
     warmup_bars: int,
     metrik: str = "total_return_pct",
-    rasio_latih: float = 0.7,
-    min_trades: int = 10,
-    progress_cb: Optional[Callable[[float], None]] = None,
+    rasio_latih: float = 0.70,
+    min_trades: int = 5,
+    progress_cb: Optional[Callable[[float, str], None]] = None,
     cancel_cb: Optional[Callable[[], bool]] = None,
-    btc_klines: Optional[Sequence[Kline]] = None,
+    btc_klines: Optional[list[Kline]] = None,
+    structure_klines: Optional[list[Kline]] = None,
     native_prebuilt: Optional[tuple] = None,
 ) -> HasilGridSearch:
     if metrik not in METRIK_TERSEDIA:
         raise GridSearchError(
-            f"Metrik '{metrik}' tidak dikenal. Pilihan: {', '.join(METRIK_TERSEDIA)}."
+            f"Metrik '{metrik}' tidak dikenal. Pilihan: {', '.join(METRIK_TERSEDIA)}"
         )
-    if not 0.1 <= rasio_latih <= 1.0:
-        raise GridSearchError("rasio_latih harus di antara 0.1 dan 1.0.")
+    if not (0.1 <= float(rasio_latih) <= 1.0):
+        raise GridSearchError("rasio_latih harus berada di antara 0.1 dan 1.0.")
 
-    klines = list(klines)
-    n = len(klines)
-    if n <= warmup_bars + 10:
-        raise GridSearchError(
-            f"Data terlalu pendek: {n} candle dengan warmup {warmup_bars}."
-        )
-
-    kombinasi, dipangkas = expand_grid(
-        spec, pakai_atr=bool(base_config.get("USE_ATR_EXIT", False))
-    )
-    hasil_grid = HasilGridSearch(
-        total_kombinasi=len(kombinasi), dipangkas=dipangkas, metrik=metrik
-    )
-
-    interval_sim = str(base_config.get("CONFIRM_INTERVAL", "5m") or "5m")
-    butuh_arah = bool(
-        base_config.get("DIRECTION_FILTER_ENABLED", False)
-        or base_config.get("DIRECTION_ZONE_FILTER_ENABLED", False)
-    )
-    htf_aktif_di_grid = strategy.htf_enabled(base_config)
-    raw_htf_enabled = spec.get("HTF_FILTER_ENABLED")
-    if raw_htf_enabled is not None:
-        if isinstance(raw_htf_enabled, dict):
-            raw_htf_values = buat_rentang(
-                float(raw_htf_enabled["mulai"]),
-                float(raw_htf_enabled["sampai"]),
-                float(raw_htf_enabled["langkah"]),
-            )
-        elif isinstance(raw_htf_enabled, (list, tuple)):
-            raw_htf_values = list(raw_htf_enabled)
-        else:
-            raw_htf_values = [raw_htf_enabled]
-        caster_htf = bt.OVERRIDE_CASTERS["HTF_FILTER_ENABLED"]
-        for raw_value in raw_htf_values:
-            if raw_value is None or raw_value == "":
-                continue
-            try:
-                htf_aktif_di_grid = htf_aktif_di_grid or caster_htf(raw_value)
-            except ValueError:
-                # Nilai invalid akan ditandai sebagai kombinasi gagal di loop grid.
-                continue
-    htf_config = dict(base_config)
-    if htf_aktif_di_grid:
-        htf_config["HTF_FILTER_ENABLED"] = True
-        htf_config["HTF_INTERVAL"] = "1h"
-    butuh_htf_data = htf_aktif_di_grid
-    try:
-        butuh_warmup = parity.gate_warmup_bars(htf_config, interval_sim)
-        if htf_aktif_di_grid:
-            for params in kombinasi:
-                try:
-                    cfg_pemanasan = bt.apply_overrides(htf_config, params)
-                    cfg_pemanasan["HTF_FILTER_ENABLED"] = True
-                    cfg_pemanasan["HTF_INTERVAL"] = "1h"
-                    butuh_warmup = max(
-                        butuh_warmup,
-                        parity.gate_warmup_bars(cfg_pemanasan, interval_sim),
-                    )
-                except (bt.BacktestError, KeyError, TypeError, ValueError):
-                    continue
-    except ValueError as exc:
-        raise GridSearchError(str(exc)) from exc
+    kombinasi, dipangkas = expand_grid(spec, base_config)
+    interval_konfirmasi = str(base_config.get("CONFIRM_INTERVAL", "5m"))
+    butuh_warmup = strategy.gate_warmup_bars(base_config, interval_konfirmasi)
+    peringatan_warmup: list[str] = []
     if int(warmup_bars) < butuh_warmup:
-        if htf_aktif_di_grid:
-            alasan_warmup = "gerbang arah/HTF memerlukan candle tertutup"
-        else:
-            alasan_warmup = (
-                f"layer arah {base_config.get('DIRECTION_INTERVAL', '15m')} butuh "
-                f"{parity_trend_window(base_config)} candle tertutup"
-            )
-        hasil_grid.peringatan.append(
-            f"Warmup {warmup_bars} bar dinaikkan menjadi {butuh_warmup} bar karena "
-            f"{alasan_warmup}. Unduhan data harus mencakup rentang warmup ini."
+        peringatan_warmup.append(
+            f"Warmup {warmup_bars} bar {interval_konfirmasi} dinaikkan menjadi "
+            f"{butuh_warmup} bar karena struktur Confluence "
+            f"{strategy.confluence_structure_interval(base_config)} memerlukan "
+            f"{strategy.confluence_structure_window_bars(base_config)} candle tertutup."
         )
         warmup_bars = butuh_warmup
-    if n <= int(warmup_bars) + 10:
+    n = len(klines)
+    usable = n - warmup_bars
+    if usable < MIN_BAR_UJI:
         raise GridSearchError(
-            f"Data terlalu pendek: {n} candle dengan warmup {warmup_bars}."
+            f"Data yang bisa diuji hanya {usable} bar setelah warmup "
+            f"(butuh minimal {MIN_BAR_UJI}). Perpanjang rentang hari."
         )
 
-    if rasio_latih >= 1.0:
-        potong = n
-        kl_latih, kl_uji = klines, []
-        hasil_grid.peringatan.append(
-            "Pemisahan periode uji dimatikan (rasio_latih=1.0). Hasil peringkat "
-            "TIDAK tervalidasi pada data baru dan sangat rentan overfitting."
-        )
+    pakai_split = rasio_latih < 0.999 and usable >= MIN_BAR_UJI * 2
+    if pakai_split:
+        bar_latih = max(MIN_BAR_UJI, int(usable * rasio_latih))
+        bar_uji = usable - bar_latih
+        if bar_uji < MIN_BAR_UJI:
+            pakai_split = False
+            bar_latih = usable
+            bar_uji = 0
     else:
-        potong = warmup_bars + int((n - warmup_bars) * rasio_latih)
-        kl_latih = klines[:potong]
-        awal_uji = max(0, potong - warmup_bars)
-        kl_uji = klines[awal_uji:]
+        bar_latih = usable
+        bar_uji = 0
 
-    hasil_grid.bar_latih = max(0, len(kl_latih) - warmup_bars)
-    hasil_grid.bar_uji = max(0, len(kl_uji) - warmup_bars) if kl_uji else 0
-
-    arah_latih = arah_uji = None
-    if butuh_arah:
-        arah_latih = parity.build_direction_klines(kl_latih, base_config, interval_sim)
-        arah_uji = (
-            parity.build_direction_klines(kl_uji, base_config, interval_sim)
-            if kl_uji
-            else []
-        )
-
-    htf_latih = (
-        parity.build_htf_klines(kl_latih, htf_config, interval_sim)
-        if butuh_htf_data
-        else None
-    )
-    htf_uji = (
-        parity.build_htf_klines(kl_uji, htf_config, interval_sim)
-        if butuh_htf_data and kl_uji
-        else []
-    )
-
-    if kl_uji and hasil_grid.bar_uji < 50:
-        hasil_grid.peringatan.append(
-            f"Periode uji hanya {hasil_grid.bar_uji} bar. Terlalu pendek untuk "
-            f"memvalidasi apa pun. Perpanjang rentang hari atau turunkan rasio_latih."
-        )
+    potong_latih = warmup_bars + bar_latih
+    klines_latih = klines[:potong_latih]
+    start_uji_idx = max(0, potong_latih - warmup_bars)
+    klines_uji = klines[start_uji_idx:] if pakai_split else []
+    warmup_uji = potong_latih - start_uji_idx
 
     mulai = time.time()
+    baris_hasil: list[BarisGrid] = []
     dilewati = 0
+    dibatalkan = False
+    total = len(kombinasi)
 
-    for idx, params in enumerate(kombinasi):
-        if cancel_cb and cancel_cb():
-            hasil_grid.dibatalkan = True
+    for idx, ov in enumerate(kombinasi, start=1):
+        if cancel_cb is not None and cancel_cb():
+            dibatalkan = True
             break
+
+        try:
+            cfg = apply_overrides(base_config, ov)
+            validate_params(cfg)
+        except BacktestError:
+            dilewati += 1
+            continue
+
+        masuk_akal, _alasan = _kombinasi_masuk_akal(cfg)
+        if not masuk_akal:
+            dilewati += 1
+            continue
+
         if progress_cb:
-            progress_cb(min(1.0, idx / max(1, len(kombinasi))))
+            label = ", ".join(f"{k}={v}" for k, v in ov.items())
+            _panggil_progress(progress_cb, idx / total, f"[{idx}/{total}] {label[:60]}")
 
-        try:
-            cfg = bt.apply_overrides(base_config, params)
-            bt.validate_params(cfg)
-        except (bt.BacktestError, GridSearchError):
-            dilewati += 1
-            continue
+        res_latih = run_backtest(
+            klines_latih,
+            cfg,
+            warmup_bars=warmup_bars,
+            btc_klines=btc_klines,
+            structure_klines=structure_klines,
+        )
+        sum_latih = summarize(res_latih)
+        skor_latih = hitung_skor(sum_latih, metrik)
 
-        cfg["_symbol"] = base_config.get("_symbol", "")
-
-        try:
-            r_latih = bt.run_backtest(
-                kl_latih,
+        sum_uji: Optional[dict] = None
+        skor_uji: Optional[float] = None
+        if pakai_split:
+            res_uji = run_backtest(
+                klines_uji,
                 cfg,
-                warmup_bars,
+                warmup_bars=warmup_uji,
                 btc_klines=btc_klines,
-                direction_klines=arah_latih,
-                htf_klines=htf_latih,
+                structure_klines=structure_klines,
             )
-            s_latih = bt.summarize(r_latih)
-        except Exception as exc:
-            dilewati += 1
-            hasil_grid.hasil.append(
-                HasilKombinasi(
-                    params=dict(params),
-                    latih={},
-                    andal=False,
-                    catatan=(
-                        f"simulasi latih gagal: {type(exc).__name__}: "
-                        f"{str(exc)[:180]}"
-                    ),
-                )
+            sum_uji = summarize(res_uji)
+            skor_uji = hitung_skor(sum_uji, metrik)
+
+        degradasi = _hitung_degradasi(skor_latih, skor_uji)
+        trades_latih = int(sum_latih.get("total_trades", 0))
+        trades_uji = int(sum_uji.get("total_trades", 0)) if sum_uji else 0
+
+        catatan_parts = []
+        andal = True
+        if trades_latih < min_trades:
+            andal = False
+            catatan_parts.append(f"trade latih hanya {trades_latih} (< {min_trades})")
+        if pakai_split and trades_uji == 0:
+            andal = False
+            catatan_parts.append("0 trade pada periode uji")
+        if (
+            pakai_split
+            and sum_uji is not None
+            and float(sum_latih.get("total_return_pct", 0.0)) > 0
+            and float(sum_uji.get("total_return_pct", 0.0)) < 0
+        ):
+            catatan_parts.append("untung di latih tetapi rugi di uji (rawan overfit)")
+
+        baris_hasil.append(
+            BarisGrid(
+                params=ov,
+                latih=sum_latih,
+                uji=sum_uji,
+                skor_latih=skor_latih,
+                skor_uji=skor_uji,
+                degradasi=degradasi,
+                andal=andal,
+                catatan="; ".join(catatan_parts),
             )
-            continue
-
-        item = HasilKombinasi(
-            params=dict(params),
-            latih=s_latih,
-            skor_latih=hitung_skor(s_latih, metrik),
         )
 
-        if int(s_latih.get("total_trades", 0)) < min_trades:
-            item.andal = False
-            item.catatan = (
-                f"hanya {s_latih.get('total_trades', 0)} trade pada periode "
-                f"latih, di bawah minimum {min_trades}"
-            )
+    baris_hasil.sort(
+        key=lambda b: (
+            1 if b.andal else 0,
+            b.skor_latih,
+            b.skor_uji if b.skor_uji is not None else -1e9,
+        ),
+        reverse=True,
+    )
 
-        if kl_uji:
-            try:
-                r_uji = bt.run_backtest(
-                    kl_uji,
-                    cfg,
-                    warmup_bars,
-                    btc_klines=btc_klines,
-                    direction_klines=arah_uji,
-                    htf_klines=htf_uji,
-                )
-                s_uji = bt.summarize(r_uji)
-                item.uji = s_uji
-                item.skor_uji = hitung_skor(s_uji, metrik)
-            except Exception as exc:
-                detail = f"{type(exc).__name__}: {str(exc)[:180]}"
-                item.catatan = (
-                    (item.catatan + "; ") if item.catatan else ""
-                ) + f"periode uji gagal dijalankan: {detail}"
-
-        hasil_grid.hasil.append(item)
-
-    if progress_cb:
-        progress_cb(1.0)
-
-    hasil_grid.hasil.sort(key=lambda h: (h.andal, h.skor_latih), reverse=True)
-    hasil_grid.dilewati = dilewati
-    hasil_grid.detik = time.time() - mulai
-
-    if dilewati:
-        hasil_grid.peringatan.append(
-            f"{dilewati} kombinasi tidak diperingkat karena parameter tidak valid "
-            "atau simulasi gagal."
+    peringatan: list[str] = list(peringatan_warmup)
+    if not pakai_split:
+        peringatan.append(
+            "Rentang data terlalu pendek untuk dibagi latih/uji; seluruh bar "
+            "dipakai sebagai latih. Perpanjang hari agar ada validasi out-of-sample."
+        )
+    if total >= 50:
+        peringatan.append(
+            f"{total:,} kombinasi diuji. Semakin banyak kombinasi, semakin "
+            f"besar peluang hasil terbaik muncul karena kebetulan. Utamakan "
+            f"kombinasi dengan degradasi kecil, bukan skor latih tertinggi."
+        )
+    if baris_hasil and not any(b.andal for b in baris_hasil):
+        peringatan.append(
+            f"Tidak ada kombinasi yang mencapai >= {min_trades} trade pada periode "
+            f"latih. Hasil di bawah secara statistik belum andal."
+        )
+    if dibatalkan:
+        peringatan.append(
+            f"Grid search dihentikan pengguna setelah {len(baris_hasil)} dari "
+            f"{total} kombinasi."
         )
 
-    andal = [h for h in hasil_grid.hasil if h.andal]
-    if not andal and hasil_grid.hasil:
-        hasil_grid.peringatan.append(
-            f"Tidak satu pun kombinasi mencapai {min_trades} trade. Seluruh hasil "
-            f"berasal dari sampel yang terlalu kecil untuk disimpulkan."
-        )
-    if len(kombinasi) > 100:
-        hasil_grid.peringatan.append(
-            f"{len(kombinasi):,} kombinasi diuji. Semakin banyak kombinasi, semakin "
-            f"besar peluang hasil terbaik muncul karena kebetulan. Utamakan kombinasi "
-            f"dengan degradasi kecil, bukan skor latih tertinggi."
-        )
-    return hasil_grid
+    return HasilGridSearch(
+        symbol=str(base_config.get("_symbol", "")),
+        interval=str(base_config.get("CONFIRM_INTERVAL", "5m")),
+        metrik=metrik,
+        total_kombinasi=total,
+        dipangkas=dipangkas,
+        dilewati=dilewati,
+        bar_latih=bar_latih,
+        bar_uji=bar_uji,
+        detik=round(time.time() - mulai, 2),
+        hasil=baris_hasil,
+        peringatan=peringatan,
+        dibatalkan=dibatalkan,
+    )
+
+
+def _panggil_progress(cb: Optional[Callable], frac: float, stage: str = "") -> None:
+    if cb is None:
+        return
+    try:
+        cb(frac, stage)
+    except TypeError:
+        cb(frac)
 
 
 def run_portfolio_grid_search(
-    store,
+    store: KlineStore,
     base_config: dict,
-    interval: str,
-    warmup_ms: int,
-    spec: dict,
+    arg3=None,
+    arg4=None,
+    arg5=None,
     *,
+    interval: Optional[str] = None,
+    warmup_ms: Optional[int] = None,
+    spec: Optional[dict] = None,
     metrik: str = "total_return_pct",
-    rasio_latih: float = 0.7,
+    rasio_latih: float = 0.70,
     min_trades: int = 5,
-    progress_cb: Optional[Callable[[float], None]] = None,
+    progress_cb: Optional[Callable] = None,
     cancel_cb: Optional[Callable[[], bool]] = None,
-    btc_klines: Optional[Sequence[Kline]] = None,
+    btc_klines: Optional[list[Kline]] = None,
+    structure_store: Optional[KlineStore] = None,
     native_prebuilt: Optional[tuple] = None,
 ) -> HasilGridSearch:
-    from backtesting import portfolio_backtest as pbt
+    if isinstance(arg3, dict):
+        spec = dict(spec if spec is not None else arg3)
+        interval = str(interval if interval is not None else (arg4 or "5m"))
+        warmup_ms = int(warmup_ms if warmup_ms is not None else (arg5 or 0))
+    else:
+        interval = str(interval if interval is not None else (arg3 or "5m"))
+        warmup_ms = int(warmup_ms if warmup_ms is not None else (arg4 or 0))
+        spec = dict(spec if spec is not None else (arg5 or {}))
+    rasio_latih = float(rasio_latih)
+    min_trades = int(min_trades)
+    if metrik not in METRIK_TERSEDIA:
+        raise GridSearchError(
+            f"Metrik '{metrik}' tidak dikenal. Pilihan: {', '.join(METRIK_TERSEDIA)}"
+        )
+    if not (0.1 <= rasio_latih <= 1.0):
+        raise GridSearchError("rasio_latih harus berada di antara 0.1 dan 1.0.")
+
+    _pastikan_grid_portofolio_hanya_exit(spec)
+    kombinasi, dipangkas = expand_grid(spec, base_config)
+    butuh_warmup_ms = strategy.gate_warmup_ms(base_config, interval)
+    peringatan_warmup: list[str] = []
+    punya_native_struct = bool(
+        native_prebuilt is not None
+        and len(native_prebuilt) >= 3
+        and native_prebuilt[2]
+    )
+    if not punya_native_struct and int(warmup_ms) < butuh_warmup_ms:
+        peringatan_warmup.append(
+            f"Warmup {warmup_ms} ms dinaikkan menjadi {butuh_warmup_ms} ms "
+            f"karena struktur Confluence {strategy.confluence_structure_interval(base_config)} "
+            f"memerlukan {strategy.confluence_structure_window_bars(base_config)} "
+            "candle tertutup sebelum bar entry pertama."
+        )
+        warmup_ms = butuh_warmup_ms
+
+    built = build_timeline(
+        store,
+        interval,
+        config=base_config,
+        include_ohlcv=True,
+        structure_store=structure_store,
+    )
+    timeline = built[0]
+    series_of = built[1]
+    struktur_of = built[2] if len(built) >= 3 else {}
+    if punya_native_struct:
+        struktur_of = native_prebuilt[2]
+    prebuilt = (timeline, series_of, struktur_of)
+    if not timeline:
+        raise GridSearchError("Garis waktu portofolio kosong.")
+
+    first_allowed = timeline[0] + warmup_ms
+    usable_times = [t for t in timeline if t >= first_allowed]
+    usable = len(usable_times)
+    if usable < MIN_BAR_UJI:
+        raise GridSearchError(
+            f"Bar portofolio yang bisa diuji hanya {usable} setelah warmup "
+            f"(butuh minimal {MIN_BAR_UJI}). Perpanjang rentang hari."
+        )
+
+    pakai_split = rasio_latih < 0.999 and usable >= MIN_BAR_UJI * 2
+    if pakai_split:
+        bar_latih = max(MIN_BAR_UJI, int(usable * rasio_latih))
+        bar_uji = usable - bar_latih
+        if bar_uji < MIN_BAR_UJI:
+            pakai_split = False
+            bar_latih = usable
+            bar_uji = 0
+    else:
+        bar_latih = usable
+        bar_uji = 0
+
+    batas_latih_ms = usable_times[bar_latih - 1]
+    awal_uji_ms = usable_times[bar_latih] if pakai_split else 0
 
     mulai = time.time()
-    if not 0.1 <= float(rasio_latih) <= 1.0:
-        raise GridSearchError("rasio_latih harus di antara 0.1 dan 1.0.")
-    min_trades = int(min_trades)
-    if min_trades < 1:
-        raise GridSearchError("min_trades minimal 1.")
-    _pastikan_grid_portofolio_hanya_exit(spec)
-
-    kombinasi, dipangkas = expand_grid(
-        spec,
-        max_kombinasi=MAX_KOMBINASI_PORTFOLIO,
-        pakai_atr=bool(base_config.get("USE_ATR_EXIT", False)),
-    )
-    hasil_grid = HasilGridSearch(
-        total_kombinasi=len(kombinasi), dipangkas=dipangkas, metrik=metrik
-    )
-
-    timeline, series_of = pbt.build_timeline(store, interval)
-    if not timeline:
-        raise GridSearchError(
-            "Garis waktu kosong, tidak ada candle yang bisa diproses."
-        )
-    awal_data, akhir_data = timeline[0], timeline[-1]
-
-    if strategy.htf_enabled(base_config):
-        try:
-            butuh_htf_ms = parity.gate_warmup_ms(base_config, interval)
-        except ValueError as exc:
-            raise GridSearchError(str(exc)) from exc
-        if int(warmup_ms) < butuh_htf_ms:
-            hasil_grid.peringatan.append(
-                f"Warmup {warmup_ms} ms dinaikkan menjadi {butuh_htf_ms} ms karena "
-                "gerbang tren HTF memerlukan candle tertutup sebelum bar entry pertama."
-            )
-            warmup_ms = butuh_htf_ms
-
-    if float(rasio_latih) >= 1.0:
-        potong_ms = akhir_data
-        hasil_grid.peringatan.append(
-            "Pemisahan periode uji dimatikan (rasio_latih=1.0). Hasil peringkat "
-            "TIDAK tervalidasi pada data baru dan sangat rentan overfitting."
-        )
-    else:
-        potong_ms = (
-            awal_data
-            + warmup_ms
-            + int((akhir_data - awal_data - warmup_ms) * float(rasio_latih))
-        )
-        if potong_ms <= awal_data + warmup_ms:
-            potong_ms = awal_data + warmup_ms + 1
-
-    akhir_latih_ms = potong_ms
-    if float(rasio_latih) < 1.0:
-        akhir_latih_ms = potong_ms - 1
-        hasil_grid.bar_latih = sum(
-            1 for t in timeline if awal_data + warmup_ms <= t < potong_ms
-        )
-        hasil_grid.bar_uji = sum(1 for t in timeline if t >= potong_ms)
-    else:
-        hasil_grid.bar_latih = sum(1 for t in timeline if t >= awal_data + warmup_ms)
-        hasil_grid.bar_uji = 0
-    if float(rasio_latih) < 1.0 and hasil_grid.bar_uji < 50:
-        hasil_grid.peringatan.append(
-            f"Periode uji hanya {hasil_grid.bar_uji} bar (di bawah 50). "
-            f"Skor uji pada sampel sepersis ini sulit diandalkan."
-        )
-
-    native_arah = None
-    if native_prebuilt is not None:
-        _, _, native_arah, _ = pbt.unpack_prebuilt(native_prebuilt)
-    arah_of = (
-        native_arah
-        if native_arah is not None
-        else pbt.build_direction_lookups(store, list(series_of), base_config, interval)
-    )
-    timing_of = pbt.build_timing_lookups(store, list(series_of), base_config, interval)
-    native_htf_of = pbt.unpack_prebuilt_htf(native_prebuilt)
-    htf_of = (
-        native_htf_of
-        if native_htf_of is not None
-        else pbt.build_htf_lookups(store, list(series_of), base_config, interval)
-    )
-    if (arah_of and native_arah is None) or strategy.htf_enabled(base_config):
-        butuh_warmup = parity.gate_warmup_ms(base_config, interval)
-        if int(warmup_ms) < butuh_warmup:
-            hasil_grid.peringatan.append(
-                f"Warmup {warmup_ms} ms dinaikkan menjadi {butuh_warmup} ms karena "
-                "gerbang arah/HTF memerlukan candle tertutup sebelum bar entry pertama."
-            )
-            warmup_ms = butuh_warmup
-    prebuilt = (timeline, series_of, arah_of, timing_of, htf_of)
-    try:
-        entry_cache_shared = pbt.precompute_entry_signals(
-            store,
-            base_config,
-            interval,
-            warmup_ms=warmup_ms,
-            prebuilt=prebuilt,
-            cancel_cb=cancel_cb,
-            btc_klines=btc_klines,
-        )
-    except pbt.BacktestError as exc:
-        if "dibatalkan" in str(exc).lower():
-            hasil_grid.dibatalkan = True
-            return hasil_grid
-        raise GridSearchError(str(exc)) from exc
-
+    baris_hasil: list[BarisGrid] = []
     dilewati = 0
+    gagal_simulasi = 0
+    dibatalkan = False
     total = len(kombinasi)
+    _panggil_progress(
+        progress_cb, 0.0, "Menghitung sinyal entry portofolio sekali untuk seluruh grid..."
+    )
+    precompute_cfg = dict(base_config)
+    if "CONFLUENCE_MIN_RR_RATIO" in (spec or {}) or "CONFLUENCE_SL_BUFFER_PCT" in (spec or {}):
+        precompute_cfg["CONFLUENCE_MIN_RR_RATIO"] = 0.05
+    entry_signal_cache = precompute_entry_signals(
+        store,
+        precompute_cfg,
+        interval,
+        warmup_ms=warmup_ms,
+        prebuilt=prebuilt,
+        btc_klines=btc_klines,
+        cancel_cb=cancel_cb,
+        structure_store=structure_store,
+    )
 
-    for idx, params in enumerate(kombinasi):
+    for idx, ov in enumerate(kombinasi, start=1):
         if cancel_cb is not None and cancel_cb():
-            hasil_grid.dibatalkan = True
+            dibatalkan = True
             break
-        item = HasilKombinasi(params=dict(params), latih={})
+
         try:
-            cfg = bt.apply_overrides(base_config, params)
-            bt.validate_params(cfg)
-        except (bt.BacktestError, GridSearchError) as exc:
+            cfg = apply_overrides(base_config, ov)
+            validate_params(cfg)
+        except BacktestError:
             dilewati += 1
-            item.andal = False
-            item.catatan = f"parameter tidak valid: {exc}"
-            hasil_grid.hasil.append(item)
             continue
+
+        masuk_akal, _ = _kombinasi_masuk_akal(cfg)
+        if not masuk_akal:
+            dilewati += 1
+            continue
+
+        label = ", ".join(f"{k}={v}" for k, v in ov.items())
+        _panggil_progress(progress_cb, idx / total, f"[{idx}/{total}] {label[:60]}")
+
         try:
-
-            def _prog_latih(frac, _idx=idx):
-                if progress_cb:
-                    progress_cb((_idx + max(0.0, min(1.0, float(frac))) * 0.45) / total)
-
-            r_latih = pbt.run_portfolio_backtest(
+            res_latih = run_portfolio_backtest(
                 store,
                 cfg,
                 interval,
                 warmup_ms=warmup_ms,
-                end_ms=akhir_latih_ms,
+                max_skipped_records=0,
+                end_ms=batas_latih_ms,
                 prebuilt=prebuilt,
-                progress_cb=_prog_latih,
                 cancel_cb=cancel_cb,
                 btc_klines=btc_klines,
-                entry_signal_cache=entry_cache_shared,
+                entry_signal_cache=entry_signal_cache,
             )
-            s_latih = pbt.summarize_portfolio(r_latih)
-            item.latih = s_latih
-            item.skor_latih = hitung_skor(s_latih, metrik)
-            if int(s_latih.get("total_trades", 0)) < min_trades:
-                item.andal = False
-                item.catatan = (
-                    f"hanya {s_latih.get('total_trades', 0)} trade pada "
-                    f"periode latih, di bawah minimum {min_trades}"
+            sum_latih = summarize_portfolio(res_latih)
+            skor_latih = hitung_skor(sum_latih, metrik)
+
+            sum_uji: Optional[dict] = None
+            skor_uji: Optional[float] = None
+            if pakai_split:
+                res_uji = run_portfolio_backtest(
+                    store,
+                    cfg,
+                    interval,
+                    warmup_ms=0,
+                    max_skipped_records=0,
+                    start_ms=awal_uji_ms,
+                    prebuilt=prebuilt,
+                    cancel_cb=cancel_cb,
+                    btc_klines=btc_klines,
+                    entry_signal_cache=entry_signal_cache,
                 )
-
-            if float(rasio_latih) < 1.0:
-                try:
-
-                    def _prog_uji(frac, _idx=idx):
-                        if progress_cb:
-                            progress_cb(
-                                (_idx + 0.45 + max(0.0, min(1.0, float(frac))) * 0.55)
-                                / total
-                            )
-
-                    r_uji = pbt.run_portfolio_backtest(
-                        store,
-                        cfg,
-                        interval,
-                        warmup_ms=warmup_ms,
-                        start_ms=potong_ms - warmup_ms,
-                        prebuilt=prebuilt,
-                        progress_cb=_prog_uji,
-                        cancel_cb=cancel_cb,
-                        btc_klines=btc_klines,
-                        entry_signal_cache=entry_cache_shared,
-                    )
-                    s_uji = pbt.summarize_portfolio(r_uji)
-                    item.uji = s_uji
-                    item.skor_uji = hitung_skor(s_uji, metrik)
-                except pbt.BacktestError as exc:
-                    item.catatan = (
-                        (item.catatan + "; ") if item.catatan else ""
-                    ) + f"periode uji gagal dijalankan: {exc}"
-        except pbt.BacktestError as exc:
+                sum_uji = summarize_portfolio(res_uji)
+                skor_uji = hitung_skor(sum_uji, metrik)
+        except BacktestError as exc:
             if "dibatalkan" in str(exc).lower():
-                hasil_grid.dibatalkan = True
+                dibatalkan = True
                 break
             dilewati += 1
-            item.andal = False
-            item.catatan = f"simulasi latih gagal: {exc}"
+            gagal_simulasi += 1
+            baris_hasil.append(
+                BarisGrid(
+                    params=ov,
+                    latih={"total_trades": 0, "total_return_pct": 0.0, "win_rate": 0.0, "max_drawdown_pct": 0.0, "profit_factor": 0.0},
+                    uji=None,
+                    skor_latih=-1e9,
+                    skor_uji=None,
+                    degradasi=None,
+                    andal=False,
+                    catatan=f"simulasi gagal: {str(exc)[:180]}",
+                )
+            )
+            continue
 
-        hasil_grid.hasil.append(item)
+        degradasi = _hitung_degradasi(skor_latih, skor_uji)
+        trades_latih = int(sum_latih.get("total_trades", 0))
+        trades_uji = int(sum_uji.get("total_trades", 0)) if sum_uji else 0
+
+        catatan_parts = []
+        andal = True
+        if trades_latih < min_trades:
+            andal = False
+            catatan_parts.append(f"trade latih hanya {trades_latih} (< {min_trades})")
+        if pakai_split and trades_uji == 0:
+            andal = False
+            catatan_parts.append("0 trade pada periode uji")
+        if (
+            pakai_split
+            and sum_uji is not None
+            and float(sum_latih.get("total_return_pct", 0.0)) > 0
+            and float(sum_uji.get("total_return_pct", 0.0)) < 0
+        ):
+            catatan_parts.append("untung di latih tetapi rugi di uji (rawan overfit)")
+
+        baris_hasil.append(
+            BarisGrid(
+                params=ov,
+                latih=sum_latih,
+                uji=sum_uji,
+                skor_latih=skor_latih,
+                skor_uji=skor_uji,
+                degradasi=degradasi,
+                andal=andal,
+                catatan="; ".join(catatan_parts),
+            )
+        )
+
+    baris_hasil.sort(
+        key=lambda b: (
+            1 if b.andal else 0,
+            b.skor_latih,
+            b.skor_uji if b.skor_uji is not None else -1e9,
+        ),
+        reverse=True,
+    )
+
+    peringatan: list[str] = list(peringatan_warmup)
+    if gagal_simulasi:
+        peringatan.append(
+            f"{gagal_simulasi} kombinasi gagal disimulasikan dan ditandai tidak andal. "
+            "Periksa kolom catatan pada hasil untuk melihat rincian error."
+        )
+    if not pakai_split:
+        peringatan.append(
+            "Rentang data terlalu pendek untuk dibagi latih/uji; seluruh bar "
+            "dipakai sebagai latih. Perpanjang hari agar ada validasi out-of-sample."
+        )
+    if total >= 50:
+        peringatan.append(
+            f"{total:,} kombinasi diuji pada portofolio. Utamakan kombinasi "
+            f"dengan degradasi kecil dan jumlah trade memadai."
+        )
+    if baris_hasil and not any(b.andal for b in baris_hasil):
+        peringatan.append(
+            f"Tidak ada kombinasi yang mencapai >= {min_trades} trade pada periode "
+            f"latih. Hasil di bawah secara statistik belum andal."
+        )
+    if dibatalkan:
+        peringatan.append(
+            f"Grid search dihentikan pengguna setelah {len(baris_hasil)} dari "
+            f"{total} kombinasi."
+        )
+
+    return HasilGridSearch(
+        symbol=f"PORTOFOLIO ({len(series_of)} koin)",
+        interval=interval,
+        metrik=metrik,
+        total_kombinasi=total,
+        dipangkas=dipangkas,
+        dilewati=dilewati,
+        bar_latih=bar_latih,
+        bar_uji=bar_uji,
+        detik=round(time.time() - mulai, 2),
+        hasil=baris_hasil,
+        peringatan=peringatan,
+        dibatalkan=dibatalkan,
+    )
+
+
+def execute_grid_search(
+    client,
+    *,
+    mode: str = "portfolio",
+    symbol: str = "BTCUSDT",
+    days: float = 14.0,
+    max_symbols: int = 30,
+    base_config: dict,
+    spec: dict,
+    base_overrides: Optional[dict] = None,
+    metrik: str = "total_return_pct",
+    rasio_latih: float = 0.70,
+    min_trades: int = 5,
+    progress_cb: Optional[Callable[[float, str], None]] = None,
+    cancel_cb: Optional[Callable[[], bool]] = None,
+) -> HasilGridSearch:
+    if days <= 0 or days > 1825:
+        raise GridSearchError("Rentang hari harus antara 0.5 sampai 1825 (5 tahun).")
+
+    mode_norm = (mode or "portfolio").strip().lower()
+    if mode_norm == "portfolio":
+        _pastikan_grid_portofolio_hanya_exit(spec)
+    kombinasi, _ = expand_grid(spec, base_config)
+    if not kombinasi:
+        raise GridSearchError("Tidak ada kombinasi parameter untuk diuji.")
+
+    base_cfg = apply_overrides(base_config, base_overrides)
+    validate_params(base_cfg)
+
+    interval = str(base_cfg.get("CONFIRM_INTERVAL", "5m"))
+    bar_minutes = INTERVAL_MINUTES[interval]
+    window_24h = bars_per_day(interval)
+
+    max_lookback = strategy.confirm_window_bars(base_cfg)
+    max_gate_warmup = strategy.gate_warmup_bars(base_cfg, interval)
+
+    warmup_bars = max(window_24h, max_lookback, max_gate_warmup)
+    warmup_ms = warmup_bars * bar_minutes * MS_PER_MIN
+    end_ms = last_completed_candle_end_ms(interval)
+    start_ms = end_ms - int(days * MS_PER_DAY) - warmup_ms
+
+    if mode_norm == "portfolio":
+        max_symbols = max(3, min(int(max_symbols or 30), 200))
         if progress_cb:
-            progress_cb((idx + 1) / total)
-
-    if progress_cb:
-        progress_cb(1.0)
-
-    hasil_grid.hasil.sort(key=lambda h: (h.andal, h.skor_latih), reverse=True)
-    hasil_grid.dilewati = dilewati
-    hasil_grid.detik = time.time() - mulai
-
-    if dilewati:
-        hasil_grid.peringatan.append(
-            f"{dilewati} kombinasi tidak diperingkat karena parameter tidak valid "
-            "atau simulasi gagal."
+            progress_cb(0.02, "Mengambil daftar pasangan USDT dari Binance...")
+        tickers = client.get_ticker_24hr_all()
+        try:
+            tradable = client.get_tradable_symbols(base_cfg.get("QUOTE_ASSET", "USDT"))
+        except Exception:
+            tradable = None
+        if tradable:
+            base_cfg["_historical_tradable_symbols"] = set(tradable)
+            base_cfg["_tradable_status_is_current_snapshot"] = True
+        universe = select_universe(
+            tickers, base_cfg, max_symbols=max_symbols, tradable_symbols=tradable
         )
+        if not universe:
+            raise GridSearchError(
+                "Tidak ada pasangan yang lolos filter volume 24 jam minimum."
+            )
 
-    andal = [h for h in hasil_grid.hasil if h.andal]
-    if not andal and hasil_grid.hasil:
-        hasil_grid.peringatan.append(
-            f"Tidak satu pun kombinasi mencapai {min_trades} trade. Seluruh hasil "
-            f"berasal dari sampel yang terlalu kecil untuk disimpulkan."
-        )
-    if len(kombinasi) > 100:
-        hasil_grid.peringatan.append(
-            f"{len(kombinasi):,} kombinasi diuji. Semakin banyak kombinasi, semakin "
-            f"besar peluang hasil terbaik muncul karena kebetulan. Utamakan kombinasi "
-            f"dengan degradasi kecil, bukan skor latih tertinggi."
-        )
+        def dl_cb(p: float, sym: str):
+            if progress_cb:
+                progress_cb(
+                    round(0.04 + p * 0.46, 3),
+                    f"Mengunduh {sym} ({int(p * len(universe))}/{len(universe)} koin)",
+                )
+
+        store = new_backtest_store(base_cfg)
+        cache = open_kline_cache(base_cfg)
+        try:
+            ok_symbols, _failed = fetch_universe_klines(
+                client,
+                universe,
+                interval,
+                start_ms,
+                end_ms,
+                store,
+                progress_cb=dl_cb,
+                cancel_cb=cancel_cb,
+                cache=cache,
+            )
+            if not ok_symbols:
+                raise GridSearchError("Gagal mengunduh data untuk semua kandidat.")
+
+            btc_klines = None
+            if base_cfg.get("BTC_FILTER_ENABLED", False):
+                btc_symbol = "BTC" + str(base_cfg.get("QUOTE_ASSET", "USDT"))
+                if btc_symbol in ok_symbols:
+                    btc_klines = store.klines(btc_symbol)
+                else:
+                    try:
+                        from backtesting.portfolio_backtest import _klines_untuk_simbol
+
+                        btc_klines = _klines_untuk_simbol(
+                            client, btc_symbol, interval, start_ms, end_ms, cache
+                        )
+                    except Exception:
+                        btc_klines = None
+
+            native_prebuilt = None
+            if strategy.confluence_enabled(base_cfg) and strategy.confluence_uses_mtf(
+                base_cfg
+            ):
+                from backtesting.portfolio_backtest import fetch_native_lookups
+
+                struktur_of = fetch_native_lookups(
+                    client,
+                    list(ok_symbols),
+                    base_cfg,
+                    start_ms + warmup_ms,
+                    end_ms,
+                    cache=cache,
+                    max_workers=4,
+                )
+                if struktur_of:
+                    native_prebuilt = (None, None, struktur_of)
+
+            def grid_cb(p: float, msg: str):
+                if progress_cb:
+                    progress_cb(round(0.50 + p * 0.50, 3), msg)
+
+            return run_portfolio_grid_search(
+                store,
+                base_cfg,
+                spec,
+                interval,
+                warmup_ms=warmup_ms,
+                metrik=metrik,
+                rasio_latih=rasio_latih,
+                min_trades=min_trades,
+                progress_cb=grid_cb,
+                cancel_cb=cancel_cb,
+                btc_klines=btc_klines,
+                native_prebuilt=native_prebuilt,
+            )
+        finally:
+            if cache is not None:
+                cache.close()
+            store.close()
+
+    symbol = (symbol or "").strip().upper()
+    if not symbol:
+        raise GridSearchError("Simbol tidak boleh kosong.")
+    try:
+        tradable = client.get_tradable_symbols(base_cfg.get("QUOTE_ASSET", "USDT"))
+    except Exception:
+        tradable = None
+    if tradable:
+        base_cfg["_historical_tradable_symbols"] = set(tradable)
+        base_cfg["_tradable_status_is_current_snapshot"] = True
+    base_cfg["_symbol"] = symbol
+
+    def fetch_cb(p: float):
+        if progress_cb:
+            progress_cb(
+                round(p * 0.45, 3), f"Mengunduh data {symbol} ({int(p * 100)}%)"
+            )
+
+    cache = open_kline_cache(base_cfg)
+    try:
+        from backtesting.portfolio_backtest import _klines_untuk_simbol
+
+        if cache is not None:
+            klines = _klines_untuk_simbol(
+                client, symbol, interval, start_ms, end_ms, cache
+            )
+            if progress_cb:
+                progress_cb(0.45, f"Data {symbol} siap dari cache")
+        else:
+            klines = fetch_full_klines(
+                client,
+                symbol,
+                interval,
+                start_ms,
+                end_ms,
+                progress_cb=fetch_cb,
+                sleep_between_calls=0.15,
+            )
+
+        btc_klines = None
+        if base_cfg.get("BTC_FILTER_ENABLED", False):
+            btc_symbol = "BTC" + str(base_cfg.get("QUOTE_ASSET", "USDT"))
+            if btc_symbol == symbol:
+                btc_klines = klines
+            else:
+                try:
+                    btc_klines = _klines_untuk_simbol(
+                        client, btc_symbol, interval, start_ms, end_ms, cache
+                    )
+                except Exception:
+                    btc_klines = None
+
+        structure_klines = None
+        if strategy.confluence_enabled(base_cfg) and strategy.confluence_uses_mtf(
+            base_cfg
+        ):
+            struct_interval = strategy.confluence_structure_interval(base_cfg)
+            struct_window = strategy.confluence_structure_window_bars(base_cfg)
+            struct_bar_ms = INTERVAL_MINUTES[struct_interval] * MS_PER_MIN
+            struct_start_ms = (
+                end_ms - int(days * MS_PER_DAY) - struct_window * struct_bar_ms
+            )
+            try:
+                structure_klines = _klines_untuk_simbol(
+                    client,
+                    symbol,
+                    struct_interval,
+                    min(start_ms, struct_start_ms),
+                    end_ms,
+                    cache,
+                )
+            except Exception:
+                structure_klines = None
+    finally:
+        if cache is not None:
+            cache.close()
+
+    def grid_cb(p: float, msg: str):
+        if progress_cb:
+            progress_cb(round(0.45 + p * 0.55, 3), msg)
+
+    hasil_grid = run_grid_search(
+        klines,
+        base_cfg,
+        spec,
+        warmup_bars=warmup_bars,
+        metrik=metrik,
+        rasio_latih=rasio_latih,
+        min_trades=min_trades,
+        progress_cb=grid_cb,
+        cancel_cb=cancel_cb,
+        btc_klines=btc_klines,
+        structure_klines=structure_klines,
+    )
     return hasil_grid
 
 
@@ -815,8 +1074,8 @@ def cetak_tabel(hasil: HasilGridSearch, top_n: int = 15) -> None:
         )
 
 
-_KUNCI_BOOL = ("USE_ATR_EXIT",)
-_KUNCI_INT = ("ATR_PERIOD",)
+_KUNCI_BOOL: tuple = ()
+_KUNCI_INT: tuple = ()
 
 
 def _konversi_nilai(kunci: str, teks: str):
@@ -910,24 +1169,28 @@ def selftest() -> bool:
     except GridSearchError:
         check("expand_grid menolak kunci tanpa efek", True)
 
-    kombinasi, dipangkas = expand_grid({"USE_ATR_EXIT": [True], "SL_PCT": [1.0, 2.0], "ATR_MULT_SL": [6.0, 7.0]})
-    check("expand_grid memangkas parameter persen saat ATR aktif", len(kombinasi) == 2 and dipangkas == 2, f"{len(kombinasi)} kombinasi, {dipangkas} dipangkas")
-    kombinasi, dipangkas = expand_grid({"USE_ATR_EXIT": [False], "ATR_MULT_SL": [6.0, 7.0], "SL_PCT": [1.0, 2.0]})
-    check("expand_grid memangkas parameter ATR saat ATR mati", len(kombinasi) == 2 and dipangkas == 2, f"{len(kombinasi)} kombinasi, {dipangkas} dipangkas")
+    kombinasi, dipangkas = expand_grid(
+        {"CONFLUENCE_SL_BUFFER_PCT": [0.1, 0.2, 0.2], "CONFLUENCE_MIN_RR_RATIO": [1.2, 1.5]}
+    )
+    check(
+        "expand_grid menghasilkan kombinasi unik",
+        len(kombinasi) == 4 and dipangkas == 0,
+        f"{len(kombinasi)} kombinasi, {dipangkas} dipangkas",
+    )
     try:
-        expand_grid({"SL_PCT": []})
+        expand_grid({"CONFLUENCE_SL_BUFFER_PCT": []})
         check("expand_grid menolak daftar kosong", False)
     except GridSearchError:
         check("expand_grid menolak daftar kosong", True)
     try:
         _pastikan_grid_portofolio_hanya_exit(
-            {"BREAKOUT_RETEST_TOLERANCE_ATR": [0.1, 0.2]}
+            {"VP_BINS": [15, 20]}
         )
         check("grid portofolio menolak parameter entry", False)
     except GridSearchError:
         check("grid portofolio menolak parameter entry", True)
     try:
-        _pastikan_grid_portofolio_hanya_exit({"ATR_MULT_SL": [5.0, 6.0]})
+        _pastikan_grid_portofolio_hanya_exit({"CONFLUENCE_SL_BUFFER_PCT": [0.1, 0.2]})
         check("grid portofolio menerima parameter exit", True)
     except GridSearchError:
         check("grid portofolio menerima parameter exit", False)
@@ -945,11 +1208,10 @@ def selftest() -> bool:
     except GridSearchError:
         check("hitung_skor menolak metrik tidak dikenal", True)
 
-    spec = parse_spec_cli("ATR_MULT_SL=1:2:0.5,TP_PCT=3|4,USE_ATR_EXIT=true")
-    check("parse_spec_cli rentang", spec["ATR_MULT_SL"] == [1.0, 1.5, 2.0], spec.get("ATR_MULT_SL"))
-    check("parse_spec_cli daftar", spec["TP_PCT"] == [3.0, 4.0])
-    check("parse_spec_cli boolean", spec["USE_ATR_EXIT"] == [True], spec.get("USE_ATR_EXIT"))
-    for teks in ("", "   ", "tanpa_sama_dengan", "KUNCI=", "ATR_MULT_SL=1:2", "ATR_MULT_SL=abc", "USE_ATR_EXIT=1:2:0.5"):
+    spec = parse_spec_cli("CONFLUENCE_SL_BUFFER_PCT=0.1:0.3:0.1,CONFLUENCE_MIN_RR_RATIO=1.2|1.5")
+    check("parse_spec_cli rentang", spec["CONFLUENCE_SL_BUFFER_PCT"] == [0.1, 0.2, 0.3], spec.get("CONFLUENCE_SL_BUFFER_PCT"))
+    check("parse_spec_cli daftar", spec["CONFLUENCE_MIN_RR_RATIO"] == [1.2, 1.5])
+    for teks in ("", "   ", "tanpa_sama_dengan", "KUNCI=", "CONFLUENCE_SL_BUFFER_PCT=1:2", "CONFLUENCE_SL_BUFFER_PCT=abc"):
         try:
             parse_spec_cli(teks)
             check(f"parse_spec_cli menolak {teks!r}", False)
@@ -960,22 +1222,11 @@ def selftest() -> bool:
     cfg.update({
         "_symbol": "",
         "MODE": "PAPER",
-        "DIRECTION_FILTER_ENABLED": False,
-        "DIRECTION_ZONE_FILTER_ENABLED": False,
-        "TIMING_FILTER_ENABLED": False,
-        "BREAKOUT_RETEST_FILTER_ENABLED": False,
-        "DEMAND_ZONE_FILTER_ENABLED": False,
+        "CONFLUENCE_FILTER_ENABLED": False,
         "BTC_FILTER_ENABLED": False,
-        "ROLLING_VOLUME_FILTER_ENABLED": False,
-        "PUMP_MIN_24H_CHANGE_PCT": -1000.0,
         "MIN_QUOTE_VOLUME_USDT_24H": 0.0,
-        "USE_ATR_EXIT": False,
-        "USE_TP": True,
-        "USE_STOP_LOSS": True,
-        "USE_BREAKEVEN": False,
-        "USE_TRAILING": False,
-        "SL_PCT": 2.0,
-        "TP_PCT": 4.0,
+        "CONFLUENCE_SL_BUFFER_PCT": 0.20,
+        "CONFLUENCE_MIN_RR_RATIO": 1.2,
         "TAKER_FEE_PCT": 0.1,
         "USE_BNB_FEE_DISCOUNT": False,
         "USE_RISK_PERCENT": False,
@@ -990,51 +1241,67 @@ def selftest() -> bool:
     klines = sd.seri_banyak_setup(harga=100.0, siklus=10, volume=9_000_000.0)
 
     try:
-        run_grid_search(klines[:50], cfg, {"SL_PCT": [1.5]}, 300)
+        run_grid_search(klines[:50], cfg, {"CONFLUENCE_SL_BUFFER_PCT": [0.2]}, 300)
         check("run_grid_search menolak data pendek", False)
     except GridSearchError:
         check("run_grid_search menolak data pendek", True)
     try:
-        run_grid_search(klines, cfg, {"SL_PCT": [1.5]}, 300, metrik="metrik_bohong")
+        run_grid_search(klines, cfg, {"CONFLUENCE_SL_BUFFER_PCT": [0.2]}, 300, metrik="metrik_bohong")
         check("run_grid_search menolak metrik tidak dikenal", False)
     except GridSearchError:
         check("run_grid_search menolak metrik tidak dikenal", True)
     try:
-        run_grid_search(klines, cfg, {"SL_PCT": [1.5]}, 300, rasio_latih=1.5)
+        run_grid_search(klines, cfg, {"CONFLUENCE_SL_BUFFER_PCT": [0.2]}, 300, rasio_latih=1.5)
         check("run_grid_search menolak rasio latih di luar rentang", False)
     except GridSearchError:
         check("run_grid_search menolak rasio latih di luar rentang", True)
-    cfg["USE_TP"] = True
-    hasil_tolak = run_grid_search(klines, cfg, {"SL_PCT": [1.5, 2.5], "TP_PCT": [1.0, 4.0]}, 300, min_trades=1)
-    check("run_grid_search melewati kombinasi TP <= SL", hasil_tolak.total_kombinasi == 4 and len(hasil_tolak.hasil) == 2 and hasil_tolak.dilewati == 2, f"{hasil_tolak.total_kombinasi} kombinasi, {len(hasil_tolak.hasil)} hasil, {hasil_tolak.dilewati} dilewati")
-    cfg["USE_TP"] = False
 
-    hasil = run_grid_search(klines, cfg, {"SL_PCT": [1.5, 2.5], "TP_PCT": [3.0, 4.0]}, 300, min_trades=1)
+    hasil_tolak = run_grid_search(
+        klines,
+        cfg,
+        {"CONFLUENCE_SL_BUFFER_PCT": [0.15, 0.25], "MAX_HOLD_HOURS": [0.1, 12.0]},
+        300,
+        min_trades=1,
+    )
+    check(
+        "run_grid_search melewati kombinasi MAX_HOLD_HOURS tidak valid",
+        hasil_tolak.total_kombinasi == 4 and len(hasil_tolak.hasil) == 2 and hasil_tolak.dilewati == 2,
+        f"{hasil_tolak.total_kombinasi} kombinasi, {len(hasil_tolak.hasil)} hasil, {hasil_tolak.dilewati} dilewati",
+    )
+
+    hasil = run_grid_search(
+        klines,
+        cfg,
+        {"CONFLUENCE_SL_BUFFER_PCT": [0.15, 0.25], "CONFLUENCE_MIN_RR_RATIO": [1.2, 1.8]},
+        300,
+        min_trades=1,
+    )
     check("run_grid_search menjalankan seluruh kombinasi", hasil.total_kombinasi == 4 and len(hasil.hasil) == 4, f"{hasil.total_kombinasi} kombinasi, {len(hasil.hasil)} hasil")
     check("run_grid_search memeringkat hasil", all(hasil.hasil[i].skor_latih >= hasil.hasil[i + 1].skor_latih for i in range(len(hasil.hasil) - 1)))
     check("run_grid_search mencatat bar latih dan uji", hasil.bar_latih > 0 and hasil.bar_uji > 0, f"{hasil.bar_latih}/{hasil.bar_uji}")
     check("run_grid_search melaporkan periode uji", semua_uji(hasil), "item tanpa uji")
 
-    cfg_htf = deepcopy(PUMP_CONFIG)
-    cfg_htf.update({
+    cfg_conf = deepcopy(PUMP_CONFIG)
+    cfg_conf.update({
         "_symbol": "",
         "MODE": "PAPER",
-        "DIRECTION_FILTER_ENABLED": True,
-        "DIRECTION_ZONE_FILTER_ENABLED": True,
-        "TIMING_FILTER_ENABLED": False,
-        "BREAKOUT_RETEST_FILTER_ENABLED": False,
-        "DEMAND_ZONE_FILTER_ENABLED": False,
+        "CONFLUENCE_FILTER_ENABLED": True,
+        "CONFLUENCE_STRUCTURE_INTERVAL": "15m",
+        "CONFLUENCE_LOOKBACK_BARS": 60,
         "BTC_FILTER_ENABLED": False,
-        "ROLLING_VOLUME_FILTER_ENABLED": False,
-        "PUMP_MIN_24H_CHANGE_PCT": -1000.0,
         "MIN_QUOTE_VOLUME_USDT_24H": 0.0,
-        "USE_ATR_EXIT": False,
-        "SL_PCT": 2.0,
-        "TP_PCT": 4.0,
+        "CONFLUENCE_SL_BUFFER_PCT": 0.20,
+        "CONFLUENCE_MIN_RR_RATIO": 1.2,
     })
     klines_panjang = sd.seri_5m_trend(harga=100.0, jam_trend=120)
-    hasil_htf = run_grid_search(klines_panjang, cfg_htf, {"SL_PCT": [1.5, 2.5]}, 100, min_trades=1)
-    check("run_grid_search menaikkan warmup gerbang arah M15", any("layer arah" in w for w in hasil_htf.peringatan), [w[:80] for w in hasil_htf.peringatan])
+    hasil_conf = run_grid_search(
+        klines_panjang,
+        cfg_conf,
+        {"CONFLUENCE_SL_BUFFER_PCT": [0.15, 0.25]},
+        100,
+        min_trades=1,
+    )
+    check("run_grid_search menaikkan warmup struktur Confluence 15m", any("struktur Confluence" in w for w in hasil_conf.peringatan), [w[:80] for w in hasil_conf.peringatan])
 
     print("\nHASIL: " + ("SEMUA LULUS" if ok_all else "ADA YANG GAGAL"))
     return ok_all

@@ -1,55 +1,97 @@
 from __future__ import annotations
 
-import logging
-import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Callable, Optional
-
+import logging
+import math
+from typing import Any, Callable, Optional
 
 from strategy import indicators as strategy
 from strategy.indicators import Kline
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("pump_bot")
 
 STABLE_BASE_ASSETS = {
+    "USDT",
     "USDC",
     "BUSD",
-    "TUSD",
     "FDUSD",
-    "DAI",
+    "TUSD",
     "USDP",
+    "DAI",
+    "AEUR",
     "EUR",
+    "EURI",
     "GBP",
     "TRY",
     "BRL",
-    "AEUR",
+    "JPY",
+    "ARS",
+    "BIDR",
+    "IDRT",
+    "UAH",
+    "PLN",
+    "RON",
+    "ZAR",
+    "VAI",
+    "UST",
     "USTC",
-    "USDD",
-    "PYUSD",
-    "USDE",
+    "PAXG",
+    "WBTC",
     "USD1",
+    "USDE",
     "RLUSD",
+    "BFUSD",
+    "XUSD",
 }
 
 LEVERAGED_TOKEN_SUFFIXES = ("UP", "DOWN", "BULL", "BEAR")
+SELL_WALL_MIN_LEVELS = 3
+VALID_DEPTH_LIMITS = (100, 500, 1000)
+
+
+@dataclass
+class SetupResult:
+    ok: bool
+    reason: str
+    signal_close: Optional[float] = None
+    signal_close_time: Optional[int] = None
+    atr_value: Optional[float] = None
+    poi_low: Optional[float] = None
+    poi_high: Optional[float] = None
+    fib_low: Optional[float] = None
+    fib_high: Optional[float] = None
+    vp_poc: Optional[float] = None
+    vp_hvn_low: Optional[float] = None
+    vp_hvn_high: Optional[float] = None
+    fvg_low: Optional[float] = None
+    fvg_high: Optional[float] = None
+    ob_low: Optional[float] = None
+    ob_high: Optional[float] = None
+    ssl_level: Optional[float] = None
+    sweep_low: Optional[float] = None
+    bsl_level: Optional[float] = None
+    swing_low: Optional[float] = None
+    swing_high: Optional[float] = None
+    impulse_pct: Optional[float] = None
+    close_position: Optional[float] = None
+    sl_price: Optional[float] = None
+    tp_price: Optional[float] = None
+    sl_pct: Optional[float] = None
+    tp_pct: Optional[float] = None
+    rr_ratio: Optional[float] = None
 
 
 @dataclass
 class Candidate:
     symbol: str
     base_asset: str
-    price_change_pct: float
     quote_volume: float
     last_price: float
     confirmed: bool = False
     confirm_reason: str = ""
-    setup: "Optional[SetupResult]" = None
-    htf_trend: "Optional[dict]" = None
-    htf_resistance: "Optional[dict]" = None
-    direction: "Optional[dict]" = None
-    direction_zone: "Optional[dict]" = None
-    timing: "Optional[dict]" = None
+    setup: Optional[SetupResult] = None
+    confluence_structure: Optional[dict] = None
 
 
 @dataclass
@@ -94,19 +136,12 @@ class ScanDiagnostics:
         if not self.checked_candidates:
             return []
         interval = str(config.get("CONFIRM_INTERVAL", "5m"))
-        arah_interval = str(config.get("DIRECTION_INTERVAL", "15m"))
-        htf_interval = str(config.get("HTF_INTERVAL", "1h"))
+        struct_interval = strategy.confluence_structure_interval(config)
         labels = {
-            "HTF_TREND": f"tren {htf_interval}",
-            "HTF_RESISTANCE": f"resistance {htf_interval}",
-            "DIRECTION": f"arah {arah_interval}",
-            "DIRECTION_ZONE": f"zona demand {arah_interval}",
+            "CONFLUENCE_STRUCTURE": f"struktur POI Confluence {struct_interval}",
             "CANDLE_CONFIRM": f"candle {interval} gagal diambil",
-            "TIMING": f"timing {interval}",
             "HISTORY_CONFIRM": f"riwayat {interval} kurang",
-            "BREAKOUT_RETEST": f"breakout-retest {interval}",
-            "VOLUME_CONFIRM": f"volume rolling {interval}",
-            "DEMAND_CONFIRM": f"demand {interval}",
+            "CONFLUENCE_TRIGGER": f"pemicu likuiditas/reaksi Confluence {interval}",
             "SETUP_CONFIRM": f"konfirmasi {interval}",
         }
         candle = "belum tersedia"
@@ -123,17 +158,11 @@ class ScanDiagnostics:
             f"candle konfirmasi terbaru tutup {candle}.",
             "Diagnostik: setiap simbol dicatat pada gerbang pertama yang gagal.",
         ]
-        if bool(config.get("HTF_FILTER_ENABLED", False)):
+        if strategy.confluence_enabled(config):
             lines.insert(
                 0,
-                f"Status gerbang tren HTF {htf_interval}: AKTIF; hanya candle tertutup "
-                "yang dipakai dan kegagalan data menolak entry.",
-            )
-        if strategy.htf_resistance_enabled(config):
-            lines.insert(
-                1 if lines else 0,
-                f"Status resistance HTF {htf_interval}: AKTIF; close sinyal M5 "
-                "dibandingkan dengan pivot high H1 tertutup.",
+                f"Status gerbang The Confluence Code ({struct_interval} -> {interval}): "
+                "AKTIF; hanya candle tertutup yang dipakai dan kegagalan data menolak entry.",
             )
         for stage, label in labels.items():
             count = self.rejection_counts.get(stage, 0)
@@ -188,19 +217,20 @@ def _angka_wajar(nilai) -> bool:
     return angka >= 0.0
 
 
-def _validate_price_change(price_change_pct) -> tuple[bool, str]:
-    try:
-        change = float(price_change_pct)
-    except (TypeError, ValueError):
-        return False, f"priceChangePercent tidak bisa dibaca ({price_change_pct!r})"
-    if not math.isfinite(change):
-        return False, f"priceChangePercent tidak wajar ({price_change_pct!r})"
-    return True, ""
-
-
 def evaluate_market_gate(
-    price_change_pct, quote_volume, config: dict, btc_drop_pct: float | None = None
+    *args, btc_drop_pct: float | None = None
 ) -> tuple[bool, str]:
+    if len(args) == 2:
+        quote_volume, config = args
+    elif len(args) == 3 and isinstance(args[1], dict):
+        quote_volume, config, btc_drop_pct = args
+    elif len(args) == 3:
+        _unused_change, quote_volume, config = args
+    elif len(args) == 4:
+        _unused_change, quote_volume, config, btc_drop_pct = args
+    else:
+        raise TypeError("Argumen evaluate_market_gate tidak sesuai.")
+
     if btc_drop_pct is None:
         btc_drop_pct = config.get("_btc_drop_pct")
     if config.get("BTC_FILTER_ENABLED", False):
@@ -221,29 +251,13 @@ def evaluate_market_gate(
     if not _angka_wajar(quote_volume):
         return False, f"quote_volume 24 jam tidak wajar ({quote_volume!r})"
 
-    data_ok, data_reason = _validate_price_change(price_change_pct)
-    if not data_ok:
-        return False, data_reason
-
-    try:
-        minimum = float(config.get("PUMP_MIN_24H_CHANGE_PCT", 10.0))
-    except (TypeError, ValueError):
-        return False, "minimum pump 24 jam bukan angka yang valid"
-    if not math.isfinite(minimum):
-        return False, "minimum pump 24 jam bukan angka yang valid"
-    change = float(price_change_pct)
-    if change < minimum:
-        return False, f"kenaikan 24 jam {change:.2f}% di bawah ambang {minimum:g}%"
-
-    return True, f"filter pasar lolos: kenaikan 24 jam {change:.2f}% >= {minimum:g}%"
+    return True, "filter pasar lolos"
 
 
 def market_gate_ok_at(
-    price_change_pct, quote_volume, config: dict, btc_drop_pct: "float | None" = None
+    *args, btc_drop_pct: "float | None" = None
 ) -> bool:
-    ok, _r = evaluate_market_gate(
-        price_change_pct, quote_volume, config, btc_drop_pct=btc_drop_pct
-    )
+    ok, _r = evaluate_market_gate(*args, btc_drop_pct=btc_drop_pct)
     return ok
 
 
@@ -253,6 +267,7 @@ def filter_and_rank_candidates(
     tradable_symbols: "set | None" = None,
     *,
     apply_market_gate: bool = True,
+    btc_drop_pct: Optional[float] = None,
 ) -> list[Candidate]:
     quote_asset = config["QUOTE_ASSET"]
     min_vol = float(config.get("MIN_QUOTE_VOLUME_USDT_24H", 0) or 0)
@@ -268,7 +283,6 @@ def filter_and_rank_candidates(
         base_asset = symbol[: -len(quote_asset)]
 
         try:
-            price_change_pct = float(t["priceChangePercent"])
             quote_volume = float(t["quoteVolume"])
             last_price = float(t["lastPrice"])
         except (KeyError, ValueError, TypeError):
@@ -276,7 +290,7 @@ def filter_and_rank_candidates(
 
         if not math.isfinite(last_price) or last_price <= 0:
             continue
-        if not math.isfinite(price_change_pct) or not _angka_wajar(quote_volume):
+        if not _angka_wajar(quote_volume):
             continue
         if quote_volume < min_vol:
             continue
@@ -285,7 +299,7 @@ def filter_and_rank_candidates(
 
         if apply_market_gate:
             ok_market, alasan = evaluate_market_gate(
-                price_change_pct, quote_volume, config
+                quote_volume, config, btc_drop_pct=btc_drop_pct
             )
             if not ok_market:
                 logger.debug("Filter pasar menolak %s: %s", symbol, alasan)
@@ -295,7 +309,6 @@ def filter_and_rank_candidates(
             Candidate(
                 symbol=symbol,
                 base_asset=base_asset,
-                price_change_pct=price_change_pct,
                 quote_volume=quote_volume,
                 last_price=last_price,
             )
@@ -311,10 +324,6 @@ def filter_and_rank_candidates(
             lolos_struktural,
         )
     return out
-
-
-SELL_WALL_MIN_LEVELS = 3
-VALID_DEPTH_LIMITS = (100, 500, 1000)
 
 
 def normalize_depth_limit(value) -> int:
@@ -463,347 +472,221 @@ def evaluate_orderbook(
     )
 
 
-@dataclass
-class SetupResult:
-    ok: bool
-    reason: str
-    signal_close: Optional[float] = None
-    signal_close_time: Optional[int] = None
-    atr_value: Optional[float] = None
-    demand_zone_low: Optional[float] = None
-    demand_zone_high: Optional[float] = None
-    demand_distance_pct: Optional[float] = None
-    demand_close_position: Optional[float] = None
-    breakout_level: Optional[float] = None
-    breakout_time: Optional[int] = None
-    retest_zone_low: Optional[float] = None
-    retest_zone_high: Optional[float] = None
-    retest_touches: int = 0
-
-
-def _demand_zone_confirmation(klines: list[Kline], config: dict) -> dict:
-    return strategy.detect_demand_zone(klines, config)
-
-
-def _rolling_volume_confirmation(klines: list[Kline], config: dict) -> tuple[bool, str]:
-    if not bool(config.get("ROLLING_VOLUME_FILTER_ENABLED", False)):
-        return True, "rolling volume nonaktif"
-
-    lookback = max(1, int(config.get("ROLLING_VOLUME_LOOKBACK_BARS", 20) or 20))
-    confirmations = max(1, int(config.get("ROLLING_VOLUME_CONFIRMATION_BARS", 1) or 1))
-    multiplier = float(config.get("ROLLING_VOLUME_SURGE_MULT", 2.0) or 0.0)
-    required = lookback + confirmations
-    if len(klines) < required:
-        return (
-            False,
-            f"data volume rolling kurang: {len(klines)} dari minimum {required}",
-        )
-    if not math.isfinite(multiplier) or multiplier <= 0:
-        return False, "ROLLING_VOLUME_SURGE_MULT tidak valid"
-
-    values = []
-    for k in klines:
-        quote = float(getattr(k, "quote_volume", 0.0) or 0.0)
-        base = float(getattr(k, "volume", 0.0) or 0.0)
-        value = quote if quote > 0 else base
-        if not math.isfinite(value) or value < 0:
-            return False, "volume candle tidak valid"
-        values.append(value)
-
-    passed = 0
-    ratios = []
-    for offset in range(confirmations):
-        idx = len(values) - confirmations + offset
-        prior = values[idx - lookback : idx]
-        average = sum(prior) / lookback
-        current = values[idx]
-        if average <= 0:
-            return False, "rata-rata volume rolling nol"
-        ratio = current / average
-        ratios.append(ratio)
-        if ratio >= multiplier:
-            passed += 1
-
-    ok = passed == confirmations
-    detail = (
-        f"rolling volume {min(ratios):.2f}x, minimum {multiplier:g}x, "
-        f"{passed}/{confirmations} candle konfirmasi"
-    )
-    return ok, detail
-
-
-def detect_entry_setup(klines: list[Kline], config: dict) -> SetupResult:
-    n = len(klines)
-    minimum = strategy.required_lookback_bars(config)
-    if n < minimum:
-        return SetupResult(False, f"data candle kurang: {n} dari minimum {minimum}")
-    closes = [float(k.close) for k in klines]
-    if any(x <= 0 or not math.isfinite(x) for x in closes):
-        return SetupResult(False, "close candle tidak valid")
-
-    breakout = strategy.evaluate_breakout_retest(klines, config)
-    breakout_fields = {
-        "breakout_level": breakout.get("breakout_level"),
-        "breakout_time": breakout.get("breakout_time"),
-        "retest_zone_low": breakout.get("retest_zone_low"),
-        "retest_zone_high": breakout.get("retest_zone_high"),
-        "retest_touches": int(breakout.get("retest_touches", 0) or 0),
-    }
-    if not breakout["ok"]:
-        return SetupResult(
-            False,
-            f"breakout-retest ditolak: {breakout['reason']}",
-            **breakout_fields,
-        )
-
-    volume_ok, volume_detail = _rolling_volume_confirmation(klines, config)
-    if not volume_ok:
-        return SetupResult(
-            False,
-            f"rolling volume ditolak: {volume_detail}",
-            **breakout_fields,
-        )
-    demand = _demand_zone_confirmation(klines, config)
-    if not demand["ok"]:
-        return SetupResult(
-            False,
-            f"zona demand ditolak: {demand['reason']}",
-            demand_zone_low=demand.get("zone_low"),
-            demand_zone_high=demand.get("zone_high"),
-            demand_distance_pct=demand.get("distance_pct"),
-            demand_close_position=demand.get("close_position"),
-            **breakout_fields,
-        )
-
-    details = []
-    if strategy.breakout_retest_enabled(config):
-        details.append(breakout["reason"])
-    if bool(config.get("ROLLING_VOLUME_FILTER_ENABLED", False)):
-        details.append(volume_detail)
-    if bool(config.get("DEMAND_ZONE_FILTER_ENABLED", False)):
-        details.append(demand["reason"])
-    return SetupResult(
-        True,
-        "entry sah: " + (", ".join(details) if details else "seluruh filter aktif lolos"),
-        signal_close=klines[-1].close,
-        signal_close_time=int(klines[-1].close_time),
-        atr_value=strategy.atr(klines, int(config.get("ATR_PERIOD", 14) or 14)),
-        demand_zone_low=demand.get("zone_low"),
-        demand_zone_high=demand.get("zone_high"),
-        demand_distance_pct=demand.get("distance_pct"),
-        demand_close_position=demand.get("close_position"),
-        **breakout_fields,
-    )
-
-
-def setup_quality_key(setup: SetupResult, candidate: Candidate) -> tuple:
-    return (-float(candidate.quote_volume),)
-
-
-def _htf_trend_context(
-    symbol: str,
+def confluence_structure_verdict(
+    symbol_or_klines: Any,
     config: dict,
-    htf_provider,
-    signal_close_time_ms: int | None = None,
-) -> tuple[dict, list[Kline] | None]:
-    from strategy import indicators as strategy_mod
+    structure_provider: Optional[Callable[[str], list]] = None,
+    signal_close_time_ms: Optional[int] = None,
+) -> dict:
+    interval = strategy.confluence_structure_interval(config)
+    single_tf = not strategy.confluence_uses_mtf(config)
+    if isinstance(symbol_or_klines, (list, tuple)):
+        rows = list(symbol_or_klines)
+        if signal_close_time_ms is not None:
+            rows = [
+                k for k in rows if int(k.close_time) <= int(signal_close_time_ms)
+            ]
+        return strategy.evaluate_confluence_structure(
+            rows, config, is_single_timeframe=single_tf
+        )
 
-    interval = strategy_mod.htf_interval(config)
-    if not strategy_mod.htf_enabled(config):
-        return strategy_mod.evaluate_htf([], config, signal_close_time_ms), None
+    symbol = str(symbol_or_klines or "")
+    if not strategy.confluence_enabled(config):
+        return strategy.evaluate_confluence_structure([], config)
 
     kosong = {
         "interval": interval,
         "bars": 0,
-        "required": strategy_mod.htf_required_bars(config),
-        "window": strategy_mod.htf_window_bars(config),
-        "close": None,
-        "ema_fast": None,
-        "ema_slow": None,
-        "adx": None,
+        "required": strategy.confluence_structure_required_bars(config),
+        "window": strategy.confluence_structure_window_bars(config),
+        "poi_low": None,
+        "poi_high": None,
+        "swing_low": None,
+        "swing_high": None,
+        "impulse_pct": None,
+        "fib_low": None,
+        "fib_high": None,
+        "vp_poc": None,
+        "vp_hvn_low": None,
+        "vp_hvn_high": None,
+        "fvg_low": None,
+        "fvg_high": None,
+        "ob_low": None,
+        "ob_high": None,
+        "bsl_level": None,
         "checks": {},
         "values": {},
     }
-    if htf_provider is None:
-        return (
-            {
+    if structure_provider is None:
+        return {
+            "ok": False,
+            "reason": (
+                f"filter struktur Confluence {interval} aktif tetapi penyedia "
+                "candle tidak tersedia (fail closed)"
+            ),
+            **kosong,
+        }
+    try:
+        klines = structure_provider(symbol)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "reason": (
+                f"candle struktur Confluence {interval} {symbol} gagal diambil: "
+                f"{exc} (fail closed)"
+            ),
+            **kosong,
+        }
+    if not klines:
+        return {
+            "ok": False,
+            "reason": (
+                f"candle struktur Confluence {interval} {symbol} kosong (fail closed)"
+            ),
+            **kosong,
+        }
+    rows = list(klines)
+    if signal_close_time_ms is not None:
+        rows = [
+            k for k in rows if int(k.close_time) <= int(signal_close_time_ms)
+        ]
+        if not rows:
+            return {
                 "ok": False,
                 "reason": (
-                    f"filter tren HTF {interval} aktif tetapi penyedia candle "
-                    "tidak tersedia (ditolak demi keamanan)"
+                    f"tidak ada candle struktur Confluence {interval} {symbol} "
+                    "yang tertutup sebelum sinyal (anti look-ahead)"
                 ),
                 **kosong,
-            },
-            None,
-        )
-    try:
-        klines = htf_provider(symbol)
-    except Exception as exc:
-        return (
-            {
-                "ok": False,
-                "reason": f"candle tren HTF {interval} {symbol} gagal diambil: {exc} (ditolak demi keamanan)",
-                **kosong,
-            },
-            None,
-        )
-    if not klines:
-        return (
-            {
-                "ok": False,
-                "reason": f"candle tren HTF {interval} {symbol} kosong (ditolak demi keamanan)",
-                **kosong,
-            },
-            None,
-        )
-    rows = list(klines)
-    return (
-        strategy_mod.evaluate_htf(rows, config, signal_close_time_ms),
-        rows,
+            }
+    return strategy.evaluate_confluence_structure(
+        rows, config, is_single_timeframe=single_tf
     )
 
 
-def htf_trend_verdict(
-    symbol: str,
+def detect_entry_setup(
+    klines: list[Kline],
     config: dict,
-    htf_provider,
-    signal_close_time_ms: int | None = None,
-) -> dict:
-    return _htf_trend_context(
-        symbol, config, htf_provider, signal_close_time_ms
-    )[0]
+    structure_klines: Optional[list[Kline]] = None,
+    structure_verdict: Optional[dict] = None,
+) -> SetupResult:
+    required = strategy.required_lookback_bars(config)
+    if len(klines) < required:
+        return SetupResult(
+            ok=False,
+            reason=f"data candle kurang: {len(klines)} dari minimum {required}",
+        )
+    closes = [float(k.close) for k in klines]
+    if any(x <= 0 or not math.isfinite(x) for x in closes):
+        return SetupResult(ok=False, reason="close candle tidak valid")
 
+    last_bar = klines[-1]
+    atr_value = strategy.atr(klines, 14)
 
-def direction_verdict(
-    symbol: str,
-    config: dict,
-    direction_provider,
-    signal_close_time_ms: int | None = None,
-) -> dict:
-    from strategy import indicators as strategy_mod
+    if not strategy.confluence_enabled(config):
+        rng = float(last_bar.high) - float(last_bar.low)
+        close_pos = (
+            (float(last_bar.close) - float(last_bar.low)) / rng if rng > 0 else 0.0
+        )
+        fb_exit = strategy.compute_confluence_exit_levels(
+            float(last_bar.close), config, fallback_allowed=True
+        )
+        return SetupResult(
+            ok=True,
+            reason="filter Confluence Code nonaktif (entry langsung dari gerbang pasar)",
+            signal_close=float(last_bar.close),
+            signal_close_time=int(last_bar.close_time),
+            atr_value=atr_value,
+            close_position=close_pos,
+            sl_price=fb_exit["sl_price"],
+            tp_price=fb_exit["tp_price"],
+            sl_pct=fb_exit["sl_pct"],
+            tp_pct=fb_exit["tp_pct"],
+            rr_ratio=fb_exit["rr_ratio"],
+        )
 
-    interval = str(config.get("DIRECTION_INTERVAL", "15m") or "15m")
-    kosong = {
-        "interval": interval,
-        "bars": 0,
-        "required": strategy_mod.direction_required_bars(config),
-        "window": strategy_mod.direction_window_bars(config),
-        "close": None,
-        "ema_fast": None,
-        "ema_slow": None,
-        "adx": None,
-        "checks": {},
-        "values": {},
-    }
-    if not bool(config.get("DIRECTION_FILTER_ENABLED", False)):
-        return {"ok": True, "reason": "filter arah nonaktif", **kosong}
-    if direction_provider is None:
-        return {
-            "ok": False,
-            "reason": (
-                f"filter arah {interval} aktif tetapi penyedia candle arah "
-                "tidak tersedia (fail closed)"
-            ),
-            **kosong,
+    if structure_verdict is not None:
+        if not structure_verdict.get("ok", False):
+            return SetupResult(
+                ok=False,
+                reason=str(
+                    structure_verdict.get("reason")
+                    or "struktur Confluence ditolak"
+                ),
+                signal_close=float(last_bar.close),
+                signal_close_time=int(last_bar.close_time),
+                atr_value=atr_value,
+                poi_low=structure_verdict.get("poi_low"),
+                poi_high=structure_verdict.get("poi_high"),
+                fib_low=structure_verdict.get("fib_low"),
+                fib_high=structure_verdict.get("fib_high"),
+                vp_poc=structure_verdict.get("vp_poc"),
+                vp_hvn_low=structure_verdict.get("vp_hvn_low"),
+                vp_hvn_high=structure_verdict.get("vp_hvn_high"),
+                fvg_low=structure_verdict.get("fvg_low"),
+                fvg_high=structure_verdict.get("fvg_high"),
+                ob_low=structure_verdict.get("ob_low"),
+                ob_high=structure_verdict.get("ob_high"),
+                bsl_level=structure_verdict.get("bsl_level"),
+                swing_low=structure_verdict.get("swing_low"),
+                swing_high=structure_verdict.get("swing_high"),
+                impulse_pct=structure_verdict.get("impulse_pct"),
+            )
+        trig = strategy.evaluate_confluence_trigger(
+            klines, config, structure=structure_verdict
+        )
+        verdict = {
+            **structure_verdict,
+            "ok": trig["ok"],
+            "reason": trig["reason"],
+            "ssl_level": trig.get("ssl_level"),
+            "sweep_low": trig.get("sweep_low"),
+            "close_position": trig.get("close_position"),
+            "sl_price": trig.get("sl_price"),
+            "tp_price": trig.get("tp_price"),
+            "sl_pct": trig.get("sl_pct"),
+            "tp_pct": trig.get("tp_pct"),
+            "rr_ratio": trig.get("rr_ratio"),
         }
-    try:
-        klines = direction_provider(symbol)
-    except Exception as exc:
-        return {
-            "ok": False,
-            "reason": f"candle arah {interval} {symbol} gagal diambil: {exc}",
-            **kosong,
-        }
-    if not klines:
-        return {
-            "ok": False,
-            "reason": f"candle arah {interval} {symbol} kosong",
-            **kosong,
-        }
-    return strategy_mod.evaluate_direction(
-        list(klines), config, signal_close_time_ms
+    else:
+        verdict = strategy.evaluate_confluence_code(
+            klines, config, structure_klines=structure_klines
+        )
+
+    return SetupResult(
+        ok=bool(verdict.get("ok", False)),
+        reason=str(verdict.get("reason") or ""),
+        signal_close=float(last_bar.close),
+        signal_close_time=int(last_bar.close_time),
+        atr_value=atr_value,
+        poi_low=verdict.get("poi_low"),
+        poi_high=verdict.get("poi_high"),
+        fib_low=verdict.get("fib_low"),
+        fib_high=verdict.get("fib_high"),
+        vp_poc=verdict.get("vp_poc"),
+        vp_hvn_low=verdict.get("vp_hvn_low"),
+        vp_hvn_high=verdict.get("vp_hvn_high"),
+        fvg_low=verdict.get("fvg_low"),
+        fvg_high=verdict.get("fvg_high"),
+        ob_low=verdict.get("ob_low"),
+        ob_high=verdict.get("ob_high"),
+        ssl_level=verdict.get("ssl_level"),
+        sweep_low=verdict.get("sweep_low"),
+        bsl_level=verdict.get("bsl_level"),
+        swing_low=verdict.get("swing_low"),
+        swing_high=verdict.get("swing_high"),
+        impulse_pct=verdict.get("impulse_pct"),
+        close_position=verdict.get("close_position"),
+        sl_price=verdict.get("sl_price"),
+        tp_price=verdict.get("tp_price"),
+        sl_pct=verdict.get("sl_pct"),
+        tp_pct=verdict.get("tp_pct"),
+        rr_ratio=verdict.get("rr_ratio"),
     )
 
 
-def direction_zone_verdict(
-    symbol: str,
-    config: dict,
-    direction_provider,
-    signal_close_time_ms: int | None = None,
-) -> dict:
-    from strategy import indicators as strategy_mod
-
-    interval = strategy_mod.direction_interval(config)
-    kosong = {
-        "interval": interval,
-        "bars": 0,
-        "required": strategy_mod.direction_zone_window_bars(config),
-        "zone_low": None,
-        "zone_high": None,
-        "distance_pct": None,
-        "close_position": None,
-    }
-    if not bool(config.get("DIRECTION_ZONE_FILTER_ENABLED", False)):
-        return {
-            "ok": True,
-            "reason": f"filter zona demand {interval} nonaktif",
-            **kosong,
-        }
-    if direction_provider is None:
-        return {
-            "ok": False,
-            "reason": (
-                f"filter zona demand {interval} aktif tetapi penyedia candle "
-                "arah tidak tersedia (fail closed)"
-            ),
-            **kosong,
-        }
-    try:
-        klines = direction_provider(symbol)
-    except Exception as exc:
-        return {
-            "ok": False,
-            "reason": f"candle arah {interval} {symbol} gagal diambil: {exc}",
-            **kosong,
-        }
-    if not klines:
-        return {
-            "ok": False,
-            "reason": f"candle arah {interval} {symbol} kosong",
-            **kosong,
-        }
-    return strategy_mod.evaluate_direction_zone(
-        list(klines), config, signal_close_time_ms
-    )
-
-
-def timing_verdict(
-    config: dict, klines: list, signal_close_time_ms: int | None = None
-) -> dict:
-    from strategy import indicators as strategy_mod
-
-    interval = strategy_mod.timing_interval(config)
-    kosong = {
-        "interval": interval,
-        "bars": 0,
-        "required": strategy_mod.timing_required_bars(config),
-        "window": strategy_mod.timing_window_bars(config),
-        "close": None,
-        "ema_fast": None,
-        "ema_slow": None,
-        "adx": None,
-        "checks": {},
-        "values": {},
-    }
-    if not strategy_mod.timing_enabled(config):
-        return {"ok": True, "reason": f"filter timing {interval} nonaktif", **kosong}
-    if not klines:
-        return {
-            "ok": False,
-            "reason": f"candle timing {interval} kosong (fail closed)",
-            **kosong,
-        }
-    return strategy_mod.evaluate_timing(list(klines), config, signal_close_time_ms)
+def setup_quality_key(setup: Optional[SetupResult], candidate: Candidate) -> tuple:
+    return (-float(candidate.quote_volume),)
 
 
 def find_best_candidate(
@@ -813,12 +696,14 @@ def find_best_candidate(
     tradable_symbols: "set | None" = None,
     klines_fetcher_many: "Optional[Callable[[list], dict]]" = None,
     prewarm_fn: "Optional[Callable[[list], None]]" = None,
-    direction_provider: "Optional[Callable[[str], list]]" = None,
+    structure_provider: "Optional[Callable[[str], list]]" = None,
     diagnostics: Optional[ScanDiagnostics] = None,
     confirm_close_time_ms: "int | None" = None,
-    htf_provider: "Optional[Callable[[str], list]]" = None,
+    btc_drop_pct: Optional[float] = None,
 ) -> Optional[Candidate]:
-    ranked = filter_and_rank_candidates(tickers, config, tradable_symbols)
+    ranked = filter_and_rank_candidates(
+        tickers, config, tradable_symbols, btc_drop_pct=btc_drop_pct
+    )
     top_n = ranked[: int(config.get("TOP_N_CANDIDATES_TO_CONFIRM", 10) or 10)]
     if diagnostics is not None:
         diagnostics.market_candidates = len(ranked)
@@ -835,86 +720,51 @@ def find_best_candidate(
         except Exception as exc:
             logger.debug("Pemanasan harga kandidat dilewati: %s", exc)
 
-    lolos_htf: list[Candidate] = []
-    htf_klines_by_symbol: dict[str, list[Kline]] = {}
-    resistance_active = strategy.htf_resistance_enabled(config)
+    confirm_interval = str(config.get("CONFIRM_INTERVAL", "5m")).strip().lower()
+    struct_interval = strategy.confluence_structure_interval(config)
+    use_external_structure = strategy.confluence_enabled(config) and (
+        structure_provider is not None or struct_interval != confirm_interval
+    )
+
+    lolos_struktur: list[Candidate] = []
     for cand in top_n:
-        if strategy.htf_enabled(config):
-            if resistance_active:
-                tren_htf, htf_klines = _htf_trend_context(
-                    cand.symbol, config, htf_provider, confirm_close_time_ms
-                )
-                if htf_klines is not None:
-                    htf_klines_by_symbol[cand.symbol] = htf_klines
-            else:
-                tren_htf = htf_trend_verdict(
-                    cand.symbol, config, htf_provider, confirm_close_time_ms
-                )
-            cand.htf_trend = tren_htf
-            if not tren_htf["ok"]:
+        if use_external_structure:
+            struktur = confluence_structure_verdict(
+                cand.symbol,
+                config,
+                structure_provider,
+                confirm_close_time_ms,
+            )
+            cand.confluence_structure = struktur
+            if not struktur["ok"]:
                 cand.confirmed = False
                 cand.confirm_reason = (
-                    f"tren HTF {tren_htf.get('interval') or '1h'} ditolak: "
-                    f"{tren_htf['reason']}"
-                )
-                if diagnostics is not None:
-                    diagnostics.reject("HTF_TREND", cand.symbol, tren_htf["reason"])
-                continue
-            cand.confirm_reason = tren_htf["reason"]
-        if bool(config.get("DIRECTION_FILTER_ENABLED", False)):
-            arah = direction_verdict(
-                cand.symbol, config, direction_provider, confirm_close_time_ms
-            )
-            cand.direction = arah
-            if not arah["ok"]:
-                cand.confirmed = False
-                cand.confirm_reason = (
-                    f"arah {arah.get('interval') or '15m'} ditolak: {arah['reason']}"
-                )
-                if diagnostics is not None:
-                    diagnostics.reject("DIRECTION", cand.symbol, arah["reason"])
-                continue
-            cand.confirm_reason = (
-                f"{cand.confirm_reason} | {arah['reason']}"
-                if cand.confirm_reason
-                else arah["reason"]
-            )
-        if bool(config.get("DIRECTION_ZONE_FILTER_ENABLED", False)):
-            zona_arah = direction_zone_verdict(
-                cand.symbol, config, direction_provider, confirm_close_time_ms
-            )
-            cand.direction_zone = zona_arah
-            if not zona_arah["ok"]:
-                cand.confirmed = False
-                cand.confirm_reason = (
-                    f"zona demand {zona_arah.get('interval') or '15m'} ditolak: "
-                    f"{zona_arah['reason']}"
+                    f"struktur Confluence {struktur.get('interval') or struct_interval} "
+                    f"ditolak: {struktur['reason']}"
                 )
                 if diagnostics is not None:
                     diagnostics.reject(
-                        "DIRECTION_ZONE", cand.symbol, zona_arah["reason"]
+                        "CONFLUENCE_STRUCTURE", cand.symbol, struktur["reason"]
                     )
                 continue
-            cand.confirm_reason = (
-                f"{cand.confirm_reason} | {zona_arah['reason']}"
-                if cand.confirm_reason
-                else zona_arah["reason"]
-            )
-        lolos_htf.append(cand)
+            cand.confirm_reason = struktur["reason"]
+        lolos_struktur.append(cand)
 
-    if not lolos_htf:
+    if not lolos_struktur:
         return None
 
     diprakira: dict = {}
-    if klines_fetcher_many is not None and len(lolos_htf) > 1:
+    if klines_fetcher_many is not None and len(lolos_struktur) > 1:
         try:
-            diprakira = klines_fetcher_many([cand.symbol for cand in lolos_htf]) or {}
+            diprakira = (
+                klines_fetcher_many([cand.symbol for cand in lolos_struktur]) or {}
+            )
         except Exception as exc:
             logger.debug("Pengambilan candle paralel dilewati: %s", exc)
             diprakira = {}
 
     lolos: list[Candidate] = []
-    for cand in lolos_htf:
+    for cand in lolos_struktur:
         try:
             if cand.symbol in diprakira:
                 klines = diprakira.get(cand.symbol)
@@ -930,90 +780,30 @@ def find_best_candidate(
             continue
         if diagnostics is not None:
             diagnostics.observe_signal(klines)
-        signal_close_time_ms = int(klines[-1].close_time) if klines else None
-        if resistance_active:
-            try:
-                signal_price = float(klines[-1].close) if klines else None
-                resistance = strategy.evaluate_htf_resistance(
-                    htf_klines_by_symbol.get(cand.symbol, []),
-                    config,
-                    signal_price=signal_price,
-                    signal_close_time_ms=signal_close_time_ms,
-                )
-            except Exception as exc:
-                resistance = {
-                    "ok": False,
-                    "interval": strategy.htf_interval(config),
-                    "resistance_price": None,
-                    "distance_pct": None,
-                    "reason": (
-                        f"evaluasi resistance HTF gagal: {exc} "
-                        "(ditolak demi keamanan)"
-                    ),
-                }
-            cand.htf_resistance = resistance
-            if not resistance["ok"]:
-                cand.confirmed = False
-                resistance_reason = (
-                    f"resistance HTF {resistance.get('interval') or '1h'} "
-                    f"ditolak: {resistance['reason']}"
-                )
-                cand.confirm_reason = (
-                    f"{cand.confirm_reason} | {resistance_reason}"
-                    if cand.confirm_reason
-                    else resistance_reason
-                )
-                if diagnostics is not None:
-                    diagnostics.reject(
-                        "HTF_RESISTANCE", cand.symbol, resistance["reason"]
-                    )
-                continue
-            cand.confirm_reason = (
-                f"{cand.confirm_reason} | {resistance['reason']}"
-                if cand.confirm_reason
-                else resistance["reason"]
-            )
-        if bool(config.get("TIMING_FILTER_ENABLED", False)):
-            timing = timing_verdict(config, klines or [], signal_close_time_ms)
-            cand.timing = timing
-            if not timing["ok"]:
-                cand.confirmed = False
-                timing_reason = (
-                    f"timing {timing.get('interval') or '5m'} ditolak: {timing['reason']}"
-                )
-                cand.confirm_reason = (
-                    f"{cand.confirm_reason} | {timing_reason}"
-                    if cand.confirm_reason
-                    else timing_reason
-                )
-                if diagnostics is not None:
-                    diagnostics.reject("TIMING", cand.symbol, timing["reason"])
-                continue
-            cand.confirm_reason = (
-                f"{cand.confirm_reason} | {timing['reason']}"
-                if cand.confirm_reason
-                else timing["reason"]
-            )
-        hasil = detect_entry_setup(klines or [], config)
-        cand.confirmed = hasil.ok
-        cand.confirm_reason = (
-            f"{cand.confirm_reason} | {hasil.reason}"
-            if cand.confirm_reason
-            else hasil.reason
+
+        hasil = detect_entry_setup(
+            klines or [],
+            config,
+            structure_verdict=cand.confluence_structure,
         )
+        cand.confirmed = hasil.ok
+        cand.confirm_reason = hasil.reason
         cand.setup = hasil
         if not hasil.ok:
             if diagnostics is not None:
-                if hasil.reason.startswith("breakout-retest ditolak"):
-                    stage = "BREAKOUT_RETEST"
-                elif hasil.reason.startswith("rolling volume ditolak"):
-                    stage = "VOLUME_CONFIRM"
-                elif hasil.reason.startswith("zona demand ditolak"):
-                    stage = "DEMAND_CONFIRM"
-                elif hasil.reason.startswith("data candle kurang"):
+                if hasil.reason.startswith("data candle kurang"):
                     stage = "HISTORY_CONFIRM"
+                elif cand.confluence_structure is None and (
+                    "BoS" in hasil.reason
+                    or "Volume Profile" in hasil.reason
+                    or "Fibonacci" in hasil.reason
+                    or "FVG" in hasil.reason
+                    or "Order Block" in hasil.reason
+                    or "tidak ada irisan" in hasil.reason
+                ):
+                    stage = "CONFLUENCE_STRUCTURE"
                 else:
-                    stage = "SETUP_CONFIRM"
+                    stage = "CONFLUENCE_TRIGGER"
                 diagnostics.reject(stage, cand.symbol, hasil.reason)
             continue
         lolos.append(cand)

@@ -56,18 +56,10 @@ class BacktestResult:
     final_equity: float = 0.0
     risk_events: dict = field(default_factory=dict)
     chase_skips: int = 0
-    direction_scans: int = 0
-    direction_skips: int = 0
-    htf_scans: int = 0
-    htf_skips: int = 0
-    htf_resistance_scans: int = 0
-    htf_resistance_skips: int = 0
-    direction_zone_scans: int = 0
-    direction_zone_skips: int = 0
-    timing_scans: int = 0
-    timing_skips: int = 0
-    breakout_scans: int = 0
-    breakout_skips: int = 0
+    confluence_structure_scans: int = 0
+    confluence_structure_skips: int = 0
+    confluence_trigger_scans: int = 0
+    confluence_trigger_skips: int = 0
     same_coin_skips: int = 0
     mark_to_market_open: bool = False
     mark_to_market_pnl_pct: float = 0.0
@@ -200,8 +192,7 @@ def run_backtest(
     warmup_bars: int,
     progress_cb: Optional[Callable[[float], None]] = None,
     btc_klines: Optional[list[Kline]] = None,
-    direction_klines: Optional[list[Kline]] = None,
-    htf_klines: Optional[list[Kline]] = None,
+    structure_klines: Optional[list[Kline]] = None,
 ) -> BacktestResult:
     interval = config.get("CONFIRM_INTERVAL", "5m")
     window = bars_per_day(interval)
@@ -213,18 +204,10 @@ def run_backtest(
     n = len(klines)
     trades: list[BacktestTrade] = []
     warnings: list[str] = []
-    direction_scans = 0
-    direction_skips = 0
-    htf_scans = 0
-    htf_skips = 0
-    htf_resistance_scans = 0
-    htf_resistance_skips = 0
-    direction_zone_scans = 0
-    direction_zone_skips = 0
-    timing_scans = 0
-    timing_skips = 0
-    breakout_scans = 0
-    breakout_skips = 0
+    confluence_structure_scans = 0
+    confluence_structure_skips = 0
+    confluence_trigger_scans = 0
+    confluence_trigger_skips = 0
 
     initial_equity = initial_backtest_equity(config)
     symbol = str(config.get("_symbol", "") or "")
@@ -283,55 +266,26 @@ def run_backtest(
     if btc_warning:
         warnings.append(btc_warning)
 
-    direction_lookup = parity.make_direction_lookup(
-        direction_klines if direction_klines is not None else klines,
+    structure_lookup = parity.make_structure_lookup(
+        structure_klines if structure_klines is not None else klines,
         config,
         interval,
-        sudah_dirangkai=direction_klines is not None,
+        sudah_dirangkai=structure_klines is not None,
     )
-    htf_lookup = parity.make_htf_lookup(
-        htf_klines if htf_klines is not None else klines,
-        config,
-        interval,
-        sudah_dirangkai=htf_klines is not None,
-    )
-    timing_lookup = parity.make_timing_lookup(klines, config)
-    if direction_lookup is not None or htf_lookup is not None:
+    if structure_lookup is not None:
         butuh_warmup = strategy.gate_warmup_bars(config, interval)
         if int(warmup_bars) < butuh_warmup:
-            if htf_lookup is None:
-                warnings.append(
-                    f"Warmup {warmup_bars} bar {interval} dinaikkan menjadi {butuh_warmup} bar "
-                    f"karena layer arah {direction_lookup.interval} butuh "
-                    f"{direction_lookup.window} candle tertutup. "
-                    "Naikkan warmup di pemanggil (atau perpanjang rentang data) supaya "
-                    "backtest dan live memakai riwayat yang sama."
-                )
-            else:
-                nama_gerbang = (
-                    f"arah {direction_lookup.interval} dan tren HTF {htf_lookup.interval}"
-                    if direction_lookup is not None
-                    else f"tren HTF {htf_lookup.interval}"
-                )
-                warnings.append(
-                    f"Warmup {warmup_bars} bar {interval} dinaikkan menjadi {butuh_warmup} bar "
-                    f"karena {nama_gerbang} memerlukan riwayat candle tertutup. "
-                    "Naikkan warmup di pemanggil (atau perpanjang rentang data) supaya "
-                    "backtest dan live memakai riwayat yang sama."
-                )
+            warnings.append(
+                f"Warmup {warmup_bars} bar {interval} dinaikkan menjadi {butuh_warmup} bar "
+                f"karena struktur Confluence {structure_lookup.interval} memerlukan "
+                f"{structure_lookup.window} candle tertutup. "
+                "Naikkan warmup di pemanggil (atau perpanjang rentang data) supaya "
+                "backtest dan live memakai riwayat yang sama."
+            )
             warmup_bars = butuh_warmup
 
     i = max(warmup_bars, window - 1, lookback)
     start_idx = i
-    if timing_lookup is not None:
-        butuh_timing = timing_lookup.required
-        bar_uji = max(0.0, float(n - start_idx))
-        if bar_uji < butuh_timing:
-            warnings.append(
-                f"Periode uji sekitar {bar_uji:.0f} candle {interval}, lebih pendek "
-                f"dari {butuh_timing} candle yang dibutuhkan EMA + ADX di layer timing. "
-                "Perpanjang rentang uji agar filter ini teruji di beberapa siklus."
-            )
 
     while i < n:
         if progress_cb and i % 200 == 0:
@@ -348,7 +302,6 @@ def run_backtest(
                 and st["vol24h"] >= min_vol
                 and candle.open_time >= next_entry_allowed_at
                 and scanner.market_gate_ok_at(
-                    st["pct24h"],
                     st["vol24h"],
                     gate_cfg,
                     btc_drop_pct=(
@@ -358,62 +311,25 @@ def run_backtest(
                     ),
                 )
             ):
-                if htf_lookup is not None:
-                    htf_scans += 1
-                    verdict_htf = htf_lookup.verdict_at(candle.close_time)
-                    if not verdict_htf["ok"]:
-                        htf_skips += 1
-                        i += 1
-                        continue
-                if strategy.htf_resistance_enabled(config):
-                    htf_resistance_scans += 1
-                    verdict_resistance = (
-                        htf_lookup.resistance_at(candle.close_time, candle.close)
-                        if htf_lookup is not None
-                        else {"ok": False}
-                    )
-                    if not verdict_resistance["ok"]:
-                        htf_resistance_skips += 1
-                        i += 1
-                        continue
-                if bool(config.get("DIRECTION_FILTER_ENABLED", False)):
-                    direction_scans += 1
-                    verdict = (
-                        direction_lookup.verdict_at(candle.close_time)
-                        if direction_lookup is not None
-                        else {"ok": False}
-                    )
-                    if not verdict["ok"]:
-                        direction_skips += 1
-                        i += 1
-                        continue
-                if bool(config.get("DIRECTION_ZONE_FILTER_ENABLED", False)):
-                    direction_zone_scans += 1
-                    verdict_zona_arah = (
-                        direction_lookup.zone_at(candle.close_time)
-                        if direction_lookup is not None
-                        else {"ok": False}
-                    )
-                    if not verdict_zona_arah["ok"]:
-                        direction_zone_skips += 1
+                verdict_struktur = None
+                if structure_lookup is not None:
+                    confluence_structure_scans += 1
+                    verdict_struktur = structure_lookup.verdict_at(candle.close_time)
+                    if not verdict_struktur["ok"]:
+                        confluence_structure_skips += 1
                         i += 1
                         continue
                 window_klines = klines[max(0, i - lookback + 1) : i + 1]
-                if bool(config.get("TIMING_FILTER_ENABLED", False)):
-                    timing_scans += 1
-                    if (
-                        timing_lookup is None
-                        or not timing_lookup.verdict_at(candle.close_time)["ok"]
-                    ):
-                        timing_skips += 1
-                        i += 1
-                        continue
-                if strategy.breakout_retest_enabled(config):
-                    breakout_scans += 1
-                setup = scanner.detect_entry_setup(window_klines, config)
+                if strategy.confluence_enabled(config):
+                    confluence_trigger_scans += 1
+                setup = scanner.detect_entry_setup(
+                    window_klines,
+                    config,
+                    structure_verdict=verdict_struktur,
+                )
                 if not setup.ok:
-                    if setup.reason.startswith("breakout-retest ditolak"):
-                        breakout_skips += 1
+                    if strategy.confluence_enabled(config):
+                        confluence_trigger_skips += 1
                     i += 1
                     continue
                 if parity.same_coin_blocked(symbol, candle.open_time, symbol_blocks):
@@ -441,30 +357,6 @@ def run_backtest(
                         raw_entry_price = entry_candle.open
                         entry_time_value = entry_candle.open_time
                         first_exit_idx = entry_idx
-                    level_cfg = dict(config)
-                    if bool(config.get("USE_ATR_EXIT", False)):
-                        atr_val = setup.atr_value
-                        if atr_val is None:
-                            warnings.append(
-                                f"Entry bar {i} dilewati: USE_ATR_EXIT aktif tetapi "
-                                "nilai ATR tidak tersedia, level exit tidak dapat "
-                                "dikunci dengan aman (paritas open_position)."
-                            )
-                            i += 1
-                            continue
-                        level_cfg["_atr_value"] = atr_val
-                    lv = strategy.resolve_exit_levels(level_cfg)
-                    if str(lv.get("source", "")).upper() == "ATR" and not (
-                        0.0 < float(lv.get("sl_pct") or 0.0) < raw_entry_price
-                    ):
-                        warnings.append(
-                            f"Entry bar {i} dilewati: jarak SL ATR "
-                            f"{float(lv.get('sl_pct') or 0.0):.10g} tidak masuk akal "
-                            f"terhadap harga acuan {raw_entry_price:.10g} "
-                            "(paritas open_position). Cek ATR_MULT_SL/ATR."
-                        )
-                        i += 1
-                        continue
                     exec_entry_price = strategy.backtest_buy_execution_price(
                         raw_entry_price, execution_spread_pct, execution_slippage_pct
                     )
@@ -474,6 +366,9 @@ def run_backtest(
                         chase_skips += 1
                         i += 1
                         continue
+                    lv = strategy.resolve_exit_levels(
+                        config, setup=setup, entry_price=exec_entry_price
+                    )
                     pos = parity.PositionState(
                         exec_entry_price, lv, entry_time=entry_time_value
                     )
@@ -564,104 +459,57 @@ def run_backtest(
             f"{chase_skips} sinyal dilewati oleh filter MAX_CHASE_PCT "
             f"({max_chase_pct:g}%), sama seperti bot live."
         )
-    if htf_skips:
+    if confluence_structure_skips:
         warnings.append(
-            f"{htf_skips} dari {htf_scans} sinyal konfirmasi dilewati oleh gerbang "
-            f"tren HTF {htf_lookup.interval} (close > EMA{int(config.get('HTF_EMA_FAST', 20))} "
-            f"> EMA{int(config.get('HTF_EMA_SLOW', 50))} dan ADX"
-            f"{int(config.get('HTF_ADX_PERIOD', 14))} >= "
-            f"{float(config.get('HTF_ADX_MIN', 30.0) or 0.0):g}), sama seperti bot live."
+            f"{confluence_structure_skips} dari {confluence_structure_scans} evaluasi dilewati "
+            f"oleh struktur POI The Confluence Code ({strategy.confluence_structure_interval(config)}): "
+            "BoS, Volume Profile, Fibonacci, FVG, dan Order Block wajib sejajar di zona diskon."
         )
-    if htf_resistance_skips:
+    if confluence_trigger_skips:
         warnings.append(
-            f"{htf_resistance_skips} dari {htf_resistance_scans} sinyal konfirmasi "
-            f"dilewati filter resistance HTF {strategy.htf_interval(config)}: ruang "
-            f"ke pivot swing-high terdekat harus >= "
-            f"{float(config.get('HTF_RESISTANCE_MIN_ROOM_PCT', 1.5) or 0.0):g}% "
-            "dari close M5; hanya memakai candle H1 tertutup."
+            f"{confluence_trigger_skips} dari {confluence_trigger_scans} struktur POI dilewati "
+            f"oleh pemicu eksekusi The Confluence Code ({interval}): "
+            "sapuan likuiditas SSL dan konfirmasi reaksi candle bullish di zona POI."
         )
-    if direction_skips:
+    risk_summary = controls.summary()
+    if risk_summary["kill_switch_triggers"] > 0:
         warnings.append(
-            f"{direction_skips} dari {direction_scans} sinyal konfirmasi dilewati oleh "
-            f"layer arah {str(config.get('DIRECTION_INTERVAL', '15m'))} "
-            f"(EMA{int(config.get('DIRECTION_EMA_FAST', 20) or 20)}/"
-            f"EMA{int(config.get('DIRECTION_EMA_SLOW', 50) or 50)} dan ADX"
-            f"{int(config.get('DIRECTION_ADX_PERIOD', 14))} >= "
-            f"{float(config.get('DIRECTION_ADX_MIN', 32.0) or 0.0):g}), sama seperti bot live."
+            f"Kill switch drawdown aktif {risk_summary['kill_switch_triggers']} kali "
+            f"(batas {risk_summary['max_drawdown_limit_pct']}%). "
+            f"Force close: {risk_summary['force_closes']}, "
+            f"reset cooldown: {risk_summary['cooldown_resets']}."
         )
-    if direction_zone_skips:
-        warnings.append(
-            f"{direction_zone_skips} dari {direction_zone_scans} sinyal konfirmasi dilewati "
-            f"oleh zona demand {str(config.get('DIRECTION_INTERVAL', '15m'))} "
-            f"(lookback {int(config.get('DIRECTION_ZONE_LOOKBACK_BARS', 28) or 28)} "
-            f"candle, "
-            + (
-                "wajib di dalam zona"
-                if config.get("DIRECTION_ZONE_REQUIRE_INSIDE_ZONE", False)
-                else (
-                    "jarak maksimum "
-                    f"{float(config.get('DIRECTION_ZONE_MAX_DISTANCE_PCT', 7.0) or 0.0):g}% "
-                    "dari atap zona"
-                )
-            )
-            + f", tebal zona minimum "
-            f"{float(config.get('DIRECTION_ZONE_BUFFER_PCT', 1.2) or 0.0):g}%). "
-            f"Gerbang ini memakai candle arah yang sama, bukan candle {interval}."
-        )
-    if timing_skips:
-        warnings.append(
-            f"{timing_skips} dari {timing_scans} sinyal konfirmasi dilewati oleh "
-            f"layer timing {str(config.get('CONFIRM_INTERVAL', '5m'))} "
-            f"(EMA{int(config.get('TIMING_EMA_FAST', 20) or 20)}/"
-            f"EMA{int(config.get('TIMING_EMA_SLOW', 50) or 50)} dan ADX"
-            f"{int(config.get('TIMING_ADX_PERIOD', 14) or 14)} >= "
-            f"{float(config.get('TIMING_ADX_MIN', 18.0) or 0.0):g} pada "
-            f"{timing_lookup.interval}, sama seperti bot live."
-        )
-    if breakout_skips:
-        warnings.append(
-            f"{breakout_skips} dari {breakout_scans} sinyal yang sudah lolos tren M5 "
-            f"ditolak oleh breakout-retest {str(config.get('CONFIRM_INTERVAL', '5m'))} "
-            f"(retest maksimum {int(config.get('BREAKOUT_RETEST_MAX_BARS', 12) or 12)} "
-            f"candle, toleransi "
-            f"{float(config.get('BREAKOUT_RETEST_TOLERANCE_ATR', 0.2) or 0.0):g} ATR)."
-        )
-    result = BacktestResult(
-        symbol=config.get("_symbol", "?"),
+
+    usable = max(0, n - start_idx)
+    start_time = klines[start_idx].open_time if start_idx < n else 0
+    end_time = klines[-1].close_time if n > 0 else 0
+
+    if progress_cb:
+        progress_cb(1.0)
+
+    return BacktestResult(
+        symbol=config.get("_symbol", ""),
         interval=interval,
         bars_total=n,
-        bars_usable=max(0, n - start_idx),
-        start_time=(
-            klines[start_idx].open_time
-            if n > start_idx
-            else (klines[0].open_time if n else 0)
-        ),
-        end_time=klines[-1].close_time if n else 0,
+        bars_usable=usable,
+        start_time=start_time,
+        end_time=end_time,
         trades=trades,
         params=config,
         warnings=warnings,
         initial_equity=initial_equity,
-        final_equity=equity + mark_to_market_pnl_quote,
-        risk_events=dict(controls.events),
+        final_equity=equity,
+        risk_events=risk_summary,
         chase_skips=chase_skips,
-        direction_scans=direction_scans,
-        direction_skips=direction_skips,
-        htf_scans=htf_scans,
-        htf_skips=htf_skips,
-        htf_resistance_scans=htf_resistance_scans,
-        htf_resistance_skips=htf_resistance_skips,
-        direction_zone_scans=direction_zone_scans,
-        direction_zone_skips=direction_zone_skips,
-        timing_scans=timing_scans,
-        timing_skips=timing_skips,
-        breakout_scans=breakout_scans,
-        breakout_skips=breakout_skips,
+        confluence_structure_scans=confluence_structure_scans,
+        confluence_structure_skips=confluence_structure_skips,
+        confluence_trigger_scans=confluence_trigger_scans,
+        confluence_trigger_skips=confluence_trigger_skips,
         same_coin_skips=same_coin_skips,
         mark_to_market_open=mark_to_market_open,
         mark_to_market_pnl_pct=mark_to_market_pnl_pct,
         mark_to_market_pnl_quote=mark_to_market_pnl_quote,
     )
-    return result
 
 
 def summarize(result: BacktestResult) -> dict:
@@ -673,7 +521,7 @@ def summarize(result: BacktestResult) -> dict:
     losses = [t for t in trades if t.pnl_pct <= 0]
     win_rate = (len(wins) / total * 100.0) if total else 0.0
 
-    initial = result.initial_equity or initial_backtest_equity(result.params)
+    initial = float(result.initial_equity or initial_backtest_equity(result.params))
     equity = initial
     gross_equity = initial
     equity_curve = [0.0]
@@ -744,8 +592,21 @@ def summarize(result: BacktestResult) -> dict:
     avg_hold = (sum(t.hold_minutes for t in trades) / total) if total else 0.0
 
     reason_counts: dict = {}
+    by_reason: dict[str, dict] = {}
     for t in trades:
         reason_counts[t.reason] = reason_counts.get(t.reason, 0) + 1
+        slot = by_reason.setdefault(t.reason, {"count": 0, "sum_pnl": 0.0, "wins": 0})
+        slot["count"] += 1
+        slot["sum_pnl"] += t.pnl_pct
+        if t.pnl_pct > 0:
+            slot["wins"] += 1
+    for _r, slot in by_reason.items():
+        c = slot["count"]
+        slot["avg_pnl_pct"] = round(slot["sum_pnl"] / c, 3) if c else 0.0
+        slot["win_rate"] = round(slot["wins"] / c * 100.0, 1) if c else 0.0
+        del slot["sum_pnl"]
+
+    trade_metrics = parity.per_trade_metrics(trades)
 
     return {
         "total_trades": total,
@@ -761,138 +622,128 @@ def summarize(result: BacktestResult) -> dict:
         "losses": len(losses),
         "win_rate": win_rate,
         "total_return_pct": total_return_pct,
+        "gross_return_pct": gross_return_pct,
+        "fee_drag_pct": gross_return_pct - total_return_pct,
+        "total_fee_pct": sum(t.fee_pct for t in trades),
         "max_drawdown_pct": max_dd,
+        "avg_pnl_pct": trade_metrics["avg_trade_pct"],
         "avg_win_pct": avg_win,
         "avg_loss_pct": avg_loss,
         "profit_factor": profit_factor,
         "avg_hold_minutes": avg_hold,
         "reason_counts": reason_counts,
+        "by_reason": by_reason,
         "equity_curve": equity_curve,
         "initial_equity": initial,
         "realized_equity": realized_equity,
         "final_equity": final_equity,
         "total_pnl_quote": final_equity - initial,
-        "gross_return_pct": gross_return_pct,
-        "fee_drag_pct": gross_return_pct - total_return_pct,
-        "total_fee_pct": sum(t.fee_pct for t in trades),
-        "risk_events": dict(result.risk_events),
-        "chase_skips": int(result.chase_skips),
-        "direction_scans": int(getattr(result, "direction_scans", 0)),
-        "direction_skips": int(getattr(result, "direction_skips", 0)),
-        "htf_scans": int(getattr(result, "htf_scans", 0)),
-        "htf_skips": int(getattr(result, "htf_skips", 0)),
-        "htf_resistance_scans": int(getattr(result, "htf_resistance_scans", 0)),
-        "htf_resistance_skips": int(getattr(result, "htf_resistance_skips", 0)),
-        "direction_zone_scans": int(getattr(result, "direction_zone_scans", 0)),
-        "direction_zone_skips": int(getattr(result, "direction_zone_skips", 0)),
-        "timing_scans": int(getattr(result, "timing_scans", 0)),
-        "timing_skips": int(getattr(result, "timing_skips", 0)),
-        "breakout_scans": int(getattr(result, "breakout_scans", 0)),
-        "breakout_skips": int(getattr(result, "breakout_skips", 0)),
-        "same_coin_skips": int(getattr(result, "same_coin_skips", 0)),
-        **parity.per_trade_metrics(trades),
+        "risk_events": result.risk_events or {},
+        "chase_skips": result.chase_skips,
+        "confluence_structure_scans": result.confluence_structure_scans,
+        "confluence_structure_skips": result.confluence_structure_skips,
+        "confluence_trigger_scans": result.confluence_trigger_scans,
+        "confluence_trigger_skips": result.confluence_trigger_skips,
+        "same_coin_skips": result.same_coin_skips,
+        **trade_metrics,
     }
 
 
-def _as_bool(v):
+def _cast_bool(v) -> bool:
     if isinstance(v, bool):
         return v
     if isinstance(v, (int, float)):
-        return bool(v)
-    s = str(v).strip().lower()
-    if s in ("true", "1", "on", "yes", "ya"):
-        return True
-    if s in ("false", "0", "off", "no", "tidak"):
-        return False
-    raise ValueError(f"bukan boolean: {v!r}")
+        if v in (0, 1):
+            return bool(v)
+        raise ValueError(f"Nilai boolean angka harus 0 atau 1, bukan {v!r}")
+    if isinstance(v, str):
+        low = v.strip().lower()
+        if low in ("1", "true", "yes", "ya", "on"):
+            return True
+        if low in ("0", "false", "no", "tidak", "off"):
+            return False
+    raise ValueError(f"Nilai boolean tidak dikenal: {v!r}")
 
 
 OVERRIDE_CASTERS = {
-        "USE_ATR_EXIT": _as_bool,
-        "ATR_PERIOD": int,
-        "ATR_MULT_SL": float,
-        "ATR_MULT_TP": float,
-        "ATR_MULT_BE_TRIGGER": float,
-        "ATR_MULT_BE_LOCK": float,
-        "ATR_MULT_TRAIL_START": float,
-        "ATR_MULT_TRAIL": float,
-        "MAX_HOLD_HOURS": float,
-        "SL_PCT": float,
-        "TP_PCT": float,
-        "BE_TRIGGER_PCT": float,
-        "BE_LOCK_PCT": float,
-        "TRAILING_START_PCT": float,
-        "TRAILING_STEP_PCT": float,
-        "CONFIRM_LOOKBACK_BARS": int,
-        "DEMAND_ZONE_FILTER_ENABLED": _as_bool,
-        "DEMAND_LOOKBACK_BARS": int,
-        "DEMAND_ZONE_BUFFER_PCT": float,
-        "DEMAND_MAX_DISTANCE_PCT": float,
-        "DEMAND_MIN_CLOSE_POSITION": float,
-        "DEMAND_REQUIRE_INSIDE_ZONE": _as_bool,
-        "HTF_FILTER_ENABLED": _as_bool,
-        "HTF_INTERVAL": str,
-        "HTF_EMA_FAST": int,
-        "HTF_EMA_SLOW": int,
-        "HTF_ADX_PERIOD": int,
-        "HTF_ADX_MIN": float,
-        "HTF_LOOKBACK_BARS": int,
-        "HTF_RESISTANCE_FILTER_ENABLED": _as_bool,
-        "HTF_RESISTANCE_LOOKBACK_BARS": int,
-        "HTF_RESISTANCE_PIVOT_WING_BARS": int,
-        "HTF_RESISTANCE_MIN_ROOM_PCT": float,
-        "DIRECTION_FILTER_ENABLED": _as_bool,
-        "DIRECTION_INTERVAL": str,
-        "DIRECTION_EMA_FAST": int,
-        "DIRECTION_EMA_SLOW": int,
-        "DIRECTION_ADX_PERIOD": int,
-        "DIRECTION_ADX_MIN": float,
-        "DIRECTION_LOOKBACK_BARS": int,
-        "DIRECTION_ZONE_FILTER_ENABLED": _as_bool,
-        "DIRECTION_ZONE_LOOKBACK_BARS": int,
-        "DIRECTION_ZONE_BUFFER_PCT": float,
-        "DIRECTION_ZONE_MAX_DISTANCE_PCT": float,
-        "DIRECTION_ZONE_MIN_CLOSE_POSITION": float,
-        "DIRECTION_ZONE_REQUIRE_INSIDE_ZONE": _as_bool,
-        "TIMING_FILTER_ENABLED": _as_bool,
-        "TIMING_EMA_FAST": int,
-        "TIMING_EMA_SLOW": int,
-        "TIMING_ADX_PERIOD": int,
-        "TIMING_ADX_MIN": float,
-        "TIMING_LOOKBACK_BARS": int,
-        "BREAKOUT_RETEST_FILTER_ENABLED": _as_bool,
-        "BREAKOUT_LOOKBACK_BARS": int,
-        "BREAKOUT_PIVOT_WING_BARS": int,
-        "BREAKOUT_ATR_PERIOD": int,
-        "BREAKOUT_RETEST_TOLERANCE_ATR": float,
-        "BREAKOUT_RETEST_MAX_BARS": int,
-        "BREAKOUT_RETEST_MAX_TOUCHES": int,
-        "BREAKOUT_RETEST_REQUIRE_BULLISH": _as_bool,
-        "PUMP_MIN_24H_CHANGE_PCT": float,
-        "MIN_QUOTE_VOLUME_USDT_24H": float,
-        "ROLLING_VOLUME_FILTER_ENABLED": _as_bool,
-        "ROLLING_VOLUME_LOOKBACK_BARS": int,
-        "ROLLING_VOLUME_SURGE_MULT": float,
-        "ROLLING_VOLUME_CONFIRMATION_BARS": int,
-        "SAME_COIN_BLOCK_HOURS": float,
-        "SAME_COIN_BLOCK_LOSS_ONLY": _as_bool,
+    "MIN_QUOTE_VOLUME_USDT_24H": float,
+    "BTC_FILTER_ENABLED": _cast_bool,
+    "BTC_MAX_DROP_PCT": float,
+    "BTC_LOOKBACK_BARS": int,
+    "CONFIRM_INTERVAL": str,
+    "CONFIRM_LOOKBACK_BARS": int,
+    "CONFLUENCE_FILTER_ENABLED": _cast_bool,
+    "CONFLUENCE_STRUCTURE_INTERVAL": str,
+    "CONFLUENCE_LOOKBACK_BARS": int,
+    "CONFLUENCE_MIN_IMPULSE_PCT": float,
+    "CONFLUENCE_ZONE_TOLERANCE_RATIO": float,
+    "VP_FILTER_ENABLED": _cast_bool,
+    "VP_BINS": int,
+    "VP_HVN_TOP_RATIO": float,
+    "FIB_FILTER_ENABLED": _cast_bool,
+    "FIB_RETRACEMENT_MIN": float,
+    "FIB_RETRACEMENT_MAX": float,
+    "LIQUIDITY_FILTER_ENABLED": _cast_bool,
+    "LIQUIDITY_SWEEP_LOOKBACK_BARS": int,
+    "FVG_FILTER_ENABLED": _cast_bool,
+    "OB_FILTER_ENABLED": _cast_bool,
+    "CONFLUENCE_REQUIRE_BULLISH_REACTION": _cast_bool,
+    "CONFLUENCE_MIN_CLOSE_POSITION": float,
+    "CONFLUENCE_SL_BUFFER_PCT": float,
+    "CONFLUENCE_MIN_RR_RATIO": float,
+    "MAX_HOLD_HOURS": float,
+    "TAKER_FEE_PCT": float,
+    "USE_BNB_FEE_DISCOUNT": _cast_bool,
+    "USE_RISK_PERCENT": _cast_bool,
+    "RISK_PERCENT": float,
+    "POSITION_SIZE_USDT": float,
+    "MAX_POSITION_USDT": float,
+    "BALANCE_BUFFER_PCT": float,
+    "BACKTEST_INITIAL_EQUITY_USDT": float,
+    "BACKTEST_ENTRY_SPREAD_PCT": float,
+    "BACKTEST_SLIPPAGE_PCT": float,
+    "BACKTEST_ENTRY_DELAY_BARS": int,
+    "USE_EQUITY_STOP": _cast_bool,
+    "MAX_DRAWDOWN_PERCENT": float,
+    "CLOSE_ALL_AT_LIMIT": _cast_bool,
+    "DD_COOLDOWN_HOURS": float,
+    "COOLDOWN_MINUTES_AFTER_CLOSE": float,
+    "MIN_SECONDS_BETWEEN_TRADES": float,
+    "SAME_COIN_BLOCK_HOURS": float,
+    "SAME_COIN_BLOCK_LOSS_ONLY": _cast_bool,
+    "MAX_CHASE_PCT": float,
 }
 
 
-def apply_overrides(base_config: dict, overrides: dict) -> dict:
+def apply_overrides(base_config: dict, overrides: Optional[dict]) -> dict:
     cfg = copy.deepcopy(base_config)
-    for key, caster in OVERRIDE_CASTERS.items():
-        if key in overrides and overrides[key] is not None and overrides[key] != "":
-            try:
-                cfg[key] = caster(overrides[key])
-            except (TypeError, ValueError) as exc:
-                raise BacktestError(
-                    f"Nilai parameter '{key}' tidak valid: {overrides[key]!r}"
-                ) from exc
+    if not overrides:
+        return cfg
+    for key, val in overrides.items():
+        if key not in OVERRIDE_CASTERS or val is None or val == "":
+            continue
+        caster = OVERRIDE_CASTERS[key]
+        try:
+            cast_val = caster(val)
+        except (ValueError, TypeError) as e:
+            raise BacktestError(f"Nilai parameter '{key}' tidak valid: {val}") from e
+        if isinstance(cast_val, float) and not math.isfinite(cast_val):
+            raise BacktestError(
+                f"Nilai parameter '{key}' harus angka berhingga: {val}"
+            )
+        if caster is int and isinstance(val, str) and "." in val.strip():
+            raise BacktestError(
+                f"Nilai parameter '{key}' harus bilangan bulat: {val}"
+            )
+        if caster is int and isinstance(val, float) and not val.is_integer():
+            raise BacktestError(
+                f"Nilai parameter '{key}' harus bilangan bulat: {val}"
+            )
+        cfg[key] = cast_val
     return cfg
 
 
-def _rentang_demand(key: str, lo: float, hi: float) -> tuple:
+def _rentang_schema(key: str, lo: float, hi: float) -> tuple:
     try:
         from config.settings_schema import PARAMETER_SCHEMA
 
@@ -905,228 +756,361 @@ def _rentang_demand(key: str, lo: float, hi: float) -> tuple:
     return float(lo), float(hi)
 
 
-def validate_params(cfg: dict) -> None:
-    if bool(cfg.get("USE_ATR_EXIT", False)):
-        checks = [
-            ("ATR_PERIOD", 1, 1000),
-            ("ATR_MULT_SL", 0.0001, 1000),
-            ("ATR_MULT_TP", 0.0001, 1000),
-            ("ATR_MULT_BE_TRIGGER", 0.0001, 1000),
-            ("ATR_MULT_BE_LOCK", 0.0, 1000),
-            ("ATR_MULT_TRAIL_START", 0.0001, 1000),
-            ("ATR_MULT_TRAIL", 0.0001, 1000),
-        ]
-    else:
-        checks = [
-            ("SL_PCT", 0.01, 1000),
-            ("TP_PCT", 0.01, 1000),
-            ("BE_TRIGGER_PCT", 0.01, 1000),
-            ("BE_LOCK_PCT", -100, 1000),
-            ("TRAILING_START_PCT", 0.01, 1000),
-            ("TRAILING_STEP_PCT", 0.01, 1000),
-        ]
+def validate_params(config: dict) -> None:
+    checks = [
+        ("CONFLUENCE_SL_BUFFER_PCT", 0.0, 10.0),
+        ("CONFLUENCE_MIN_RR_RATIO", 0.1, 20.0),
+    ]
     for key, lo, hi in checks:
-        val = cfg.get(key)
-        if val is None or not (lo <= val <= hi):
+        lo, hi = _rentang_schema(key, lo, hi)
+        val = config.get(key)
+        if val is None or not (lo <= float(val) <= hi):
             raise BacktestError(
-                f"Parameter '{key}'={val} di luar rentang wajar ({lo}..{hi})."
+                f"Parameter '{key}'={val} di luar rentang wajar ({lo:g}..{hi:g})."
             )
 
-    if bool(cfg.get("DEMAND_ZONE_FILTER_ENABLED", False)):
-        demand_checks = [
-            ("DEMAND_LOOKBACK_BARS", 3, 500),
-            ("DEMAND_ZONE_BUFFER_PCT", 0.05, 20.0),
-            ("DEMAND_MAX_DISTANCE_PCT", 0.1, 50.0),
-            ("DEMAND_MIN_CLOSE_POSITION", 0.0, 1.0),
+    interval = config.get("CONFIRM_INTERVAL", "5m")
+    if interval not in INTERVAL_MINUTES:
+        raise BacktestError(f"Interval '{interval}' tidak dikenal.")
+
+    if bool(config.get("CONFLUENCE_FILTER_ENABLED", False)):
+        struct_interval = strategy.confluence_structure_interval(config)
+        if struct_interval not in INTERVAL_MINUTES:
+            raise BacktestError(
+                f"CONFLUENCE_STRUCTURE_INTERVAL '{struct_interval}' tidak dikenal."
+            )
+        confluence_checks = [
+            ("CONFLUENCE_LOOKBACK_BARS", 15, 500),
+            ("CONFLUENCE_MIN_IMPULSE_PCT", 0.1, 100.0),
+            ("CONFLUENCE_ZONE_TOLERANCE_RATIO", 0.0, 0.50),
+            ("VP_BINS", 5, 100),
+            ("VP_HVN_TOP_RATIO", 0.05, 1.0),
+            ("FIB_RETRACEMENT_MIN", 0.10, 0.95),
+            ("FIB_RETRACEMENT_MAX", 0.15, 0.99),
+            ("LIQUIDITY_SWEEP_LOOKBACK_BARS", 1, 30),
+            ("CONFLUENCE_MIN_CLOSE_POSITION", 0.0, 1.0),
         ]
-        for key, lo, hi in demand_checks:
-            lo, hi = _rentang_demand(key, lo, hi)
-            val = cfg.get(key)
+        for key, lo, hi in confluence_checks:
+            lo, hi = _rentang_schema(key, lo, hi)
+            val = config.get(key)
             if val is None or not (lo <= float(val) <= hi):
                 raise BacktestError(
                     f"Parameter '{key}'={val} di luar rentang wajar ({lo:g}..{hi:g})."
                 )
 
+    try:
+        strategy.max_hold_ms(config, str(interval))
+    except ValueError as exc:
+        raise BacktestError(str(exc)) from exc
+
     from config.settings_schema import relation_violations
 
-    pelanggaran = relation_violations(cfg, mode_aware=True)
+    pelanggaran = relation_violations(config, mode_aware=True)
     if pelanggaran:
         daftar = "; ".join(f"{kunci}: {pesan}" for kunci, pesan in pelanggaran.items())
         raise BacktestError(f"Kombinasi parameter tidak konsisten: {daftar}")
 
-    if bool(cfg.get("DIRECTION_FILTER_ENABLED", False)):
-        arah_checks = [
-            ("DIRECTION_EMA_FAST", 2, 500),
-            ("DIRECTION_EMA_SLOW", 3, strategy.TREND_KLINE_LIMIT - 1),
-            ("DIRECTION_ADX_PERIOD", 2, 200),
-            ("DIRECTION_ADX_MIN", 0.0, 100.0),
-            ("DIRECTION_LOOKBACK_BARS", 20, strategy.TREND_KLINE_LIMIT - 1),
-        ]
-        for key, lo, hi in arah_checks:
-            val = cfg.get(key)
-            if val is None or not (lo <= float(val) <= hi):
-                raise BacktestError(
-                    f"Parameter '{key}'={val} di luar rentang wajar ({lo}..{hi})."
-                )
-        interval = cfg.get("CONFIRM_INTERVAL", "5m")
+
+def execute_backtest(
+    client,
+    symbol: str,
+    days: float,
+    base_config: dict,
+    overrides: Optional[dict] = None,
+    progress_cb: Optional[Callable[[float, str], None]] = None,
+    sleep_between_calls: float = 0.2,
+    use_cache: Optional[bool] = None,
+) -> dict:
+    symbol = (symbol or "").strip().upper()
+    if not symbol:
+        raise BacktestError("Simbol tidak boleh kosong.")
+    if days <= 0 or days > 1825:
+        raise BacktestError("Rentang hari harus antara 0.5 sampai 1825 (5 tahun).")
+
+    config = apply_overrides(base_config, overrides)
+    config["_symbol"] = symbol
+    validate_params(config)
+
+    interval = config.get("CONFIRM_INTERVAL", "5m")
+    bar_minutes = INTERVAL_MINUTES[interval]
+    window_24h = bars_per_day(interval)
+    warmup_bars = max(
+        window_24h,
+        strategy.confirm_window_bars(config),
+        strategy.gate_warmup_bars(config, interval),
+    )
+    warmup_ms = warmup_bars * bar_minutes * MS_PER_MIN
+
+    end_ms = last_completed_candle_end_ms(interval)
+    start_ms = end_ms - int(days * MS_PER_DAY) - warmup_ms
+
+    cache_enabled = (
+        bool(config.get("BACKTEST_CACHE_ENABLED", True))
+        if use_cache is None
+        else bool(use_cache)
+    )
+    cache_obj = None
+    if cache_enabled:
         try:
-            butuh_arah = strategy.direction_required_bars(cfg)
-            strategy.direction_warmup_bars(cfg, interval)
-        except ValueError as exc:
-            raise BacktestError(str(exc)) from exc
-        if int(cfg.get("DIRECTION_LOOKBACK_BARS", 0)) < butuh_arah:
-            raise BacktestError(
-                f"DIRECTION_LOOKBACK_BARS={cfg.get('DIRECTION_LOOKBACK_BARS')} lebih kecil "
-                f"dari {butuh_arah} candle yang dibutuhkan EMA dan ADX pada "
-                f"{cfg.get('DIRECTION_INTERVAL', '15m')}. Naikkan nilainya supaya backtest "
-                "dan bot live memakai jendela arah yang sama."
+            from backtesting.backtest_cache import KlineCache
+
+            cache_path = str(config.get("BACKTEST_CACHE_FILE", "") or "").strip()
+            if cache_path:
+                cache_obj = KlineCache(cache_path)
+        except Exception:
+            cache_obj = None
+
+    def _fetch_with_cache(sym: str, itv: str, s_ms: int, e_ms: int, cb=None) -> list[Kline]:
+        if cache_obj is None:
+            return fetch_full_klines(
+                client,
+                sym,
+                itv,
+                s_ms,
+                e_ms,
+                progress_cb=cb,
+                sleep_between_calls=sleep_between_calls,
             )
-
-    if strategy.htf_enabled(cfg):
-        htf_interval = str(cfg.get("HTF_INTERVAL", "1h") or "1h").strip().lower()
-        if htf_interval not in strategy.INTERVAL_MINUTES:
-            raise BacktestError(
-                f"HTF_INTERVAL '{htf_interval}' tidak didukung untuk backtest."
+        missing = cache_obj.missing_ranges(sym, itv, s_ms, e_ms)
+        for m_start, m_end in missing:
+            bagian = fetch_full_klines(
+                client,
+                sym,
+                itv,
+                m_start,
+                m_end,
+                progress_cb=cb,
+                sleep_between_calls=sleep_between_calls,
             )
-        if htf_interval != "1h":
-            raise BacktestError(
-                "Tahap A membatasi HTF_INTERVAL ke '1h' supaya gerbang tetap H1."
-            )
-        htf_checks = [
-            ("HTF_EMA_FAST", 2, 500),
-            ("HTF_EMA_SLOW", 3, strategy.TREND_KLINE_LIMIT - 1),
-            ("HTF_ADX_PERIOD", 2, 200),
-            ("HTF_ADX_MIN", 0.0, 100.0),
-            ("HTF_LOOKBACK_BARS", 20, strategy.TREND_KLINE_LIMIT - 1),
-        ]
-        for key, lo, hi in htf_checks:
-            val = cfg.get(key)
-            if val is None or not (lo <= float(val) <= hi):
-                raise BacktestError(
-                    f"Parameter '{key}'={val} di luar rentang wajar ({lo}..{hi})."
-                )
-        try:
-            butuh_htf = strategy.htf_required_bars(cfg)
-            strategy.htf_warmup_bars(cfg, cfg.get("CONFIRM_INTERVAL", "5m"))
-        except (KeyError, ValueError) as exc:
-            raise BacktestError(str(exc)) from exc
-        if int(cfg.get("HTF_LOOKBACK_BARS", 0)) < butuh_htf:
-            raise BacktestError(
-                f"HTF_LOOKBACK_BARS={cfg.get('HTF_LOOKBACK_BARS')} lebih kecil dari "
-                f"{butuh_htf} candle yang dibutuhkan EMA dan ADX H1."
-            )
+            cache_obj.put(sym, itv, bagian, m_start, m_end)
+        return cache_obj.read(sym, itv, s_ms, e_ms)
 
-    if bool(cfg.get("DIRECTION_ZONE_FILTER_ENABLED", False)):
-        zona_arah_checks = [
-            ("DIRECTION_ZONE_LOOKBACK_BARS", 3, 500),
-            ("DIRECTION_ZONE_BUFFER_PCT", 0.05, 20.0),
-            ("DIRECTION_ZONE_MAX_DISTANCE_PCT", 0.0, 50.0),
-            ("DIRECTION_ZONE_MIN_CLOSE_POSITION", 0.0, 1.0),
-        ]
-        for key, lo, hi in zona_arah_checks:
-            lo, hi = _rentang_demand(key, lo, hi)
-            val = cfg.get(key)
-            if val is None or not (lo <= float(val) <= hi):
-                raise BacktestError(
-                    f"Parameter '{key}'={val} di luar rentang wajar ({lo:g}..{hi:g})."
-                )
-        try:
-            strategy.direction_warmup_bars(
-                cfg, cfg.get("CONFIRM_INTERVAL", "5m")
-            )
-        except ValueError as exc:
-            raise BacktestError(str(exc)) from exc
+    def fetch_cb(p: float):
+        if progress_cb:
+            progress_cb(round(p * 0.75, 3), f"Mengunduh data {symbol} ({int(p*100)}%)")
 
-    if bool(cfg.get("BREAKOUT_RETEST_FILTER_ENABLED", False)):
-        breakout_checks = [
-            ("BREAKOUT_LOOKBACK_BARS", 5, 500),
-            ("BREAKOUT_PIVOT_WING_BARS", 1, 20),
-            ("BREAKOUT_ATR_PERIOD", 2, 200),
-            ("BREAKOUT_RETEST_TOLERANCE_ATR", 0.0, 10.0),
-            ("BREAKOUT_RETEST_MAX_BARS", 1, 100),
-            ("BREAKOUT_RETEST_MAX_TOUCHES", 1, 20),
-        ]
-        for key, lo, hi in breakout_checks:
-            val = cfg.get(key)
-            if val is None or not (lo <= float(val) <= hi):
-                raise BacktestError(
-                    f"Parameter '{key}'={val} di luar rentang wajar ({lo}..{hi})."
-                )
+    if progress_cb:
+        progress_cb(0.02, f"Mengunduh data historis {symbol} ({interval})...")
 
-    if bool(cfg.get("TIMING_FILTER_ENABLED", False)):
-        timing_checks = [
-            ("TIMING_EMA_FAST", 2, 500),
-            ("TIMING_EMA_SLOW", 3, strategy.TREND_KLINE_LIMIT - 1),
-            ("TIMING_ADX_PERIOD", 2, 200),
-            ("TIMING_ADX_MIN", 0.0, 100.0),
-            ("TIMING_LOOKBACK_BARS", 20, strategy.TREND_KLINE_LIMIT - 1),
-        ]
-        for key, lo, hi in timing_checks:
-            val = cfg.get(key)
-            if val is None or not (lo <= float(val) <= hi):
-                raise BacktestError(
-                    f"Parameter '{key}'={val} di luar rentang wajar ({lo}..{hi})."
-                )
-
-    confirm_lookback = int(cfg.get("CONFIRM_LOOKBACK_BARS", 0))
-    if not 3 <= confirm_lookback <= 1000:
-        raise BacktestError(
-            "CONFIRM_LOOKBACK_BARS harus berada pada rentang 3 sampai 1000 candle."
-        )
-    butuh = strategy.required_lookback_bars(cfg)
-    if confirm_lookback < butuh:
-        raise BacktestError(
-            f"CONFIRM_LOOKBACK_BARS={cfg.get('CONFIRM_LOOKBACK_BARS')} lebih kecil dari {butuh} "
-            "candle yang dibutuhkan gerbang entry M5. Naikkan nilainya supaya backtest "
-            "dan bot live memakai jendela yang sama."
-        )
-
-    pump_min = cfg.get("PUMP_MIN_24H_CHANGE_PCT", 10.0)
+    cache_meta = None
+    btc_klines: Optional[list[Kline]] = None
+    structure_klines: Optional[list[Kline]] = None
     try:
-        minimum = float(pump_min)
-    except (TypeError, ValueError):
-        raise BacktestError(
-            f"Parameter 'PUMP_MIN_24H_CHANGE_PCT'={pump_min!r} bukan angka."
-        ) from None
-    if not math.isfinite(minimum) or not (-1000.0 <= minimum <= 1000.0):
-        raise BacktestError(
-            f"Parameter 'PUMP_MIN_24H_CHANGE_PCT'={pump_min!r} "
-            "di luar rentang wajar (-1000..1000)."
+        klines = _fetch_with_cache(symbol, interval, start_ms, end_ms, cb=fetch_cb)
+
+        min_needed = warmup_bars + 10
+        if len(klines) < min_needed:
+            raise BacktestError(
+                f"Data {symbol} tidak cukup: hanya {len(klines)} candle "
+                f"(butuh minimal {min_needed}). Coba kurangi rentang hari atau pilih koin lain."
+            )
+
+        quote = str(config.get("QUOTE_ASSET", "USDT") or "USDT").strip().upper()
+        btc_symbol = f"BTC{quote}"
+        if config.get("BTC_FILTER_ENABLED", False):
+            if symbol == btc_symbol:
+                btc_klines = klines
+            else:
+                if progress_cb:
+                    progress_cb(0.76, f"Mengunduh data referensi {btc_symbol}...")
+                try:
+                    btc_klines = _fetch_with_cache(
+                        btc_symbol, interval, start_ms, end_ms, cb=None
+                    )
+                except Exception:
+                    btc_klines = None
+
+        if strategy.confluence_enabled(config):
+            struct_interval = strategy.confluence_structure_interval(config)
+            if struct_interval != interval:
+                struct_window = strategy.confluence_structure_window_bars(config)
+                struct_bar_ms = INTERVAL_MINUTES[struct_interval] * MS_PER_MIN
+                struct_start_ms = (
+                    end_ms - int(days * MS_PER_DAY) - struct_window * struct_bar_ms
+                )
+                if struct_start_ms < start_ms:
+                    if progress_cb:
+                        progress_cb(
+                            0.77,
+                            f"Mengunduh data struktur {symbol} ({struct_interval})...",
+                        )
+                    try:
+                        structure_klines = _fetch_with_cache(
+                            symbol, struct_interval, struct_start_ms, end_ms, cb=None
+                        )
+                    except Exception:
+                        structure_klines = None
+        if cache_obj is not None:
+            cache_meta = cache_obj.stats()
+    finally:
+        if cache_obj is not None:
+            cache_obj.close()
+
+    def sim_cb(p: float):
+        if progress_cb:
+            progress_cb(
+                round(0.78 + p * 0.20, 3), f"Menjalankan simulasi ({int(p*100)}%)"
+            )
+
+    if progress_cb:
+        progress_cb(0.78, "Menjalankan simulasi strategi...")
+
+    result = run_backtest(
+        klines,
+        config,
+        warmup_bars=warmup_bars,
+        progress_cb=sim_cb,
+        btc_klines=btc_klines,
+        structure_klines=structure_klines,
+    )
+    summary = summarize(result)
+
+    if progress_cb:
+        progress_cb(1.0, "Selesai")
+
+    trades_out = [
+        {
+            "n": idx,
+            "entry_time": t.entry_time,
+            "entry_price": t.entry_price,
+            "exit_time": t.exit_time,
+            "exit_price": t.exit_price,
+            "reason": t.reason,
+            "hold_minutes": round(t.hold_minutes, 1),
+            "pnl_pct": round(t.pnl_pct, 3),
+            "gross_pnl_pct": round(t.gross_pnl_pct, 3),
+            "fee_pct": round(t.fee_pct, 3),
+            "sl_pct": round(t.sl_pct, 6),
+            "tp_pct": round(t.tp_pct, 6),
+            "exit_source": t.exit_source,
+            "position_notional": round(t.position_notional, 2),
+            "equity_before": round(t.equity_before, 2),
+            "equity_after": round(t.equity_after, 2),
+            "pnl_quote": round(t.pnl_quote, 2),
+        }
+        for idx, t in enumerate(result.trades, start=1)
+    ]
+
+    applied_params = {k: config.get(k) for k in OVERRIDE_CASTERS.keys()}
+
+    spread_pct, slip_pct, delay_bars = entry_execution_params(config)
+    assumptions = [
+        "Simulasi 1 koin menggunakan filter entry The Confluence Code (Volume Profile -> Fibonacci -> Liquidity -> FVG -> Order Block) dan logika exit yang sama dengan bot.",
+        (
+            f"Eksekusi entry menunggu {delay_bars} bar setelah sinyal lalu membeli pada harga open + "
+            f"setengah spread ({spread_pct / 2:.3f}%) + slippage ({slippage_label(slip_pct)}%). "
+            f"Exit menjual dengan pengurangan spread/slippage yang sama."
+        ),
+        (
+            f"Ukuran posisi mengikuti pengaturan bot (modal awal simulasi "
+            f"{summary['initial_equity']:,.2f} {config.get('QUOTE_ASSET', 'USDT')}), "
+            f"cooldown selesai trade {config.get('COOLDOWN_MINUTES_AFTER_CLOSE', 0)} menit, "
+            f"jeda antar trade {config.get('MIN_SECONDS_BETWEEN_TRADES', 0)} detik, "
+            f"dan batas kejar harga {config.get('MAX_CHASE_PCT', 0)}%."
+        ),
+        "Evaluasi di dalam 1 candle memakai urutan konservatif: Stop Loss diperiksa lebih dulu daripada Take Profit.",
+        "Untuk menguji pemilihan top gainer lintas seluruh pasar sekaligus, gunakan mode Backtest Portofolio.",
+    ]
+    if result.warnings:
+        assumptions.extend(result.warnings)
+
+    return {
+        "symbol": symbol,
+        "interval": interval,
+        "days": days,
+        "bars_total": result.bars_total,
+        "bars_usable": result.bars_usable,
+        "start_time": result.start_time,
+        "end_time": result.end_time,
+        "summary": summary,
+        "trades": trades_out,
+        "params": applied_params,
+        "assumptions": assumptions,
+        "warnings": result.warnings,
+        "cache": cache_meta,
+    }
+
+
+def slippage_label(slip_pct: float) -> str:
+    return f"{float(slip_pct):.3f}"
+
+
+def _fmt_ts(ms: int) -> str:
+    if not ms:
+        return "-"
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(ms / 1000))
+
+
+def print_report(data: dict) -> None:
+    s = data["summary"]
+    p = data["params"]
+    print("=" * 72)
+    print(
+        f"BACKTEST REPORT : {data['symbol']}  |  interval {data['interval']}  |  {data['days']} hari"
+    )
+    print(
+        f"Periode data    : {_fmt_ts(data['start_time'])}  s/d  {_fmt_ts(data['end_time'])}  "
+        f"({data['bars_usable']} candle diuji)"
+    )
+    print("-" * 72)
+    exit_info = (
+        f"Confluence Struktural (SL buffer={p.get('CONFLUENCE_SL_BUFFER_PCT', 0.2)}% "
+        f"Min R:R=1:{p.get('CONFLUENCE_MIN_RR_RATIO', 1.2)} "
+        f"MaxHold={p.get('MAX_HOLD_HOURS', 0)}h)"
+    )
+    confluence_info = (
+        f"{p.get('CONFLUENCE_STRUCTURE_INTERVAL', '15m')}->"
+        f"{p.get('CONFIRM_INTERVAL', '5m')} "
+        f"(VP={'ON' if p.get('VP_FILTER_ENABLED', True) else 'OFF'},"
+        f"Fib={'ON' if p.get('FIB_FILTER_ENABLED', True) else 'OFF'},"
+        f"Liq={'ON' if p.get('LIQUIDITY_FILTER_ENABLED', True) else 'OFF'},"
+        f"FVG={'ON' if p.get('FVG_FILTER_ENABLED', True) else 'OFF'},"
+        f"OB={'ON' if p.get('OB_FILTER_ENABLED', True) else 'OFF'})"
+        if p.get("CONFLUENCE_FILTER_ENABLED", True)
+        else "OFF"
+    )
+    print(
+        f"Parameter utama : Confluence={confluence_info}  |  Exit: {exit_info}"
+    )
+    print("-" * 72)
+    print(f"Total trade     : {s['total_trades']}")
+    if s["total_trades"] == 0:
+        print("Tidak ada sinyal entry yang terpicu pada periode ini.")
+        print("=" * 72)
+        return
+    print(
+        f"Menang / Kalah  : {s['wins']} / {s['losses']}   (Win rate: {s['win_rate']}%)"
+    )
+    print(f"Total return    : {s['total_return_pct']:+.2f}% (kompon, sudah potong fee)")
+    print(
+        f"Rata-rata PnL   : {s['avg_pnl_pct']:+.3f}%   "
+        f"(menang: {s['avg_win_pct']:+.3f}% | kalah: {s['avg_loss_pct']:+.3f}%)"
+    )
+    print(
+        f"Trade terbaik   : {s['best_trade_pct']:+.3f}%   |   terburuk: {s['worst_trade_pct']:+.3f}%"
+    )
+    pf = s["profit_factor"] if s["profit_factor"] is not None else "inf"
+    print(
+        f"Profit factor   : {pf}   |   Max drawdown: {s['max_drawdown_pct']:.2f}%   "
+        f"|   Rata-rata tahan: {s['avg_hold_minutes']} menit"
+    )
+    print("-" * 72)
+    print("Rincian per alasan exit:")
+    for reason, info in s["by_reason"].items():
+        print(
+            f"  {reason:<16} : {info['count']:>4} trade  |  "
+            f"winrate {info['win_rate']:>5.1f}%  |  avg PnL {info['avg_pnl_pct']:+.3f}%"
         )
-
-    block_hours = cfg.get("SAME_COIN_BLOCK_HOURS")
-    if block_hours is not None:
-        lo, hi = _rentang_demand("SAME_COIN_BLOCK_HOURS", 0.0, 8760.0)
-        try:
-            nilai_block = float(block_hours)
-        except (TypeError, ValueError):
-            raise BacktestError(
-                f"Parameter 'SAME_COIN_BLOCK_HOURS'={block_hours} bukan angka."
-            ) from None
-        if not math.isfinite(nilai_block) or not (lo <= nilai_block <= hi):
-            raise BacktestError(
-                f"Parameter 'SAME_COIN_BLOCK_HOURS'={block_hours} di luar rentang "
-                f"wajar ({lo:g}..{hi:g})."
-            )
-
-    max_hold = cfg.get("MAX_HOLD_HOURS")
-    if max_hold is not None and max_hold != "":
-        lo, hi = _rentang_demand("MAX_HOLD_HOURS", 0.0, parity.MAX_HOLD_HOURS_LIMIT)
-        try:
-            nilai_hold = float(max_hold)
-        except (TypeError, ValueError):
-            raise BacktestError(
-                f"Parameter 'MAX_HOLD_HOURS'={max_hold} bukan angka."
-            ) from None
-        if not math.isfinite(nilai_hold) or not (lo <= nilai_hold <= hi):
-            raise BacktestError(
-                f"Parameter 'MAX_HOLD_HOURS'={max_hold} di luar rentang wajar "
-                f"({lo:g}..{hi:g}). 0 berarti time stop nonaktif."
-            )
-        try:
-            parity.max_hold_ms(cfg, cfg.get("CONFIRM_INTERVAL", "5m"))
-        except ValueError as exc:
-            raise BacktestError(str(exc)) from exc
+    print("-" * 72)
+    last_trades = data["trades"][-10:]
+    print(f"{len(last_trades)} trade terakhir:")
+    for t in last_trades:
+        print(
+            f"  #{t['n']:<3} {_fmt_ts(t['entry_time'])} -> {_fmt_ts(t['exit_time'])}  "
+            f"in={t['entry_price']:.6g} out={t['exit_price']:.6g}  "
+            f"{t['pnl_pct']:+6.2f}%  [{t['reason']}] ({t['hold_minutes']}m)"
+        )
+    print("=" * 72)
 
 
 def print_single_result(result: BacktestResult) -> None:
@@ -1161,29 +1145,15 @@ def print_single_result(result: BacktestResult) -> None:
     if (
         risk_info
         or summary.get("chase_skips")
-        or summary.get("direction_skips")
-        or summary.get("htf_scans")
-        or summary.get("htf_resistance_scans")
-        or summary.get("direction_zone_skips")
-        or summary.get("timing_skips")
+        or summary.get("confluence_structure_scans")
+        or summary.get("confluence_trigger_scans")
     ):
         print(
             f"Kontrol akun/filter: {risk_info}, chase dilewati {summary.get('chase_skips', 0)}, "
-            f"arah dilewati {summary.get('direction_skips', 0)}, "
-            + (
-                f"tren HTF dilewati {summary.get('htf_skips', 0)} dari "
-                f"{summary.get('htf_scans', 0)}, "
-                if summary.get("htf_scans")
-                else ""
-            )
-            + (
-                f"resistance H1 dilewati {summary.get('htf_resistance_skips', 0)} dari "
-                f"{summary.get('htf_resistance_scans', 0)}, "
-                if summary.get("htf_resistance_scans")
-                else ""
-            )
-            + f"zona arah dilewati {summary.get('direction_zone_skips', 0)}, "
-            f"timing dilewati {summary.get('timing_skips', 0)}"
+            f"struktur POI dilewati {summary.get('confluence_structure_skips', 0)} dari "
+            f"{summary.get('confluence_structure_scans', 0)}, "
+            f"trigger dilewati {summary.get('confluence_trigger_skips', 0)} dari "
+            f"{summary.get('confluence_trigger_scans', 0)}"
         )
     if result.warnings:
         print("Peringatan:")
@@ -1193,38 +1163,55 @@ def print_single_result(result: BacktestResult) -> None:
 
 
 def main():
-    import argparse as _argparse
-    import sys as _sys
+    import argparse
 
-    parser = _argparse.ArgumentParser(description="Backtest pump scanner")
-    parser.add_argument("--symbol", default="BTCUSDT", help="Simbol, mis. SOLUSDT")
-    parser.add_argument(
-        "--days", type=int, default=30, help="Jumlah hari data historis"
+    parser = argparse.ArgumentParser(
+        description="Backtest strategi Pump Scanner pada data historis Binance."
     )
     parser.add_argument(
-        "--interval", default=None, help="Interval candle, default dari config"
+        "--symbol", default="BTCUSDT", help="Simbol pasangan, contoh: SOLUSDT, PEPEUSDT"
+    )
+    parser.add_argument(
+        "--days", type=float, default=14, help="Jumlah hari ke belakang (default: 14)"
+    )
+    parser.add_argument(
+        "--interval",
+        default=None,
+        help="Override CONFIRM_INTERVAL (1m/3m/5m/15m/1h)",
+    )
+    parser.add_argument(
+        "--sl-buffer",
+        type=float,
+        default=None,
+        help="Override CONFLUENCE_SL_BUFFER_PCT",
+    )
+    parser.add_argument(
+        "--min-rr",
+        type=float,
+        default=None,
+        help="Override CONFLUENCE_MIN_RR_RATIO",
+    )
+    parser.add_argument(
+        "--structure-interval",
+        default=None,
+        help="Override CONFLUENCE_STRUCTURE_INTERVAL (5m/15m/1h)",
     )
     parser.add_argument(
         "--grid",
         metavar="SPEC",
         default=None,
-        help="Jalankan grid search. Format: "
-        '"SL_PCT=1:4:0.5,TP_PCT=2:8:1" untuk rentang, atau '
-        '"TP_PCT=2|4|6" untuk daftar nilai. Data diunduh '
-        "SEKALI lalu dipakai ulang untuk semua kombinasi.",
+        help="Jalankan grid search.",
     )
     parser.add_argument(
         "--grid-metric",
         default="total_return_pct",
-        help="Metrik peringkat: total_return_pct, profit_factor, "
-        "return_per_drawdown, win_rate",
+        help="Metrik peringkat grid search.",
     )
     parser.add_argument(
         "--grid-train",
         type=float,
         default=0.7,
-        help="Porsi data untuk periode latih (0.7 = 70 persen). "
-        "Sisanya dipakai memvalidasi hasil pada data baru.",
+        help="Porsi data untuk periode latih (0.7 = 70 persen).",
     )
     parser.add_argument(
         "--grid-min-trades",
@@ -1233,7 +1220,10 @@ def main():
         help="Di bawah jumlah trade ini hasil ditandai tidak andal.",
     )
     parser.add_argument(
-        "--grid-top", type=int, default=15, help="Jumlah baris teratas yang dicetak."
+        "--grid-top",
+        type=int,
+        default=15,
+        help="Jumlah baris teratas yang dicetak.",
     )
     parser.add_argument(
         "--selftest",
@@ -1250,151 +1240,75 @@ def main():
         exit_ok, _ = _run_exit_selftest(verbose=True)
         raise SystemExit(0 if entry_ok and exit_ok else 1)
 
-    if len(_sys.argv) == 1:
-        parser.print_help()
-        return
-
-    from config.config import PUMP_CONFIG
     from trading.clients.binance_client import BinanceSpotClient
+    from config.config import PUMP_CONFIG, get_base_url
 
-    cfg = copy.deepcopy(PUMP_CONFIG)
-    cfg["_symbol"] = args.symbol
+    overrides = {}
     if args.interval:
-        cfg["CONFIRM_INTERVAL"] = args.interval
-    validate_params(cfg)
+        overrides["CONFIRM_INTERVAL"] = args.interval
+    if args.sl_buffer is not None:
+        overrides["CONFLUENCE_SL_BUFFER_PCT"] = args.sl_buffer
+    if args.min_rr is not None:
+        overrides["CONFLUENCE_MIN_RR_RATIO"] = args.min_rr
+    if args.structure_interval:
+        overrides["CONFLUENCE_STRUCTURE_INTERVAL"] = args.structure_interval
 
-    interval = cfg["CONFIRM_INTERVAL"]
-    warmup = bars_per_day(interval)
-    try:
-        butuh_gerbang = strategy.gate_warmup_bars(cfg, interval)
-    except ValueError as exc:
-        raise BacktestError(str(exc)) from exc
-    warmup = max(warmup, butuh_gerbang, strategy.required_lookback_bars(cfg))
-    total_bars = warmup + bars_per_day(interval) * args.days
-    bar_per_hari = float(bars_per_day(interval))
-
-    print(
-        f"Mengambil {total_bars} candle {interval} untuk {args.symbol} "
-        f"({args.days} hari + warmup {warmup} candle = "
-        f"{warmup / bar_per_hari:.2f} hari)..."
-    )
-    if strategy.direction_enabled(cfg):
-        dir_itv = strategy.direction_interval(cfg)
-        print(
-            f"  Layer arah {dir_itv} aktif: jendela "
-            f"{strategy.direction_window_bars(cfg)} candle (minimum "
-            f"{strategy.direction_required_bars(cfg)} candle untuk EMA dan ADX). "
-            "Koin dengan riwayat arah lebih pendek ditolak."
-        )
-        if args.days * bars_per_day(dir_itv) < strategy.direction_required_bars(cfg):
-            print(
-                f"PERINGATAN: --days {args.days} lebih pendek dari kebutuhan EMA + ADX "
-                f"{dir_itv} ({strategy.direction_required_bars(cfg)} candle)."
-            )
-    if strategy.direction_zone_enabled(cfg) and not strategy.direction_enabled(cfg):
-        dir_itv = strategy.direction_interval(cfg)
-        print(
-            f"  Layer zona demand {dir_itv} aktif: jendela "
-            f"{strategy.direction_zone_window_bars(cfg)} candle. Koin dengan riwayat "
-            "arah lebih pendek ditolak."
-        )
-        if args.days * bars_per_day(dir_itv) < strategy.direction_zone_window_bars(cfg):
-            print(
-                f"PERINGATAN: --days {args.days} lebih pendek dari kebutuhan zona "
-                f"demand {dir_itv} ({strategy.direction_zone_window_bars(cfg)} candle)."
-            )
-    if strategy.timing_enabled(cfg):
-        print(
-            f"  Layer timing {strategy.timing_interval(cfg)} aktif: jendela "
-            f"{strategy.timing_window_bars(cfg)} candle (minimum "
-            f"{strategy.timing_required_bars(cfg)} candle untuk EMA dan ADX)."
-        )
-    if strategy.breakout_retest_enabled(cfg):
-        print(
-            f"  Breakout-retest {strategy.timing_interval(cfg)} aktif: jendela minimum "
-            f"{strategy.breakout_retest_required_bars(cfg)} candle, retest maksimum "
-            f"{int(cfg.get('BREAKOUT_RETEST_MAX_BARS', 12) or 12)} candle, toleransi "
-            f"{float(cfg.get('BREAKOUT_RETEST_TOLERANCE_ATR', 0.2) or 0.0):g} ATR."
-        )
     client = BinanceSpotClient(
         "",
         "",
-        cfg["LIVE_BASE_URL"],
+        get_base_url(PUMP_CONFIG),
         allow_signed=False,
-        rate_limit_state_file=cfg.get("RATE_LIMIT_STATE_FILE"),
-        rate_limit_limit=int(cfg.get("RATE_LIMIT_WEIGHT_LIMIT", 6000) or 6000),
-        rate_limit_safety_margin=int(cfg.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100),
+        rate_limit_state_file=PUMP_CONFIG.get("RATE_LIMIT_STATE_FILE"),
+        rate_limit_limit=int(
+            PUMP_CONFIG.get("RATE_LIMIT_WEIGHT_LIMIT", 6000) or 6000
+        ),
+        rate_limit_safety_margin=int(
+            PUMP_CONFIG.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100
+        ),
     )
-    end_ms = last_completed_candle_end_ms(interval)
-    start_ms = end_ms - (total_bars + 1) * strategy.interval_to_ms(interval)
-    klines = fetch_full_klines(client, args.symbol, interval, start_ms, end_ms)
-    print(f"Dapat {len(klines)} candle.")
 
-    if len(klines) < warmup + 50:
-        raise BacktestError(
-            f"Data terlalu sedikit ({len(klines)} candle) untuk backtest yang berarti."
-        )
-
-    btc_klines = None
-    if cfg.get("BTC_FILTER_ENABLED", False):
-        btc_symbol = "BTC" + str(cfg.get("QUOTE_ASSET", "USDT"))
-        try:
-            btc_klines = fetch_full_klines(
-                client, btc_symbol, interval, start_ms, end_ms
-            )
-            print(f"Dapat {len(btc_klines)} candle {btc_symbol} untuk filter BTC.")
-        except Exception as exc:
-            btc_klines = None
-            print(
-                f"PERINGATAN: candle {btc_symbol} gagal diambil ({exc}); filter BTC tidak diterapkan."
-            )
+    def cli_progress(p: float, msg: str):
+        print(f"\r[{int(p*100):>3}%] {msg:<50}", end="", flush=True)
 
     if args.grid:
         from backtesting.grid_search import (
             GridSearchError,
             cetak_tabel,
+            execute_grid_search,
             parse_spec_cli,
-            run_grid_search,
         )
 
         try:
             spec = parse_spec_cli(args.grid)
-        except GridSearchError as exc:
-            print(f"Spesifikasi grid tidak valid: {exc}")
-            raise SystemExit(2) from exc
-
-        jumlah = 1
-        for nilai in spec.values():
-            jumlah *= len(nilai) if isinstance(nilai, list) else 1
-        print(
-            f"\nGrid search: {len(spec)} parameter, sampai {jumlah:,} kombinasi mentah."
-        )
-        print("Data candle dipakai ulang, tidak ada request tambahan ke Binance.\n")
-
-        def _progress(p):
-            print(f"\r  kemajuan {p*100:5.1f}%", end="", flush=True)
-
-        try:
-            hasil = run_grid_search(
-                klines,
-                cfg,
-                spec,
-                warmup,
+            hasil = execute_grid_search(
+                client,
+                mode="single",
+                symbol=args.symbol,
+                days=args.days,
+                base_config=PUMP_CONFIG,
+                spec=spec,
+                base_overrides=overrides,
                 metrik=args.grid_metric,
                 rasio_latih=args.grid_train,
                 min_trades=args.grid_min_trades,
-                progress_cb=_progress,
-                btc_klines=btc_klines,
+                progress_cb=cli_progress,
             )
-        except GridSearchError as exc:
+        except (GridSearchError, BacktestError) as exc:
             print(f"\nGrid search gagal: {exc}")
             raise SystemExit(2) from exc
         print()
         cetak_tabel(hasil, top_n=args.grid_top)
         return
 
-    result = run_backtest(klines, cfg, warmup, btc_klines=btc_klines)
-    print_single_result(result)
+    try:
+        data = execute_backtest(
+            client, args.symbol, args.days, PUMP_CONFIG, overrides, cli_progress
+        )
+        print()
+        print_report(data)
+    except BacktestError as e:
+        print(f"\nGagal menjalankan backtest: {e}")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
