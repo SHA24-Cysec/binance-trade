@@ -137,7 +137,7 @@ class HtfKlineCache:
             raw = self._client.get_klines(
                 symbol,
                 self.interval(),
-                limit=min(strategy.TREND_KLINE_LIMIT, jendela + 1),
+                limit=min(strategy.TREND_KLINE_LIMIT, jendela + 2),
             )
             closed = [
                 k
@@ -148,7 +148,7 @@ class HtfKlineCache:
             self._simpan_kegagalan(symbol, str(exc), gagal=True, ttl=ttl_gagal)
             raise
 
-        siap = closed[-jendela:]
+        siap = closed[-(jendela + 1) :]
         if not siap:
             self._simpan_kegagalan(
                 symbol,
@@ -215,6 +215,8 @@ DEFAULT_STATE = {
     "entry_time": 0,
     "sl_price": 0.0,
     "tp_price": 0.0,
+    "be_active": False,
+    "be_stop_price": 0.0,
     "sl_pct": 0.0,
     "tp_pct": 0.0,
     "exit_source": "",
@@ -245,6 +247,7 @@ DEFAULT_STATE = {
     "reconciliation_required": False,
     "reconciliation_assets": [],
     "reconciliation_reason": "",
+    "dust_assets": [],
     "state_integrity_error": "",
 }
 
@@ -341,6 +344,7 @@ def load_pump_state(
     for key in (
         "sl_price",
         "tp_price",
+        "be_stop_price",
         "sl_pct",
         "tp_pct",
         "dd_stop_until",
@@ -713,6 +717,26 @@ def maybe_force_close_at_risk_limit(
         state["_limit_close_done"] = False
 
 
+def _ambang_dust(config: dict) -> float:
+    try:
+        nilai = float(config.get("DUST_VALUE_THRESHOLD_USDT", 1.0))
+    except (TypeError, ValueError):
+        return 1.0
+    if not math.isfinite(nilai) or nilai < 0.0:
+        return 1.0
+    return nilai
+
+
+def _nilai_aset(client, asset: str, quote: str, amount: float) -> "float | None":
+    try:
+        harga = float(client.get_price(f"{asset}{quote}"))
+    except Exception:
+        return None
+    if not math.isfinite(harga) or harga <= 0.0:
+        return None
+    return float(amount) * harga
+
+
 def reconcile_state_with_exchange(
     client: ExchangeClient,
     config: dict,
@@ -725,6 +749,7 @@ def reconcile_state_with_exchange(
     live = str(config.get("MODE", "PAPER")).upper() == "LIVE"
     issues: list[str] = []
     issue_assets: set[str] = set()
+    state["dust_assets"] = []
 
     def issue(reason: str, *assets: str) -> None:
         issues.append(reason)
@@ -975,18 +1000,48 @@ def reconcile_state_with_exchange(
     elif symbol or qty_state > 0:
         issue("POSITION_STATE_MALFORMED", str(symbol or ""))
     elif not state.get("pending_order"):
-        foreign = []
+        ambang_debu = _ambang_dust(config)
+        foreign: list[str] = []
+        dust: list[tuple[str, float, float]] = []
         for bal in account.get("balances", []):
             asset = str(bal.get("asset") or "")
             if not asset or asset in (quote, "BNB"):
                 continue
             amount = float(bal.get("free", 0.0)) + float(bal.get("locked", 0.0))
-            if amount > 0:
+            if amount <= 0:
+                continue
+            nilai = _nilai_aset(client, asset, quote, amount)
+            if nilai is not None and nilai <= ambang_debu:
+                dust.append((asset, amount, nilai))
+            else:
                 foreign.append(asset)
+        if dust:
+            state["dust_assets"] = [
+                {
+                    "asset": aset,
+                    "amount": jumlah,
+                    "value_quote": round(nilai, 8),
+                }
+                for aset, jumlah, nilai in dust
+            ]
+            logger.warning(
+                "Sisa debu di akun diabaikan karena di bawah ambang %.8g %s: %s. "
+                "Debu tidak memblokir entry. Ambang diatur lewat DUST_VALUE_THRESHOLD_USDT.",
+                ambang_debu,
+                quote,
+                ", ".join(
+                    f"{aset} {jumlah:.8g} (senilai {nilai:.6g} {quote})"
+                    for aset, jumlah, nilai in dust
+                ),
+            )
         if foreign:
             issue("UNMANAGED_BASE_ASSETS", *foreign)
             logger.critical(
-                "State kosong tetapi akun memiliki aset base tidak terkelola: %s.",
+                "State kosong tetapi akun memiliki aset base tidak terkelola di atas "
+                "ambang debu %.8g %s: %s. Entry baru diblokir sampai aset ini dijual "
+                "atau dikonversi.",
+                ambang_debu,
+                quote,
                 ", ".join(sorted(set(foreign))),
             )
 
@@ -1080,6 +1135,8 @@ def reset_position(state: dict) -> None:
     state["entry_time"] = 0
     state["sl_price"] = 0.0
     state["tp_price"] = 0.0
+    state["be_active"] = False
+    state["be_stop_price"] = 0.0
     state["sl_pct"] = 0.0
     state["tp_pct"] = 0.0
     state["exit_source"] = ""
@@ -2009,7 +2066,8 @@ def _protection_stop_price(
     if entry <= 0:
         return 0.0
     sl_px = float(state.get("sl_price") or 0.0)
-    if 0.0 < sl_px < entry:
+    be_aktif = bool(state.get("be_active"))
+    if 0.0 < sl_px < entry or (be_aktif and sl_px >= entry):
         level = sl_px
     else:
         sl_pct = abs(float(state.get("sl_pct") or 0.0))
@@ -4264,6 +4322,8 @@ def open_position(
     state["last_trade_time"] = state_mod.now_ms()
     state["sl_price"] = float(filled_levels.get("sl_price") or 0.0)
     state["tp_price"] = float(filled_levels.get("tp_price") or 0.0)
+    state["be_active"] = False
+    state["be_stop_price"] = 0.0
     state["sl_pct"] = filled_levels["sl_pct"]
     state["tp_pct"] = filled_levels["tp_pct"]
     state["exit_source"] = filled_levels["source"]
@@ -4785,6 +4845,35 @@ def manage_exit(
             reference_price=current_price,
         )
         return
+    be_params = strategy.confluence_breakeven_params(config)
+    if be_params["enabled"] and not state.get("be_active"):
+        pemicu = strategy.confluence_breakeven_trigger(
+            entry, sl_price, be_params["r_multiple"]
+        )
+        if pemicu > entry and current_price >= pemicu:
+            level_be = strategy.confluence_breakeven_price(
+                entry, sl_price, be_params["r_multiple"], be_params["lock_pct"]
+            )
+            symbol_be = str(state.get("current_symbol") or "")
+            filters_be = filters_cache.get(symbol_be)
+            if filters_be is not None:
+                level_be = float(filters_be.round_price(level_be))
+            if 0.0 < level_be < current_price:
+                state["be_active"] = True
+                state["be_stop_price"] = level_be
+                state["sl_price"] = level_be
+                state_mod.save_state(config["STATE_FILE"], state)
+                logger.info(
+                    "BREAKEVEN %s aktif: stop dipindah dari %.8f ke %.8f "
+                    "(pemicu %.2fxR di %.8f, harga sekarang %.8f).",
+                    symbol_be,
+                    sl_price,
+                    level_be,
+                    be_params["r_multiple"],
+                    pemicu,
+                    current_price,
+                )
+                sl_price = level_be
     if tp_price > 0.0 and current_price >= tp_price:
         close_position(
             client,

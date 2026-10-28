@@ -47,6 +47,7 @@ from trading.equity import (
     load_equity,
 )
 from trading import strategy_drawdown as strategy_dd
+from strategy import confluence_code as confluence
 from strategy import indicators as strategy
 from infrastructure.process.runtime_control import BotModeLock, BotAlreadyRunningError
 from market import coin_icons
@@ -714,10 +715,45 @@ def build_status():
                 PUMP_CONFIG.get("MAX_DRAWDOWN_PERCENT") or 0.0
             ),
         },
+        "breakeven": {
+            "enabled": bool(PUMP_CONFIG.get("CONFLUENCE_BREAKEVEN_ENABLED", True)),
+            "r_multiple": float(
+                PUMP_CONFIG.get("CONFLUENCE_BREAKEVEN_R_MULTIPLE", 1.0) or 0.0
+            ),
+            "lock_pct": float(
+                PUMP_CONFIG.get("CONFLUENCE_BREAKEVEN_LOCK_PCT", 0.0) or 0.0
+            ),
+            "active": bool(state.get("be_active")),
+            "stop_price": float(state.get("be_stop_price") or 0.0),
+            "trigger_price": strategy.confluence_breakeven_trigger(
+                float(state.get("entry_price") or 0.0),
+                float(state.get("sl_price") or 0.0),
+                float(
+                    PUMP_CONFIG.get("CONFLUENCE_BREAKEVEN_R_MULTIPLE", 1.0) or 0.0
+                ),
+            )
+            if state.get("current_symbol")
+            else 0.0,
+        },
+        "dust": {
+            "assets": list(state.get("dust_assets") or []),
+            "threshold_quote": float(
+                PUMP_CONFIG.get("DUST_VALUE_THRESHOLD_USDT", 1.0) or 0.0
+            ),
+            "total_value_quote": round(
+                sum(
+                    float(item.get("value_quote") or 0.0)
+                    for item in (state.get("dust_assets") or [])
+                    if isinstance(item, dict)
+                ),
+                8,
+            ),
+        },
         "flags": {
             "dd_stopped": bool(state.get("dd_stopped")),
             "state_integrity_error": str(state.get("state_integrity_error") or ""),
         },
+        "confluence": confluence_status(PUMP_CONFIG),
         "config": {
             "sl_pct": state.get("sl_pct") or None,
             "tp_pct": state.get("tp_pct") or None,
@@ -725,16 +761,181 @@ def build_status():
             "tp_price": state.get("tp_price") or None,
             "exit_source": state.get("exit_source") or "CONFLUENCE",
             "confluence_sl_buffer_pct": float(
-                PUMP_CONFIG.get("CONFLUENCE_SL_BUFFER_PCT", 0.20) or 0.0
+                PUMP_CONFIG.get(
+                    "CONFLUENCE_SL_BUFFER_PCT",
+                    confluence.CONFLUENCE_CODE_DEFAULTS["CONFLUENCE_SL_BUFFER_PCT"],
+                )
+                or 0.0
             ),
             "confluence_min_rr_ratio": float(
-                PUMP_CONFIG.get("CONFLUENCE_MIN_RR_RATIO", 1.2) or 1.2
+                PUMP_CONFIG.get(
+                    "CONFLUENCE_MIN_RR_RATIO",
+                    confluence.CONFLUENCE_CODE_DEFAULTS["CONFLUENCE_MIN_RR_RATIO"],
+                )
+                or confluence.CONFLUENCE_CODE_DEFAULTS["CONFLUENCE_MIN_RR_RATIO"]
             ),
             "max_hold_hours": float(
                 PUMP_CONFIG.get("MAX_HOLD_HOURS", 0.0) or 0.0
             ),
         },
     }
+
+
+def confluence_status(config: dict) -> dict:
+    try:
+        interval = strategy.confluence_structure_interval(config)
+        confirm_interval = strategy.confirm_interval(config)
+        single_timeframe = not strategy.confluence_uses_mtf(config)
+        lookback = strategy.confluence_structure_required_bars(config)
+        enabled = strategy.confluence_enabled(config)
+        config_error = ""
+    except (TypeError, ValueError) as exc:
+        interval = str(config.get("CONFLUENCE_STRUCTURE_INTERVAL", "") or "")
+        confirm_interval = str(config.get("CONFIRM_INTERVAL", "") or "")
+        single_timeframe = interval == confirm_interval
+        lookback = 0
+        enabled = False
+        config_error = str(exc)[:200]
+    komponen = {
+        "volume_profile": bool(config.get("VP_FILTER_ENABLED", True)),
+        "fibonacci": bool(config.get("FIB_FILTER_ENABLED", True)),
+        "liquidity": bool(config.get("LIQUIDITY_FILTER_ENABLED", True)),
+        "fvg": bool(config.get("FVG_FILTER_ENABLED", True)),
+        "order_block": bool(config.get("OB_FILTER_ENABLED", True)),
+    }
+    return {
+        "enabled": enabled,
+        "config_error": config_error,
+        "interval": interval,
+        "confirm_interval": confirm_interval,
+        "single_timeframe": single_timeframe,
+        "require_all_five": bool(config.get("CONFLUENCE_REQUIRE_ALL_FIVE", True)),
+        "min_score": float(
+            config.get(
+                "CONFLUENCE_MIN_SCORE",
+                confluence.CONFLUENCE_CODE_DEFAULTS["CONFLUENCE_MIN_SCORE"],
+            )
+            or 0.0
+        ),
+        "lookback_bars": lookback,
+        "min_impulse_pct": float(
+            config.get(
+                "CONFLUENCE_MIN_IMPULSE_PCT",
+                confluence.CONFLUENCE_CODE_DEFAULTS["CONFLUENCE_MIN_IMPULSE_PCT"],
+            )
+            or 0.0
+        ),
+        "fib_range": [
+            float(
+                config.get(
+                    "FIB_RETRACEMENT_MIN",
+                    confluence.CONFLUENCE_CODE_DEFAULTS["FIB_RETRACEMENT_MIN"],
+                )
+                or 0.0
+            ),
+            float(
+                config.get(
+                    "FIB_RETRACEMENT_MAX",
+                    confluence.CONFLUENCE_CODE_DEFAULTS["FIB_RETRACEMENT_MAX"],
+                )
+                or 0.0
+            ),
+        ],
+        "min_close_position": float(
+            config.get(
+                "CONFLUENCE_MIN_CLOSE_POSITION",
+                confluence.CONFLUENCE_CODE_DEFAULTS["CONFLUENCE_MIN_CLOSE_POSITION"],
+            )
+            or 0.0
+        ),
+        "min_rr_ratio": float(
+            config.get(
+                "CONFLUENCE_MIN_RR_RATIO",
+                confluence.CONFLUENCE_CODE_DEFAULTS["CONFLUENCE_MIN_RR_RATIO"],
+            )
+            or confluence.CONFLUENCE_CODE_DEFAULTS["CONFLUENCE_MIN_RR_RATIO"]
+        ),
+        "components": komponen,
+        "components_active": sum(1 for nilai in komponen.values() if nilai),
+    }
+
+
+def evaluate_confluence_symbol(symbol: str, config: dict) -> dict:
+    interval = strategy.confluence_structure_interval(config)
+    window = strategy.required_lookback_bars(config)
+    client = get_client()
+    mentah = client.get_klines(symbol, interval, limit=window + 3)
+    sekarang = int(state_mod.now_ms())
+    klines = [
+        k
+        for k in strategy.parse_klines(mentah or [])
+        if int(k.close_time) < sekarang
+    ]
+    if not klines:
+        raise RuntimeError(f"candle {interval} {symbol} tertutup tidak tersedia")
+    if len(klines) < window:
+        raise RuntimeError(
+            f"candle {interval} {symbol} tertutup kurang: {len(klines)} dari minimum {window}"
+        )
+    struktur = confluence.evaluate_confluence_zone(klines, config)
+    reaksi = confluence.evaluate_confluence_reaction(
+        klines, config, struktur
+    )
+    sinyal = klines[-1]
+    exit_info = strategy.compute_confluence_exit_levels(
+        float(sinyal.close),
+        config,
+        poi_low=struktur.get("poi_zone_low"),
+        ob_low=struktur.get("ob_zone_low"),
+        swing_low=struktur.get("swing_low"),
+        sweep_low=reaksi.get("sweep_low"),
+        bsl_level=struktur.get("bsl_level"),
+        swing_high=struktur.get("swing_high"),
+        fallback_allowed=False,
+    )
+    return {
+        "symbol": symbol,
+        "interval": interval,
+        "as_of": _fmt_ms(int(sinyal.close_time)),
+        "price": float(sinyal.close),
+        "zone": {
+            "ok": bool(struktur.get("ok")),
+            "stage": str(struktur.get("stage") or ""),
+            "reason": str(struktur.get("reason") or ""),
+            "score": float(struktur.get("score") or 0.0),
+            "checks": dict(struktur.get("checks") or {}),
+            "levels": dict(struktur.get("zones") or {}),
+            "impulse_pct": struktur.get("impulse_pct"),
+            "ssl_level": struktur.get("ssl_level"),
+            "bsl_level": struktur.get("bsl_level"),
+            "poc": struktur.get("vp_poc_price"),
+        },
+        "trigger": {
+            "ok": bool(reaksi.get("ok")),
+            "stage": str(reaksi.get("stage") or ""),
+            "reason": str(reaksi.get("reason") or ""),
+            "touched": bool(reaksi.get("touched")),
+            "swept": bool(reaksi.get("swept")),
+            "close_position": reaksi.get("close_position"),
+            "sweep_low": reaksi.get("sweep_low"),
+        },
+        "exit": {
+            "ok": bool(exit_info.get("ok")),
+            "sl_price": exit_info.get("sl_price"),
+            "tp_price": exit_info.get("tp_price"),
+            "sl_pct": exit_info.get("sl_pct"),
+            "tp_pct": exit_info.get("tp_pct"),
+            "rr_ratio": exit_info.get("rr_ratio"),
+            "reason": exit_info.get("reason"),
+        },
+        "config": confluence_status(config),
+    }
+
+
+def _fmt_ms(timestamp_ms: int) -> str:
+    return datetime.fromtimestamp(
+        int(timestamp_ms) / 1000.0, tz=timezone.utc
+    ).strftime("%Y-%m-%d %H:%M UTC")
 
 
 def build_trade_summary(trades):
@@ -806,7 +1007,10 @@ BT_PARAM_KEYS = (
     "CONFLUENCE_STRUCTURE_INTERVAL",
     "CONFLUENCE_LOOKBACK_BARS",
     "CONFLUENCE_MIN_IMPULSE_PCT",
+    "CONFLUENCE_IMPULSE_SELECTION",
     "CONFLUENCE_ZONE_TOLERANCE_RATIO",
+    "CONFLUENCE_REQUIRE_ALL_FIVE",
+    "CONFLUENCE_MIN_SCORE",
     "VP_FILTER_ENABLED",
     "VP_BINS",
     "VP_HVN_TOP_RATIO",
@@ -814,11 +1018,15 @@ BT_PARAM_KEYS = (
     "FIB_RETRACEMENT_MIN",
     "FIB_RETRACEMENT_MAX",
     "LIQUIDITY_FILTER_ENABLED",
+    "LIQUIDITY_EQUAL_LEVEL_TOL_RATIO",
     "LIQUIDITY_SWEEP_LOOKBACK_BARS",
     "FVG_FILTER_ENABLED",
     "OB_FILTER_ENABLED",
     "CONFLUENCE_REQUIRE_BULLISH_REACTION",
     "CONFLUENCE_MIN_CLOSE_POSITION",
+    "CONFLUENCE_BREAKEVEN_ENABLED",
+    "CONFLUENCE_BREAKEVEN_R_MULTIPLE",
+    "CONFLUENCE_BREAKEVEN_LOCK_PCT",
 )
 
 GRID_PARAM_KEYS = tuple(
@@ -1254,6 +1462,8 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "reason": t.reason,
                 "hold_minutes": t.hold_minutes,
                 "pnl_pct": t.pnl_pct,
+                "gross_pnl_pct": getattr(t, "gross_pnl_pct", 0.0),
+                "fee_pct": getattr(t, "fee_pct", 0.0),
                 "rank_at_entry": t.rank_at_entry,
             }
             for t in result.trades
@@ -1293,7 +1503,13 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "interval": strategy.confluence_structure_interval(cfg),
                 "lookback_bars": int(cfg.get("CONFLUENCE_LOOKBACK_BARS", 60) or 60),
                 "min_impulse_pct": float(
-                    cfg.get("CONFLUENCE_MIN_IMPULSE_PCT", 1.2) or 1.2
+                    cfg.get(
+                        "CONFLUENCE_MIN_IMPULSE_PCT",
+                        confluence.CONFLUENCE_CODE_DEFAULTS[
+                            "CONFLUENCE_MIN_IMPULSE_PCT"
+                        ],
+                    )
+                    or confluence.CONFLUENCE_CODE_DEFAULTS["CONFLUENCE_MIN_IMPULSE_PCT"]
                 ),
                 "zone_tolerance_ratio": float(
                     cfg.get("CONFLUENCE_ZONE_TOLERANCE_RATIO", 0.06) or 0.06
@@ -1676,6 +1892,28 @@ def _bt_peringatan_timing(cfg: dict, days: int) -> list:
     ]
 
 
+def _tolak_kunci_tak_dikenal(data: dict, diizinkan: set) -> "tuple | None":
+    if not isinstance(data, dict):
+        return jsonify({"error": "Body JSON harus berupa object."}), 400
+    asing = sorted(str(k) for k in data if k not in diizinkan)
+    if not asing:
+        return None
+    return (
+        jsonify(
+            {
+                "error": (
+                    "Kunci tidak dikenal pada body request: "
+                    + ", ".join(asing)
+                    + ". Parameter backtest harus dikirim sebagai kunci tingkat atas, "
+                    "bukan di dalam objek lain. Kunci yang diterima: "
+                    + ", ".join(sorted(diizinkan))
+                )
+            }
+        ),
+        400,
+    )
+
+
 @app.route("/api/backtest/start", methods=["POST"])
 def api_backtest_start():
     blocked = _reject_if_backtest_disabled()
@@ -1683,6 +1921,11 @@ def api_backtest_start():
         return blocked
     _bt_cleanup_old_jobs()
     data = request.get_json(force=True, silent=True) or {}
+    ditolak = _tolak_kunci_tak_dikenal(
+        data, {"days", "max_symbols", *BT_PARAM_KEYS}
+    )
+    if ditolak is not None:
+        return ditolak
 
     try:
         days = int(data.get("days", 30))
@@ -1797,6 +2040,20 @@ def api_backtest_grid_start():
         return blocked
     _bt_cleanup_old_jobs()
     data = request.get_json(force=True, silent=True) or {}
+    ditolak = _tolak_kunci_tak_dikenal(
+        data,
+        {
+            "days",
+            "max_symbols",
+            "spec",
+            "rasio_latih",
+            "metrik",
+            "min_trades",
+            *BT_PARAM_KEYS,
+        },
+    )
+    if ditolak is not None:
+        return ditolak
 
     try:
         days = int(data.get("days", 30))
@@ -2124,6 +2381,17 @@ def index():
 @app.route("/api/status")
 def api_status():
     return jsonify(build_status())
+
+
+@app.route("/api/confluence")
+def api_confluence():
+    symbol = str(request.args.get("symbol", "") or "").strip().upper()
+    if not symbol or not re.match(r"^[A-Z0-9]{2,30}$", symbol):
+        return jsonify({"error": "symbol tidak valid"}), 400
+    try:
+        return jsonify(evaluate_confluence_symbol(symbol, PUMP_CONFIG))
+    except Exception as exc:
+        return jsonify({"error": str(exc)[:200]}), 502
 
 
 @app.route("/api/coin-icon/<symbol>")

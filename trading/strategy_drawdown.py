@@ -158,10 +158,16 @@ def load_period(config):
         period = strict_json(period_path(config).read_bytes())
     except FileNotFoundError:
         if read_receipt(config) is not None:
-            raise DrawdownError("Metadata periode hilang setelah inisialisasi. Pulihkan backup, bukan membuat periode otomatis baru.")
+            raise DrawdownError(
+                "Metadata periode hilang setelah inisialisasi. Pulihkan backup, "
+                "bukan membuat periode otomatis baru."
+            ) from None
         history = Path(str(period_path(config)) + ".history")
         if history.exists() and any(history.iterdir()):
-            raise DrawdownError("Metadata periode hilang tetapi arsip lama masih ada. Pulihkan periode yang benar.")
+            raise DrawdownError(
+                "Metadata periode hilang tetapi arsip lama masih ada. "
+                "Pulihkan periode yang benar."
+            ) from None
         return None
     except OSError as exc:
         raise DrawdownError("Periode strategi tidak dapat dibaca.") from exc

@@ -25,6 +25,8 @@ def config_dasar(cap_jam: float | None = CAP_CONTOH, ekor: str = "datar") -> dic
             "MODE": "PAPER",
             "CONFIG_UPDATE_MODE": "test",
             "CONFLUENCE_FILTER_ENABLED": False,
+            "CONFIRM_INTERVAL": "5m",
+            "CONFLUENCE_STRUCTURE_INTERVAL": "5m",
             "BTC_FILTER_ENABLED": False,
             "MIN_QUOTE_VOLUME_USDT_24H": 0.0,
             "CONFLUENCE_SL_BUFFER_PCT": 0.20,
@@ -355,10 +357,7 @@ def cek_integrasi_parameter() -> str:
 
 def cek_exit_struktural_confluence() -> str:
     from config.settings_schema import PARAMETER_SCHEMA, REMOVED_PARAMETERS
-    from backtesting.entry_selftest import (
-        _build_confluence_m15_series,
-        _build_confluence_m5_trigger_series,
-    )
+    from backtesting.confluence_fixture import build_one_zone_series
     from market.market_scanner import detect_entry_setup
 
     kunci_exit_lama = (
@@ -393,10 +392,10 @@ def cek_exit_struktural_confluence() -> str:
         assert k_baru in bt.OVERRIDE_CASTERS, f"{k_baru} hilang dari OVERRIDE_CASTERS"
 
     cfg = deepcopy(PUMP_CONFIG)
-    m15 = _build_confluence_m15_series()
-    m5 = _build_confluence_m5_trigger_series()
-    struktur = strategy.evaluate_confluence_structure(m15, cfg)
-    setup = detect_entry_setup(m5, cfg, structure_verdict=struktur)
+    cfg["CONFLUENCE_LOOKBACK_BARS"] = 40
+    rangkaian = build_one_zone_series()
+    struktur = strategy.evaluate_confluence_structure(rangkaian[:-1], cfg)
+    setup = detect_entry_setup(rangkaian, cfg, structure_verdict=struktur)
     assert setup.ok, f"setup Confluence harus lolos: {setup.reason}"
     assert setup.sl_price is not None and setup.tp_price is not None
     assert abs(setup.tp_price - float(struktur["bsl_level"])) < 1e-9, (
@@ -407,7 +406,7 @@ def cek_exit_struktural_confluence() -> str:
 
     cfg_rr_ketat = deepcopy(cfg)
     cfg_rr_ketat["CONFLUENCE_MIN_RR_RATIO"] = 5.0
-    setup_tolak = detect_entry_setup(m5, cfg_rr_ketat, structure_verdict=struktur)
+    setup_tolak = detect_entry_setup(rangkaian, cfg_rr_ketat, structure_verdict=struktur)
     assert not setup_tolak.ok and "R:R" in setup_tolak.reason, (
         f"setup dengan R:R di bawah CONFLUENCE_MIN_RR_RATIO harus ditolak: {setup_tolak.reason}"
     )

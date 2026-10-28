@@ -210,7 +210,7 @@ class ConfluenceStructureLookup:
         if idx < 0:
             return scanner.confluence_structure_verdict([], self.config)
         if idx not in self._verdict_cache:
-            start = max(0, idx - self.window + 1)
+            start = max(0, idx - self.window)
             window_slice = self.klines[start : idx + 1]
             self._verdict_cache[idx] = scanner.confluence_structure_verdict(
                 window_slice, self.config
@@ -228,7 +228,12 @@ def make_structure_lookup(
     if not strategy.confluence_enabled(config):
         return None
     if not klines:
-        return ConfluenceStructureLookup([], config, "15m", confirm_interval)
+        return ConfluenceStructureLookup(
+            [],
+            config,
+            strategy.confluence_structure_interval(config),
+            confirm_interval,
+        )
     target_interval = strategy.confluence_structure_interval(config)
     src_interval = str(
         confirm_interval or config.get("CONFIRM_INTERVAL", "5m")
@@ -397,6 +402,7 @@ class PositionState:
         self.be_activated = False
         self.trailing_activated = False
         self.trailing_stop_price = 0.0
+        self.initial_sl_price = sl_price
         self.levels = {
             "src": src,
             "use_atr": False,
@@ -431,6 +437,20 @@ def evaluate_candle_exit(
 
     if candle.low <= sl_price:
         return "STOP_LOSS", min(sl_price, candle.open)
+    be_params = strategy.confluence_breakeven_params(config)
+    if be_params["enabled"] and not pos.be_active:
+        pemicu = strategy.confluence_breakeven_trigger(
+            entry, pos.initial_sl_price, be_params["r_multiple"]
+        )
+        if pemicu > entry and candle.high >= pemicu:
+            pos.be_stop = strategy.confluence_breakeven_price(
+                entry, pos.initial_sl_price, be_params["r_multiple"], be_params["lock_pct"]
+            )
+            pos.be_active = True
+            pos.be_activated = True
+            pos.sl_price = pos.be_stop
+            pos.levels["sl_price"] = pos.be_stop
+            sl_price = pos.be_stop
     if candle.high >= tp_price:
         return "TAKE_PROFIT", max(tp_price, candle.open)
     if strategy.time_stop_due(pos.entry_time, candle.close_time, cap_ms, bar_ms):

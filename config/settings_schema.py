@@ -555,7 +555,7 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "CONFIRM_INTERVAL": _field(
         "Scan",
         "Interval konfirmasi",
-        "Interval candle konfirmasi untuk pemicu eksekusi entry M5. CONFLUENCE_STRUCTURE_INTERVAL wajib kelipatan bulat dari nilai ini dan tidak boleh lebih pendek agar candle struktur POI dapat dirangkai tanpa look-ahead.",
+        "Interval candle sinyal untuk pemicu eksekusi entry. Samakan dengan CONFLUENCE_STRUCTURE_INTERVAL untuk mode single timeframe, atau pakai interval lebih pendek untuk mode multi timeframe. CONFLUENCE_STRUCTURE_INTERVAL wajib kelipatan bulat dari nilai ini dan tidak boleh lebih pendek agar candle struktur POI dapat dirangkai tanpa look-ahead.",
         "str",
         editor="select",
         options=[
@@ -753,6 +753,39 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         unit="%",
         dangerous=True,
     ),
+    "DUST_VALUE_THRESHOLD_USDT": _field(
+        "Sistem",
+        "Ambang debu aset",
+        "Nilai aset non-quote yang dianggap debu dan tidak memblokir entry. Aset di atas ambang ini dianggap posisi tidak terkelola dan memblokir entry sampai dijual atau dikonversi.",
+        "float",
+        minimum=0.0,
+        maximum=100.0,
+        unit="USDT",
+    ),
+    "CONFLUENCE_BREAKEVEN_ENABLED": _field(
+        "Confluence Code",
+        "Aktifkan breakeven",
+        "Pindahkan stop loss ke harga entry setelah harga bergerak naik sejauh kelipatan risiko tertentu. Tidak ada penjualan sebagian, jadi cocok untuk modal kecil yang tidak memenuhi minimum order bursa.",
+        "bool",
+    ),
+    "CONFLUENCE_BREAKEVEN_R_MULTIPLE": _field(
+        "Confluence Code",
+        "Pemicu breakeven",
+        "Jarak pemicu dihitung dari jarak stop loss awal. 1,0 berarti stop baru dipindah setelah harga naik sejauh satu kali risiko.",
+        "float",
+        minimum=0.1,
+        maximum=10.0,
+        unit="R",
+    ),
+    "CONFLUENCE_BREAKEVEN_LOCK_PCT": _field(
+        "Confluence Code",
+        "Kunci profit breakeven",
+        "Tambahan persen di atas harga entry sebagai posisi stop setelah breakeven aktif. 0 berarti stop tepat di harga entry.",
+        "float",
+        minimum=0.0,
+        maximum=5.0,
+        unit="persen",
+    ),
     "TOP_N_CANDIDATES_TO_CONFIRM": _field(
         "Scan",
         "Jumlah kandidat konfirmasi",
@@ -770,7 +803,7 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "CONFLUENCE_STRUCTURE_INTERVAL": _field(
         "Confluence Code",
         "Interval struktur POI Confluence",
-        "Timeframe candle tertutup untuk memetakan struktur impuls BoS, Volume Profile, Fibonacci, FVG, dan Order Block (default 15m).",
+        "Timeframe candle tertutup untuk memetakan struktur impuls BoS, Volume Profile, Fibonacci, Liquidity, FVG, dan Order Block (default 4h, samakan dengan CONFIRM_INTERVAL untuk single timeframe).",
         "str",
         editor="select",
         options=[
@@ -791,9 +824,9 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "CONFLUENCE_LOOKBACK_BARS": _field(
         "Confluence Code",
         "Lookback struktur Confluence",
-        "Jumlah candle tertutup yang dianalisis untuk mencari struktur impuls BoS dan zona POI.",
+        "Jumlah candle tertutup yang dianalisis untuk mencari struktur impuls BoS dan zona POI. Mesin memakai tepat sebanyak ini candle terakhir, minimal 20.",
         "int",
-        minimum=15,
+        minimum=20,
         maximum=500,
         unit="candle",
     ),
@@ -806,6 +839,14 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         maximum=100.0,
         unit="%",
     ),
+    "CONFLUENCE_IMPULSE_SELECTION": _field(
+        "Confluence Code",
+        "Cara memilih impuls",
+        "STRONGEST memakai leg dengan impuls terbesar dalam jendela dan menjadi bawaan karena hasil uji terbaik. RECENT memakai leg terbaru yang sah, sehingga zona lebih dekat ke harga sekarang, tetapi pada data 15m hasilnya lebih sering kena sapuan.",
+        "str",
+        editor="select",
+        options=["STRONGEST", "RECENT"],
+    ),
     "CONFLUENCE_ZONE_TOLERANCE_RATIO": _field(
         "Confluence Code",
         "Toleransi klaster POI",
@@ -814,6 +855,21 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         minimum=0.0,
         maximum=0.50,
         unit="rasio",
+    ),
+    "CONFLUENCE_REQUIRE_ALL_FIVE": _field(
+        "Confluence Code",
+        "Wajibkan 5 dari 5 konfluensi",
+        "Jika aktif, entry hanya diambil ketika Volume Profile, Fibonacci, Liquidity, FVG, dan Order Block semuanya bertemu di satu zona harga yang sama.",
+        "bool",
+    ),
+    "CONFLUENCE_MIN_SCORE": _field(
+        "Confluence Code",
+        "Skor konfluensi minimum",
+        "Ambang skor 0 sampai 100 untuk kekuatan pertemuan zona. Skor turun saat zona hanya berdekatan, bukan beririsan penuh.",
+        "float",
+        minimum=0.0,
+        maximum=100.0,
+        unit="poin",
     ),
     "VP_FILTER_ENABLED": _field(
         "Confluence Code",
@@ -869,6 +925,15 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         "Wajibkan terbentuk Buy-Side Liquidity (BSL) di puncak impuls serta Sell-Side Liquidity (SSL) internal yang tersapu menuju zona POI.",
         "bool",
     ),
+    "LIQUIDITY_EQUAL_LEVEL_TOL_RATIO": _field(
+        "Confluence Code",
+        "Toleransi level likuiditas sejajar",
+        "Jarak maksimum antar low atau high yang dianggap sejajar, dihitung sebagai rasio dari panjang impuls, untuk membentuk pool likuiditas.",
+        "float",
+        minimum=0.01,
+        maximum=0.50,
+        unit="rasio",
+    ),
     "LIQUIDITY_SWEEP_LOOKBACK_BARS": _field(
         "Confluence Code",
         "Lookback sapuan likuiditas",
@@ -899,10 +964,10 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "CONFLUENCE_MIN_CLOSE_POSITION": _field(
         "Confluence Code",
         "Posisi close reaksi minimum",
-        "Posisi penutupan minimum di dalam rentang high-low candle pemicu (0.55 = menutup di 45% bagian atas).",
+        "Posisi penutupan minimum di dalam rentang high-low candle pemicu (0.60 = menutup di 40% bagian atas candle).",
         "float",
-        minimum=0.0,
-        maximum=1.0,
+        minimum=0.1,
+        maximum=0.95,
         unit="rasio",
     ),
     "USE_RISK_PERCENT": _field(
@@ -1182,6 +1247,10 @@ REMOVED_PARAMETERS = frozenset(
         "USE_TRAILING",
         "TRAILING_START_PCT",
         "TRAILING_STEP_PCT",
+        "CONFLUENCE_PARTIAL_TP_ENABLED",
+        "CONFLUENCE_PARTIAL_TP_FRACTION",
+        "CONFLUENCE_PARTIAL_TP_R_MULTIPLE",
+        "CONFLUENCE_PARTIAL_TP_BREAKEVEN",
     }
 )
 
@@ -1219,6 +1288,68 @@ def _migrate_legacy_keys(payload: dict) -> dict:
     return hasil
 
 
+_CONFLUENCE_V2_PASANGAN_LAMA = ("5m", "15m")
+_CONFLUENCE_V3_PASANGAN_LAMA = ("4h", "4h")
+
+_CONFLUENCE_V2_NILAI_LAMA = {
+    "CONFLUENCE_LOOKBACK_BARS": (60, 120),
+    "CONFLUENCE_MIN_IMPULSE_PCT": (0.8, 2.0),
+    "VP_BINS": (15, 24),
+    "VP_HVN_TOP_RATIO": (0.25, 0.30),
+    "FIB_RETRACEMENT_MIN": (0.40, 0.50),
+    "FIB_RETRACEMENT_MAX": (0.786, 0.79),
+    "CONFLUENCE_MIN_CLOSE_POSITION": (0.50, 0.60),
+    "CONFLUENCE_SL_BUFFER_PCT": (0.20, 0.50),
+    "CONFLUENCE_MIN_RR_RATIO": (1.2, 1.5),
+}
+
+
+def _sama_dengan(nilai: Any, target: float) -> bool:
+    try:
+        return abs(float(nilai) - float(target)) <= 1e-9
+    except (TypeError, ValueError):
+        return False
+
+
+def _migrate_confluence_v2(payload: dict) -> tuple[dict, bool]:
+    hasil = dict(payload)
+    konfirmasi = str(hasil.get("CONFIRM_INTERVAL", "")).strip().lower()
+    struktur = str(hasil.get("CONFLUENCE_STRUCTURE_INTERVAL", "")).strip().lower()
+    if (konfirmasi, struktur) != _CONFLUENCE_V2_PASANGAN_LAMA:
+        return hasil, False
+    for kunci, (lama, _baru) in _CONFLUENCE_V2_NILAI_LAMA.items():
+        if kunci in hasil and not _sama_dengan(hasil.get(kunci), lama):
+            return hasil, False
+    hasil["CONFIRM_INTERVAL"] = "4h"
+    hasil["CONFLUENCE_STRUCTURE_INTERVAL"] = "4h"
+    for kunci, (lama, baru) in _CONFLUENCE_V2_NILAI_LAMA.items():
+        if kunci in hasil and _sama_dengan(hasil.get(kunci), lama):
+            hasil[kunci] = baru
+    return hasil, True
+
+
+def _migrate_confluence_scalping(payload: dict) -> tuple[dict, bool]:
+    hasil = dict(payload)
+    konfirmasi = str(hasil.get("CONFIRM_INTERVAL", "")).strip().lower()
+    struktur = str(hasil.get("CONFLUENCE_STRUCTURE_INTERVAL", "")).strip().lower()
+    if (konfirmasi, struktur) != _CONFLUENCE_V3_PASANGAN_LAMA:
+        return hasil, False
+    for kunci, (_lama, baru) in _CONFLUENCE_V2_NILAI_LAMA.items():
+        if kunci in hasil and not _sama_dengan(hasil.get(kunci), baru):
+            return hasil, False
+    if "CONFLUENCE_LOOKBACK_BARS" in hasil and not _sama_dengan(
+        hasil.get("CONFLUENCE_LOOKBACK_BARS"), 120
+    ):
+        return hasil, False
+    if "CONFIRM_LOOKBACK_BARS" in hasil and not _sama_dengan(
+        hasil.get("CONFIRM_LOOKBACK_BARS"), 121
+    ):
+        return hasil, False
+    hasil["CONFIRM_INTERVAL"] = "15m"
+    hasil["CONFLUENCE_STRUCTURE_INTERVAL"] = "15m"
+    return hasil, True
+
+
 def _validate_override_payload(payload: dict) -> None:
     unknown = sorted(set(payload) - set(PARAMETER_SCHEMA))
     if unknown:
@@ -1239,6 +1370,9 @@ def load_mode_override(mode: str) -> tuple[dict, list[str]]:
         if payload is None:
             return {}, errors
         payload = _migrate_legacy_keys(payload)
+        payload, migrated_v2 = _migrate_confluence_v2(payload)
+        payload, migrated_v3 = _migrate_confluence_scalping(payload)
+        migrated = migrated_v2 or migrated_v3
         try:
             _validate_override_payload(payload)
         except ValueError as exc:
@@ -1246,6 +1380,12 @@ def load_mode_override(mode: str) -> tuple[dict, list[str]]:
             message = f"Override {raw_mode} rusak: {exc}. Cadangan: {backup}"
             _error_marker(SETTINGS_ERROR_FILE, message, backup)
             return {}, errors + [message]
+        if migrated:
+            doc.setdefault("overrides", {})[raw_mode] = dict(payload)
+            try:
+                atomic_write_json(SETTINGS_FILE, doc)
+            except (OSError, TypeError, ValueError):
+                pass
         return dict(payload), errors
 
 
@@ -1395,6 +1535,20 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
     cek_confluence = mode_aware is False or confluence_aktif
 
     if cek_confluence:
+        if _flag_untuk_relasi(cfg, "CONFLUENCE_REQUIRE_ALL_FIVE", True):
+            for kunci_lima in (
+                "VP_FILTER_ENABLED",
+                "FIB_FILTER_ENABLED",
+                "LIQUIDITY_FILTER_ENABLED",
+                "FVG_FILTER_ENABLED",
+                "OB_FILTER_ENABLED",
+            ):
+                if not _flag_untuk_relasi(cfg, kunci_lima, True):
+                    keluar.setdefault(
+                        kunci_lima,
+                        "wajib aktif karena CONFLUENCE_REQUIRE_ALL_FIVE menuntut "
+                        "kelima konfluensi",
+                    )
         fib_pair = pasangan("FIB_RETRACEMENT_MIN", "FIB_RETRACEMENT_MAX")
         if fib_pair is not None and fib_pair[0] >= fib_pair[1]:
             keluar["FIB_RETRACEMENT_MIN"] = (
@@ -1483,6 +1637,28 @@ def validate_candidate(
             relation(kunci_relasi, False, pesan_relasi)
 
         if cleaned.get("CONFLUENCE_FILTER_ENABLED"):
+            wajib_semua = _flag_untuk_relasi(
+                cleaned, "CONFLUENCE_REQUIRE_ALL_FIVE", True
+            )
+            if wajib_semua:
+                mati = [
+                    k
+                    for k in (
+                        "VP_FILTER_ENABLED",
+                        "FIB_FILTER_ENABLED",
+                        "LIQUIDITY_FILTER_ENABLED",
+                        "FVG_FILTER_ENABLED",
+                        "OB_FILTER_ENABLED",
+                    )
+                    if not _flag_untuk_relasi(cleaned, k, True)
+                ]
+                if mati:
+                    relation(
+                        mati[0],
+                        False,
+                        "wajib aktif karena CONFLUENCE_REQUIRE_ALL_FIVE menuntut "
+                        "kelima konfluensi",
+                    )
             active_components = [
                 k
                 for k in (

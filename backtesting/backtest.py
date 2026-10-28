@@ -676,7 +676,10 @@ OVERRIDE_CASTERS = {
     "CONFLUENCE_STRUCTURE_INTERVAL": str,
     "CONFLUENCE_LOOKBACK_BARS": int,
     "CONFLUENCE_MIN_IMPULSE_PCT": float,
+    "CONFLUENCE_IMPULSE_SELECTION": str,
     "CONFLUENCE_ZONE_TOLERANCE_RATIO": float,
+    "CONFLUENCE_REQUIRE_ALL_FIVE": _cast_bool,
+    "CONFLUENCE_MIN_SCORE": float,
     "VP_FILTER_ENABLED": _cast_bool,
     "VP_BINS": int,
     "VP_HVN_TOP_RATIO": float,
@@ -684,6 +687,7 @@ OVERRIDE_CASTERS = {
     "FIB_RETRACEMENT_MIN": float,
     "FIB_RETRACEMENT_MAX": float,
     "LIQUIDITY_FILTER_ENABLED": _cast_bool,
+    "LIQUIDITY_EQUAL_LEVEL_TOL_RATIO": float,
     "LIQUIDITY_SWEEP_LOOKBACK_BARS": int,
     "FVG_FILTER_ENABLED": _cast_bool,
     "OB_FILTER_ENABLED": _cast_bool,
@@ -691,6 +695,9 @@ OVERRIDE_CASTERS = {
     "CONFLUENCE_MIN_CLOSE_POSITION": float,
     "CONFLUENCE_SL_BUFFER_PCT": float,
     "CONFLUENCE_MIN_RR_RATIO": float,
+    "CONFLUENCE_BREAKEVEN_ENABLED": _cast_bool,
+    "CONFLUENCE_BREAKEVEN_R_MULTIPLE": float,
+    "CONFLUENCE_BREAKEVEN_LOCK_PCT": float,
     "MAX_HOLD_HOURS": float,
     "TAKER_FEE_PCT": float,
     "USE_BNB_FEE_DISCOUNT": _cast_bool,
@@ -768,6 +775,13 @@ def validate_params(config: dict) -> None:
             raise BacktestError(
                 f"Parameter '{key}'={val} di luar rentang wajar ({lo:g}..{hi:g})."
             )
+
+    pilihan_impuls = str(config.get("CONFLUENCE_IMPULSE_SELECTION") or "").strip().upper()
+    if pilihan_impuls not in ("STRONGEST", "RECENT"):
+        raise BacktestError(
+            "Parameter 'CONFLUENCE_IMPULSE_SELECTION' hanya menerima STRONGEST atau "
+            f"RECENT, bukan '{config.get('CONFLUENCE_IMPULSE_SELECTION')}'."
+        )
 
     interval = config.get("CONFIRM_INTERVAL", "5m")
     if interval not in INTERVAL_MINUTES:
@@ -1308,7 +1322,7 @@ def main():
         print_report(data)
     except BacktestError as e:
         print(f"\nGagal menjalankan backtest: {e}")
-        raise SystemExit(1)
+        raise SystemExit(1) from e
 
 
 if __name__ == "__main__":

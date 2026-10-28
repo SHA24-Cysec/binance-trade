@@ -54,6 +54,7 @@ VALID_DEPTH_LIMITS = (100, 500, 1000)
 class SetupResult:
     ok: bool
     reason: str
+    stage: str = ""
     signal_close: Optional[float] = None
     signal_close_time: Optional[int] = None
     atr_value: Optional[float] = None
@@ -138,10 +139,14 @@ class ScanDiagnostics:
         interval = str(config.get("CONFIRM_INTERVAL", "5m"))
         struct_interval = strategy.confluence_structure_interval(config)
         labels = {
-            "CONFLUENCE_STRUCTURE": f"struktur POI Confluence {struct_interval}",
+            "CONFLUENCE_STRUCTURE": (
+                f"struktur satu zona Confluence {struct_interval}"
+            ),
             "CANDLE_CONFIRM": f"candle {interval} gagal diambil",
             "HISTORY_CONFIRM": f"riwayat {interval} kurang",
-            "CONFLUENCE_TRIGGER": f"pemicu likuiditas/reaksi Confluence {interval}",
+            "CONFLUENCE_TRIGGER": (
+                f"pemicu likuiditas/reaksi Confluence {interval}"
+            ),
             "SETUP_CONFIRM": f"konfirmasi {interval}",
         }
         candle = "belum tersedia"
@@ -164,10 +169,11 @@ class ScanDiagnostics:
                 f"Status gerbang The Confluence Code ({struct_interval} -> {interval}): "
                 "AKTIF; hanya candle tertutup yang dipakai dan kegagalan data menolak entry.",
             )
-        for stage, label in labels.items():
+        for stage in sorted(self.rejection_counts):
             count = self.rejection_counts.get(stage, 0)
             if not count:
                 continue
+            label = labels.get(stage, f"tahap {stage}")
             symbol, reason = self.examples.get(stage, ("-", "alasan tidak tersedia"))
             lines.append(
                 f"Penolakan {label}: {count} kandidat; contoh {symbol}: {reason}"
@@ -574,11 +580,12 @@ def detect_entry_setup(
     if len(klines) < required:
         return SetupResult(
             ok=False,
+            stage="HISTORY_CONFIRM",
             reason=f"data candle kurang: {len(klines)} dari minimum {required}",
         )
     closes = [float(k.close) for k in klines]
     if any(x <= 0 or not math.isfinite(x) for x in closes):
-        return SetupResult(ok=False, reason="close candle tidak valid")
+        return SetupResult(ok=False, stage="CANDLE_CONFIRM", reason="close candle tidak valid")
 
     last_bar = klines[-1]
     atr_value = strategy.atr(klines, 14)
@@ -593,6 +600,7 @@ def detect_entry_setup(
         )
         return SetupResult(
             ok=True,
+            stage="DISABLED",
             reason="filter Confluence Code nonaktif (entry langsung dari gerbang pasar)",
             signal_close=float(last_bar.close),
             signal_close_time=int(last_bar.close_time),
@@ -609,6 +617,7 @@ def detect_entry_setup(
         if not structure_verdict.get("ok", False):
             return SetupResult(
                 ok=False,
+                stage=str(structure_verdict.get("stage") or "CONFLUENCE_STRUCTURE"),
                 reason=str(
                     structure_verdict.get("reason")
                     or "struktur Confluence ditolak"
@@ -655,6 +664,7 @@ def detect_entry_setup(
 
     return SetupResult(
         ok=bool(verdict.get("ok", False)),
+        stage=str(verdict.get("stage") or "CONFLUENCE_TRIGGER"),
         reason=str(verdict.get("reason") or ""),
         signal_close=float(last_bar.close),
         signal_close_time=int(last_bar.close_time),
@@ -683,6 +693,38 @@ def detect_entry_setup(
         tp_pct=verdict.get("tp_pct"),
         rr_ratio=verdict.get("rr_ratio"),
     )
+
+
+STAGE_GROUPS = {
+    "STRUCTURE": "CONFLUENCE_STRUCTURE",
+    "CONFLUENCE_STRUCTURE": "CONFLUENCE_STRUCTURE",
+    "VOLUME_PROFILE": "CONFLUENCE_STRUCTURE",
+    "FIBONACCI": "CONFLUENCE_STRUCTURE",
+    "LIQUIDITY": "CONFLUENCE_STRUCTURE",
+    "FVG": "CONFLUENCE_STRUCTURE",
+    "ORDER_BLOCK": "CONFLUENCE_STRUCTURE",
+    "ONE_ZONE": "CONFLUENCE_STRUCTURE",
+    "ZONE_TOUCH": "CONFLUENCE_TRIGGER",
+    "LIQUIDITY_SWEEP": "CONFLUENCE_TRIGGER",
+    "REACTION_CONFIRM": "CONFLUENCE_TRIGGER",
+    "SETUP_CONFIRM": "CONFLUENCE_TRIGGER",
+    "CONFLUENCE_TRIGGER": "CONFLUENCE_TRIGGER",
+    "EXIT_STRUCTURE": "CONFLUENCE_TRIGGER",
+    "RISK_REWARD": "CONFLUENCE_TRIGGER",
+    "FALLBACK": "CONFLUENCE_TRIGGER",
+    "HISTORY_CONFIRM": "HISTORY_CONFIRM",
+    "CANDLE_CONFIRM": "CANDLE_CONFIRM",
+    "DISABLED": "CONFLUENCE_TRIGGER",
+}
+
+
+def diagnostic_stage(stage: str, reason: str) -> str:
+    kunci = str(stage or "").strip().upper()
+    if kunci in STAGE_GROUPS:
+        return STAGE_GROUPS[kunci]
+    if str(reason or "").startswith("data candle kurang"):
+        return "HISTORY_CONFIRM"
+    return "CONFLUENCE_TRIGGER"
 
 
 def setup_quality_key(setup: Optional[SetupResult], candidate: Candidate) -> tuple:
@@ -791,20 +833,11 @@ def find_best_candidate(
         cand.setup = hasil
         if not hasil.ok:
             if diagnostics is not None:
-                if hasil.reason.startswith("data candle kurang"):
-                    stage = "HISTORY_CONFIRM"
-                elif cand.confluence_structure is None and (
-                    "BoS" in hasil.reason
-                    or "Volume Profile" in hasil.reason
-                    or "Fibonacci" in hasil.reason
-                    or "FVG" in hasil.reason
-                    or "Order Block" in hasil.reason
-                    or "tidak ada irisan" in hasil.reason
-                ):
-                    stage = "CONFLUENCE_STRUCTURE"
-                else:
-                    stage = "CONFLUENCE_TRIGGER"
-                diagnostics.reject(stage, cand.symbol, hasil.reason)
+                diagnostics.reject(
+                    diagnostic_stage(hasil.stage, hasil.reason),
+                    cand.symbol,
+                    hasil.reason,
+                )
             continue
         lolos.append(cand)
 
