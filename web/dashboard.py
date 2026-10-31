@@ -47,8 +47,8 @@ from trading.equity import (
     load_equity,
 )
 from trading import strategy_drawdown as strategy_dd
-from strategy import confluence_code as confluence
 from strategy import indicators as strategy
+from strategy.entry_rule import EXIT_FIXED as _EXIT_TETAP
 from infrastructure.process.runtime_control import BotModeLock, BotAlreadyRunningError
 from market import coin_icons
 from market.fx_rate import IdrRateProvider
@@ -768,21 +768,15 @@ def build_status():
             ),
         },
         "breakeven": {
-            "enabled": bool(PUMP_CONFIG.get("CONFLUENCE_BREAKEVEN_ENABLED", True)),
-            "r_multiple": float(
-                PUMP_CONFIG.get("CONFLUENCE_BREAKEVEN_R_MULTIPLE", 1.0) or 0.0
-            ),
-            "lock_pct": float(
-                PUMP_CONFIG.get("CONFLUENCE_BREAKEVEN_LOCK_PCT", 0.0) or 0.0
-            ),
+            "enabled": bool(_EXIT_TETAP["breakeven_enabled"]),
+            "r_multiple": float(_EXIT_TETAP["breakeven_r_multiple"]),
+            "lock_pct": float(_EXIT_TETAP["breakeven_lock_pct"]),
             "active": bool(state.get("be_active")),
             "stop_price": float(state.get("be_stop_price") or 0.0),
-            "trigger_price": strategy.confluence_breakeven_trigger(
+            "trigger_price": strategy.entry_breakeven_trigger(
                 float(state.get("entry_price") or 0.0),
                 float(state.get("sl_price") or 0.0),
-                float(
-                    PUMP_CONFIG.get("CONFLUENCE_BREAKEVEN_R_MULTIPLE", 1.0) or 0.0
-                ),
+                float(_EXIT_TETAP["breakeven_r_multiple"]),
             )
             if state.get("current_symbol")
             else 0.0,
@@ -805,116 +799,59 @@ def build_status():
             "dd_stopped": bool(state.get("dd_stopped")),
             "state_integrity_error": str(state.get("state_integrity_error") or ""),
         },
-        "confluence": confluence_status(PUMP_CONFIG),
+        "entry_rule": entry_rule_status(PUMP_CONFIG),
         "config": {
             "sl_pct": state.get("sl_pct") or None,
             "tp_pct": state.get("tp_pct") or None,
             "sl_price": state.get("sl_price") or None,
             "tp_price": state.get("tp_price") or None,
-            "exit_source": state.get("exit_source") or "CONFLUENCE",
-            "confluence_sl_buffer_pct": float(
-                PUMP_CONFIG.get(
-                    "CONFLUENCE_SL_BUFFER_PCT",
-                    confluence.CONFLUENCE_CODE_DEFAULTS["CONFLUENCE_SL_BUFFER_PCT"],
-                )
-                or 0.0
+            "exit_source": state.get("exit_source") or "ENTRY_RULE",
+            "entry_sl_buffer_pct": float(
+                PUMP_CONFIG.get("ENTRY_SL_BUFFER_PCT", 0.30) or 0.0
             ),
-            "confluence_min_rr_ratio": float(
-                PUMP_CONFIG.get(
-                    "CONFLUENCE_MIN_RR_RATIO",
-                    confluence.CONFLUENCE_CODE_DEFAULTS["CONFLUENCE_MIN_RR_RATIO"],
-                )
-                or confluence.CONFLUENCE_CODE_DEFAULTS["CONFLUENCE_MIN_RR_RATIO"]
+            "entry_min_rr_ratio": float(
+                PUMP_CONFIG.get("ENTRY_MIN_RR_RATIO", 2.0) or 2.0
             ),
-            "max_hold_hours": float(
-                PUMP_CONFIG.get("MAX_HOLD_HOURS", 0.0) or 0.0
+            "entry_bull_candles": int(
+                PUMP_CONFIG.get("ENTRY_BULL_CANDLES", 3) or 3
             ),
+            "max_hold_hours": float(_EXIT_TETAP["max_hold_hours"]),
+            "trailing_pct": float(strategy.exit_trailing_params(PUMP_CONFIG)["pct"]),
         },
     }
 
 
-def confluence_status(config: dict) -> dict:
+def entry_rule_status(config: dict) -> dict:
     try:
-        interval = strategy.confluence_structure_interval(config)
-        confirm_interval = strategy.confirm_interval(config)
-        single_timeframe = not strategy.confluence_uses_mtf(config)
-        lookback = strategy.confluence_structure_required_bars(config)
-        enabled = strategy.confluence_enabled(config)
+        interval = strategy.confirm_interval(config)
+        bull = strategy.entry_bull_candles(config)
+        lookback = strategy.required_lookback_bars(config)
+        enabled = strategy.entry_rule_enabled(config)
         config_error = ""
     except (TypeError, ValueError) as exc:
-        interval = str(config.get("CONFLUENCE_STRUCTURE_INTERVAL", "") or "")
-        confirm_interval = str(config.get("CONFIRM_INTERVAL", "") or "")
-        single_timeframe = interval == confirm_interval
+        interval = str(config.get("CONFIRM_INTERVAL", "") or "")
+        bull = 0
         lookback = 0
         enabled = False
         config_error = str(exc)[:200]
-    komponen = {
-        "volume_profile": bool(config.get("VP_FILTER_ENABLED", True)),
-        "fibonacci": bool(config.get("FIB_FILTER_ENABLED", True)),
-        "liquidity": bool(config.get("LIQUIDITY_FILTER_ENABLED", True)),
-        "fvg": bool(config.get("FVG_FILTER_ENABLED", True)),
-        "order_block": bool(config.get("OB_FILTER_ENABLED", True)),
-    }
     return {
         "enabled": enabled,
         "config_error": config_error,
         "interval": interval,
-        "confirm_interval": confirm_interval,
-        "single_timeframe": single_timeframe,
-        "require_all_five": bool(config.get("CONFLUENCE_REQUIRE_ALL_FIVE", True)),
-        "min_score": float(
-            config.get(
-                "CONFLUENCE_MIN_SCORE",
-                confluence.CONFLUENCE_CODE_DEFAULTS["CONFLUENCE_MIN_SCORE"],
-            )
-            or 0.0
-        ),
+        "bull_candles": bull,
         "lookback_bars": lookback,
-        "min_impulse_pct": float(
-            config.get(
-                "CONFLUENCE_MIN_IMPULSE_PCT",
-                confluence.CONFLUENCE_CODE_DEFAULTS["CONFLUENCE_MIN_IMPULSE_PCT"],
-            )
-            or 0.0
-        ),
-        "fib_range": [
-            float(
-                config.get(
-                    "FIB_RETRACEMENT_MIN",
-                    confluence.CONFLUENCE_CODE_DEFAULTS["FIB_RETRACEMENT_MIN"],
-                )
-                or 0.0
-            ),
-            float(
-                config.get(
-                    "FIB_RETRACEMENT_MAX",
-                    confluence.CONFLUENCE_CODE_DEFAULTS["FIB_RETRACEMENT_MAX"],
-                )
-                or 0.0
-            ),
-        ],
-        "min_close_position": float(
-            config.get(
-                "CONFLUENCE_MIN_CLOSE_POSITION",
-                confluence.CONFLUENCE_CODE_DEFAULTS["CONFLUENCE_MIN_CLOSE_POSITION"],
-            )
-            or 0.0
-        ),
-        "min_rr_ratio": float(
-            config.get(
-                "CONFLUENCE_MIN_RR_RATIO",
-                confluence.CONFLUENCE_CODE_DEFAULTS["CONFLUENCE_MIN_RR_RATIO"],
-            )
-            or confluence.CONFLUENCE_CODE_DEFAULTS["CONFLUENCE_MIN_RR_RATIO"]
-        ),
-        "components": komponen,
-        "components_active": sum(1 for nilai in komponen.values() if nilai),
+        "sl_anchor": str(config.get("ENTRY_SL_ANCHOR", "SIGNAL") or "SIGNAL").upper(),
+        "sl_buffer_pct": float(config.get("ENTRY_SL_BUFFER_PCT", 0.30) or 0.0),
+        "min_rr_ratio": float(config.get("ENTRY_MIN_RR_RATIO", 2.0) or 2.0),
+        "max_sl_pct": float(config.get("ENTRY_MAX_SL_PCT", 3.0) or 0.0),
+        "trailing_pct": strategy.exit_trailing_params(config)["pct"],
+        "exit_fixed": strategy.exit_fixed_params(),
     }
 
 
-def evaluate_confluence_symbol(symbol: str, config: dict) -> dict:
-    interval = strategy.confluence_structure_interval(config)
-    window = strategy.required_lookback_bars(config)
+def evaluate_entry_symbol(symbol: str, config: dict) -> dict:
+    interval = strategy.confirm_interval(config)
+    window = strategy.confirm_window_bars(config)
     client = get_client()
     mentah = client.get_klines(symbol, interval, limit=window + 3)
     sekarang = int(state_mod.now_ms())
@@ -925,62 +862,54 @@ def evaluate_confluence_symbol(symbol: str, config: dict) -> dict:
     ]
     if not klines:
         raise RuntimeError(f"candle {interval} {symbol} tertutup tidak tersedia")
-    if len(klines) < window:
+    if len(klines) < strategy.required_lookback_bars(config):
         raise RuntimeError(
-            f"candle {interval} {symbol} tertutup kurang: {len(klines)} dari minimum {window}"
+            f"candle {interval} {symbol} tertutup kurang: {len(klines)} "
+            f"dari minimum {strategy.required_lookback_bars(config)}"
         )
-    struktur = confluence.evaluate_confluence_zone(klines, config)
-    reaksi = confluence.evaluate_confluence_reaction(
-        klines, config, struktur
-    )
+    verdict = strategy.evaluate_entry(klines, config)
     sinyal = klines[-1]
-    exit_info = strategy.compute_confluence_exit_levels(
-        float(sinyal.close),
-        config,
-        poi_low=struktur.get("poi_zone_low"),
-        ob_low=struktur.get("ob_zone_low"),
-        swing_low=struktur.get("swing_low"),
-        sweep_low=reaksi.get("sweep_low"),
-        bsl_level=struktur.get("bsl_level"),
-        swing_high=struktur.get("swing_high"),
-        fallback_allowed=False,
-    )
+    urut = klines[-(strategy.entry_bull_candles(config) + 3) :]
+    riwayat = [
+        {
+            "open_time": _fmt_ms(int(k.open_time)),
+            "open": float(k.open),
+            "high": float(k.high),
+            "low": float(k.low),
+            "close": float(k.close),
+            "bullish": bool(
+                float(k.close) > float(k.open)
+                and (
+                    idx == 0
+                    or float(k.close) > float(urut[idx - 1].close)
+                )
+            ),
+        }
+        for idx, k in enumerate(urut)
+    ]
     return {
         "symbol": symbol,
         "interval": interval,
         "as_of": _fmt_ms(int(sinyal.close_time)),
         "price": float(sinyal.close),
-        "zone": {
-            "ok": bool(struktur.get("ok")),
-            "stage": str(struktur.get("stage") or ""),
-            "reason": str(struktur.get("reason") or ""),
-            "score": float(struktur.get("score") or 0.0),
-            "checks": dict(struktur.get("checks") or {}),
-            "levels": dict(struktur.get("zones") or {}),
-            "impulse_pct": struktur.get("impulse_pct"),
-            "ssl_level": struktur.get("ssl_level"),
-            "bsl_level": struktur.get("bsl_level"),
-            "poc": struktur.get("vp_poc_price"),
+        "verdict": {
+            "ok": bool(verdict.get("ok")),
+            "stage": str(verdict.get("stage") or ""),
+            "reason": str(verdict.get("reason") or ""),
+            "bull_count": int(verdict.get("bull_count") or 0),
+            "bull_required": int(verdict.get("bull_required") or 0),
+            "checks": dict(verdict.get("checks") or {}),
         },
-        "trigger": {
-            "ok": bool(reaksi.get("ok")),
-            "stage": str(reaksi.get("stage") or ""),
-            "reason": str(reaksi.get("reason") or ""),
-            "touched": bool(reaksi.get("touched")),
-            "swept": bool(reaksi.get("swept")),
-            "close_position": reaksi.get("close_position"),
-            "sweep_low": reaksi.get("sweep_low"),
-        },
+        "candles": riwayat,
         "exit": {
-            "ok": bool(exit_info.get("ok")),
-            "sl_price": exit_info.get("sl_price"),
-            "tp_price": exit_info.get("tp_price"),
-            "sl_pct": exit_info.get("sl_pct"),
-            "tp_pct": exit_info.get("tp_pct"),
-            "rr_ratio": exit_info.get("rr_ratio"),
-            "reason": exit_info.get("reason"),
+            "sl_price": verdict.get("sl_price"),
+            "tp_price": verdict.get("tp_price"),
+            "sl_pct": verdict.get("sl_pct"),
+            "tp_pct": verdict.get("tp_pct"),
+            "rr_ratio": verdict.get("rr_ratio"),
+            "entry_low": verdict.get("entry_low"),
         },
-        "config": confluence_status(config),
+        "config": entry_rule_status(config),
     }
 
 
@@ -1050,35 +979,15 @@ def _reject_if_backtest_disabled():
 
 
 BT_PARAM_KEYS = (
-    "CONFLUENCE_SL_BUFFER_PCT",
-    "CONFLUENCE_MIN_RR_RATIO",
-    "MAX_HOLD_HOURS",
+    "ENTRY_RULE_ENABLED",
+    "ENTRY_BULL_CANDLES",
+    "ENTRY_SL_ANCHOR",
+    "ENTRY_SL_BUFFER_PCT",
+    "ENTRY_MIN_RR_RATIO",
+    "ENTRY_MAX_SL_PCT",
+    "EXIT_TRAILING_PCT",
     "CONFIRM_INTERVAL",
     "CONFIRM_LOOKBACK_BARS",
-    "CONFLUENCE_FILTER_ENABLED",
-    "CONFLUENCE_STRUCTURE_INTERVAL",
-    "CONFLUENCE_LOOKBACK_BARS",
-    "CONFLUENCE_MIN_IMPULSE_PCT",
-    "CONFLUENCE_IMPULSE_SELECTION",
-    "CONFLUENCE_ZONE_TOLERANCE_RATIO",
-    "CONFLUENCE_REQUIRE_ALL_FIVE",
-    "CONFLUENCE_MIN_SCORE",
-    "VP_FILTER_ENABLED",
-    "VP_BINS",
-    "VP_HVN_TOP_RATIO",
-    "FIB_FILTER_ENABLED",
-    "FIB_RETRACEMENT_MIN",
-    "FIB_RETRACEMENT_MAX",
-    "LIQUIDITY_FILTER_ENABLED",
-    "LIQUIDITY_EQUAL_LEVEL_TOL_RATIO",
-    "LIQUIDITY_SWEEP_LOOKBACK_BARS",
-    "FVG_FILTER_ENABLED",
-    "OB_FILTER_ENABLED",
-    "CONFLUENCE_REQUIRE_BULLISH_REACTION",
-    "CONFLUENCE_MIN_CLOSE_POSITION",
-    "CONFLUENCE_BREAKEVEN_ENABLED",
-    "CONFLUENCE_BREAKEVEN_R_MULTIPLE",
-    "CONFLUENCE_BREAKEVEN_LOCK_PCT",
 )
 
 GRID_PARAM_KEYS = tuple(
@@ -1109,31 +1018,11 @@ def _bt_simulation_interval(cfg: dict) -> str:
 
 
 def _bt_native_htf_intervals(cfg: dict) -> list[str]:
-    out: list[str] = []
-    if strategy.confluence_enabled(cfg) and strategy.confluence_uses_mtf(cfg):
-        out.append(strategy.confluence_structure_interval(cfg))
-    return out
+    return []
 
 
 def _bt_native_prebuilt(prep: dict, cfg: dict):
-    struktur = prep.get("native_struktur")
-    if struktur is None:
-        return None
-    missing = []
-    if (
-        strategy.confluence_enabled(cfg)
-        and strategy.confluence_uses_mtf(cfg)
-        and not struktur
-    ):
-        missing.append(strategy.confluence_structure_interval(cfg))
-    if missing:
-        raise bt.BacktestError(
-            "Candle struktur Confluence native tidak berhasil diambil untuk "
-            + ", ".join(missing)
-            + ". Simulasi dihentikan supaya tidak menampilkan 0 trade yang "
-            "menyesatkan. Periksa koneksi ke Binance lalu jalankan ulang."
-        )
-    return (None, None, struktur)
+    return None
 
 
 def _bt_simulation_warmup_bars(cfg: dict) -> int:
@@ -1162,46 +1051,26 @@ def _bt_estimate_requests(days: int, max_symbols: int, cfg: dict) -> int:
 
 
 def _bt_direction_warmup_note(cfg: dict, interval: str) -> str:
-    if not strategy.confluence_enabled(cfg):
-        return "Filter The Confluence Code nonaktif, jadi candle struktur tidak dievaluasi."
-    struct_itv = strategy.confluence_structure_interval(cfg)
-    if not strategy.confluence_uses_mtf(cfg):
-        return (
-            f"Struktur POI The Confluence Code berjalan single-timeframe pada candle {interval} "
-            "yang sama tanpa unduhan timeframe tambahan."
-        )
-    try:
-        jam = pbt.parity.confluence_warmup_ms(cfg, interval) / 3_600_000.0
-    except ValueError:
-        return (
-            f"Struktur POI {struct_itv} aktif, tetapi intervalnya tidak sepadan dengan interval "
-            "simulasi sehingga backtest ini akan menolak berjalan."
-        )
+    if not strategy.entry_rule_enabled(cfg):
+        return "Aturan entry nonaktif, jadi candle tidak dievaluasi."
     return (
-        f"Struktur POI memakai candle {struct_itv} asli dari bursa, sama seperti bot live, "
-        f"sehingga tidak menambah warmup pada rentang simulasi {interval}. Kalau memakai "
-        f"jalur agregasi, pemanasan struktur ini butuh sekitar {jam:.1f} jam pertama."
+        f"Aturan entry berjalan single-timeframe pada candle {interval} yang sama, "
+        "tanpa unduhan timeframe tambahan."
     )
 
 
 def _bt_timing_note(cfg: dict, interval: str) -> str:
-    if not strategy.confluence_enabled(cfg):
-        return "Trigger eksekusi The Confluence Code nonaktif."
+    if not strategy.entry_rule_enabled(cfg):
+        return "Aturan entry nonaktif."
     try:
         candle = strategy.required_lookback_bars(cfg)
         jam = candle * strategy.interval_to_ms(interval) / 3_600_000
     except (ValueError, KeyError) as exc:
-        return f"Trigger {interval} tidak bisa disimulasikan: {exc}"
-    aktif = []
-    if bool(cfg.get("LIQUIDITY_FILTER_ENABLED", True)):
-        aktif.append("sapuan likuiditas SSL")
-    if bool(cfg.get("CONFLUENCE_REQUIRE_BULLISH_REACTION", True)):
-        aktif.append("reaksi bullish")
-    komponen = " dan ".join(aktif) if aktif else "trigger eksekusi"
+        return f"Aturan entry {interval} tidak bisa disimulasikan: {exc}"
     return (
-        f"{komponen.capitalize()} memakai candle {cfg.get('CONFIRM_INTERVAL', '5m')} "
-        f"yang sama tanpa unduhan tambahan dan membutuhkan {candle} candle tertutup "
-        f"(sekitar {jam:.2f} jam)."
+        f"Aturan entry membutuhkan {candle} candle tertutup {interval} "
+        f"(sekitar {jam:.2f} jam) sebelum bar pertama bisa dinilai, dan entry terjadi "
+        "di close candle bullish terakhir yang memenuhi syarat."
     )
 
 
@@ -1218,23 +1087,21 @@ def _bt_prepare_universe(
         )
         * bar_ms
     )
-    native_htf_aktif = bool(_bt_native_htf_intervals(cfg))
-    if not native_htf_aktif and strategy.confluence_enabled(cfg):
-        try:
-            butuh_gerbang_bars = pbt.parity.gate_warmup_bars(cfg, interval)
-            butuh_gerbang_ms = butuh_gerbang_bars * bar_ms
-        except ValueError as exc:
-            raise bt.BacktestError(str(exc)) from exc
-        if butuh_gerbang_ms > warmup_ms:
-            logger.info(
-                "Warmup backtest dinaikkan dari %.1f jam menjadi %.1f jam karena struktur "
-                "Confluence memerlukan %d candle %s sebagai pemanasan.",
-                warmup_ms / 3_600_000.0,
-                butuh_gerbang_ms / 3_600_000.0,
-                butuh_gerbang_bars,
-                interval,
-            )
-            warmup_ms = butuh_gerbang_ms
+    try:
+        butuh_gerbang_bars = pbt.parity.gate_warmup_bars(cfg, interval)
+    except ValueError as exc:
+        raise bt.BacktestError(str(exc)) from exc
+    butuh_gerbang_ms = butuh_gerbang_bars * bar_ms
+    if butuh_gerbang_ms > warmup_ms:
+        logger.info(
+            "Warmup backtest dinaikkan dari %.1f jam menjadi %.1f jam karena aturan "
+            "entry memerlukan %d candle %s sebagai pemanasan.",
+            warmup_ms / 3_600_000.0,
+            butuh_gerbang_ms / 3_600_000.0,
+            butuh_gerbang_bars,
+            interval,
+        )
+        warmup_ms = butuh_gerbang_ms
 
     end_ms = int(time.time() * 1000)
     start_ms = end_ms - days * bt.MS_PER_DAY
@@ -1336,38 +1203,6 @@ def _bt_prepare_universe(
                 "Periksa koneksi ke Binance." + contoh
             )
 
-        struktur_of = {}
-        native_htf_aktif = bool(_bt_native_htf_intervals(cfg))
-        if native_htf_aktif:
-            struct_itv = strategy.confluence_structure_interval(cfg)
-            set_progress(
-                0.81,
-                f"mengambil candle struktur POI native ({struct_itv})...",
-            )
-
-            def htf_progress(frac, sym):
-                set_progress(
-                    0.81 + frac * 0.01,
-                    f"mengambil candle {sym} ({int(frac * len(symbols_with_data))}"
-                    f"/{len(symbols_with_data)})",
-                )
-
-            struktur_of = pbt.fetch_native_lookups(
-                klien,
-                list(symbols_with_data),
-                cfg,
-                start_ms,
-                end_ms,
-                cache=kline_cache,
-                max_workers=4,
-                progress_cb=htf_progress,
-            )
-            if not struktur_of:
-                logger.warning(
-                    "Tidak ada candle struktur Confluence native yang berhasil diambil. "
-                    "Struktur POI akan menolak semua kandidat karena riwayat tidak cukup."
-                )
-
         btc_klines = None
         btc_error = ""
         if cfg.get("BTC_FILTER_ENABLED", False):
@@ -1409,7 +1244,6 @@ def _bt_prepare_universe(
         "end_ms": end_ms,
         "btc_klines": btc_klines,
         "btc_error": btc_error,
-        "native_struktur": struktur_of,
     }
 
 
@@ -1550,51 +1384,17 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
             ),
             "params_used": {k: cfg.get(k) for k in BT_PARAM_KEYS},
             "summary": summary,
-            "confluence_structure": {
-                "enabled": bool(strategy.confluence_enabled(cfg)),
-                "interval": strategy.confluence_structure_interval(cfg),
-                "lookback_bars": int(cfg.get("CONFLUENCE_LOOKBACK_BARS", 60) or 60),
-                "min_impulse_pct": float(
-                    cfg.get(
-                        "CONFLUENCE_MIN_IMPULSE_PCT",
-                        confluence.CONFLUENCE_CODE_DEFAULTS[
-                            "CONFLUENCE_MIN_IMPULSE_PCT"
-                        ],
-                    )
-                    or confluence.CONFLUENCE_CODE_DEFAULTS["CONFLUENCE_MIN_IMPULSE_PCT"]
-                ),
-                "zone_tolerance_ratio": float(
-                    cfg.get("CONFLUENCE_ZONE_TOLERANCE_RATIO", 0.06) or 0.06
-                ),
-                "vp_enabled": bool(cfg.get("VP_FILTER_ENABLED", True)),
-                "vp_bins": int(cfg.get("VP_BINS", 20) or 20),
-                "vp_hvn_top_ratio": float(
-                    cfg.get("VP_HVN_TOP_RATIO", 0.40) or 0.40
-                ),
-                "fib_enabled": bool(cfg.get("FIB_FILTER_ENABLED", True)),
-                "fib_min": float(cfg.get("FIB_RETRACEMENT_MIN", 0.50) or 0.50),
-                "fib_max": float(cfg.get("FIB_RETRACEMENT_MAX", 0.786) or 0.786),
-                "fvg_enabled": bool(cfg.get("FVG_FILTER_ENABLED", True)),
-                "ob_enabled": bool(cfg.get("OB_FILTER_ENABLED", True)),
-                "skips": int(getattr(result, "confluence_structure_skips", 0)),
-                "scans": int(getattr(result, "confluence_structure_scans", 0)),
-            },
-            "confluence_trigger": {
-                "enabled": bool(strategy.confluence_enabled(cfg)),
+            "entry_rule": {
+                "enabled": bool(strategy.entry_rule_enabled(cfg)),
                 "interval": str(cfg.get("CONFIRM_INTERVAL", "5m") or "5m"),
+                "bull_candles": int(cfg.get("ENTRY_BULL_CANDLES", 3) or 3),
+                "sl_anchor": str(cfg.get("ENTRY_SL_ANCHOR", "SIGNAL") or "SIGNAL").upper(),
+                "sl_buffer_pct": float(cfg.get("ENTRY_SL_BUFFER_PCT", 0.30) or 0.0),
+                "min_rr_ratio": float(cfg.get("ENTRY_MIN_RR_RATIO", 2.0) or 2.0),
+                "max_sl_pct": float(cfg.get("ENTRY_MAX_SL_PCT", 3.0) or 0.0),
                 "lookback_bars": int(cfg.get("CONFIRM_LOOKBACK_BARS", 60) or 60),
-                "liquidity_enabled": bool(cfg.get("LIQUIDITY_FILTER_ENABLED", True)),
-                "sweep_lookback_bars": int(
-                    cfg.get("LIQUIDITY_SWEEP_LOOKBACK_BARS", 4) or 4
-                ),
-                "require_bullish_reaction": bool(
-                    cfg.get("CONFLUENCE_REQUIRE_BULLISH_REACTION", True)
-                ),
-                "min_close_position": float(
-                    cfg.get("CONFLUENCE_MIN_CLOSE_POSITION", 0.55) or 0.55
-                ),
-                "skips": int(getattr(result, "confluence_trigger_skips", 0)),
-                "scans": int(getattr(result, "confluence_trigger_scans", 0)),
+                "skips": int(getattr(result, "entry_rule_skips", 0)),
+                "scans": int(getattr(result, "entry_rule_scans", 0)),
             },
             "trades": trades_out,
             "skipped": skipped_out,
@@ -1635,7 +1435,7 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 + " detik seperti bot asli). "
                 "Urutan konservatif: STOP_LOSS struktural diperiksa lebih dulu daripada "
                 "TAKE_PROFIT (BSL $$$) jika keduanya tersentuh di dalam satu candle. "
-                "TIME_STOP (MAX_HOLD_HOURS) diperiksa paling akhir dan menutup posisi di "
+                "TIME_STOP (batas tahan tetap 24 jam) diperiksa paling akhir dan menutup posisi di "
                 "harga close candle terakhir yang umurnya masih di dalam batas.",
                 "Entry memodelkan spread (BACKTEST_ENTRY_SPREAD_PCT), slippage "
                 "(BACKTEST_SLIPPAGE_PCT), dan jeda eksekusi (BACKTEST_ENTRY_DELAY_BARS). "
@@ -1643,15 +1443,15 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "dimodelkan, jadi order besar di koin tipis akan lebih buruk dari ini. "
                 "Filter kedalaman, ketimpangan bid/ask, dan sell wall juga hanya berlaku di "
                 "PAPER dan LIVE (snapshot order book tidak tersedia historis).",
-                "Strategi entry The Confluence Code (CONFLUENCE_FILTER_ENABLED) SUDAH "
-                "disimulasikan memakai aturan yang sama dengan bot live: struktur POI pada "
-                + strategy.confluence_structure_interval(cfg)
-                + " memeriksa Break of Structure (BoS), Volume Profile HVN/POC, Fibonacci "
-                "Retracement 0.50-0.786, Fair Value Gap (FVG), dan Order Block (OB), lalu "
-                "trigger eksekusi pada "
+                "Aturan entry SUDAH disimulasikan memakai logika yang sama dengan bot "
+                "live: candle dihitung bullish bila close di atas open dan di atas close "
+                "candle sebelumnya, entry terjadi setelah "
+                + str(int(cfg.get("ENTRY_BULL_CANDLES", 3) or 3))
+                + " candle bullish beruntun di "
                 + prep["interval"]
-                + " memeriksa sapuan likuiditas internal (SSL Sweep) ke zona POI dan "
-                "konfirmasi candle reaksi bullish. "
+                + ", SL diletakkan di bawah low candle sinyal dikurangi buffer, dan TP "
+                "dihitung dari kelipatan risiko. Setup dengan jarak SL melebihi batas juga "
+                "ditolak. "
                 + _bt_direction_warmup_note(cfg, prep["interval"])
                 + " "
                 + _bt_timing_note(cfg, prep["interval"])
@@ -1829,13 +1629,12 @@ def _bt_run_grid_job(
                 "Split latih/uji di sini satu kali berdasarkan urutan waktu (bukan "
                 "walk-forward bergulir). Untuk keyakinan lebih, ulangi dengan beberapa "
                 "rasio dan rentang hari yang berbeda.",
-                "Yang disapu grid hanya parameter EXIT Confluence (CONFLUENCE_SL_BUFFER_PCT, "
-                "CONFLUENCE_MIN_RR_RATIO, dan MAX_HOLD_HOURS). Filter struktur entry The Confluence Code "
-                "(CONFLUENCE_*, VP_*, FIB_*, LIQUIDITY_*, FVG_*, OB_*) "
-                "diambil dari konfigurasi backtest dan tetap "
-                "sama pada semua kombinasi. Lookup struktur POI digunakan ulang. Untuk "
-                "membandingkan setelan Confluence, jalankan backtest portofolio terpisah "
-                "per setelan.",
+                "Yang disapu grid hanya parameter exit (ENTRY_SL_BUFFER_PCT, "
+                "ENTRY_MIN_RR_RATIO dan ENTRY_MAX_SL_PCT). Setelan aturan "
+                "entry (ENTRY_BULL_CANDLES, ENTRY_SL_ANCHOR, CONFIRM_INTERVAL) diambil dari "
+                "konfigurasi backtest dan tetap sama pada semua kombinasi. Untuk "
+                "membandingkan setelan entry, jalankan backtest portofolio terpisah per "
+                "setelan.",
                 "Statistik 24 jam DIREKONSTRUKSI dari candle, bukan snapshot "
                 "ticker/24hr historis. Volume itulah yang menentukan simbol mana yang "
                 "masuk top-N kandidat per bar.",
@@ -1889,48 +1688,23 @@ def _bt_run_grid_job(
 
 def _bt_min_days_note(cfg: dict, interval: str) -> tuple[int, str]:
     dasar = 2
-    if not strategy.confluence_enabled(cfg):
+    if not strategy.entry_rule_enabled(cfg):
         return dasar, ""
-
-    native_struct = bool(_bt_native_htf_intervals(cfg))
-    minimal = dasar
-    catatan = ""
-    struct_itv = strategy.confluence_structure_interval(cfg)
-    if native_struct:
-        catatan = (
-            f"Struktur POI ({struct_itv}) memakai candle asli bursa, "
-            "sama seperti bot live, jadi riwayat struktur tidak menambah "
-            "batas minimum hari pada rentang simulasi. Riwayat yang dibutuhkan "
-            "tetap diunduh otomatis sebelum rentang uji."
-        )
-    else:
-        try:
-            jam_struct = (
-                pbt.parity.confluence_warmup_ms(cfg, interval) / 3_600_000.0
-            )
-        except ValueError as exc:
-            return dasar, str(exc)
-        if jam_struct > 0:
-            minimal = max(minimal, int(math.ceil(jam_struct / 24.0)) + 1)
-            catatan += (
-                f" Struktur POI {struct_itv} memerlukan sekitar "
-                f"{jam_struct:.2f} jam pemanasan."
-            )
     try:
-        m5_bars = strategy.required_lookback_bars(cfg)
-        jam_timing = m5_bars * strategy.interval_to_ms(interval) / 3_600_000
+        candle = strategy.required_lookback_bars(cfg)
+        jam = candle * strategy.interval_to_ms(interval) / 3_600_000
     except (ValueError, KeyError) as exc:
         return dasar, str(exc)
-    minimal = max(minimal, int(math.ceil(jam_timing / 24.0)) + 1)
-    catatan += (
-        f" Trigger {cfg.get('CONFIRM_INTERVAL', '5m')} butuh sekitar "
-        f"{jam_timing:.2f} jam riwayat sebelum bar pertama bisa dievaluasi."
+    minimal = max(dasar, int(math.ceil(jam / 24.0)) + 1)
+    catatan = (
+        f" Aturan entry butuh sekitar {jam:.2f} jam riwayat {interval} sebelum bar "
+        "pertama bisa dievaluasi."
     )
     return minimal, catatan.strip()
 
 
 def _bt_peringatan_timing(cfg: dict, days: int) -> list:
-    if not strategy.confluence_enabled(cfg):
+    if not strategy.entry_rule_enabled(cfg):
         return []
     interval = str(cfg.get("CONFIRM_INTERVAL", "5m") or "5m")
     bar_uji = int(days) * 1440 // max(1, bt.INTERVAL_MINUTES.get(interval, 5))
@@ -1939,7 +1713,7 @@ def _bt_peringatan_timing(cfg: dict, days: int) -> list:
         return []
     return [
         f"Rentang uji {int(days)} hari mencakup sekitar {bar_uji} candle {interval}, "
-        f"lebih pendek dari kebutuhan trigger Confluence ({butuh} candle). Filter tetap "
+        f"lebih pendek dari kebutuhan aturan entry ({butuh} candle). Aturan tetap "
         "dijalankan, tetapi hasilnya kurang representatif; perpanjang rentang uji."
     ]
 
@@ -2398,21 +2172,17 @@ def api_backtest_defaults():
         out["warmup_bars"] / float(bt.bars_per_day(_bt_simulation_interval(PUMP_CONFIG))),
         1,
     )
-    cfg_conf = dict(PUMP_CONFIG, CONFLUENCE_FILTER_ENABLED=True)
-    out["warmup_bars_confluence_enabled"] = int(_bt_simulation_warmup_bars(cfg_conf))
     out["native_intervals"] = _bt_native_htf_intervals(PUMP_CONFIG)
     out["native_history_days"] = round(
         strategy.native_history_ms(PUMP_CONFIG) / float(bt.MS_PER_DAY), 1
     )
-    out["confluence_enabled"] = bool(
-        PUMP_CONFIG.get("CONFLUENCE_FILTER_ENABLED", True)
+    out["entry_rule_enabled"] = bool(
+        PUMP_CONFIG.get("ENTRY_RULE_ENABLED", True)
     )
-    out["confluence_structure_interval"] = strategy.confluence_structure_interval(
-        PUMP_CONFIG
-    )
-    out["confluence_lookback_bars"] = int(
-        PUMP_CONFIG.get("CONFLUENCE_LOOKBACK_BARS", 60) or 60
-    )
+    out["entry_bull_candles"] = int(PUMP_CONFIG.get("ENTRY_BULL_CANDLES", 3) or 3)
+    out["entry_sl_anchor"] = str(
+        PUMP_CONFIG.get("ENTRY_SL_ANCHOR", "SIGNAL") or "SIGNAL"
+    ).upper()
     out["confirm_interval"] = str(PUMP_CONFIG.get("CONFIRM_INTERVAL", "5m"))
     out["confirm_lookback_bars"] = int(
         PUMP_CONFIG.get("CONFIRM_LOOKBACK_BARS", 60) or 60
@@ -2435,13 +2205,13 @@ def api_status():
     return jsonify(build_status())
 
 
-@app.route("/api/confluence")
-def api_confluence():
+@app.route("/api/entry-rule")
+def api_entry_rule():
     symbol = str(request.args.get("symbol", "") or "").strip().upper()
     if not symbol or not re.match(r"^[A-Z0-9]{2,30}$", symbol):
         return jsonify({"error": "symbol tidak valid"}), 400
     try:
-        return jsonify(evaluate_confluence_symbol(symbol, PUMP_CONFIG))
+        return jsonify(evaluate_entry_symbol(symbol, PUMP_CONFIG))
     except Exception as exc:
         return jsonify({"error": str(exc)[:200]}), 502
 

@@ -81,10 +81,8 @@ class PortfolioResult:
     final_equity: float = 0.0
     risk_events: dict = field(default_factory=dict)
     chase_skips: int = 0
-    confluence_structure_skips: int = 0
-    confluence_structure_scans: int = 0
-    confluence_trigger_skips: int = 0
-    confluence_trigger_scans: int = 0
+    entry_rule_skips: int = 0
+    entry_rule_scans: int = 0
     same_coin_skips: int = 0
     mark_to_market_open: bool = False
     mark_to_market_symbol: Optional[str] = None
@@ -318,38 +316,7 @@ def fetch_native_lookups(
     max_workers: int = 1,
     progress_cb: Optional[Callable[[float, str], None]] = None,
 ) -> dict:
-    struktur_of: dict = {}
-    unique = [str(sym) for sym in dict.fromkeys(symbols or ())]
-    if not unique:
-        return struktur_of
-
-    if strategy.confluence_enabled(config) and strategy.confluence_uses_mtf(config):
-        itv = strategy.confluence_structure_interval(config)
-        need_ms = (
-            strategy.confluence_structure_window_bars(config)
-            * strategy.INTERVAL_MINUTES.get(itv, 15)
-            * 60_000
-        )
-        series = fetch_native_klines(
-            client,
-            unique,
-            itv,
-            int(start_ms) - int(need_ms),
-            int(end_ms),
-            cache,
-            max_workers,
-            progress_cb,
-        )
-        confirm_itv = str(config.get("CONFIRM_INTERVAL", "5m") or "5m")
-        struktur_of = build_native_lookups(
-            series,
-            config,
-            lambda klines, cfg: parity.make_structure_lookup(
-                klines, cfg, confirm_itv, sudah_dirangkai=True
-            ),
-        )
-
-    return struktur_of
+    return {}
 
 
 def build_timeline(
@@ -364,11 +331,7 @@ def build_timeline(
     series_of: dict[str, SymbolSeries] = {}
     struktur_of: dict = {}
     all_times: set = set()
-    pakai_struktur = bool(config and strategy.confluence_enabled(config))
     daftar = symbols if symbols is not None else store.symbols()
-    struct_symbols = (
-        set(structure_store.symbols()) if structure_store is not None else set()
-    )
 
     for sym in daftar:
         kl = store.klines(sym)
@@ -378,18 +341,6 @@ def build_timeline(
         series = SymbolSeries.build(sym, kl, stats, include_ohlcv=include_ohlcv)
         series_of[sym] = series
         all_times.update(series.open_times())
-        if pakai_struktur:
-            if structure_store is not None and sym in struct_symbols:
-                struktur_of[sym] = parity.make_structure_lookup(
-                    structure_store.klines(sym),
-                    config,
-                    interval,
-                    sudah_dirangkai=True,
-                )
-            else:
-                struktur_of[sym] = parity.make_structure_lookup(
-                    kl, config, interval
-                )
 
     timeline = sorted(all_times)
     if config is None:
@@ -417,47 +368,19 @@ def _siapkan_struktur(
     interval: str,
     structure_store: Optional[KlineStore] = None,
 ) -> dict:
-    if not strategy.confluence_enabled(config):
-        return {}
-    _, _, struktur_bawaan = unpack_prebuilt(prebuilt)
-    if struktur_bawaan is not None:
-        return struktur_bawaan
-    if structure_store is not None:
-        tersedia = set(structure_store.symbols())
-        return {
-            sym: parity.make_structure_lookup(
-                (
-                    structure_store.klines(sym)
-                    if sym in tersedia
-                    else store.klines(sym)
-                ),
-                config,
-                interval,
-                sudah_dirangkai=(sym in tersedia),
-            )
-            for sym in series_of
-        }
-    return {
-        sym: parity.make_structure_lookup(store.klines(sym), config, interval)
-        for sym in series_of
-    }
+    return {}
 
 
 @dataclass
 class EntrySignalCache:
     signals: dict = field(default_factory=dict)
-    confluence_structure_scans: int = 0
-    confluence_structure_skips: int = 0
-    confluence_trigger_scans: int = 0
-    confluence_trigger_skips: int = 0
-    confluence_structure_events: list = field(default_factory=list)
-    confluence_trigger_events: list = field(default_factory=list)
-    confluence_structure_scans_by_time: dict = field(default_factory=dict)
-    confluence_structure_skips_by_time: dict = field(default_factory=dict)
-    confluence_trigger_scans_by_time: dict = field(default_factory=dict)
-    confluence_trigger_skips_by_time: dict = field(default_factory=dict)
-    sl_buffer_pct: float = 0.20
-    min_rr_ratio: float = 1.2
+    entry_rule_scans: int = 0
+    entry_rule_skips: int = 0
+    entry_rule_events: list = field(default_factory=list)
+    entry_rule_scans_by_time: dict = field(default_factory=dict)
+    entry_rule_skips_by_time: dict = field(default_factory=dict)
+    sl_buffer_pct: float = 0.30
+    min_rr_ratio: float = 2.0
 
     def get(self, t_now: int, default=None):
         return self.signals.get(t_now, default)
@@ -546,8 +469,8 @@ def precompute_entry_signals(
 
     signals = EntrySignalCache(
         {},
-        sl_buffer_pct=float(config.get("CONFLUENCE_SL_BUFFER_PCT", 0.20) or 0.0),
-        min_rr_ratio=float(config.get("CONFLUENCE_MIN_RR_RATIO", 1.2) or 1.2),
+        sl_buffer_pct=float(config.get("ENTRY_SL_BUFFER_PCT", 0.30) or 0.0),
+        min_rr_ratio=float(config.get("ENTRY_MIN_RR_RATIO", 2.0) or 2.0),
     )
     total_bars = len(timeline)
 
@@ -588,30 +511,6 @@ def precompute_entry_signals(
             if i + 1 < lookback:
                 continue
             waktu_bar = int(t_now)
-            verdict_struktur = None
-            if struktur_of:
-                signals.confluence_structure_scans += 1
-                signals.confluence_structure_scans_by_time[waktu_bar] = (
-                    signals.confluence_structure_scans_by_time.get(waktu_bar, 0) + 1
-                )
-                lock = struktur_of.get(sym)
-                verdict_struktur = (
-                    lock.verdict_at(close_time)
-                    if lock is not None
-                    else {"ok": False}
-                )
-                if not verdict_struktur["ok"]:
-                    signals.confluence_structure_skips += 1
-                    signals.confluence_structure_skips_by_time[waktu_bar] = (
-                        signals.confluence_structure_skips_by_time.get(
-                            waktu_bar, 0
-                        )
-                        + 1
-                    )
-                    if len(signals.confluence_structure_events) < max_skipped_records:
-                        signals.confluence_structure_events.append((waktu_bar, sym))
-                    continue
-
             sym_series = series_of[sym]
             start_w = max(0, i - lookback + 1)
             if sym_series.has_ohlcv:
@@ -619,16 +518,16 @@ def precompute_entry_signals(
             else:
                 kl = store.klines(sym)
                 window_kl = kl[start_w : i + 1]
-            if strategy.confluence_enabled(config):
-                signals.confluence_trigger_scans += 1
-                signals.confluence_trigger_scans_by_time[waktu_bar] = (
-                    signals.confluence_trigger_scans_by_time.get(waktu_bar, 0) + 1
+            if strategy.entry_rule_enabled(config):
+                signals.entry_rule_scans += 1
+                signals.entry_rule_scans_by_time[waktu_bar] = (
+                    signals.entry_rule_scans_by_time.get(waktu_bar, 0) + 1
                 )
             try:
                 setup = scanner.detect_entry_setup(
                     window_kl,
                     config,
-                    structure_verdict=verdict_struktur,
+                    signal_close_time_ms=close_time,
                 )
             except Exception as exc:
                 raise BacktestError(
@@ -636,13 +535,13 @@ def precompute_entry_signals(
                     f"(bar {i}) gagal: {type(exc).__name__}: {str(exc)[:160]}"
                 ) from exc
             if not setup.ok:
-                if strategy.confluence_enabled(config):
-                    signals.confluence_trigger_skips += 1
-                    signals.confluence_trigger_skips_by_time[waktu_bar] = (
-                        signals.confluence_trigger_skips_by_time.get(waktu_bar, 0) + 1
+                if strategy.entry_rule_enabled(config):
+                    signals.entry_rule_skips += 1
+                    signals.entry_rule_skips_by_time[waktu_bar] = (
+                        signals.entry_rule_skips_by_time.get(waktu_bar, 0) + 1
                     )
-                    if len(signals.confluence_trigger_events) < max_skipped_records:
-                        signals.confluence_trigger_events.append((waktu_bar, sym))
+                    if len(signals.entry_rule_events) < max_skipped_records:
+                        signals.entry_rule_events.append((waktu_bar, sym))
                 continue
             lolos.append((rank, sym, i, vol24, setup))
 
@@ -745,19 +644,14 @@ def run_portfolio_backtest(
         _pre_warnings.append(
             "Status TRADING historis tidak tersedia dari candle Binance. Policy status hanya dapat diverifikasi dari metadata saat ini bila caller menyediakannya."
         )
-    native_struct = prebuilt is not None and struktur_of is not None
-    if not native_struct:
-        struktur_of = _siapkan_struktur(prebuilt, store, series_of, config, interval)
-    if struktur_of and not native_struct:
-        _butuh_gerbang = strategy.gate_warmup_ms(config, interval)
-        if int(warmup_ms) < _butuh_gerbang:
-            _pre_warnings.append(
-                f"Warmup {warmup_ms} ms dinaikkan menjadi {_butuh_gerbang} ms karena "
-                f"struktur Confluence {strategy.confluence_structure_interval(config)} "
-                f"membutuhkan {strategy.confluence_structure_window_bars(config)} candle "
-                "tertutup sebelum bar entry pertama. Unduhan data harus mencakup rentang warmup ini."
-            )
-            warmup_ms = _butuh_gerbang
+    _butuh_gerbang = strategy.gate_warmup_ms(config, interval)
+    if _butuh_gerbang > 0 and int(warmup_ms) < _butuh_gerbang:
+        _pre_warnings.append(
+            f"Warmup {warmup_ms} ms dinaikkan menjadi {_butuh_gerbang} ms karena aturan "
+            "entry membutuhkan riwayat candle tertutup sebelum bar entry pertama. "
+            "Unduhan data harus mencakup rentang warmup ini."
+        )
+        warmup_ms = _butuh_gerbang
     _butuh = strategy.required_lookback_bars(config)
     if int(config.get("CONFIRM_LOOKBACK_BARS", 0)) < _butuh:
         _pre_warnings.append(
@@ -801,10 +695,8 @@ def run_portfolio_backtest(
     cands_at_entry = 0
     next_entry_allowed_at = 0
     chase_skips = 0
-    confluence_structure_skips = 0
-    confluence_structure_scans = 0
-    confluence_trigger_skips = 0
-    confluence_trigger_scans = 0
+    entry_rule_skips = 0
+    entry_rule_scans = 0
     symbol_blocks: dict = {}
     same_coin_skips = 0
     max_chase_pct = float(config.get("MAX_CHASE_PCT", 0) or 0)
@@ -848,44 +740,22 @@ def run_portfolio_backtest(
                 "Cache sinyal entry dipakai bersama jendela waktu. Daftar sinyal "
                 "yang dilewati filter disaring ke dalam jendela waktu uji."
             )
-        struct_scan_map = getattr(
-            entry_signal_cache, "confluence_structure_scans_by_time", None
-        )
-        struct_skip_map = getattr(
-            entry_signal_cache, "confluence_structure_skips_by_time", None
-        )
-        if isinstance(struct_scan_map, dict) and struct_scan_map:
-            confluence_structure_scans += _jumlah_dalam_jendela(struct_scan_map)
+        scan_map = getattr(entry_signal_cache, "entry_rule_scans_by_time", None)
+        skip_map = getattr(entry_signal_cache, "entry_rule_skips_by_time", None)
+        if isinstance(scan_map, dict) and scan_map:
+            entry_rule_scans += _jumlah_dalam_jendela(scan_map)
         else:
-            confluence_structure_scans += int(
-                getattr(entry_signal_cache, "confluence_structure_scans", 0)
+            entry_rule_scans += int(
+                getattr(entry_signal_cache, "entry_rule_scans", 0)
             )
-        if isinstance(struct_skip_map, dict) and struct_skip_map:
-            confluence_structure_skips += _jumlah_dalam_jendela(struct_skip_map)
+        if isinstance(skip_map, dict) and skip_map:
+            entry_rule_skips += _jumlah_dalam_jendela(skip_map)
         else:
-            confluence_structure_skips += int(
-                getattr(entry_signal_cache, "confluence_structure_skips", 0)
-            )
-        trig_scan_map = getattr(
-            entry_signal_cache, "confluence_trigger_scans_by_time", None
-        )
-        trig_skip_map = getattr(
-            entry_signal_cache, "confluence_trigger_skips_by_time", None
-        )
-        if isinstance(trig_scan_map, dict) and trig_scan_map:
-            confluence_trigger_scans += _jumlah_dalam_jendela(trig_scan_map)
-        else:
-            confluence_trigger_scans += int(
-                getattr(entry_signal_cache, "confluence_trigger_scans", 0)
-            )
-        if isinstance(trig_skip_map, dict) and trig_skip_map:
-            confluence_trigger_skips += _jumlah_dalam_jendela(trig_skip_map)
-        else:
-            confluence_trigger_skips += int(
-                getattr(entry_signal_cache, "confluence_trigger_skips", 0)
+            entry_rule_skips += int(
+                getattr(entry_signal_cache, "entry_rule_skips", 0)
             )
         for waktu_event, simbol_event in _event_dalam_jendela(
-            getattr(entry_signal_cache, "confluence_structure_events", [])
+            getattr(entry_signal_cache, "entry_rule_events", [])
         ):
             if len(skipped) >= max_skipped_records:
                 break
@@ -893,20 +763,7 @@ def run_portfolio_backtest(
                 SkippedSignal(
                     time=waktu_event,
                     symbol=simbol_event,
-                    reason="FILTER_CONFLUENCE_STRUCTURE",
-                    holding=None,
-                )
-            )
-        for waktu_event, simbol_event in _event_dalam_jendela(
-            getattr(entry_signal_cache, "confluence_trigger_events", [])
-        ):
-            if len(skipped) >= max_skipped_records:
-                break
-            skipped.append(
-                SkippedSignal(
-                    time=waktu_event,
-                    symbol=simbol_event,
-                    reason="FILTER_CONFLUENCE_TRIGGER",
+                    reason="FILTER_ENTRY_RULE",
                     holding=None,
                 )
             )
@@ -1091,20 +948,10 @@ def run_portfolio_backtest(
                             continue
                         kl = store.klines(sym)
                         window_kl = kl[max(0, i - lookback + 1) : i + 1]
-                        verdict_struktur = None
-                        if struktur_of:
-                            lock = struktur_of.get(sym)
-                            verdict_struktur = (
-                                lock.verdict_at(kl[i].close_time)
-                                if lock is not None
-                                else {"ok": False}
-                            )
-                            if not verdict_struktur["ok"]:
-                                continue
                         setup_skip = scanner.detect_entry_setup(
                             window_kl,
                             config,
-                            structure_verdict=verdict_struktur,
+                            signal_close_time_ms=kl[i].close_time,
                         )
                         if setup_skip.ok:
                             skipped.append(
@@ -1146,18 +993,10 @@ def run_portfolio_backtest(
                     for _vol24, sym, i in board[:top_n]:
                         kl = store.klines(sym)
                         window_kl = kl[max(0, i - lookback + 1) : i + 1]
-                        verdict_struktur = None
-                        if struktur_of:
-                            lock = struktur_of.get(sym)
-                            verdict_struktur = (
-                                lock.verdict_at(kl[i].close_time)
-                                if lock is not None
-                                else {"ok": False}
-                            )
-                            if not verdict_struktur["ok"]:
-                                continue
                         if scanner.detect_entry_setup(
-                            window_kl, config, structure_verdict=verdict_struktur
+                            window_kl,
+                            config,
+                            signal_close_time_ms=kl[i].close_time,
                         ).ok:
                             skipped.append(
                                 SkippedSignal(
@@ -1195,35 +1034,14 @@ def run_portfolio_backtest(
                 if i + 1 < lookback:
                     continue
                 kl = store.klines(sym)
-                verdict_struktur = None
-                if struktur_of:
-                    confluence_structure_scans += 1
-                    lock = struktur_of.get(sym)
-                    verdict_struktur = (
-                        lock.verdict_at(kl[i].close_time)
-                        if lock is not None
-                        else {"ok": False}
-                    )
-                    if not verdict_struktur["ok"]:
-                        confluence_structure_skips += 1
-                        if len(skipped) < max_skipped_records:
-                            skipped.append(
-                                SkippedSignal(
-                                    time=t_now,
-                                    symbol=sym,
-                                    reason="FILTER_CONFLUENCE_STRUCTURE",
-                                    holding=None,
-                                )
-                            )
-                        continue
                 window_kl = kl[max(0, i - lookback + 1) : i + 1]
-                if strategy.confluence_enabled(config):
-                    confluence_trigger_scans += 1
+                if strategy.entry_rule_enabled(config):
+                    entry_rule_scans += 1
                 try:
                     setup = scanner.detect_entry_setup(
                         window_kl,
                         config,
-                        structure_verdict=verdict_struktur,
+                        signal_close_time_ms=kl[i].close_time,
                     )
                 except Exception as exc:
                     raise BacktestError(
@@ -1231,14 +1049,14 @@ def run_portfolio_backtest(
                         f"(bar {i}) gagal: {type(exc).__name__}: {str(exc)[:160]}"
                     ) from exc
                 if not setup.ok:
-                    if strategy.confluence_enabled(config):
-                        confluence_trigger_skips += 1
+                    if strategy.entry_rule_enabled(config):
+                        entry_rule_skips += 1
                         if len(skipped) < max_skipped_records:
                             skipped.append(
                                 SkippedSignal(
                                     time=t_now,
                                     symbol=sym,
-                                    reason="FILTER_CONFLUENCE_TRIGGER",
+                                    reason="FILTER_ENTRY_RULE",
                                     holding=None,
                                 )
                             )
@@ -1264,59 +1082,31 @@ def run_portfolio_backtest(
             eligible_count, raw_lolos = cached_entry
             if not raw_lolos:
                 continue
-            cfg_buf = float(config.get("CONFLUENCE_SL_BUFFER_PCT", 0.20) or 0.0)
-            cfg_rr = float(config.get("CONFLUENCE_MIN_RR_RATIO", 1.2) or 1.2)
+            cfg_buf = float(config.get("ENTRY_SL_BUFFER_PCT", 0.30) or 0.0)
+            cfg_rr = float(config.get("ENTRY_MIN_RR_RATIO", 2.0) or 2.0)
             same_exit_cfg = (
-                abs(cfg_buf - getattr(entry_signal_cache, "sl_buffer_pct", 0.20)) < 1e-9
-                and abs(cfg_rr - getattr(entry_signal_cache, "min_rr_ratio", 1.2)) < 1e-9
+                abs(cfg_buf - getattr(entry_signal_cache, "sl_buffer_pct", 0.30)) < 1e-9
+                and abs(cfg_rr - getattr(entry_signal_cache, "min_rr_ratio", 2.0)) < 1e-9
             )
             if same_exit_cfg:
                 lolos = list(raw_lolos)
             else:
                 lolos = []
                 for r_rank, r_sym, r_i, r_vol24, r_setup in raw_lolos:
-                    if not strategy.confluence_enabled(config):
-                        fb = strategy.compute_confluence_exit_levels(
-                            float(r_setup.signal_close or 100.0),
-                            config,
-                            fallback_allowed=True,
-                        )
-                        lolos.append(
-                            (
-                                r_rank,
-                                r_sym,
-                                r_i,
-                                r_vol24,
-                                replace(
-                                    r_setup,
-                                    sl_price=fb["sl_price"],
-                                    tp_price=fb["tp_price"],
-                                    sl_pct=fb["sl_pct"],
-                                    tp_pct=fb["tp_pct"],
-                                    rr_ratio=fb["rr_ratio"],
-                                ),
-                            )
-                        )
-                        continue
-                    info = strategy.compute_confluence_exit_levels(
+                    info = strategy.compute_entry_exit_levels(
                         float(r_setup.signal_close or 0.0),
                         config,
-                        poi_low=r_setup.poi_low,
-                        ob_low=r_setup.ob_low,
-                        swing_low=r_setup.swing_low,
-                        sweep_low=r_setup.sweep_low,
-                        bsl_level=r_setup.bsl_level,
-                        swing_high=r_setup.swing_high,
-                        fallback_allowed=False,
+                        anchor_low=getattr(r_setup, "entry_low", None),
+                        fallback_allowed=True,
                     )
                     if not info["ok"]:
-                        confluence_trigger_skips += 1
+                        entry_rule_skips += 1
                         if len(skipped) < max_skipped_records:
                             skipped.append(
                                 SkippedSignal(
                                     time=t_now,
                                     symbol=r_sym,
-                                    reason="FILTER_CONFLUENCE_TRIGGER",
+                                    reason="FILTER_ENTRY_RULE",
                                     holding=None,
                                 )
                             )
@@ -1470,16 +1260,11 @@ def run_portfolio_backtest(
             f"{chase_skips} sinyal dilewati oleh filter MAX_CHASE_PCT "
             f"({max_chase_pct:g}%), sama seperti bot live."
         )
-    if confluence_structure_skips:
+    if entry_rule_skips:
         warnings.append(
-            f"{confluence_structure_skips} dari {confluence_structure_scans} kandidat top-N "
-            f"dilewati oleh struktur POI The Confluence Code "
-            f"({strategy.confluence_structure_interval(config)})."
-        )
-    if confluence_trigger_skips:
-        warnings.append(
-            f"{confluence_trigger_skips} dari {confluence_trigger_scans} struktur POI "
-            f"dilewati oleh pemicu eksekusi The Confluence Code ({interval})."
+            f"{entry_rule_skips} dari {entry_rule_scans} kandidat top-N dilewati aturan "
+            f"entry ({strategy.entry_bull_candles(config)} candle bullish beruntun di "
+            f"{interval} dengan batas jarak SL)."
         )
     risk_summary = controls.summary()
     if risk_summary["kill_switch_triggers"] > 0:
@@ -1507,10 +1292,8 @@ def run_portfolio_backtest(
         final_equity=equity,
         risk_events=risk_summary,
         chase_skips=chase_skips,
-        confluence_structure_skips=confluence_structure_skips,
-        confluence_structure_scans=confluence_structure_scans,
-        confluence_trigger_skips=confluence_trigger_skips,
-        confluence_trigger_scans=confluence_trigger_scans,
+        entry_rule_skips=entry_rule_skips,
+        entry_rule_scans=entry_rule_scans,
         same_coin_skips=same_coin_skips,
         mark_to_market_open=mark_to_market_open,
         mark_to_market_symbol=mark_to_market_symbol,
@@ -1719,14 +1502,8 @@ def summarize_portfolio(result: PortfolioResult) -> dict:
         "trades_per_day": (total / span_days) if span_days > 0 else 0.0,
         "risk_events": dict(result.risk_events or {}),
         "chase_skips": int(result.chase_skips),
-        "confluence_structure_skips": int(result.confluence_structure_skips),
-        "confluence_structure_scans": int(result.confluence_structure_scans),
-        "confluence_trigger_skips": int(result.confluence_trigger_skips),
-        "confluence_trigger_scans": int(result.confluence_trigger_scans),
-        "structure_skips": int(result.confluence_structure_skips),
-        "structure_scans": int(result.confluence_structure_scans),
-        "trigger_skips": int(result.confluence_trigger_skips),
-        "trigger_scans": int(result.confluence_trigger_scans),
+        "entry_rule_skips": int(result.entry_rule_skips),
+        "entry_rule_scans": int(result.entry_rule_scans),
         "same_coin_skips": int(result.same_coin_skips),
         **trade_metrics,
     }
@@ -1966,18 +1743,18 @@ def selftest() -> bool:
         cfg.update(
             {
                 "MODE": "PAPER",
-                "CONFLUENCE_FILTER_ENABLED": False,
+                "ENTRY_RULE_ENABLED": True,
                 "BTC_FILTER_ENABLED": False,
                 "MIN_QUOTE_VOLUME_USDT_24H": 0.0,
-                "CONFLUENCE_SL_BUFFER_PCT": 0.20,
-                "CONFLUENCE_MIN_RR_RATIO": 1.2,
+                "ENTRY_SL_BUFFER_PCT": 0.30,
+                "ENTRY_MIN_RR_RATIO": 2.0,
+                "ENTRY_MAX_SL_PCT": 5.0,
                 "TAKER_FEE_PCT": 0.1,
                 "USE_BNB_FEE_DISCOUNT": False,
                 "USE_RISK_PERCENT": False,
                 "POSITION_SIZE_USDT": 100.0,
                 "MAX_POSITION_USDT": 0.0,
                 "BACKTEST_INITIAL_EQUITY_USDT": 1000.0,
-                "MAX_HOLD_HOURS": 0.0,
                 "COOLDOWN_MINUTES_AFTER_CLOSE": 0,
                 "MIN_SECONDS_BETWEEN_TRADES": 0,
                 "MAX_CHASE_PCT": 0.0,
@@ -2002,17 +1779,12 @@ def selftest() -> bool:
         tl_3 = build_timeline(store, "5m", config=cfg)
         check("build_timeline 3-tuple dengan config", len(tl_3) == 3 and tl_3[2] == {})
 
-        cfg_conf = _base_cfg()
-        cfg_conf["CONFLUENCE_FILTER_ENABLED"] = True
-        tl_conf = build_timeline(store, "5m", config=cfg_conf)
-        check(
-            "build_timeline mengisi struktur saat CONFLUENCE_FILTER_ENABLED=True",
-            len(tl_conf) == 3 and set(tl_conf[2].keys()) == {"AAAUSDT", "BBBUSDT"},
-        )
-
         u2 = unpack_prebuilt((tl_2[0], tl_2[1]))
-        u3 = unpack_prebuilt(tl_conf)
-        check("unpack_prebuilt menerima 2-tuple dan 3-tuple", u2[2] is None and u3[2] is not None)
+        u3 = unpack_prebuilt(tl_3)
+        check(
+            "unpack_prebuilt menerima 2-tuple dan 3-tuple",
+            u2[2] is None and u3[2] == {},
+        )
 
         warmup_ms = 300 * 5 * MS_PER_MIN
         res_plain = run_portfolio_backtest(
@@ -2053,7 +1825,7 @@ def selftest() -> bool:
     from backtesting.backtest import run_backtest
 
     par_cfg = _base_cfg()
-    par_kl = seri_dengan_setup(harga=100.0, ekor="naik", panjang_ekor=20)
+    par_kl = seri_banyak_setup(harga=100.0, siklus=10, volume=9_000_000.0)
     par_store = new_backtest_store(par_cfg)
     try:
         par_store.write_symbol("SOLOUSDT", par_kl)

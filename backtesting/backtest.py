@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from strategy.indicators import Kline
+from strategy import entry_rule
 from strategy import indicators as strategy
 from market import market_scanner as scanner
 from backtesting import parity
@@ -56,10 +57,8 @@ class BacktestResult:
     final_equity: float = 0.0
     risk_events: dict = field(default_factory=dict)
     chase_skips: int = 0
-    confluence_structure_scans: int = 0
-    confluence_structure_skips: int = 0
-    confluence_trigger_scans: int = 0
-    confluence_trigger_skips: int = 0
+    entry_rule_scans: int = 0
+    entry_rule_skips: int = 0
     same_coin_skips: int = 0
     mark_to_market_open: bool = False
     mark_to_market_pnl_pct: float = 0.0
@@ -192,7 +191,6 @@ def run_backtest(
     warmup_bars: int,
     progress_cb: Optional[Callable[[float], None]] = None,
     btc_klines: Optional[list[Kline]] = None,
-    structure_klines: Optional[list[Kline]] = None,
 ) -> BacktestResult:
     interval = config.get("CONFIRM_INTERVAL", "5m")
     window = bars_per_day(interval)
@@ -204,10 +202,8 @@ def run_backtest(
     n = len(klines)
     trades: list[BacktestTrade] = []
     warnings: list[str] = []
-    confluence_structure_scans = 0
-    confluence_structure_skips = 0
-    confluence_trigger_scans = 0
-    confluence_trigger_skips = 0
+    entry_rule_scans = 0
+    entry_rule_skips = 0
 
     initial_equity = initial_backtest_equity(config)
     symbol = str(config.get("_symbol", "") or "")
@@ -266,23 +262,18 @@ def run_backtest(
     if btc_warning:
         warnings.append(btc_warning)
 
-    structure_lookup = parity.make_structure_lookup(
-        structure_klines if structure_klines is not None else klines,
-        config,
-        interval,
-        sudah_dirangkai=structure_klines is not None,
+    butuh_warmup = max(
+        strategy.required_lookback_bars(config),
+        strategy.gate_warmup_bars(config, interval),
     )
-    if structure_lookup is not None:
-        butuh_warmup = strategy.gate_warmup_bars(config, interval)
-        if int(warmup_bars) < butuh_warmup:
-            warnings.append(
-                f"Warmup {warmup_bars} bar {interval} dinaikkan menjadi {butuh_warmup} bar "
-                f"karena struktur Confluence {structure_lookup.interval} memerlukan "
-                f"{structure_lookup.window} candle tertutup. "
-                "Naikkan warmup di pemanggil (atau perpanjang rentang data) supaya "
-                "backtest dan live memakai riwayat yang sama."
-            )
-            warmup_bars = butuh_warmup
+    if int(warmup_bars) < butuh_warmup:
+        warnings.append(
+            f"Warmup {warmup_bars} bar {interval} dinaikkan menjadi {butuh_warmup} bar "
+            "karena aturan entry membutuhkan riwayat candle tertutup. Naikkan warmup di "
+            "pemanggil (atau perpanjang rentang data) supaya backtest dan live memakai "
+            "riwayat yang sama."
+        )
+        warmup_bars = butuh_warmup
 
     i = max(warmup_bars, window - 1, lookback)
     start_idx = i
@@ -311,25 +302,17 @@ def run_backtest(
                     ),
                 )
             ):
-                verdict_struktur = None
-                if structure_lookup is not None:
-                    confluence_structure_scans += 1
-                    verdict_struktur = structure_lookup.verdict_at(candle.close_time)
-                    if not verdict_struktur["ok"]:
-                        confluence_structure_skips += 1
-                        i += 1
-                        continue
                 window_klines = klines[max(0, i - lookback + 1) : i + 1]
-                if strategy.confluence_enabled(config):
-                    confluence_trigger_scans += 1
+                if strategy.entry_rule_enabled(config):
+                    entry_rule_scans += 1
                 setup = scanner.detect_entry_setup(
                     window_klines,
                     config,
-                    structure_verdict=verdict_struktur,
+                    signal_close_time_ms=candle.close_time,
                 )
                 if not setup.ok:
-                    if strategy.confluence_enabled(config):
-                        confluence_trigger_skips += 1
+                    if strategy.entry_rule_enabled(config):
+                        entry_rule_skips += 1
                     i += 1
                     continue
                 if parity.same_coin_blocked(symbol, candle.open_time, symbol_blocks):
@@ -459,17 +442,11 @@ def run_backtest(
             f"{chase_skips} sinyal dilewati oleh filter MAX_CHASE_PCT "
             f"({max_chase_pct:g}%), sama seperti bot live."
         )
-    if confluence_structure_skips:
+    if entry_rule_skips:
         warnings.append(
-            f"{confluence_structure_skips} dari {confluence_structure_scans} evaluasi dilewati "
-            f"oleh struktur POI The Confluence Code ({strategy.confluence_structure_interval(config)}): "
-            "BoS, Volume Profile, Fibonacci, FVG, dan Order Block wajib sejajar di zona diskon."
-        )
-    if confluence_trigger_skips:
-        warnings.append(
-            f"{confluence_trigger_skips} dari {confluence_trigger_scans} struktur POI dilewati "
-            f"oleh pemicu eksekusi The Confluence Code ({interval}): "
-            "sapuan likuiditas SSL dan konfirmasi reaksi candle bullish di zona POI."
+            f"{entry_rule_skips} dari {entry_rule_scans} sinyal dilewati aturan entry "
+            f"({strategy.entry_bull_candles(config)} candle bullish beruntun di {interval}, "
+            "SL di bawah low candle sinyal, atau jarak SL melebihi batas)."
         )
     risk_summary = controls.summary()
     if risk_summary["kill_switch_triggers"] > 0:
@@ -501,10 +478,8 @@ def run_backtest(
         final_equity=equity,
         risk_events=risk_summary,
         chase_skips=chase_skips,
-        confluence_structure_scans=confluence_structure_scans,
-        confluence_structure_skips=confluence_structure_skips,
-        confluence_trigger_scans=confluence_trigger_scans,
-        confluence_trigger_skips=confluence_trigger_skips,
+        entry_rule_scans=entry_rule_scans,
+        entry_rule_skips=entry_rule_skips,
         same_coin_skips=same_coin_skips,
         mark_to_market_open=mark_to_market_open,
         mark_to_market_pnl_pct=mark_to_market_pnl_pct,
@@ -640,10 +615,8 @@ def summarize(result: BacktestResult) -> dict:
         "total_pnl_quote": final_equity - initial,
         "risk_events": result.risk_events or {},
         "chase_skips": result.chase_skips,
-        "confluence_structure_scans": result.confluence_structure_scans,
-        "confluence_structure_skips": result.confluence_structure_skips,
-        "confluence_trigger_scans": result.confluence_trigger_scans,
-        "confluence_trigger_skips": result.confluence_trigger_skips,
+        "entry_rule_scans": result.entry_rule_scans,
+        "entry_rule_skips": result.entry_rule_skips,
         "same_coin_skips": result.same_coin_skips,
         **trade_metrics,
     }
@@ -672,33 +645,13 @@ OVERRIDE_CASTERS = {
     "BTC_LOOKBACK_BARS": int,
     "CONFIRM_INTERVAL": str,
     "CONFIRM_LOOKBACK_BARS": int,
-    "CONFLUENCE_FILTER_ENABLED": _cast_bool,
-    "CONFLUENCE_STRUCTURE_INTERVAL": str,
-    "CONFLUENCE_LOOKBACK_BARS": int,
-    "CONFLUENCE_MIN_IMPULSE_PCT": float,
-    "CONFLUENCE_IMPULSE_SELECTION": str,
-    "CONFLUENCE_ZONE_TOLERANCE_RATIO": float,
-    "CONFLUENCE_REQUIRE_ALL_FIVE": _cast_bool,
-    "CONFLUENCE_MIN_SCORE": float,
-    "VP_FILTER_ENABLED": _cast_bool,
-    "VP_BINS": int,
-    "VP_HVN_TOP_RATIO": float,
-    "FIB_FILTER_ENABLED": _cast_bool,
-    "FIB_RETRACEMENT_MIN": float,
-    "FIB_RETRACEMENT_MAX": float,
-    "LIQUIDITY_FILTER_ENABLED": _cast_bool,
-    "LIQUIDITY_EQUAL_LEVEL_TOL_RATIO": float,
-    "LIQUIDITY_SWEEP_LOOKBACK_BARS": int,
-    "FVG_FILTER_ENABLED": _cast_bool,
-    "OB_FILTER_ENABLED": _cast_bool,
-    "CONFLUENCE_REQUIRE_BULLISH_REACTION": _cast_bool,
-    "CONFLUENCE_MIN_CLOSE_POSITION": float,
-    "CONFLUENCE_SL_BUFFER_PCT": float,
-    "CONFLUENCE_MIN_RR_RATIO": float,
-    "CONFLUENCE_BREAKEVEN_ENABLED": _cast_bool,
-    "CONFLUENCE_BREAKEVEN_R_MULTIPLE": float,
-    "CONFLUENCE_BREAKEVEN_LOCK_PCT": float,
-    "MAX_HOLD_HOURS": float,
+    "ENTRY_RULE_ENABLED": _cast_bool,
+    "ENTRY_BULL_CANDLES": int,
+    "ENTRY_SL_ANCHOR": str,
+    "ENTRY_SL_BUFFER_PCT": float,
+    "ENTRY_MIN_RR_RATIO": float,
+    "ENTRY_MAX_SL_PCT": float,
+    "EXIT_TRAILING_PCT": float,
     "TAKER_FEE_PCT": float,
     "USE_BNB_FEE_DISCOUNT": _cast_bool,
     "USE_RISK_PERCENT": _cast_bool,
@@ -765,8 +718,14 @@ def _rentang_schema(key: str, lo: float, hi: float) -> tuple:
 
 def validate_params(config: dict) -> None:
     checks = [
-        ("CONFLUENCE_SL_BUFFER_PCT", 0.0, 10.0),
-        ("CONFLUENCE_MIN_RR_RATIO", 0.1, 20.0),
+        ("ENTRY_SL_BUFFER_PCT", 0.0, 10.0),
+        ("ENTRY_MIN_RR_RATIO", 0.1, 20.0),
+        ("ENTRY_MAX_SL_PCT", 0.0, 50.0),
+        (
+            "EXIT_TRAILING_PCT",
+            entry_rule.EXIT_TRAILING_MIN_PCT,
+            entry_rule.EXIT_TRAILING_MAX_PCT,
+        ),
     ]
     for key, lo, hi in checks:
         lo, hi = _rentang_schema(key, lo, hi)
@@ -776,41 +735,20 @@ def validate_params(config: dict) -> None:
                 f"Parameter '{key}'={val} di luar rentang wajar ({lo:g}..{hi:g})."
             )
 
-    pilihan_impuls = str(config.get("CONFLUENCE_IMPULSE_SELECTION") or "").strip().upper()
-    if pilihan_impuls not in ("STRONGEST", "RECENT"):
+    bull = config.get("ENTRY_BULL_CANDLES")
+    if bull is None or not (2 <= int(bull) <= 10):
         raise BacktestError(
-            "Parameter 'CONFLUENCE_IMPULSE_SELECTION' hanya menerima STRONGEST atau "
-            f"RECENT, bukan '{config.get('CONFLUENCE_IMPULSE_SELECTION')}'."
+            f"Parameter 'ENTRY_BULL_CANDLES'={bull} harus di antara 2 dan 10."
+        )
+    anchor = str(config.get("ENTRY_SL_ANCHOR") or "").strip().upper()
+    if anchor not in ("SIGNAL", "SEQUENCE"):
+        raise BacktestError(
+            f"Parameter 'ENTRY_SL_ANCHOR' hanya menerima SIGNAL atau SEQUENCE, bukan {anchor!r}."
         )
 
     interval = config.get("CONFIRM_INTERVAL", "5m")
     if interval not in INTERVAL_MINUTES:
         raise BacktestError(f"Interval '{interval}' tidak dikenal.")
-
-    if bool(config.get("CONFLUENCE_FILTER_ENABLED", False)):
-        struct_interval = strategy.confluence_structure_interval(config)
-        if struct_interval not in INTERVAL_MINUTES:
-            raise BacktestError(
-                f"CONFLUENCE_STRUCTURE_INTERVAL '{struct_interval}' tidak dikenal."
-            )
-        confluence_checks = [
-            ("CONFLUENCE_LOOKBACK_BARS", 15, 500),
-            ("CONFLUENCE_MIN_IMPULSE_PCT", 0.1, 100.0),
-            ("CONFLUENCE_ZONE_TOLERANCE_RATIO", 0.0, 0.50),
-            ("VP_BINS", 5, 100),
-            ("VP_HVN_TOP_RATIO", 0.05, 1.0),
-            ("FIB_RETRACEMENT_MIN", 0.10, 0.95),
-            ("FIB_RETRACEMENT_MAX", 0.15, 0.99),
-            ("LIQUIDITY_SWEEP_LOOKBACK_BARS", 1, 30),
-            ("CONFLUENCE_MIN_CLOSE_POSITION", 0.0, 1.0),
-        ]
-        for key, lo, hi in confluence_checks:
-            lo, hi = _rentang_schema(key, lo, hi)
-            val = config.get(key)
-            if val is None or not (lo <= float(val) <= hi):
-                raise BacktestError(
-                    f"Parameter '{key}'={val} di luar rentang wajar ({lo:g}..{hi:g})."
-                )
 
     try:
         strategy.max_hold_ms(config, str(interval))
@@ -908,7 +846,6 @@ def execute_backtest(
 
     cache_meta = None
     btc_klines: Optional[list[Kline]] = None
-    structure_klines: Optional[list[Kline]] = None
     try:
         klines = _fetch_with_cache(symbol, interval, start_ms, end_ms, cb=fetch_cb)
 
@@ -934,26 +871,6 @@ def execute_backtest(
                 except Exception:
                     btc_klines = None
 
-        if strategy.confluence_enabled(config):
-            struct_interval = strategy.confluence_structure_interval(config)
-            if struct_interval != interval:
-                struct_window = strategy.confluence_structure_window_bars(config)
-                struct_bar_ms = INTERVAL_MINUTES[struct_interval] * MS_PER_MIN
-                struct_start_ms = (
-                    end_ms - int(days * MS_PER_DAY) - struct_window * struct_bar_ms
-                )
-                if struct_start_ms < start_ms:
-                    if progress_cb:
-                        progress_cb(
-                            0.77,
-                            f"Mengunduh data struktur {symbol} ({struct_interval})...",
-                        )
-                    try:
-                        structure_klines = _fetch_with_cache(
-                            symbol, struct_interval, struct_start_ms, end_ms, cb=None
-                        )
-                    except Exception:
-                        structure_klines = None
         if cache_obj is not None:
             cache_meta = cache_obj.stats()
     finally:
@@ -975,7 +892,6 @@ def execute_backtest(
         warmup_bars=warmup_bars,
         progress_cb=sim_cb,
         btc_klines=btc_klines,
-        structure_klines=structure_klines,
     )
     summary = summarize(result)
 
@@ -1009,7 +925,7 @@ def execute_backtest(
 
     spread_pct, slip_pct, delay_bars = entry_execution_params(config)
     assumptions = [
-        "Simulasi 1 koin menggunakan filter entry The Confluence Code (Volume Profile -> Fibonacci -> Liquidity -> FVG -> Order Block) dan logika exit yang sama dengan bot.",
+        "Simulasi 1 koin mengikuti aturan entry candle bullish beruntun dan logika exit yang sama dengan bot.",
         (
             f"Eksekusi entry menunggu {delay_bars} bar setelah sinyal lalu membeli pada harga open + "
             f"setengah spread ({spread_pct / 2:.3f}%) + slippage ({slippage_label(slip_pct)}%). "
@@ -1068,23 +984,18 @@ def print_report(data: dict) -> None:
     )
     print("-" * 72)
     exit_info = (
-        f"Confluence Struktural (SL buffer={p.get('CONFLUENCE_SL_BUFFER_PCT', 0.2)}% "
-        f"Min R:R=1:{p.get('CONFLUENCE_MIN_RR_RATIO', 1.2)} "
-        f"MaxHold={p.get('MAX_HOLD_HOURS', 0)}h)"
+        f"SL buffer={p.get('ENTRY_SL_BUFFER_PCT', 0.3)}% "
+        f"Min R:R=1:{p.get('ENTRY_MIN_RR_RATIO', 2.0)} "
+        f"MaxHold={strategy.exit_fixed_params()['max_hold_hours']:g}h"
     )
-    confluence_info = (
-        f"{p.get('CONFLUENCE_STRUCTURE_INTERVAL', '15m')}->"
-        f"{p.get('CONFIRM_INTERVAL', '5m')} "
-        f"(VP={'ON' if p.get('VP_FILTER_ENABLED', True) else 'OFF'},"
-        f"Fib={'ON' if p.get('FIB_FILTER_ENABLED', True) else 'OFF'},"
-        f"Liq={'ON' if p.get('LIQUIDITY_FILTER_ENABLED', True) else 'OFF'},"
-        f"FVG={'ON' if p.get('FVG_FILTER_ENABLED', True) else 'OFF'},"
-        f"OB={'ON' if p.get('OB_FILTER_ENABLED', True) else 'OFF'})"
-        if p.get("CONFLUENCE_FILTER_ENABLED", True)
+    entry_info = (
+        f"{p.get('ENTRY_BULL_CANDLES', 3)} candle bullish di {p.get('CONFIRM_INTERVAL', '5m')} "
+        f"(SL anchor {p.get('ENTRY_SL_ANCHOR', 'SIGNAL')})"
+        if p.get("ENTRY_RULE_ENABLED", True)
         else "OFF"
     )
     print(
-        f"Parameter utama : Confluence={confluence_info}  |  Exit: {exit_info}"
+        f"Parameter utama : Entry={entry_info}  |  Exit: {exit_info}"
     )
     print("-" * 72)
     print(f"Total trade     : {s['total_trades']}")
@@ -1156,18 +1067,11 @@ def print_single_result(result: BacktestResult) -> None:
     print(f"Modal awal         : {summary['initial_equity']:.2f}")
     print(f"Alasan exit        : {dict(sorted(summary['reason_counts'].items()))}")
     risk_info = {k: v for k, v in summary.get("risk_events", {}).items() if v}
-    if (
-        risk_info
-        or summary.get("chase_skips")
-        or summary.get("confluence_structure_scans")
-        or summary.get("confluence_trigger_scans")
-    ):
+    if risk_info or summary.get("chase_skips") or summary.get("entry_rule_scans"):
         print(
             f"Kontrol akun/filter: {risk_info}, chase dilewati {summary.get('chase_skips', 0)}, "
-            f"struktur POI dilewati {summary.get('confluence_structure_skips', 0)} dari "
-            f"{summary.get('confluence_structure_scans', 0)}, "
-            f"trigger dilewati {summary.get('confluence_trigger_skips', 0)} dari "
-            f"{summary.get('confluence_trigger_scans', 0)}"
+            f"aturan entry menolak {summary.get('entry_rule_skips', 0)} dari "
+            f"{summary.get('entry_rule_scans', 0)} evaluasi"
         )
     if result.warnings:
         print("Peringatan:")
@@ -1197,18 +1101,19 @@ def main():
         "--sl-buffer",
         type=float,
         default=None,
-        help="Override CONFLUENCE_SL_BUFFER_PCT",
+        help="Override ENTRY_SL_BUFFER_PCT",
     )
     parser.add_argument(
         "--min-rr",
         type=float,
         default=None,
-        help="Override CONFLUENCE_MIN_RR_RATIO",
+        help="Override ENTRY_MIN_RR_RATIO",
     )
     parser.add_argument(
-        "--structure-interval",
+        "--bull-candles",
+        type=int,
         default=None,
-        help="Override CONFLUENCE_STRUCTURE_INTERVAL (5m/15m/1h)",
+        help="Override ENTRY_BULL_CANDLES (2-10)",
     )
     parser.add_argument(
         "--grid",
@@ -1261,11 +1166,11 @@ def main():
     if args.interval:
         overrides["CONFIRM_INTERVAL"] = args.interval
     if args.sl_buffer is not None:
-        overrides["CONFLUENCE_SL_BUFFER_PCT"] = args.sl_buffer
+        overrides["ENTRY_SL_BUFFER_PCT"] = args.sl_buffer
     if args.min_rr is not None:
-        overrides["CONFLUENCE_MIN_RR_RATIO"] = args.min_rr
-    if args.structure_interval:
-        overrides["CONFLUENCE_STRUCTURE_INTERVAL"] = args.structure_interval
+        overrides["ENTRY_MIN_RR_RATIO"] = args.min_rr
+    if args.bull_candles is not None:
+        overrides["ENTRY_BULL_CANDLES"] = args.bull_candles
 
     client = BinanceSpotClient(
         "",

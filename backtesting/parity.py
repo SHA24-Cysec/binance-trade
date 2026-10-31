@@ -184,73 +184,6 @@ def gate_config(config: dict, btc_lookup: Optional[BtcDropLookup]) -> dict:
     return cfg
 
 
-class ConfluenceStructureLookup:
-
-    def __init__(
-        self,
-        structure_klines: list[Kline],
-        config: dict,
-        interval: str,
-        confirm_interval: str = "5m",
-    ) -> None:
-        self.klines = sorted(structure_klines, key=lambda k: k.open_time)
-        self.close_times = [k.close_time for k in self.klines]
-        self.interval = str(interval)
-        self.confirm_interval = str(confirm_interval)
-        self.window = strategy.confluence_structure_window_bars(config)
-        self.config = dict(config)
-        self._verdict_cache: dict[int, dict] = {}
-
-    @property
-    def usable(self) -> bool:
-        return len(self.klines) >= self.window
-
-    def verdict_at(self, close_time_ms: int) -> dict:
-        idx = bisect_right(self.close_times, int(close_time_ms)) - 1
-        if idx < 0:
-            return scanner.confluence_structure_verdict([], self.config)
-        if idx not in self._verdict_cache:
-            start = max(0, idx - self.window)
-            window_slice = self.klines[start : idx + 1]
-            self._verdict_cache[idx] = scanner.confluence_structure_verdict(
-                window_slice, self.config
-            )
-        return self._verdict_cache[idx]
-
-
-def make_structure_lookup(
-    klines: Optional[list[Kline]],
-    config: dict,
-    confirm_interval: str = "5m",
-    *,
-    sudah_dirangkai: bool = False,
-) -> Optional[ConfluenceStructureLookup]:
-    if not strategy.confluence_enabled(config):
-        return None
-    if not klines:
-        return ConfluenceStructureLookup(
-            [],
-            config,
-            strategy.confluence_structure_interval(config),
-            confirm_interval,
-        )
-    target_interval = strategy.confluence_structure_interval(config)
-    src_interval = str(
-        confirm_interval or config.get("CONFIRM_INTERVAL", "5m")
-    ).strip().lower()
-    if sudah_dirangkai or target_interval == src_interval:
-        struct_klines = list(klines)
-    else:
-        struct_klines = strategy.aggregate_klines(
-            klines,
-            strategy.INTERVAL_MINUTES[target_interval],
-            strategy.INTERVAL_MINUTES[src_interval],
-        )
-    return ConfluenceStructureLookup(
-        struct_klines, config, target_interval, src_interval
-    )
-
-
 class AccountRiskControls:
 
     def __init__(self, config: dict, initial_equity: float) -> None:
@@ -354,6 +287,10 @@ class AccountRiskControls:
         }
 
 
+FIXED_BREAKEVEN_REASON = "BREAKEVEN"
+TRAILING_STOP_REASON = "TRAILING_STOP"
+
+
 class PositionState:
 
     def __init__(
@@ -367,7 +304,7 @@ class PositionState:
             raise ValueError(
                 f"PositionState membutuhkan entry_price > 0 dan berhingga, dapat {entry_price!r}"
             )
-        src = str(levels_dict.get("source", "CONFLUENCE") or "CONFLUENCE").upper()
+        src = str(levels_dict.get("source", "ENTRY_RULE") or "ENTRY_RULE").upper()
         sl_p = float(levels_dict.get("sl_pct") or 0.0)
         tp_p = float(levels_dict.get("tp_pct") or 0.0)
         if not (0.0 < sl_p < 100.0):
@@ -397,14 +334,20 @@ class PositionState:
         self.tp_price = tp_price
         self.be_active = False
         self.be_stop = 0.0
-        self.trailing_active = False
-        self.trailing_stop = 0.0
         self.be_activated = False
-        self.trailing_activated = False
+        self.trailing_active = False
         self.trailing_stop_price = 0.0
         self.initial_sl_price = sl_price
+        raw_atr = levels_dict.get("atr")
+        try:
+            atr_val = float(raw_atr) if raw_atr is not None else None
+        except (TypeError, ValueError):
+            atr_val = None
+        if atr_val is not None and atr_val <= 0.0:
+            atr_val = None
         self.levels = {
             "src": src,
+            "atr": atr_val,
             "use_atr": False,
             "sl": sl_p,
             "tp": tp_p,
@@ -420,6 +363,16 @@ class PositionState:
         }
 
 
+def _alasan_stop(pos: PositionState, sl_price: float) -> str:
+    trail = float(getattr(pos, "trailing_stop_price", 0.0) or 0.0)
+    if bool(getattr(pos, "trailing_active", False)) and trail > 0.0:
+        if sl_price >= trail - 1e-12:
+            return TRAILING_STOP_REASON
+    if bool(getattr(pos, "be_active", False)) and sl_price >= float(pos.entry_price):
+        return FIXED_BREAKEVEN_REASON
+    return "STOP_LOSS"
+
+
 def evaluate_candle_exit(
     pos: PositionState,
     candle: Kline,
@@ -430,40 +383,57 @@ def evaluate_candle_exit(
     entry = pos.entry_price
     lv = pos.levels
     sl_price = float(lv.get("sl_price") or (entry * (1.0 - lv["sl"] / 100.0)))
-    tp_price = float(lv.get("tp_price") or (entry * (1.0 + lv["tp"] / 100.0)))
 
+    puncak_sebelum = pos.highest_price
     if candle.high > pos.highest_price:
         pos.highest_price = candle.high
 
     if candle.low <= sl_price:
-        return "STOP_LOSS", min(sl_price, candle.open)
-    be_params = strategy.confluence_breakeven_params(config)
+        return _alasan_stop(pos, sl_price), min(sl_price, candle.open)
+    be_params = strategy.entry_breakeven_params(config)
     if be_params["enabled"] and not pos.be_active:
-        pemicu = strategy.confluence_breakeven_trigger(
+        pemicu = strategy.entry_breakeven_trigger(
             entry, pos.initial_sl_price, be_params["r_multiple"]
         )
         if pemicu > entry and candle.high >= pemicu:
-            pos.be_stop = strategy.confluence_breakeven_price(
+            level_be = strategy.entry_breakeven_price(
                 entry, pos.initial_sl_price, be_params["r_multiple"], be_params["lock_pct"]
             )
-            pos.be_active = True
-            pos.be_activated = True
-            pos.sl_price = pos.be_stop
-            pos.levels["sl_price"] = pos.be_stop
-            sl_price = pos.be_stop
-    if candle.high >= tp_price:
-        return "TAKE_PROFIT", max(tp_price, candle.open)
+            if level_be > sl_price:
+                pos.be_stop = level_be
+                pos.be_active = True
+                pos.be_activated = True
+                pos.sl_price = level_be
+                pos.levels["sl_price"] = level_be
+                sl_price = level_be
+    trail_params = strategy.exit_trailing_params(config)
+    if trail_params["enabled"]:
+        pemicu_trail = strategy.exit_trailing_start_price(
+            entry, pos.initial_sl_price, trail_params["start_r"]
+        )
+        if pemicu_trail > 0.0 and puncak_sebelum >= pemicu_trail:
+            kandidat = strategy.exit_trailing_stop_price(
+                puncak_sebelum, trail_params["pct"]
+            )
+            if kandidat > 0.0 and kandidat > sl_price:
+                pos.trailing_active = True
+                pos.trailing_stop_price = kandidat
+                pos.sl_price = kandidat
+                pos.levels["sl_price"] = kandidat
+                sl_price = kandidat
+    if candle.low <= sl_price:
+        return _alasan_stop(pos, sl_price), min(sl_price, candle.open)
     if strategy.time_stop_due(pos.entry_time, candle.close_time, cap_ms, bar_ms):
         return TIME_STOP_REASON, candle.close
 
     return None
 
 
-def confluence_warmup_bars(config: dict, interval: str = "5m") -> int:
-    return strategy.confluence_warmup_bars(config, str(interval))
+def entry_warmup_bars(config: dict, interval: str = "5m") -> int:
+    return strategy.entry_warmup_bars(config, str(interval))
 
 
-def confluence_warmup_ms(config: dict, interval: str = "5m") -> int:
+def entry_warmup_ms(config: dict, interval: str = "5m") -> int:
     return strategy.gate_warmup_ms(config, str(interval))
 
 

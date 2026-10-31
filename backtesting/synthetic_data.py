@@ -132,76 +132,18 @@ def blok_setup(harga: float, mulai_index: int, volume: float = 5_000_000.0):
         )
     )
     i += 1
-    return out, level * 1.008, i
 
-
-def blok_setup_confluence(harga: float, mulai_index: int, volume: float = 5_000_000.0):
-    out: list[Kline] = []
-    i = mulai_index
-    for _ in range(10):
+    harga_naik = level * 1.008
+    for _ in range(3):
+        open_ = harga_naik
+        harga_naik = open_ * 1.005
         out.append(
             make_candle(
-                i, harga, harga * 1.004, harga * 0.996, harga * 1.001, volume
+                i, open_, harga_naik * 1.002, open_ * 0.998, harga_naik, volume
             )
         )
         i += 1
-
-    base_low = harga * 0.98
-    out.append(
-        make_candle(
-            i, harga * 1.001, harga * 1.003, base_low, harga * 0.983, volume * 3.0
-        )
-    )
-    i += 1
-    out.append(
-        make_candle(
-            i, harga * 0.983, harga * 1.015, harga * 0.981, harga * 1.012, volume * 3.0
-        )
-    )
-    i += 1
-    out.append(
-        make_candle(
-            i, harga * 1.012, harga * 1.060, harga * 1.010, harga * 1.055, volume * 0.5
-        )
-    )
-    i += 1
-    out.append(
-        make_candle(
-            i, harga * 1.055, harga * 1.100, harga * 1.020, harga * 1.095, volume * 0.4
-        )
-    )
-    i += 1
-    out.append(
-        make_candle(
-            i, harga * 1.095, harga * 1.096, harga * 1.045, harga * 1.050, volume * 0.4
-        )
-    )
-    i += 1
-    out.append(
-        make_candle(
-            i, harga * 1.050, harga * 1.054, harga * 1.032, harga * 1.046, volume * 0.4
-        )
-    )
-    i += 1
-    out.append(
-        make_candle(
-            i, harga * 1.046, harga * 1.048, harga * 1.039, harga * 1.041, volume * 0.4
-        )
-    )
-    i += 1
-    out.append(
-        make_candle(
-            i, harga * 1.035, harga * 1.036, harga * 1.029, harga * 1.031, volume * 0.4
-        )
-    )
-    i += 1
-    out.append(
-        make_candle(
-            i, harga * 1.018, harga * 1.041, harga * 1.011, harga * 1.039, volume * 1.5
-        )
-    )
-    i += 1
-    return out, harga * 1.039, i
+    return out, harga_naik, i
 
 
 def seri_banyak_setup(

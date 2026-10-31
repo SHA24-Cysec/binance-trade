@@ -271,34 +271,43 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         maximum=1000,
         unit="candle",
     ),
-    "CONFLUENCE_SL_BUFFER_PCT": _field(
-        "SL dan TP",
-        "Buffer SL Confluence",
-        "Buffer tambahan di bawah struktur Order Block / POI / Swing Low / Sweep Low untuk mengunci level Stop Loss struktural.",
+    "ENTRY_SL_BUFFER_PCT": _field(
+        "Aturan Entry",
+        "Buffer SL di bawah low sinyal",
+        "Jarak tambahan di bawah low candle sinyal untuk menempatkan Stop Loss. Nilai kecil seperti 0.3 persen menghindari stop yang menempel tepat di low.",
         "float",
         minimum=0.0,
         maximum=10.0,
         unit="%",
     ),
-    "CONFLUENCE_MIN_RR_RATIO": _field(
-        "SL dan TP",
-        "Minimum Risk:Reward Confluence",
-        "Rasio imbal hasil terhadap risiko minimum (target BSL $$$ dibagi jarak SL struktural) agar setup diizinkan entry.",
+    "ENTRY_MIN_RR_RATIO": _field(
+        "Aturan Entry",
+        "Minimum Risk:Reward",
+        "Rasio imbal hasil terhadap risiko. Take Profit dihitung dari jarak Stop Loss dikali nilai ini, jadi tidak perlu menebak target harga.",
         "float",
         minimum=0.1,
         maximum=20.0,
         unit="x",
     ),
-    "MAX_HOLD_HOURS": _field(
-        "SL dan TP",
-        "Batas waktu tahan (time stop)",
-        "Tutup posisi otomatis saat umurnya mencapai batas ini. 0 = nonaktif. "
-        "Exit harga (Stop Loss struktural dan Take Profit BSL $$$) tetap diprioritaskan "
-        "pada bar yang sama, jadi time stop hanya menutup posisi yang mengendap tanpa arah.",
+    "ENTRY_MAX_SL_PCT": _field(
+        "Aturan Entry",
+        "Batas jarak SL",
+        "Setup ditolak bila jarak Stop Loss melebihi persen ini terhadap harga entry. Berguna agar scalping tidak masuk pada candle yang terlalu panjang. 0 berarti tanpa batas.",
         "float",
-        minimum=0,
-        maximum=720,
-        unit="jam",
+        minimum=0.0,
+        maximum=50.0,
+        unit="%",
+    ),
+    "EXIT_TRAILING_PCT": _field(
+        "SL dan TP",
+        "Jarak trailing stop",
+        "Stop dinaikkan mengikuti harga tertinggi, selalu sejauh persen ini di bawah "
+        "puncak yang sudah dicapai. Trailing aktif setelah untung mencapai satu kali "
+        "jarak stop, dan stop tidak pernah turun.",
+        "float",
+        minimum=0.1,
+        maximum=20.0,
+        unit="%",
     ),
     "EXTRA_EXCLUDE_SYMBOLS": _field(
         "Scan",
@@ -555,7 +564,7 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "CONFIRM_INTERVAL": _field(
         "Scan",
         "Interval konfirmasi",
-        "Interval candle sinyal untuk pemicu eksekusi entry. Samakan dengan CONFLUENCE_STRUCTURE_INTERVAL untuk mode single timeframe, atau pakai interval lebih pendek untuk mode multi timeframe. CONFLUENCE_STRUCTURE_INTERVAL wajib kelipatan bulat dari nilai ini dan tidak boleh lebih pendek agar candle struktur POI dapat dirangkai tanpa look-ahead.",
+        "Timeframe candle yang dipakai aturan entry. Bot menilai rangkaian candle bullish pada timeframe ini, jadi pilihan timeframe menentukan frekuensi entry dan rata-rata durasi posisi.",
         "str",
         editor="select",
         options=[
@@ -762,30 +771,6 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         maximum=100.0,
         unit="USDT",
     ),
-    "CONFLUENCE_BREAKEVEN_ENABLED": _field(
-        "Confluence Code",
-        "Aktifkan breakeven",
-        "Pindahkan stop loss ke harga entry setelah harga bergerak naik sejauh kelipatan risiko tertentu. Tidak ada penjualan sebagian, jadi cocok untuk modal kecil yang tidak memenuhi minimum order bursa.",
-        "bool",
-    ),
-    "CONFLUENCE_BREAKEVEN_R_MULTIPLE": _field(
-        "Confluence Code",
-        "Pemicu breakeven",
-        "Jarak pemicu dihitung dari jarak stop loss awal. 1,0 berarti stop baru dipindah setelah harga naik sejauh satu kali risiko.",
-        "float",
-        minimum=0.1,
-        maximum=10.0,
-        unit="R",
-    ),
-    "CONFLUENCE_BREAKEVEN_LOCK_PCT": _field(
-        "Confluence Code",
-        "Kunci profit breakeven",
-        "Tambahan persen di atas harga entry sebagai posisi stop setelah breakeven aktif. 0 berarti stop tepat di harga entry.",
-        "float",
-        minimum=0.0,
-        maximum=5.0,
-        unit="persen",
-    ),
     "TOP_N_CANDIDATES_TO_CONFIRM": _field(
         "Scan",
         "Jumlah kandidat konfirmasi",
@@ -794,181 +779,28 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         minimum=1,
         maximum=1000,
     ),
-    "CONFLUENCE_FILTER_ENABLED": _field(
-        "Confluence Code",
-        "Filter The Confluence Code",
-        "Aktifkan gerbang entry The Confluence Code (Volume Profile -> Fibonacci -> Liquidity -> FVG -> Order Block). Jika nonaktif, kandidat yang lolos seleksi 24 jam dan proteksi orderbook langsung memenuhi syarat entry.",
+    "ENTRY_RULE_ENABLED": _field(
+        "Aturan Entry",
+        "Aktifkan aturan entry",
+        "Gerbang entry utama: bot hanya masuk setelah sejumlah candle bullish beruntun tertutup. Jika nonaktif, kandidat yang lolos seleksi 24 jam dan proteksi orderbook langsung memenuhi syarat entry.",
         "bool",
     ),
-    "CONFLUENCE_STRUCTURE_INTERVAL": _field(
-        "Confluence Code",
-        "Interval struktur POI Confluence",
-        "Timeframe candle tertutup untuk memetakan struktur impuls BoS, Volume Profile, Fibonacci, Liquidity, FVG, dan Order Block (default 4h, samakan dengan CONFIRM_INTERVAL untuk single timeframe).",
-        "str",
-        editor="select",
-        options=[
-            "1m",
-            "3m",
-            "5m",
-            "15m",
-            "30m",
-            "1h",
-            "2h",
-            "4h",
-            "6h",
-            "8h",
-            "12h",
-            "1d",
-        ],
-    ),
-    "CONFLUENCE_LOOKBACK_BARS": _field(
-        "Confluence Code",
-        "Lookback struktur Confluence",
-        "Jumlah candle tertutup yang dianalisis untuk mencari struktur impuls BoS dan zona POI. Mesin memakai tepat sebanyak ini candle terakhir, minimal 20.",
+    "ENTRY_BULL_CANDLES": _field(
+        "Aturan Entry",
+        "Jumlah candle bullish beruntun",
+        "Berapa candle bullish berurutan yang wajib tertutup sebelum entry. Satu candle dihitung bullish bila close di atas open dan close di atas close candle sebelumnya.",
         "int",
-        minimum=20,
-        maximum=500,
+        minimum=2,
+        maximum=10,
         unit="candle",
     ),
-    "CONFLUENCE_MIN_IMPULSE_PCT": _field(
-        "Confluence Code",
-        "Impuls minimum BoS",
-        "Kenaikan persentase minimum dari Swing Low (1) ke Swing High (0) yang menembus struktur tertinggi sebelumnya (Break of Structure).",
-        "float",
-        minimum=0.1,
-        maximum=100.0,
-        unit="%",
-    ),
-    "CONFLUENCE_IMPULSE_SELECTION": _field(
-        "Confluence Code",
-        "Cara memilih impuls",
-        "STRONGEST memakai leg dengan impuls terbesar dalam jendela dan menjadi bawaan karena hasil uji terbaik. RECENT memakai leg terbaru yang sah, sehingga zona lebih dekat ke harga sekarang, tetapi pada data 15m hasilnya lebih sering kena sapuan.",
+    "ENTRY_SL_ANCHOR": _field(
+        "Aturan Entry",
+        "Titik acuan Stop Loss",
+        "SIGNAL memakai low candle sinyal terakhir. SEQUENCE memakai low terendah dari seluruh rangkaian candle bullish, sehingga stop lebih longgar tetapi lebih jarang tersapu.",
         "str",
         editor="select",
-        options=["STRONGEST", "RECENT"],
-    ),
-    "CONFLUENCE_ZONE_TOLERANCE_RATIO": _field(
-        "Confluence Code",
-        "Toleransi klaster POI",
-        "Toleransi lebar klaster terhadap rentang impuls untuk menyatukan irisan Volume Profile, Fibonacci, FVG, dan Order Block.",
-        "float",
-        minimum=0.0,
-        maximum=0.50,
-        unit="rasio",
-    ),
-    "CONFLUENCE_REQUIRE_ALL_FIVE": _field(
-        "Confluence Code",
-        "Wajibkan 5 dari 5 konfluensi",
-        "Jika aktif, entry hanya diambil ketika Volume Profile, Fibonacci, Liquidity, FVG, dan Order Block semuanya bertemu di satu zona harga yang sama.",
-        "bool",
-    ),
-    "CONFLUENCE_MIN_SCORE": _field(
-        "Confluence Code",
-        "Skor konfluensi minimum",
-        "Ambang skor 0 sampai 100 untuk kekuatan pertemuan zona. Skor turun saat zona hanya berdekatan, bukan beririsan penuh.",
-        "float",
-        minimum=0.0,
-        maximum=100.0,
-        unit="poin",
-    ),
-    "VP_FILTER_ENABLED": _field(
-        "Confluence Code",
-        "1. Volume Profile (HVN/POC)",
-        "Wajibkan terdapat High Volume Node (HVN) atau Point of Control (POC) dari Fixed Range Volume Profile di zona diskon retracement.",
-        "bool",
-    ),
-    "VP_BINS": _field(
-        "Confluence Code",
-        "Jumlah bin Volume Profile",
-        "Jumlah pembagian level harga (price bins) pada Fixed Range Volume Profile di rentang impuls.",
-        "int",
-        minimum=5,
-        maximum=100,
-        unit="bin",
-    ),
-    "VP_HVN_TOP_RATIO": _field(
-        "Confluence Code",
-        "Rasio HVN Volume Profile",
-        "Proporsi bin ber-volume tertinggi yang dikategorikan sebagai High Volume Node (misal 0.40 = 40% teratas).",
-        "float",
-        minimum=0.05,
-        maximum=1.0,
-        unit="rasio",
-    ),
-    "FIB_FILTER_ENABLED": _field(
-        "Confluence Code",
-        "2. Fibonacci Retracement",
-        "Wajibkan harga retracement dan zona POI berada di area diskon Fibonacci dari kaki impuls BoS.",
-        "bool",
-    ),
-    "FIB_RETRACEMENT_MIN": _field(
-        "Confluence Code",
-        "Batas atas Fibonacci (Min)",
-        "Level retracement Fibonacci minimum untuk zona diskon (default 0.50).",
-        "float",
-        minimum=0.10,
-        maximum=0.95,
-        unit="rasio",
-    ),
-    "FIB_RETRACEMENT_MAX": _field(
-        "Confluence Code",
-        "Batas bawah Fibonacci (Max)",
-        "Level retracement Fibonacci maksimum untuk zona diskon (default 0.786).",
-        "float",
-        minimum=0.15,
-        maximum=0.99,
-        unit="rasio",
-    ),
-    "LIQUIDITY_FILTER_ENABLED": _field(
-        "Confluence Code",
-        "3. Liquidity Sweep (SSL/BSL)",
-        "Wajibkan terbentuk Buy-Side Liquidity (BSL) di puncak impuls serta Sell-Side Liquidity (SSL) internal yang tersapu menuju zona POI.",
-        "bool",
-    ),
-    "LIQUIDITY_EQUAL_LEVEL_TOL_RATIO": _field(
-        "Confluence Code",
-        "Toleransi level likuiditas sejajar",
-        "Jarak maksimum antar low atau high yang dianggap sejajar, dihitung sebagai rasio dari panjang impuls, untuk membentuk pool likuiditas.",
-        "float",
-        minimum=0.01,
-        maximum=0.50,
-        unit="rasio",
-    ),
-    "LIQUIDITY_SWEEP_LOOKBACK_BARS": _field(
-        "Confluence Code",
-        "Lookback sapuan likuiditas",
-        "Jumlah candle terakhir pada timeframe konfirmasi untuk mendeteksi sapuan SSL dan sentuhan zona POI.",
-        "int",
-        minimum=1,
-        maximum=30,
-        unit="candle",
-    ),
-    "FVG_FILTER_ENABLED": _field(
-        "Confluence Code",
-        "4. Bullish Fair Value Gap (FVG)",
-        "Wajibkan terdapat celah ketidakseimbangan harga bullish (candle[i-1].high < candle[i+1].low) yang belum tertembus penuh di zona diskon.",
-        "bool",
-    ),
-    "OB_FILTER_ENABLED": _field(
-        "Confluence Code",
-        "5. Bullish Order Block (OB)",
-        "Wajibkan terdapat Order Block institusional di pangkal dorongan impuls yang beririsan dengan zona diskon.",
-        "bool",
-    ),
-    "CONFLUENCE_REQUIRE_BULLISH_REACTION": _field(
-        "Confluence Code",
-        "Wajib reaksi candle bullish",
-        "Wajibkan candle pemicu menutup bullish (close > open) di atas posisi penutupan minimum setelah menyentuh zona POI.",
-        "bool",
-    ),
-    "CONFLUENCE_MIN_CLOSE_POSITION": _field(
-        "Confluence Code",
-        "Posisi close reaksi minimum",
-        "Posisi penutupan minimum di dalam rentang high-low candle pemicu (0.60 = menutup di 40% bagian atas candle).",
-        "float",
-        minimum=0.1,
-        maximum=0.95,
-        unit="rasio",
+        options=["SIGNAL", "SEQUENCE"],
     ),
     "USE_RISK_PERCENT": _field(
         "Ukuran Posisi",
@@ -1251,6 +1083,32 @@ REMOVED_PARAMETERS = frozenset(
         "CONFLUENCE_PARTIAL_TP_FRACTION",
         "CONFLUENCE_PARTIAL_TP_R_MULTIPLE",
         "CONFLUENCE_PARTIAL_TP_BREAKEVEN",
+        "CONFLUENCE_FILTER_ENABLED",
+        "CONFLUENCE_STRUCTURE_INTERVAL",
+        "CONFLUENCE_LOOKBACK_BARS",
+        "CONFLUENCE_MIN_IMPULSE_PCT",
+        "CONFLUENCE_IMPULSE_SELECTION",
+        "CONFLUENCE_ZONE_TOLERANCE_RATIO",
+        "CONFLUENCE_REQUIRE_ALL_FIVE",
+        "CONFLUENCE_MIN_SCORE",
+        "CONFLUENCE_REQUIRE_BULLISH_REACTION",
+        "CONFLUENCE_MIN_CLOSE_POSITION",
+        "CONFLUENCE_SL_BUFFER_PCT",
+        "CONFLUENCE_MIN_RR_RATIO",
+        "CONFLUENCE_BREAKEVEN_ENABLED",
+        "CONFLUENCE_BREAKEVEN_R_MULTIPLE",
+        "CONFLUENCE_BREAKEVEN_LOCK_PCT",
+        "VP_FILTER_ENABLED",
+        "VP_BINS",
+        "VP_HVN_TOP_RATIO",
+        "FIB_FILTER_ENABLED",
+        "FIB_RETRACEMENT_MIN",
+        "FIB_RETRACEMENT_MAX",
+        "LIQUIDITY_FILTER_ENABLED",
+        "LIQUIDITY_EQUAL_LEVEL_TOL_RATIO",
+        "LIQUIDITY_SWEEP_LOOKBACK_BARS",
+        "FVG_FILTER_ENABLED",
+        "OB_FILTER_ENABLED",
     }
 )
 
@@ -1288,68 +1146,6 @@ def _migrate_legacy_keys(payload: dict) -> dict:
     return hasil
 
 
-_CONFLUENCE_V2_PASANGAN_LAMA = ("5m", "15m")
-_CONFLUENCE_V3_PASANGAN_LAMA = ("4h", "4h")
-
-_CONFLUENCE_V2_NILAI_LAMA = {
-    "CONFLUENCE_LOOKBACK_BARS": (60, 120),
-    "CONFLUENCE_MIN_IMPULSE_PCT": (0.8, 2.0),
-    "VP_BINS": (15, 24),
-    "VP_HVN_TOP_RATIO": (0.25, 0.30),
-    "FIB_RETRACEMENT_MIN": (0.40, 0.50),
-    "FIB_RETRACEMENT_MAX": (0.786, 0.79),
-    "CONFLUENCE_MIN_CLOSE_POSITION": (0.50, 0.60),
-    "CONFLUENCE_SL_BUFFER_PCT": (0.20, 0.50),
-    "CONFLUENCE_MIN_RR_RATIO": (1.2, 1.5),
-}
-
-
-def _sama_dengan(nilai: Any, target: float) -> bool:
-    try:
-        return abs(float(nilai) - float(target)) <= 1e-9
-    except (TypeError, ValueError):
-        return False
-
-
-def _migrate_confluence_v2(payload: dict) -> tuple[dict, bool]:
-    hasil = dict(payload)
-    konfirmasi = str(hasil.get("CONFIRM_INTERVAL", "")).strip().lower()
-    struktur = str(hasil.get("CONFLUENCE_STRUCTURE_INTERVAL", "")).strip().lower()
-    if (konfirmasi, struktur) != _CONFLUENCE_V2_PASANGAN_LAMA:
-        return hasil, False
-    for kunci, (lama, _baru) in _CONFLUENCE_V2_NILAI_LAMA.items():
-        if kunci in hasil and not _sama_dengan(hasil.get(kunci), lama):
-            return hasil, False
-    hasil["CONFIRM_INTERVAL"] = "4h"
-    hasil["CONFLUENCE_STRUCTURE_INTERVAL"] = "4h"
-    for kunci, (lama, baru) in _CONFLUENCE_V2_NILAI_LAMA.items():
-        if kunci in hasil and _sama_dengan(hasil.get(kunci), lama):
-            hasil[kunci] = baru
-    return hasil, True
-
-
-def _migrate_confluence_scalping(payload: dict) -> tuple[dict, bool]:
-    hasil = dict(payload)
-    konfirmasi = str(hasil.get("CONFIRM_INTERVAL", "")).strip().lower()
-    struktur = str(hasil.get("CONFLUENCE_STRUCTURE_INTERVAL", "")).strip().lower()
-    if (konfirmasi, struktur) != _CONFLUENCE_V3_PASANGAN_LAMA:
-        return hasil, False
-    for kunci, (_lama, baru) in _CONFLUENCE_V2_NILAI_LAMA.items():
-        if kunci in hasil and not _sama_dengan(hasil.get(kunci), baru):
-            return hasil, False
-    if "CONFLUENCE_LOOKBACK_BARS" in hasil and not _sama_dengan(
-        hasil.get("CONFLUENCE_LOOKBACK_BARS"), 120
-    ):
-        return hasil, False
-    if "CONFIRM_LOOKBACK_BARS" in hasil and not _sama_dengan(
-        hasil.get("CONFIRM_LOOKBACK_BARS"), 121
-    ):
-        return hasil, False
-    hasil["CONFIRM_INTERVAL"] = "15m"
-    hasil["CONFLUENCE_STRUCTURE_INTERVAL"] = "15m"
-    return hasil, True
-
-
 def _validate_override_payload(payload: dict) -> None:
     unknown = sorted(set(payload) - set(PARAMETER_SCHEMA))
     if unknown:
@@ -1370,9 +1166,7 @@ def load_mode_override(mode: str) -> tuple[dict, list[str]]:
         if payload is None:
             return {}, errors
         payload = _migrate_legacy_keys(payload)
-        payload, migrated_v2 = _migrate_confluence_v2(payload)
-        payload, migrated_v3 = _migrate_confluence_scalping(payload)
-        migrated = migrated_v2 or migrated_v3
+        migrated = False
         try:
             _validate_override_payload(payload)
         except ValueError as exc:
@@ -1531,71 +1325,27 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
                 "wajib diisi lebih besar dari nol saat IDR_RATE_MODE = MANUAL"
             )
 
-    confluence_aktif = _flag_untuk_relasi(cfg, "CONFLUENCE_FILTER_ENABLED", True)
-    cek_confluence = mode_aware is False or confluence_aktif
-
-    if cek_confluence:
-        if _flag_untuk_relasi(cfg, "CONFLUENCE_REQUIRE_ALL_FIVE", True):
-            for kunci_lima in (
-                "VP_FILTER_ENABLED",
-                "FIB_FILTER_ENABLED",
-                "LIQUIDITY_FILTER_ENABLED",
-                "FVG_FILTER_ENABLED",
-                "OB_FILTER_ENABLED",
-            ):
-                if not _flag_untuk_relasi(cfg, kunci_lima, True):
-                    keluar.setdefault(
-                        kunci_lima,
-                        "wajib aktif karena CONFLUENCE_REQUIRE_ALL_FIVE menuntut "
-                        "kelima konfluensi",
-                    )
-        fib_pair = pasangan("FIB_RETRACEMENT_MIN", "FIB_RETRACEMENT_MAX")
-        if fib_pair is not None and fib_pair[0] >= fib_pair[1]:
-            keluar["FIB_RETRACEMENT_MIN"] = (
-                "harus lebih kecil dari FIB_RETRACEMENT_MAX agar rentang zona diskon valid"
-            )
-
-        liq_pair = pasangan("LIQUIDITY_SWEEP_LOOKBACK_BARS", "CONFIRM_LOOKBACK_BARS")
-        if liq_pair is not None and liq_pair[0] >= liq_pair[1]:
-            keluar["LIQUIDITY_SWEEP_LOOKBACK_BARS"] = (
-                "harus lebih kecil dari CONFIRM_LOOKBACK_BARS"
-            )
-
-        try:
-            from strategy.indicators import INTERVAL_MINUTES as _INTERVAL_MINUTES
-
-            menit_konfirmasi = _INTERVAL_MINUTES.get(
-                str(cfg.get("CONFIRM_INTERVAL", "")).lower()
-            )
-            menit_struktur = _INTERVAL_MINUTES.get(
-                str(cfg.get("CONFLUENCE_STRUCTURE_INTERVAL", "")).lower()
-            )
-        except ImportError:
-            menit_konfirmasi = menit_struktur = None
-
-        if menit_struktur and menit_konfirmasi:
-            if menit_struktur % menit_konfirmasi != 0 or menit_struktur < menit_konfirmasi:
-                keluar["CONFLUENCE_STRUCTURE_INTERVAL"] = (
-                    "harus kelipatan bulat dari CONFIRM_INTERVAL dan tidak lebih pendek, "
-                    "agar backtest dapat merangkai candle struktur Confluence tanpa look-ahead"
+    if _flag_untuk_relasi(cfg, "ENTRY_RULE_ENABLED", True):
+        bull = _angka_untuk_relasi(cfg, "ENTRY_BULL_CANDLES")
+        if bull is not None:
+            butuh = max(15, int(bull) + 2)
+            lookback = _angka_untuk_relasi(cfg, "CONFIRM_LOOKBACK_BARS")
+            if lookback is not None and lookback < butuh:
+                keluar["CONFIRM_LOOKBACK_BARS"] = (
+                    f"minimal {butuh} candle agar aturan {int(bull)} candle bullish "
+                    "beruntun bisa dinilai bersama riwayatnya"
                 )
-
-    batas_tahan = _angka_untuk_relasi(cfg, "MAX_HOLD_HOURS")
-    if batas_tahan is not None and batas_tahan > 0:
-        try:
-            from strategy.indicators import INTERVAL_MINUTES as _INTERVAL_MINUTES_TAHAN
-
-            menit_bar = _INTERVAL_MINUTES_TAHAN.get(
-                str(cfg.get("CONFIRM_INTERVAL", "")).lower()
-            )
-        except ImportError:
-            menit_bar = None
-        if menit_bar and batas_tahan * 60.0 < 2.0 * float(menit_bar):
-            keluar["MAX_HOLD_HOURS"] = (
-                "minimal 2 bar CONFIRM_INTERVAL "
-                f"({2.0 * float(menit_bar) / 60.0:g} jam) supaya posisi tidak ditutup "
-                "pada bar entry-nya sendiri; isi 0 untuk menonaktifkan time stop"
-            )
+        anchor = str(cfg.get("ENTRY_SL_ANCHOR", "SIGNAL") or "").strip().upper()
+        if anchor not in ("SIGNAL", "SEQUENCE"):
+            keluar["ENTRY_SL_ANCHOR"] = "hanya boleh SIGNAL atau SEQUENCE"
+        buffer_pct = _angka_untuk_relasi(cfg, "ENTRY_SL_BUFFER_PCT")
+        batas_sl = _angka_untuk_relasi(cfg, "ENTRY_MAX_SL_PCT")
+        if buffer_pct is not None and batas_sl is not None and batas_sl > 0:
+            if buffer_pct >= batas_sl:
+                keluar["ENTRY_SL_BUFFER_PCT"] = (
+                    "harus lebih kecil dari ENTRY_MAX_SL_PCT supaya setiap setup "
+                    "tidak otomatis ditolak"
+                )
 
     return keluar
 
@@ -1636,46 +1386,11 @@ def validate_candidate(
         for kunci_relasi, pesan_relasi in relation_violations(cleaned).items():
             relation(kunci_relasi, False, pesan_relasi)
 
-        if cleaned.get("CONFLUENCE_FILTER_ENABLED"):
-            wajib_semua = _flag_untuk_relasi(
-                cleaned, "CONFLUENCE_REQUIRE_ALL_FIVE", True
+        if not cleaned.get("ENTRY_RULE_ENABLED"):
+            warnings.append(
+                "ENTRY_RULE_ENABLED nonaktif: bot masuk tanpa menunggu rangkaian "
+                "candle bullish, hanya mengandalkan seleksi 24 jam dan proteksi orderbook."
             )
-            if wajib_semua:
-                mati = [
-                    k
-                    for k in (
-                        "VP_FILTER_ENABLED",
-                        "FIB_FILTER_ENABLED",
-                        "LIQUIDITY_FILTER_ENABLED",
-                        "FVG_FILTER_ENABLED",
-                        "OB_FILTER_ENABLED",
-                    )
-                    if not _flag_untuk_relasi(cleaned, k, True)
-                ]
-                if mati:
-                    relation(
-                        mati[0],
-                        False,
-                        "wajib aktif karena CONFLUENCE_REQUIRE_ALL_FIVE menuntut "
-                        "kelima konfluensi",
-                    )
-            active_components = [
-                k
-                for k in (
-                    "VP_FILTER_ENABLED",
-                    "FIB_FILTER_ENABLED",
-                    "LIQUIDITY_FILTER_ENABLED",
-                    "FVG_FILTER_ENABLED",
-                    "OB_FILTER_ENABLED",
-                )
-                if cleaned.get(k)
-            ]
-            if not active_components:
-                warnings.append(
-                    "CONFLUENCE_FILTER_ENABLED aktif tetapi kelima komponen (Volume Profile, "
-                    "Fibonacci, Liquidity, FVG, Order Block) dinonaktifkan; hanya struktur "
-                    "impuls BoS yang diperiksa."
-                )
         relation(
             "RATE_LIMIT_SAFETY_MARGIN",
             int(cleaned.get("RATE_LIMIT_SAFETY_MARGIN", 0))

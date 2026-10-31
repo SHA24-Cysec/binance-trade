@@ -2394,79 +2394,96 @@
                 id="btDays"
                 min="2"
                 value="30"
-                title="Hari pertama dipakai sebagai warmup statistik 24 jam, jadi minimal 2 hari. Struktur POI Confluence memakai candle asli bursa bila multi-timeframe. Kebutuhan riwayat trigger dihitung otomatis oleh server."
+                title="Hari pertama dipakai sebagai warmup statistik 24 jam, jadi minimal 2 hari. Kebutuhan riwayat aturan entry dihitung otomatis oleh server."
                 oninput="btUpdateEstimate()"
               />
             </div>
             <div class="bt-field">
-              <label for="btConfluenceEnabled">Filter The Confluence Code</label>
+              <label for="btEntryRuleEnabled">Aturan Entry Aktif</label>
               <div style="display:flex;align-items:center;gap:8px;min-height:38px">
                 <input
                   type="checkbox"
-                  id="btConfluenceEnabled"
+                  id="btEntryRuleEnabled"
                   checked
                   style="width:16px;height:16px;max-width:16px;padding:0;accent-color:var(--accent)"
-                  onchange="btSyncConfluenceAvailability(); btUpdateEstimate()"
+                  onchange="btSyncEntryRuleAvailability(); btUpdateEstimate()"
                 />
-                <span class="mut" style="font-size:11.5px">Aktifkan 5 konfluensi (VP + Fib + Liquidity + FVG + OB)</span>
-              </div>
-            </div>
-            <div class="bt-field">
-              <label for="btConfluenceReactionEnabled">Wajib Reaksi Bullish</label>
-              <div style="display:flex;align-items:center;gap:8px;min-height:38px">
-                <input
-                  type="checkbox"
-                  id="btConfluenceReactionEnabled"
-                  checked
-                  style="width:16px;height:16px;max-width:16px;padding:0;accent-color:var(--accent)"
-                  onchange="btRenderStrategySummary(); btUpdateEstimate()"
-                />
-                <span class="mut" id="btConfluenceReactionHelp" style="font-size:11.5px">Konfirmasi candle reaksi bullish setelah sapuan SSL</span>
+                <span class="mut" style="font-size:11.5px">Entry setelah candle bullish beruntun tertutup</span>
               </div>
             </div>
             <div
               class="bt-field"
-              title="Buffer tambahan (%) di bawah struktur Order Block / POI / Swing Low / Sweep Low untuk mengunci level Stop Loss struktural."
+              title="Berapa candle bullish berurutan yang wajib tertutup sebelum entry. Satu candle bullish berarti close di atas open dan close di atas close candle sebelumnya."
             >
-              <label>Buffer SL Confluence (%)</label>
+              <label>Jumlah candle bullish</label>
               <input
                 type="number"
-                id="btConfluenceSlBuffer"
+                id="btBullCandles"
+                min="2"
+                max="10"
+                step="1"
+                value="3"
+                oninput="btRenderStrategySummary()"
+              />
+            </div>
+            <div
+              class="bt-field"
+              title="Titik acuan Stop Loss. SIGNAL memakai low candle sinyal terakhir, SEQUENCE memakai low terendah dari seluruh rangkaian candle bullish."
+            >
+              <label>Acuan Stop Loss</label>
+              <select id="btSlAnchor" onchange="btRenderStrategySummary()">
+                <option value="SIGNAL">SIGNAL (low candle terakhir)</option>
+                <option value="SEQUENCE">SEQUENCE (low terendah rangkaian)</option>
+              </select>
+            </div>
+            <div
+              class="bt-field"
+              title="Buffer tambahan (%) di bawah low acuan untuk mengunci level Stop Loss."
+            >
+              <label>Buffer SL (%)</label>
+              <input
+                type="number"
+                id="btEntrySlBuffer"
                 min="0"
                 max="10"
                 step="0.05"
-                value="0.20"
+                value="0.30"
                 oninput="btRenderStrategySummary()"
               />
             </div>
             <div
               class="bt-field"
-              title="Rasio imbal hasil terhadap risiko minimum (target BSL $$$ dibagi jarak SL struktural) agar setup diizinkan entry."
+              title="Rasio imbal hasil terhadap risiko. Take Profit dihitung dari jarak Stop Loss dikali nilai ini."
             >
-              <label>Min Risk:Reward Confluence</label>
+              <label>Min Risk:Reward</label>
               <input
                 type="number"
-                id="btConfluenceMinRr"
+                id="btEntryMinRr"
                 min="0.1"
                 max="20"
                 step="0.1"
-                value="1.2"
+                value="2.0"
                 oninput="btRenderStrategySummary()"
               />
             </div>
             <div
               class="bt-field"
-              title="Time stop: posisi ditutup otomatis setelah umurnya mencapai batas ini. 0 = nonaktif. Diperiksa setelah Stop Loss struktural dan Take Profit BSL $$$."
+              title="Setup ditolak bila jarak Stop Loss melebihi persen ini terhadap harga entry. 0 berarti tanpa batas."
             >
-              <label>Batas waktu tahan (jam)</label>
+              <label>Batas jarak SL (%)</label>
               <input
                 type="number"
-                id="btMaxHold"
+                id="btEntryMaxSl"
                 min="0"
-                max="720"
-                step="0.5"
+                max="50"
+                step="0.1"
+                value="3.0"
                 oninput="btRenderStrategySummary()"
               />
+            </div>
+            <div class="bt-field" title="Stop dinaikkan mengikuti harga tertinggi, selalu sejauh persen ini di bawah puncak. Trailing aktif setelah untung satu kali jarak stop dan stop tidak pernah turun. Tidak ada take profit.">
+              <label>Jarak trailing (%)</label>
+              <input type="number" id="btTrailPct" min="0.1" max="20" step="0.1" value="2.0" oninput="btRenderStrategySummary()" />
             </div>
             <div class="bt-field bt-actions">
               <label>&nbsp;</label>
@@ -3399,10 +3416,10 @@
         }
 
         const c=s.config;
-        const modeTxt='CONFLUENCE STRUKTURAL';
+        const modeTxt='ATURAN ENTRY';
         const noteTxt=p.has_position
-          ? ('SL terkunci di bawah OB/POI ('+fmtP(c.sl_price)+') · TP terkunci di BSL $$$ ('+fmtP(c.tp_price)+').')
-          : ('Buffer SL struktural '+fmt(c.confluence_sl_buffer_pct, 2)+'% di bawah Order Block/POI · Target TP otomatis di BSL $$$ · Min R:R 1:'+fmt(c.confluence_min_rr_ratio, 2)+'.');
+          ? ('SL terkunci di '+fmtP(c.sl_price)+' · TP terkunci di '+fmtP(c.tp_price)+'.')
+          : ('Entry setelah '+fmt(c.entry_bull_candles, 0)+' candle bullish beruntun · SL '+fmt((c.entry_sl_buffer_pct||0.3), 2)+'% di bawah low candle sinyal · TP dari R:R 1:'+fmt(c.entry_min_rr_ratio||2.0, 2)+'.');
 
         renderConfigPanel(s, false, '', modeTxt, noteTxt);
       }
@@ -3463,12 +3480,13 @@
           }
         }
         if(!keys.length){
-          const bufTxt = c && c.confluence_sl_buffer_pct !== undefined ? fmt(c.confluence_sl_buffer_pct, 2) + '%' : '0,20%';
-          const rrTxt = c && c.confluence_min_rr_ratio !== undefined ? '1:' + fmt(c.confluence_min_rr_ratio, 2) : '1:1,20';
+          const bufTxt = c && c.entry_sl_buffer_pct !== undefined ? fmt(c.entry_sl_buffer_pct, 2) + '%' : '0,30%';
+          const rrTxt = c && c.entry_min_rr_ratio !== undefined ? '1:' + fmt(c.entry_min_rr_ratio, 2) : '1:2,00';
+          const bullTxt = c && c.entry_bull_candles !== undefined ? fmt(c.entry_bull_candles, 0) + ' candle' : '3 candle';
           const holdTxt = c && Number(c.max_hold_hours) > 0 ? fmt(c.max_hold_hours, 1) + ' jam' : 'nonaktif';
-          html += '<div class="posrow"><span class="k">Buffer SL Struktural</span><span class="v mono">' + bufTxt + ' di bawah OB/POI</span></div>'
-            + '<div class="posrow"><span class="k">Target TP Struktural</span><span class="v mono">BSL $$$ (Swing High / Fib 0)</span></div>'
-            + '<div class="posrow"><span class="k">Filter Min Risk:Reward</span><span class="v mono">' + rrTxt + '</span></div>'
+          html += '<div class="posrow"><span class="k">Syarat Entry</span><span class="v mono">' + bullTxt + ' bullish beruntun</span></div>'
+            + '<div class="posrow"><span class="k">Buffer SL</span><span class="v mono">' + bufTxt + ' di bawah low candle sinyal</span></div>'
+            + '<div class="posrow"><span class="k">Target TP</span><span class="v mono">dari R:R ' + rrTxt + '</span></div>'
             + '<div class="posrow"><span class="k">Batas Waktu Tahan</span><span class="v mono">' + holdTxt + '</span></div>';
         }
         if(noteHtml){
@@ -3704,7 +3722,7 @@
 
         const meter = !!p.has_position && entryPx > 0;
         const keys = ['sl', 'tp'].filter(k => lv.on[k]);
-        const sig = [meter ? 'meter' : 'plain', keys.join(','), modeTxt, noteHtml || '', fmt(c.confluence_sl_buffer_pct, 2), fmt(c.confluence_min_rr_ratio, 2), fmt(c.max_hold_hours, 1)].join('|');
+        const sig = [meter ? 'meter' : 'plain', keys.join(','), modeTxt, noteHtml || '', fmt(c.entry_sl_buffer_pct, 2), fmt(c.entry_min_rr_ratio, 2), fmt(c.entry_bull_candles, 0), fmt(c.max_hold_hours, 1)].join('|');
         if(!_cfgUI || _cfgUI.sig !== sig) _cfgUI = buildConfigPanel(box, sig, meter, noteHtml, keys, c);
         if(_cfgUI.mode) _cfgUI.mode.textContent = modeTxt;
 
@@ -4337,45 +4355,37 @@
         const d = _btDefaults || {};
         const strategySummary = document.getElementById('btStrategySummary');
         if(!strategySummary) return;
-        const confOn = document.getElementById('btConfluenceEnabled')
-          ? !!document.getElementById('btConfluenceEnabled').checked
-          : (d.CONFLUENCE_FILTER_ENABLED !== false);
-        const reactOn = confOn && (document.getElementById('btConfluenceReactionEnabled')
-          ? !!document.getElementById('btConfluenceReactionEnabled').checked
-          : (d.CONFLUENCE_REQUIRE_BULLISH_REACTION !== false));
+        const ruleOn = document.getElementById('btEntryRuleEnabled')
+          ? !!document.getElementById('btEntryRuleEnabled').checked
+          : (d.ENTRY_RULE_ENABLED !== false);
         const activeText = value => value ? 'aktif' : 'nonaktif';
-        const structItv = d.CONFLUENCE_STRUCTURE_INTERVAL || '15m';
-        const trigItv = d.CONFIRM_INTERVAL || d.confirm_interval || '5m';
-        const flowText = !confOn
-          ? 'Filter The Confluence Code nonaktif (hanya gerbang pasar 24 jam)'
-          : (structItv !== trigItv)
-            ? esc(structItv) + ' Struktur POI (BoS + VP + Fib + FVG + OB) &rarr; ' + esc(trigItv) + ' Trigger (SSL Sweep + Reaksi Bullish)'
-            : 'Single-TF ' + esc(trigItv) + ' (BoS + VP + Fib + Liquidity + FVG + OB + Reaksi Bullish)';
+        const itv = d.CONFIRM_INTERVAL || d.confirm_interval || '5m';
+        const bullVal = document.getElementById('btBullCandles')?.value || d.ENTRY_BULL_CANDLES || 3;
+        const anchorVal = document.getElementById('btSlAnchor')?.value || d.ENTRY_SL_ANCHOR || 'SIGNAL';
+        const bufVal = document.getElementById('btEntrySlBuffer')?.value || d.ENTRY_SL_BUFFER_PCT || 0.30;
+        const rrVal = document.getElementById('btEntryMinRr')?.value || d.ENTRY_MIN_RR_RATIO || 2.0;
+        const maxSlVal = document.getElementById('btEntryMaxSl')?.value || d.ENTRY_MAX_SL_PCT || 3.0;
+        const trailPct = document.getElementById('btTrailPct')?.value || d.EXIT_TRAILING_PCT || 2.0;
+        const flowText = !ruleOn
+          ? 'Aturan entry nonaktif (hanya gerbang pasar 24 jam dan proteksi orderbook)'
+          : fmt(bullVal, 0) + ' candle bullish beruntun di ' + esc(itv) + ' &rarr; entry di close candle terakhir';
+        const anchorText = anchorVal === 'SEQUENCE'
+          ? 'low terendah dari seluruh rangkaian candle bullish'
+          : 'low candle sinyal terakhir';
         strategySummary.innerHTML = `
           <div class="posrow"><span class="k">Alur entry aktif</span><span class="v mono" style="font-size:11.5px">${flowText}</span></div>
-          <div class="posrow"><span class="k">Struktur BoS ${esc(structItv)}</span><span class="v mono" style="font-size:11.5px">${activeText(confOn)}, lookback ${fmt(d.CONFLUENCE_LOOKBACK_BARS || 60, 0)} candle, impuls min +${fmt(d.CONFLUENCE_MIN_IMPULSE_PCT || 1.2, 2)}%, toleransi zona ${fmt((d.CONFLUENCE_ZONE_TOLERANCE_RATIO || 0.06) * 100, 1)}%</span></div>
-          <div class="posrow"><span class="k">1. Volume Profile (${esc(structItv)})</span><span class="v mono" style="font-size:11.5px">${activeText(confOn && d.VP_FILTER_ENABLED !== false)}, ${fmt(d.VP_BINS || 20, 0)} bin harga, HVN top ${fmt((d.VP_HVN_TOP_RATIO || 0.40) * 100, 0)}%</span></div>
-          <div class="posrow"><span class="k">2. Fibonacci Diskon (${esc(structItv)})</span><span class="v mono" style="font-size:11.5px">${activeText(confOn && d.FIB_FILTER_ENABLED !== false)}, retracement ${fmt(d.FIB_RETRACEMENT_MIN || 0.50, 3)} s/d ${fmt(d.FIB_RETRACEMENT_MAX || 0.786, 3)}</span></div>
-          <div class="posrow"><span class="k">3. Liquidity Sweep (${esc(trigItv)})</span><span class="v mono" style="font-size:11.5px">${activeText(confOn && d.LIQUIDITY_FILTER_ENABLED !== false)}, sapuan SSL ${fmt(d.LIQUIDITY_SWEEP_LOOKBACK_BARS || 4, 0)} candle terakhir ke zona POI</span></div>
-          <div class="posrow"><span class="k">4. Fair Value Gap &amp; 5. Order Block (${esc(structItv)})</span><span class="v mono" style="font-size:11.5px">FVG ${activeText(confOn && d.FVG_FILTER_ENABLED !== false)} · Order Block ${activeText(confOn && d.OB_FILTER_ENABLED !== false)}</span></div>
-          <div class="posrow"><span class="k">Konfirmasi Reaksi (${esc(trigItv)})</span><span class="v mono" style="font-size:11.5px">${activeText(reactOn)}, posisi close min ${fmt(d.CONFLUENCE_MIN_CLOSE_POSITION || 0.55, 2)}, lookback ${fmt(d.CONFIRM_LOOKBACK_BARS || 60, 0)} candle</span></div>
-          <div class="posrow"><span class="k">Exit Struktural Confluence</span><span class="v mono" style="font-size:11.5px">TP di BSL $$$ · SL di bawah OB/POI (+buffer ${fmt(document.getElementById('btConfluenceSlBuffer')?.value || d.CONFLUENCE_SL_BUFFER_PCT || 0.20, 2)}%) · Min R:R 1:${fmt(document.getElementById('btConfluenceMinRr')?.value || d.CONFLUENCE_MIN_RR_RATIO || 1.2, 2)}</span></div>`;
+          <div class="posrow"><span class="k">Definisi candle bullish</span><span class="v mono" style="font-size:11.5px">${activeText(ruleOn)}, close di atas open dan di atas close candle sebelumnya</span></div>
+          <div class="posrow"><span class="k">Stop Loss</span><span class="v mono" style="font-size:11.5px">${activeText(ruleOn)}, ${esc(anchorText)} minus buffer ${fmt(bufVal, 2)}%</span></div>
+          <div class="posrow"><span class="k">Take Profit</span><span class="v mono" style="font-size:11.5px">jarak SL x ${fmt(rrVal, 2)} (R:R 1:${fmt(rrVal, 2)}), setup dengan jarak SL di atas ${fmt(maxSlVal, 2)}% ditolak</span></div>
+          <div class="posrow"><span class="k">Exit</span><span class="v mono" style="font-size:11.5px">tanpa take profit. Stop awal, breakeven di 1R, lalu trailing ${fmt(trailPct, 2)}% dari puncak, dan batas tahan 24 jam</span></div>
+          <div class="posrow"><span class="k">Riwayat minimum</span><span class="v mono" style="font-size:11.5px">${fmt(d.CONFIRM_LOOKBACK_BARS || 60, 0)} candle ${esc(itv)}</span></div>`;
       }
 
-      function btSyncConfluenceAvailability(){
-        const conf = !!document.getElementById('btConfluenceEnabled')?.checked;
-        const reaction = document.getElementById('btConfluenceReactionEnabled');
-        const help = document.getElementById('btConfluenceReactionHelp');
-        if(!reaction) return;
-        reaction.disabled = !conf;
-        if(help){
-          const cfg = _btDefaults || {};
-          const minPos = (cfg.CONFLUENCE_MIN_CLOSE_POSITION === undefined
-            || cfg.CONFLUENCE_MIN_CLOSE_POSITION === null)
-            ? 0.55 : cfg.CONFLUENCE_MIN_CLOSE_POSITION;
-          help.textContent = conf
-            ? 'Konfirmasi close > open dan posisi close >= ' + fmt(minPos, 2) + ' setelah sapuan SSL'
-            : 'Aktifkan filter The Confluence Code untuk memakai konfirmasi reaksi ini';
+      function btSyncEntryRuleAvailability(){
+        const aktif = !!document.getElementById('btEntryRuleEnabled')?.checked;
+        for(const id of ['btBullCandles','btSlAnchor','btEntrySlBuffer','btEntryMinRr','btEntryMaxSl']){
+          const el = document.getElementById(id);
+          if(el) el.disabled = !aktif;
         }
         btRenderStrategySummary();
       }
@@ -4393,18 +4403,26 @@
           }
           _btDefaults = d;
           document.getElementById('btDays').value = d.default_days;
-          document.getElementById('btConfluenceEnabled').checked = d.CONFLUENCE_FILTER_ENABLED !== false;
-          document.getElementById('btConfluenceReactionEnabled').checked = d.CONFLUENCE_REQUIRE_BULLISH_REACTION !== false;
-          if(d.CONFLUENCE_SL_BUFFER_PCT !== undefined && d.CONFLUENCE_SL_BUFFER_PCT !== null){
-            document.getElementById('btConfluenceSlBuffer').value = d.CONFLUENCE_SL_BUFFER_PCT;
+          document.getElementById('btEntryRuleEnabled').checked = d.ENTRY_RULE_ENABLED !== false;
+          if(d.ENTRY_BULL_CANDLES !== undefined && d.ENTRY_BULL_CANDLES !== null){
+            document.getElementById('btBullCandles').value = d.ENTRY_BULL_CANDLES;
           }
-          if(d.CONFLUENCE_MIN_RR_RATIO !== undefined && d.CONFLUENCE_MIN_RR_RATIO !== null){
-            document.getElementById('btConfluenceMinRr').value = d.CONFLUENCE_MIN_RR_RATIO;
+          if(d.ENTRY_SL_ANCHOR){
+            document.getElementById('btSlAnchor').value = d.ENTRY_SL_ANCHOR;
           }
-          if(d.MAX_HOLD_HOURS !== undefined && d.MAX_HOLD_HOURS !== null){
-            document.getElementById('btMaxHold').value = d.MAX_HOLD_HOURS;
+          if(d.ENTRY_SL_BUFFER_PCT !== undefined && d.ENTRY_SL_BUFFER_PCT !== null){
+            document.getElementById('btEntrySlBuffer').value = d.ENTRY_SL_BUFFER_PCT;
           }
-          btSyncConfluenceAvailability();
+          if(d.ENTRY_MIN_RR_RATIO !== undefined && d.ENTRY_MIN_RR_RATIO !== null){
+            document.getElementById('btEntryMinRr').value = d.ENTRY_MIN_RR_RATIO;
+          }
+          if(d.ENTRY_MAX_SL_PCT !== undefined && d.ENTRY_MAX_SL_PCT !== null){
+            document.getElementById('btEntryMaxSl').value = d.ENTRY_MAX_SL_PCT;
+          }
+          if(d.EXIT_TRAILING_PCT !== undefined && d.EXIT_TRAILING_PCT !== null){
+            document.getElementById('btTrailPct').value = d.EXIT_TRAILING_PCT;
+          }
+          btSyncEntryRuleAvailability();
           if(d.default_days) document.getElementById('btDays').value = d.default_days;
           if(d.default_max_symbols) document.getElementById('btMaxSymbols').value = d.default_max_symbols;
           btUpdateEstimate();
@@ -4459,14 +4477,11 @@
         const days = parseInt(document.getElementById('btDays').value || '0', 10);
         const sym = parseInt(document.getElementById('btMaxSymbols').value || '0', 10);
         if(!(days >= 2) || !(sym >= 2)){ el.textContent = ''; return; }
-        const confAktif = !!document.getElementById('btConfluenceEnabled')?.checked;
-        const warmupBars = confAktif
-          ? ((_btDefaults && _btDefaults.warmup_bars_confluence_enabled) || (_btDefaults && _btDefaults.warmup_bars) || 0)
-          : ((_btDefaults && _btDefaults.warmup_bars) || 0);
+        const warmupBars = (_btDefaults && _btDefaults.warmup_bars) || 0;
         const barsPerDay = (_btDefaults && _btDefaults.bars_per_day) || 288;
         const barsPerSym = (days + 1) * barsPerDay + warmupBars;
         const reqPerSym = Math.ceil(barsPerSym / 1000);
-        const htfIntervals = confAktif ? ((_btDefaults && _btDefaults.native_intervals) || []) : [];
+        const htfIntervals = [];
         const totalReq = sym * (reqPerSym + htfIntervals.length);
         const weight = totalReq * 2;
         const mins = weight / 3000;
@@ -4508,14 +4523,15 @@
         const payload = {
           days: days,
           max_symbols: maxSym,
-          CONFLUENCE_FILTER_ENABLED: document.getElementById('btConfluenceEnabled').checked,
-          CONFLUENCE_REQUIRE_BULLISH_REACTION: document.getElementById('btConfluenceEnabled').checked
-            && document.getElementById('btConfluenceReactionEnabled').checked,
-          MAX_HOLD_HOURS: document.getElementById('btMaxHold').value,
+          ENTRY_RULE_ENABLED: document.getElementById('btEntryRuleEnabled').checked,
+          ENTRY_BULL_CANDLES: document.getElementById('btBullCandles').value,
+          ENTRY_SL_ANCHOR: document.getElementById('btSlAnchor').value,
+          EXIT_TRAILING_PCT: document.getElementById('btTrailPct').value,
         };
         const sumber = {
-          CONFLUENCE_SL_BUFFER_PCT: 'btConfluenceSlBuffer',
-          CONFLUENCE_MIN_RR_RATIO: 'btConfluenceMinRr',
+          ENTRY_SL_BUFFER_PCT: 'btEntrySlBuffer',
+          ENTRY_MIN_RR_RATIO: 'btEntryMinRr',
+          ENTRY_MAX_SL_PCT: 'btEntryMaxSl',
         };
         for(const [kunci, id] of Object.entries(sumber)){
           const nilai = document.getElementById(id).value;
@@ -4588,15 +4604,16 @@
         if(!isPortfolio) btGridUpdateEstimate();
       }
 
-      const BT_GRID_PARAMS_CONFLUENCE = [
-        ['CONFLUENCE_SL_BUFFER_PCT', 'Buffer SL Confluence (%)'],
-        ['CONFLUENCE_MIN_RR_RATIO', 'Min Risk:Reward Confluence'],
-        ['MAX_HOLD_HOURS', 'Batas waktu tahan (jam)'],
+      const BT_GRID_PARAMS_ENTRY = [
+        ['ENTRY_SL_BUFFER_PCT', 'Buffer SL (%)'],
+        ['ENTRY_MIN_RR_RATIO', 'Min Risk:Reward'],
+        ['ENTRY_MAX_SL_PCT', 'Batas jarak SL (%)'],
+        ['EXIT_TRAILING_PCT', 'Jarak trailing (%)'],
       ];
       let _btGridDefaults = null;
       const btGridMaxKombinasi = () =>
         (_btGridDefaults && _btGridDefaults.grid_max_kombinasi) || 150;
-      const btGridParamsForMode = () => BT_GRID_PARAMS_CONFLUENCE;
+      const btGridParamsForMode = () => BT_GRID_PARAMS_ENTRY;
 
       function btGridAddRow(key, awal, langkah, akhir){
         const wrap = document.getElementById('btGridRows');
@@ -4731,7 +4748,7 @@
       function btGridSeedDefaultRow(){
         const wrap = document.getElementById('btGridRows');
         if(!wrap || wrap.children.length) return;
-        btGridAddRow('CONFLUENCE_MIN_RR_RATIO', 1.0, 0.2, 2.0);
+        btGridAddRow('ENTRY_MIN_RR_RATIO', 1.0, 0.5, 3.0);
       }
 
       async function startGridBacktest(){
@@ -4804,9 +4821,10 @@
 
       let _btGridResultRows = [];
       const BT_GRID_PARAM_INPUT = {
-        CONFLUENCE_SL_BUFFER_PCT: 'btConfluenceSlBuffer',
-        CONFLUENCE_MIN_RR_RATIO: 'btConfluenceMinRr',
-        MAX_HOLD_HOURS: 'btMaxHold',
+        ENTRY_SL_BUFFER_PCT: 'btEntrySlBuffer',
+        ENTRY_MIN_RR_RATIO: 'btEntryMinRr',
+        ENTRY_MAX_SL_PCT: 'btEntryMaxSl',
+        EXIT_TRAILING_PCT: 'btTrailPct',
       };
 
       function btPakaiGridParams(idx){
@@ -5016,8 +5034,7 @@
                      TIME_STOP:'WAKTU',
                      END_OF_DATA:'DATA HABIS', DATA_END:'DATA SIMBOL HABIS',
                      RISK_LIMIT_TRIGGERED:'BATAS RISIKO',
-                     FILTER_CONFLUENCE_STRUCTURE:'STRUKTUR POI CONFLUENCE',
-                     FILTER_CONFLUENCE_TRIGGER:'TRIGGER CONFLUENCE (SSL/REAKSI)'};
+                     FILTER_ENTRY_RULE:'ATURAN ENTRY'};
         return esc(map[key] || key);
       }
 
@@ -5034,10 +5051,8 @@
         const cardTone = v => v>0?'good':(v<0?'bad':'');
         const re = s.risk_events || {};
         const riskTotal = (re.dd_stop||0) + (re.forced_close||0) + (s.chase_skips||0);
-        const gateSkips = (s.confluence_structure_skips||s.structure_skips||0)
-          + (s.confluence_trigger_skips||s.trigger_skips||0);
-        const structObj = res.confluence_structure || {};
-        const trigObj = res.confluence_trigger || {};
+        const entryObj = res.entry_rule || {};
+        const gateSkips = (s.entry_rule_skips||0);
         const cardsHtml = `
           <div class="card ${cardTone(s.total_return_pct)}">
             <div class="label">Return bersih</div>
@@ -5062,7 +5077,7 @@
           <div class="card ${riskTotal||gateSkips?'warn':''}">
             <div class="label">Filter dan kontrol akun</div>
             <div class="value mono">${fmt(riskTotal+gateSkips,0)}</div>
-            <div class="sub">DD stop ${fmt(re.dd_stop||0,0)} · tutup paksa ${fmt(re.forced_close||0,0)} · chase dilewati ${fmt(s.chase_skips||0,0)} · struktur POI ${esc(structObj.interval||'15m')} ${fmt(structObj.skips||0,0)}/${fmt(structObj.scans||0,0)} · trigger ${esc(trigObj.interval||'5m')} ${fmt(trigObj.skips||0,0)}/${fmt(trigObj.scans||0,0)}</div></div>
+            <div class="sub">DD stop ${fmt(re.dd_stop||0,0)} · tutup paksa ${fmt(re.forced_close||0,0)} · chase dilewati ${fmt(s.chase_skips||0,0)} · aturan entry ${esc(entryObj.interval||'5m')} ${fmt(entryObj.skips||0,0)}/${fmt(entryObj.scans||0,0)}</div></div>
           <div class="card">
             <div class="label">Candle diproses</div>
             <div class="value mono">${fmt(res.bars_total,0)}</div>
@@ -5076,19 +5091,18 @@
         const p = res.params_used;
         let reasonRows = Object.entries(s.reason_counts||{}).map(([k,v])=>
           `<div class="posrow"><span class="k">${btReasonLabel(k)}</span><span class="v mono">${fmt(v,0)}x</span></div>`).join('');
-        const exitRows = `<div class="posrow"><span class="k">Mode exit</span><span class="v mono">Confluence Struktural (TP BSL $$$ · SL OB/POI)</span></div>
-             <div class="posrow"><span class="k">Buffer SL / Min R:R / Max Hold</span><span class="v mono" style="font-size:11.5px">${esc(p.CONFLUENCE_SL_BUFFER_PCT)}% / 1:${esc(p.CONFLUENCE_MIN_RR_RATIO)} / ${esc(p.MAX_HOLD_HOURS)} jam</span></div>`;
-        const structRow = res.confluence_structure ? `
-          <div class="posrow"><span class="k">Struktur POI Confluence (${esc(structObj.interval || '15m')})</span><span class="v mono" style="font-size:11.5px">${structObj.enabled ? 'aktif, lookback '+fmt(structObj.lookback_bars,0)+' candle, BoS min +'+fmt(structObj.min_impulse_pct,2)+'%, VP '+(structObj.vp_enabled?'ON':'OFF')+' ('+fmt(structObj.vp_bins,0)+' bin), Fib '+(structObj.fib_enabled?fmt(structObj.fib_min,3)+'-'+fmt(structObj.fib_max,3):'OFF')+', FVG '+(structObj.fvg_enabled?'ON':'OFF')+', OB '+(structObj.ob_enabled?'ON':'OFF')+', disaring '+fmt(structObj.skips,0)+' dari '+fmt(structObj.scans,0)+' sinyal' : 'nonaktif'}</span></div>` : '';
-        const trigRow = res.confluence_trigger ? `
-          <div class="posrow"><span class="k">Trigger Confluence (${esc(trigObj.interval || '5m')})</span><span class="v mono" style="font-size:11.5px">${trigObj.enabled ? 'aktif, SSL sweep '+(trigObj.liquidity_enabled?'ON ('+fmt(trigObj.sweep_lookback_bars,0)+' bar)':'OFF')+', reaksi bullish '+(trigObj.require_bullish_reaction?'wajib (close pos >= '+fmt(trigObj.min_close_position,2)+')':'opsional')+', disaring '+fmt(trigObj.skips,0)+' dari '+fmt(trigObj.scans,0)+' sinyal' : 'nonaktif'}</span></div>` : '';
+        const exitRows = `<div class="posrow"><span class="k">Mode exit</span><span class="v mono">Aturan Entry (SL low sinyal · tanpa TP · breakeven 1R · trailing persen)</span></div>
+             <div class="posrow"><span class="k">Buffer SL / Min R:R / Batas SL</span><span class="v mono" style="font-size:11.5px">${esc(p.ENTRY_SL_BUFFER_PCT)}% / 1:${esc(p.ENTRY_MIN_RR_RATIO)} / ${esc(p.ENTRY_MAX_SL_PCT)}%</span></div>
+             <div class="posrow"><span class="k">Exit</span><span class="v mono" style="font-size:11.5px">tanpa TP, breakeven 1R, trailing ${esc(p.EXIT_TRAILING_PCT)}%, batas tahan 24 jam</span></div>
+             <div class="posrow"><span class="k">Candle bullish / Acuan SL / Max Hold</span><span class="v mono" style="font-size:11.5px">${esc(p.ENTRY_BULL_CANDLES)} candle / ${esc(p.ENTRY_SL_ANCHOR)} / 24 jam (tetap)</span></div>`;
+        const entryRow = res.entry_rule ? `
+          <div class="posrow"><span class="k">Aturan Entry (${esc(entryObj.interval || '5m')})</span><span class="v mono" style="font-size:11.5px">${entryObj.enabled ? 'aktif, '+fmt(entryObj.bull_candles,0)+' candle bullish beruntun, acuan SL '+esc(entryObj.sl_anchor)+', buffer '+fmt(entryObj.sl_buffer_pct,2)+'%, R:R 1:'+fmt(entryObj.min_rr_ratio,2)+', batas SL '+fmt(entryObj.max_sl_pct,2)+'%, disaring '+fmt(entryObj.skips,0)+' dari '+fmt(entryObj.scans,0)+' sinyal' : 'nonaktif'}</span></div>` : '';
         document.getElementById('btInfoBox').innerHTML = `
           <div class="posrow"><span class="k">Semesta simbol</span><span class="v mono">${fmt(res.universe_with_data,0)} berhasil / ${fmt(res.universe_requested,0)} diminta${res.symbols_failed_count? ' ('+fmt(res.symbols_failed_count,0)+' gagal)':''}</span></div>
           <div class="posrow"><span class="k">Rentang data</span><span class="v mono" style="font-size:11.5px">${esc(res.start_time||'-')} &rarr; ${esc(res.end_time||'-')}</span></div>
           <div class="posrow"><span class="k">Titik waktu diproses</span><span class="v mono">${fmt(res.bars_total,0)} bar ${esc(res.interval)}</span></div>
           ${exitRows}
-          ${structRow}
-          ${trigRow}
+          ${entryRow}
           <div style="border-top:1px solid var(--border);margin:4px 0"></div>
           ${reasonRows || '<div class="posrow"><span class="k mut">Tidak ada trade terjadi pada rentang & parameter ini.</span></div>'}
           ${(res.warnings&&res.warnings.length)? '<div style="border-top:1px solid var(--border);margin:4px 0"></div>'+res.warnings.map(w=>`<div class="posrow"><span class="k" style="color:var(--amber)">⚠ ${esc(w)}</span></div>`).join('') : ''}

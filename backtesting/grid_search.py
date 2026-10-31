@@ -84,9 +84,10 @@ class HasilGridSearch:
 
 
 _KUNCI_SIMULASI_SAJA = {
-    "CONFLUENCE_SL_BUFFER_PCT",
-    "CONFLUENCE_MIN_RR_RATIO",
-    "MAX_HOLD_HOURS",
+    "ENTRY_SL_BUFFER_PCT",
+    "ENTRY_MIN_RR_RATIO",
+    "ENTRY_MAX_SL_PCT",
+    "EXIT_TRAILING_PCT",
 }
 
 PARAMETER_GRID_DIIZINKAN = set(_KUNCI_SIMULASI_SAJA)
@@ -209,12 +210,15 @@ def _kombinasi_masuk_akal(cfg: dict) -> tuple[bool, str]:
     if pelanggaran:
         kunci, pesan = next(iter(pelanggaran.items()))
         return False, f"{kunci} {pesan}"
-    sl_buf = float(cfg.get("CONFLUENCE_SL_BUFFER_PCT", 0.20) or 0.0)
-    min_rr = float(cfg.get("CONFLUENCE_MIN_RR_RATIO", 1.2) or 0.0)
+    sl_buf = float(cfg.get("ENTRY_SL_BUFFER_PCT", 0.30) or 0.0)
+    min_rr = float(cfg.get("ENTRY_MIN_RR_RATIO", 2.0) or 0.0)
+    max_sl = float(cfg.get("ENTRY_MAX_SL_PCT", 3.0) or 0.0)
     if not (0.0 <= sl_buf <= 10.0):
-        return False, "CONFLUENCE_SL_BUFFER_PCT harus di antara 0 dan 10"
+        return False, "ENTRY_SL_BUFFER_PCT harus di antara 0 dan 10"
     if not (0.1 <= min_rr <= 20.0):
-        return False, "CONFLUENCE_MIN_RR_RATIO harus di antara 0.1 dan 20"
+        return False, "ENTRY_MIN_RR_RATIO harus di antara 0.1 dan 20"
+    if not (0.0 <= max_sl <= 50.0):
+        return False, "ENTRY_MAX_SL_PCT harus di antara 0 dan 50"
     return True, ""
 
 
@@ -263,8 +267,6 @@ def run_grid_search(
     progress_cb: Optional[Callable[[float, str], None]] = None,
     cancel_cb: Optional[Callable[[], bool]] = None,
     btc_klines: Optional[list[Kline]] = None,
-    structure_klines: Optional[list[Kline]] = None,
-    native_prebuilt: Optional[tuple] = None,
 ) -> HasilGridSearch:
     if metrik not in METRIK_TERSEDIA:
         raise GridSearchError(
@@ -280,9 +282,8 @@ def run_grid_search(
     if int(warmup_bars) < butuh_warmup:
         peringatan_warmup.append(
             f"Warmup {warmup_bars} bar {interval_konfirmasi} dinaikkan menjadi "
-            f"{butuh_warmup} bar karena struktur Confluence "
-            f"{strategy.confluence_structure_interval(base_config)} memerlukan "
-            f"{strategy.confluence_structure_window_bars(base_config)} candle tertutup."
+            f"{butuh_warmup} bar karena aturan entry memerlukan "
+            f"{strategy.required_lookback_bars(base_config)} candle tertutup."
         )
         warmup_bars = butuh_warmup
     n = len(klines)
@@ -343,7 +344,6 @@ def run_grid_search(
             cfg,
             warmup_bars=warmup_bars,
             btc_klines=btc_klines,
-            structure_klines=structure_klines,
         )
         sum_latih = summarize(res_latih)
         skor_latih = hitung_skor(sum_latih, metrik)
@@ -356,7 +356,6 @@ def run_grid_search(
                 cfg,
                 warmup_bars=warmup_uji,
                 btc_klines=btc_klines,
-                structure_klines=structure_klines,
             )
             sum_uji = summarize(res_uji)
             skor_uji = hitung_skor(sum_uji, metrik)
@@ -491,16 +490,10 @@ def run_portfolio_grid_search(
     kombinasi, dipangkas = expand_grid(spec, base_config)
     butuh_warmup_ms = strategy.gate_warmup_ms(base_config, interval)
     peringatan_warmup: list[str] = []
-    punya_native_struct = bool(
-        native_prebuilt is not None
-        and len(native_prebuilt) >= 3
-        and native_prebuilt[2]
-    )
-    if not punya_native_struct and int(warmup_ms) < butuh_warmup_ms:
+    if int(warmup_ms) < butuh_warmup_ms:
         peringatan_warmup.append(
             f"Warmup {warmup_ms} ms dinaikkan menjadi {butuh_warmup_ms} ms "
-            f"karena struktur Confluence {strategy.confluence_structure_interval(base_config)} "
-            f"memerlukan {strategy.confluence_structure_window_bars(base_config)} "
+            f"karena aturan entry memerlukan {strategy.required_lookback_bars(base_config)} "
             "candle tertutup sebelum bar entry pertama."
         )
         warmup_ms = butuh_warmup_ms
@@ -514,10 +507,7 @@ def run_portfolio_grid_search(
     )
     timeline = built[0]
     series_of = built[1]
-    struktur_of = built[2] if len(built) >= 3 else {}
-    if punya_native_struct:
-        struktur_of = native_prebuilt[2]
-    prebuilt = (timeline, series_of, struktur_of)
+    prebuilt = (timeline, series_of, {})
     if not timeline:
         raise GridSearchError("Garis waktu portofolio kosong.")
 
@@ -555,8 +545,13 @@ def run_portfolio_grid_search(
         progress_cb, 0.0, "Menghitung sinyal entry portofolio sekali untuk seluruh grid..."
     )
     precompute_cfg = dict(base_config)
-    if "CONFLUENCE_MIN_RR_RATIO" in (spec or {}) or "CONFLUENCE_SL_BUFFER_PCT" in (spec or {}):
-        precompute_cfg["CONFLUENCE_MIN_RR_RATIO"] = 0.05
+    if (
+        "ENTRY_MIN_RR_RATIO" in (spec or {})
+        or "ENTRY_SL_BUFFER_PCT" in (spec or {})
+        or "ENTRY_MAX_SL_PCT" in (spec or {})
+    ):
+        precompute_cfg["ENTRY_MIN_RR_RATIO"] = 0.1
+        precompute_cfg["ENTRY_MAX_SL_PCT"] = 0.0
     entry_signal_cache = precompute_entry_signals(
         store,
         precompute_cfg,
@@ -827,22 +822,6 @@ def execute_grid_search(
                         btc_klines = None
 
             native_prebuilt = None
-            if strategy.confluence_enabled(base_cfg) and strategy.confluence_uses_mtf(
-                base_cfg
-            ):
-                from backtesting.portfolio_backtest import fetch_native_lookups
-
-                struktur_of = fetch_native_lookups(
-                    client,
-                    list(ok_symbols),
-                    base_cfg,
-                    start_ms + warmup_ms,
-                    end_ms,
-                    cache=cache,
-                    max_workers=4,
-                )
-                if struktur_of:
-                    native_prebuilt = (None, None, struktur_of)
 
             def grid_cb(p: float, msg: str):
                 if progress_cb:
@@ -919,27 +898,6 @@ def execute_grid_search(
                 except Exception:
                     btc_klines = None
 
-        structure_klines = None
-        if strategy.confluence_enabled(base_cfg) and strategy.confluence_uses_mtf(
-            base_cfg
-        ):
-            struct_interval = strategy.confluence_structure_interval(base_cfg)
-            struct_window = strategy.confluence_structure_window_bars(base_cfg)
-            struct_bar_ms = INTERVAL_MINUTES[struct_interval] * MS_PER_MIN
-            struct_start_ms = (
-                end_ms - int(days * MS_PER_DAY) - struct_window * struct_bar_ms
-            )
-            try:
-                structure_klines = _klines_untuk_simbol(
-                    client,
-                    symbol,
-                    struct_interval,
-                    min(start_ms, struct_start_ms),
-                    end_ms,
-                    cache,
-                )
-            except Exception:
-                structure_klines = None
     finally:
         if cache is not None:
             cache.close()
@@ -959,7 +917,6 @@ def execute_grid_search(
         progress_cb=grid_cb,
         cancel_cb=cancel_cb,
         btc_klines=btc_klines,
-        structure_klines=structure_klines,
     )
     return hasil_grid
 
@@ -1170,7 +1127,7 @@ def selftest() -> bool:
         check("expand_grid menolak kunci tanpa efek", True)
 
     kombinasi, dipangkas = expand_grid(
-        {"CONFLUENCE_SL_BUFFER_PCT": [0.1, 0.2, 0.2], "CONFLUENCE_MIN_RR_RATIO": [1.2, 1.5]}
+        {"ENTRY_SL_BUFFER_PCT": [0.1, 0.2, 0.2], "ENTRY_MIN_RR_RATIO": [1.2, 1.5]}
     )
     check(
         "expand_grid menghasilkan kombinasi unik",
@@ -1178,19 +1135,19 @@ def selftest() -> bool:
         f"{len(kombinasi)} kombinasi, {dipangkas} dipangkas",
     )
     try:
-        expand_grid({"CONFLUENCE_SL_BUFFER_PCT": []})
+        expand_grid({"ENTRY_SL_BUFFER_PCT": []})
         check("expand_grid menolak daftar kosong", False)
     except GridSearchError:
         check("expand_grid menolak daftar kosong", True)
     try:
         _pastikan_grid_portofolio_hanya_exit(
-            {"VP_BINS": [15, 20]}
+            {"ENTRY_BULL_CANDLES": [2, 3]}
         )
         check("grid portofolio menolak parameter entry", False)
     except GridSearchError:
         check("grid portofolio menolak parameter entry", True)
     try:
-        _pastikan_grid_portofolio_hanya_exit({"CONFLUENCE_SL_BUFFER_PCT": [0.1, 0.2]})
+        _pastikan_grid_portofolio_hanya_exit({"ENTRY_SL_BUFFER_PCT": [0.1, 0.2]})
         check("grid portofolio menerima parameter exit", True)
     except GridSearchError:
         check("grid portofolio menerima parameter exit", False)
@@ -1208,10 +1165,10 @@ def selftest() -> bool:
     except GridSearchError:
         check("hitung_skor menolak metrik tidak dikenal", True)
 
-    spec = parse_spec_cli("CONFLUENCE_SL_BUFFER_PCT=0.1:0.3:0.1,CONFLUENCE_MIN_RR_RATIO=1.2|1.5")
-    check("parse_spec_cli rentang", spec["CONFLUENCE_SL_BUFFER_PCT"] == [0.1, 0.2, 0.3], spec.get("CONFLUENCE_SL_BUFFER_PCT"))
-    check("parse_spec_cli daftar", spec["CONFLUENCE_MIN_RR_RATIO"] == [1.2, 1.5])
-    for teks in ("", "   ", "tanpa_sama_dengan", "KUNCI=", "CONFLUENCE_SL_BUFFER_PCT=1:2", "CONFLUENCE_SL_BUFFER_PCT=abc"):
+    spec = parse_spec_cli("ENTRY_SL_BUFFER_PCT=0.1:0.3:0.1,ENTRY_MIN_RR_RATIO=1.2|1.5")
+    check("parse_spec_cli rentang", spec["ENTRY_SL_BUFFER_PCT"] == [0.1, 0.2, 0.3], spec.get("ENTRY_SL_BUFFER_PCT"))
+    check("parse_spec_cli daftar", spec["ENTRY_MIN_RR_RATIO"] == [1.2, 1.5])
+    for teks in ("", "   ", "tanpa_sama_dengan", "KUNCI=", "ENTRY_SL_BUFFER_PCT=1:2", "ENTRY_SL_BUFFER_PCT=abc"):
         try:
             parse_spec_cli(teks)
             check(f"parse_spec_cli menolak {teks!r}", False)
@@ -1222,18 +1179,18 @@ def selftest() -> bool:
     cfg.update({
         "_symbol": "",
         "MODE": "PAPER",
-        "CONFLUENCE_FILTER_ENABLED": False,
+        "ENTRY_RULE_ENABLED": True,
         "BTC_FILTER_ENABLED": False,
         "MIN_QUOTE_VOLUME_USDT_24H": 0.0,
-        "CONFLUENCE_SL_BUFFER_PCT": 0.20,
-        "CONFLUENCE_MIN_RR_RATIO": 1.2,
+        "ENTRY_SL_BUFFER_PCT": 0.30,
+        "ENTRY_MIN_RR_RATIO": 2.0,
+        "ENTRY_MAX_SL_PCT": 5.0,
         "TAKER_FEE_PCT": 0.1,
         "USE_BNB_FEE_DISCOUNT": False,
         "USE_RISK_PERCENT": False,
         "POSITION_SIZE_USDT": 100.0,
         "MAX_POSITION_USDT": 0.0,
         "BACKTEST_INITIAL_EQUITY_USDT": 1000.0,
-        "MAX_HOLD_HOURS": 0.0,
         "COOLDOWN_MINUTES_AFTER_CLOSE": 0,
         "MIN_SECONDS_BETWEEN_TRADES": 0,
         "MAX_CHASE_PCT": 0.0,
@@ -1241,38 +1198,41 @@ def selftest() -> bool:
     klines = sd.seri_banyak_setup(harga=100.0, siklus=10, volume=9_000_000.0)
 
     try:
-        run_grid_search(klines[:50], cfg, {"CONFLUENCE_SL_BUFFER_PCT": [0.2]}, 300)
+        run_grid_search(klines[:50], cfg, {"ENTRY_SL_BUFFER_PCT": [0.2]}, 300)
         check("run_grid_search menolak data pendek", False)
     except GridSearchError:
         check("run_grid_search menolak data pendek", True)
     try:
-        run_grid_search(klines, cfg, {"CONFLUENCE_SL_BUFFER_PCT": [0.2]}, 300, metrik="metrik_bohong")
+        run_grid_search(klines, cfg, {"ENTRY_SL_BUFFER_PCT": [0.2]}, 300, metrik="metrik_bohong")
         check("run_grid_search menolak metrik tidak dikenal", False)
     except GridSearchError:
         check("run_grid_search menolak metrik tidak dikenal", True)
     try:
-        run_grid_search(klines, cfg, {"CONFLUENCE_SL_BUFFER_PCT": [0.2]}, 300, rasio_latih=1.5)
+        run_grid_search(klines, cfg, {"ENTRY_SL_BUFFER_PCT": [0.2]}, 300, rasio_latih=1.5)
         check("run_grid_search menolak rasio latih di luar rentang", False)
     except GridSearchError:
         check("run_grid_search menolak rasio latih di luar rentang", True)
 
-    hasil_tolak = run_grid_search(
+    hasil_tunggal = run_grid_search(
         klines,
         cfg,
-        {"CONFLUENCE_SL_BUFFER_PCT": [0.15, 0.25], "MAX_HOLD_HOURS": [0.1, 12.0]},
+        {"ENTRY_SL_BUFFER_PCT": [0.15, 0.25]},
         300,
         min_trades=1,
     )
     check(
-        "run_grid_search melewati kombinasi MAX_HOLD_HOURS tidak valid",
-        hasil_tolak.total_kombinasi == 4 and len(hasil_tolak.hasil) == 2 and hasil_tolak.dilewati == 2,
-        f"{hasil_tolak.total_kombinasi} kombinasi, {len(hasil_tolak.hasil)} hasil, {hasil_tolak.dilewati} dilewati",
+        "run_grid_search menjalankan satu kunci sweep",
+        hasil_tunggal.total_kombinasi == 2
+        and len(hasil_tunggal.hasil) == 2
+        and hasil_tunggal.dilewati == 0,
+        f"{hasil_tunggal.total_kombinasi} kombinasi, {len(hasil_tunggal.hasil)} hasil, "
+        f"{hasil_tunggal.dilewati} dilewati",
     )
 
     hasil = run_grid_search(
         klines,
         cfg,
-        {"CONFLUENCE_SL_BUFFER_PCT": [0.15, 0.25], "CONFLUENCE_MIN_RR_RATIO": [1.2, 1.8]},
+        {"ENTRY_SL_BUFFER_PCT": [0.15, 0.25], "ENTRY_MIN_RR_RATIO": [1.2, 1.8]},
         300,
         min_trades=1,
     )
@@ -1281,27 +1241,32 @@ def selftest() -> bool:
     check("run_grid_search mencatat bar latih dan uji", hasil.bar_latih > 0 and hasil.bar_uji > 0, f"{hasil.bar_latih}/{hasil.bar_uji}")
     check("run_grid_search melaporkan periode uji", semua_uji(hasil), "item tanpa uji")
 
-    cfg_conf = deepcopy(PUMP_CONFIG)
-    cfg_conf.update({
+    cfg_pendek = deepcopy(PUMP_CONFIG)
+    cfg_pendek.update({
         "_symbol": "",
         "MODE": "PAPER",
-        "CONFLUENCE_FILTER_ENABLED": True,
-        "CONFLUENCE_STRUCTURE_INTERVAL": "15m",
-        "CONFLUENCE_LOOKBACK_BARS": 60,
+        "ENTRY_RULE_ENABLED": True,
+        "ENTRY_BULL_CANDLES": 3,
+        "CONFIRM_LOOKBACK_BARS": 20,
         "BTC_FILTER_ENABLED": False,
         "MIN_QUOTE_VOLUME_USDT_24H": 0.0,
-        "CONFLUENCE_SL_BUFFER_PCT": 0.20,
-        "CONFLUENCE_MIN_RR_RATIO": 1.2,
+        "ENTRY_SL_BUFFER_PCT": 0.30,
+        "ENTRY_MIN_RR_RATIO": 2.0,
+        "ENTRY_MAX_SL_PCT": 5.0,
     })
     klines_panjang = sd.seri_5m_trend(harga=100.0, jam_trend=120)
-    hasil_conf = run_grid_search(
+    hasil_pendek = run_grid_search(
         klines_panjang,
-        cfg_conf,
-        {"CONFLUENCE_SL_BUFFER_PCT": [0.15, 0.25]},
-        100,
+        cfg_pendek,
+        {"ENTRY_SL_BUFFER_PCT": [0.15, 0.25]},
+        10,
         min_trades=1,
     )
-    check("run_grid_search menaikkan warmup struktur Confluence 15m", any("struktur Confluence" in w for w in hasil_conf.peringatan), [w[:80] for w in hasil_conf.peringatan])
+    check(
+        "run_grid_search menaikkan warmup aturan entry",
+        any("aturan entry" in w for w in hasil_pendek.peringatan),
+        [w[:80] for w in hasil_pendek.peringatan],
+    )
 
     print("\nHASIL: " + ("SEMUA LULUS" if ok_all else "ADA YANG GAGAL"))
     return ok_all

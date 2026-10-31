@@ -20,8 +20,6 @@ STATE_FILE_MISSING = "STATE_FILE_MISSING"
 DEFAULT_STATE = {
     "be_active": False,
     "be_stop_price": 0.0,
-    "trailing_active": False,
-    "trailing_stop_price": 0.0,
     "cooldown_until": 0,
     "peak_equity": None,
     "dd_stopped": False,
