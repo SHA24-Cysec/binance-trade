@@ -40,7 +40,6 @@ def config_dasar() -> dict:
             "CONFIG_UPDATE_MODE": "test",
             "ENTRY_RULE_ENABLED": True,
             "CONFIRM_INTERVAL": "5m",
-            "BTC_FILTER_ENABLED": False,
             "MIN_QUOTE_VOLUME_USDT_24H": 0.0,
             "ENTRY_SL_BUFFER_PCT": 0.30,
             "ENTRY_MIN_RR_RATIO": 2.0,

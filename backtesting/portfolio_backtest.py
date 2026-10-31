@@ -413,7 +413,6 @@ def precompute_entry_signals(
     interval: str,
     warmup_ms: int | tuple = 0,
     prebuilt: Optional[tuple] = None,
-    btc_klines: Optional[list] = None,
     progress_cb: Optional[Callable[[float], None]] = None,
     cancel_cb: Optional[Callable[[], bool]] = None,
     structure_store: Optional[KlineStore] = None,
@@ -457,9 +456,6 @@ def precompute_entry_signals(
     top_n = int(config.get("TOP_N_CANDIDATES_TO_CONFIRM", 10))
     store.set_cache_size(_resolve_symbol_cache_size(config, top_n))
 
-    bar_ms = INTERVAL_MINUTES.get(interval, 5) * MS_PER_MIN
-    btc_lookup = parity.make_btc_lookup(btc_klines, config, bar_ms)
-    gate_cfg = parity.gate_config(config, btc_lookup)
     first_allowed_time = timeline[0] + warmup_ms_int
 
     papan_input = []
@@ -482,7 +478,6 @@ def precompute_entry_signals(
         if t_now < first_allowed_time:
             continue
 
-        btc_drop = btc_lookup.drop_pct_at(t_now) if btc_lookup is not None else None
         board = []
         for sym, ot, ct, pct_arr, vol_arr, ready_arr, n_bar in papan_input:
             pos = bisect_left(ot, t_now)
@@ -493,9 +488,7 @@ def precompute_entry_signals(
             vol24 = vol_arr[pos]
             if vol24 < min_vol:
                 continue
-            gate_ok, _ = scanner.evaluate_market_gate(
-                vol24, gate_cfg, btc_drop_pct=btc_drop
-            )
+            gate_ok, _ = scanner.evaluate_market_gate(vol24, config)
             if not gate_ok:
                 continue
             board.append((vol24, sym, pos, ct[pos]))
@@ -589,7 +582,6 @@ def run_portfolio_backtest(
     start_ms: Optional[int] = None,
     end_ms: Optional[int] = None,
     prebuilt: Optional[tuple] = None,
-    btc_klines: Optional[list] = None,
     entry_signal_cache: Optional[EntrySignalCache] = None,
 ) -> PortfolioResult:
     semua_simbol = store.symbols()
@@ -704,12 +696,6 @@ def run_portfolio_backtest(
     controls = parity.AccountRiskControls(config, initial_equity)
     bar_ms = INTERVAL_MINUTES.get(interval, 5) * MS_PER_MIN
     cap_ms = parity.max_hold_ms(config, interval)
-    btc_lookup = parity.make_btc_lookup(btc_klines, config, bar_ms)
-    gate_cfg = parity.gate_config(config, btc_lookup)
-    btc_warning = parity.btc_filter_warning(config, btc_lookup)
-    if btc_warning:
-        warnings.append(btc_warning)
-
     first_allowed_time = timeline[0] + warmup_ms
     total_bars = len(timeline)
 
@@ -804,7 +790,6 @@ def run_portfolio_backtest(
 
         board = []
         if entry_signal_cache is None:
-            btc_drop = btc_lookup.drop_pct_at(t_now) if btc_lookup is not None else None
             for sym, ot, _ct, pct_arr, vol_arr, ready_arr, n_bar in papan_input:
                 pos = bisect_left(ot, t_now)
                 if pos >= n_bar or ot[pos] != t_now:
@@ -826,9 +811,7 @@ def run_portfolio_backtest(
                 vol24 = vol_arr[pos]
                 if vol24 < min_vol:
                     continue
-                gate_ok, _gate_reason = scanner.evaluate_market_gate(
-                    vol24, gate_cfg, btc_drop_pct=btc_drop
-                )
+                gate_ok, _gate_reason = scanner.evaluate_market_gate(vol24, config)
                 if not gate_ok:
                     continue
                 board.append((vol24, sym, pos))
@@ -1587,19 +1570,6 @@ def execute_portfolio_backtest(
         if not ok_symbols:
             raise BacktestError("Gagal mengunduh data untuk semua kandidat.")
 
-        btc_klines = None
-        if config.get("BTC_FILTER_ENABLED", False):
-            btc_symbol = "BTC" + str(config.get("QUOTE_ASSET", "USDT"))
-            if btc_symbol in ok_symbols:
-                btc_klines = store.klines(btc_symbol)
-            else:
-                try:
-                    btc_klines = _klines_untuk_simbol(
-                        client, btc_symbol, interval, start_ms, end_ms, cache
-                    )
-                except Exception:
-                    btc_klines = None
-
         def sim_cb(p: float):
             if progress_cb:
                 progress_cb(
@@ -1617,7 +1587,6 @@ def execute_portfolio_backtest(
             warmup_ms=warmup_ms,
             progress_cb=sim_cb,
             cancel_cb=cancel_cb,
-            btc_klines=btc_klines,
         )
     finally:
         if cache is not None:
@@ -1726,7 +1695,7 @@ def selftest() -> bool:
     from copy import deepcopy
 
     from config.config import PUMP_CONFIG
-    from backtesting.synthetic_data import seri_banyak_setup, seri_dengan_setup
+    from backtesting.synthetic_data import seri_banyak_setup
 
     ok_all = True
 
@@ -1744,7 +1713,6 @@ def selftest() -> bool:
             {
                 "MODE": "PAPER",
                 "ENTRY_RULE_ENABLED": True,
-                "BTC_FILTER_ENABLED": False,
                 "MIN_QUOTE_VOLUME_USDT_24H": 0.0,
                 "ENTRY_SL_BUFFER_PCT": 0.30,
                 "ENTRY_MIN_RR_RATIO": 2.0,

@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import logging
 import math
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 from strategy import indicators as strategy
 from strategy.indicators import Kline
@@ -204,36 +204,15 @@ def _angka_wajar(nilai) -> bool:
     return angka >= 0.0
 
 
-def evaluate_market_gate(
-    *args, btc_drop_pct: float | None = None
-) -> tuple[bool, str]:
+def evaluate_market_gate(*args) -> tuple[bool, str]:
     if len(args) == 2:
         quote_volume, config = args
     elif len(args) == 3 and isinstance(args[1], dict):
-        quote_volume, config, btc_drop_pct = args
+        quote_volume, config, _unused = args
     elif len(args) == 3:
         _unused_change, quote_volume, config = args
-    elif len(args) == 4:
-        _unused_change, quote_volume, config, btc_drop_pct = args
     else:
         raise TypeError("Argumen evaluate_market_gate tidak sesuai.")
-
-    if btc_drop_pct is None:
-        btc_drop_pct = config.get("_btc_drop_pct")
-    if config.get("BTC_FILTER_ENABLED", False):
-        if btc_drop_pct is None:
-            if config.get("_btc_filter_fail_closed", False):
-                return (
-                    False,
-                    "data filter BTC tidak tersedia, simbol ditolak (fail closed)",
-                )
-        else:
-            max_drop = abs(float(config.get("BTC_MAX_DROP_PCT", 5.0) or 0.0))
-            if float(btc_drop_pct) <= -max_drop:
-                return False, (
-                    f"BTC turun {float(btc_drop_pct):.2f}% dalam "
-                    f"{int(config.get('BTC_LOOKBACK_BARS', 3) or 3)} candle"
-                )
 
     if not _angka_wajar(quote_volume):
         return False, f"quote_volume 24 jam tidak wajar ({quote_volume!r})"
@@ -241,10 +220,8 @@ def evaluate_market_gate(
     return True, "filter pasar lolos"
 
 
-def market_gate_ok_at(
-    *args, btc_drop_pct: "float | None" = None
-) -> bool:
-    ok, _r = evaluate_market_gate(*args, btc_drop_pct=btc_drop_pct)
+def market_gate_ok_at(*args) -> bool:
+    ok, _r = evaluate_market_gate(*args)
     return ok
 
 
@@ -254,7 +231,6 @@ def filter_and_rank_candidates(
     tradable_symbols: "set | None" = None,
     *,
     apply_market_gate: bool = True,
-    btc_drop_pct: Optional[float] = None,
 ) -> list[Candidate]:
     quote_asset = config["QUOTE_ASSET"]
     min_vol = float(config.get("MIN_QUOTE_VOLUME_USDT_24H", 0) or 0)
@@ -285,9 +261,7 @@ def filter_and_rank_candidates(
         lolos_struktural += 1
 
         if apply_market_gate:
-            ok_market, alasan = evaluate_market_gate(
-                quote_volume, config, btc_drop_pct=btc_drop_pct
-            )
+            ok_market, alasan = evaluate_market_gate(quote_volume, config)
             if not ok_market:
                 logger.debug("Filter pasar menolak %s: %s", symbol, alasan)
                 continue
@@ -536,11 +510,8 @@ def find_best_candidate(
     prewarm_fn: "Optional[Callable[[list], None]]" = None,
     diagnostics: Optional[ScanDiagnostics] = None,
     confirm_close_time_ms: "int | None" = None,
-    btc_drop_pct: Optional[float] = None,
 ) -> Optional[Candidate]:
-    ranked = filter_and_rank_candidates(
-        tickers, config, tradable_symbols, btc_drop_pct=btc_drop_pct
-    )
+    ranked = filter_and_rank_candidates(tickers, config, tradable_symbols)
     top_n = ranked[: int(config.get("TOP_N_CANDIDATES_TO_CONFIRM", 10) or 10)]
     if diagnostics is not None:
         diagnostics.market_candidates = len(ranked)

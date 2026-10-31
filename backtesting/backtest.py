@@ -190,7 +190,6 @@ def run_backtest(
     config: dict,
     warmup_bars: int,
     progress_cb: Optional[Callable[[float], None]] = None,
-    btc_klines: Optional[list[Kline]] = None,
 ) -> BacktestResult:
     interval = config.get("CONFIRM_INTERVAL", "5m")
     window = bars_per_day(interval)
@@ -256,12 +255,6 @@ def run_backtest(
     controls = parity.AccountRiskControls(config, initial_equity)
     bar_ms = strategy.interval_to_ms(interval)
     cap_ms = parity.max_hold_ms(config, interval)
-    btc_lookup = parity.make_btc_lookup(btc_klines, config, bar_ms)
-    gate_cfg = parity.gate_config(config, btc_lookup)
-    btc_warning = parity.btc_filter_warning(config, btc_lookup)
-    if btc_warning:
-        warnings.append(btc_warning)
-
     butuh_warmup = max(
         strategy.required_lookback_bars(config),
         strategy.gate_warmup_bars(config, interval),
@@ -292,15 +285,7 @@ def run_backtest(
                 and st is not None
                 and st["vol24h"] >= min_vol
                 and candle.open_time >= next_entry_allowed_at
-                and scanner.market_gate_ok_at(
-                    st["vol24h"],
-                    gate_cfg,
-                    btc_drop_pct=(
-                        btc_lookup.drop_pct_at(candle.open_time)
-                        if btc_lookup is not None
-                        else None
-                    ),
-                )
+                and scanner.market_gate_ok_at(st["vol24h"], config)
             ):
                 window_klines = klines[max(0, i - lookback + 1) : i + 1]
                 if strategy.entry_rule_enabled(config):
@@ -640,9 +625,6 @@ def _cast_bool(v) -> bool:
 
 OVERRIDE_CASTERS = {
     "MIN_QUOTE_VOLUME_USDT_24H": float,
-    "BTC_FILTER_ENABLED": _cast_bool,
-    "BTC_MAX_DROP_PCT": float,
-    "BTC_LOOKBACK_BARS": int,
     "CONFIRM_INTERVAL": str,
     "CONFIRM_LOOKBACK_BARS": int,
     "ENTRY_RULE_ENABLED": _cast_bool,
@@ -845,7 +827,6 @@ def execute_backtest(
         progress_cb(0.02, f"Mengunduh data historis {symbol} ({interval})...")
 
     cache_meta = None
-    btc_klines: Optional[list[Kline]] = None
     try:
         klines = _fetch_with_cache(symbol, interval, start_ms, end_ms, cb=fetch_cb)
 
@@ -855,21 +836,6 @@ def execute_backtest(
                 f"Data {symbol} tidak cukup: hanya {len(klines)} candle "
                 f"(butuh minimal {min_needed}). Coba kurangi rentang hari atau pilih koin lain."
             )
-
-        quote = str(config.get("QUOTE_ASSET", "USDT") or "USDT").strip().upper()
-        btc_symbol = f"BTC{quote}"
-        if config.get("BTC_FILTER_ENABLED", False):
-            if symbol == btc_symbol:
-                btc_klines = klines
-            else:
-                if progress_cb:
-                    progress_cb(0.76, f"Mengunduh data referensi {btc_symbol}...")
-                try:
-                    btc_klines = _fetch_with_cache(
-                        btc_symbol, interval, start_ms, end_ms, cb=None
-                    )
-                except Exception:
-                    btc_klines = None
 
         if cache_obj is not None:
             cache_meta = cache_obj.stats()
@@ -891,7 +857,6 @@ def execute_backtest(
         config,
         warmup_bars=warmup_bars,
         progress_cb=sim_cb,
-        btc_klines=btc_klines,
     )
     summary = summarize(result)
 

@@ -1203,23 +1203,6 @@ def _bt_prepare_universe(
                 "Periksa koneksi ke Binance." + contoh
             )
 
-        btc_klines = None
-        btc_error = ""
-        if cfg.get("BTC_FILTER_ENABLED", False):
-            btc_symbol = "BTC" + str(cfg.get("QUOTE_ASSET", "USDT"))
-            set_progress(0.82, f"mengunduh {btc_symbol} untuk filter BTC...")
-            try:
-                btc_klines = pbt._klines_untuk_simbol(
-                    klien, btc_symbol, interval, fetch_start_ms, end_ms, kline_cache
-                )
-                if not btc_klines:
-                    btc_klines = None
-                    btc_error = f"candle {btc_symbol} kosong"
-            except Exception as exc:
-                if cancelled():
-                    raise
-                btc_klines = None
-                btc_error = str(exc)[:200]
     except Exception:
         if store is not None:
             store.cleanup()
@@ -1242,8 +1225,6 @@ def _bt_prepare_universe(
         "interval": interval,
         "warmup_ms": warmup_ms,
         "end_ms": end_ms,
-        "btc_klines": btc_klines,
-        "btc_error": btc_error,
     }
 
 
@@ -1326,7 +1307,6 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 0.82 + f * 0.17, "menjalankan simulasi portofolio..."
             ),
             cancel_cb=cancelled,
-            btc_klines=prep.get("btc_klines"),
             prebuilt=prebuilt,
         )
         summary = pbt.summarize_portfolio(result)
@@ -1398,22 +1378,7 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
             },
             "trades": trades_out,
             "skipped": skipped_out,
-            "warnings": (
-                list(result.warnings)
-                + _bt_peringatan_timing(cfg, days)
-                + (
-                    [
-                        f"Data BTC gagal diunduh ({prep.get('btc_error')}) sehingga filter BTC "
-                        "tidak diterapkan."
-                    ]
-                    if (
-                        cfg.get("BTC_FILTER_ENABLED", False)
-                        and prep.get("btc_klines") is None
-                        and not any("BTC" in w for w in result.warnings)
-                    )
-                    else []
-                )
-            ),
+            "warnings": list(result.warnings) + _bt_peringatan_timing(cfg, days),
             "limitations": [
                 "SURVIVORSHIP BIAS, dan ini tidak bisa diperbaiki: Binance hanya menyediakan "
                 "data historis untuk pair yang MASIH listing hari ini. Koin yang sudah "
@@ -1455,8 +1420,8 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 + _bt_direction_warmup_note(cfg, prep["interval"])
                 + " "
                 + _bt_timing_note(cfg, prep["interval"])
-                + " Filter live yang SUDAH disimulasikan dari candle: filter BTC (BTC_MAX_DROP_PCT, "
-                "memakai candle BTC historis), MAX_CHASE_PCT, MIN_SECONDS_BETWEEN_TRADES, "
+                + " Filter live yang SUDAH disimulasikan dari candle: "
+                "MAX_CHASE_PCT, MIN_SECONDS_BETWEEN_TRADES, "
                 "COOLDOWN_MINUTES_AFTER_CLOSE, equity stop (drawdown), dan "
                 "CLOSE_ALL_AT_LIMIT. Kontrol akun dicek saat candle ditutup, bukan tiap "
                 + str(PUMP_CONFIG.get("LOOP_INTERVAL_SECONDS", 15))
@@ -1568,7 +1533,6 @@ def _bt_run_grid_job(
                 f"({int(round(f * total_kombinasi))}/{total_kombinasi})",
             ),
             cancel_cb=cancelled,
-            btc_klines=prep.get("btc_klines"),
             native_prebuilt=prebuilt,
         )
         rows = gs.ringkas_untuk_tabel(hasil, top_n=20)
@@ -1597,17 +1561,7 @@ def _bt_run_grid_job(
                 "detik": round(hasil.detik, 1),
             },
             "rows": rows,
-            "warnings": (
-                [
-                    f"Filter BTC aktif tetapi data BTC gagal diunduh ({prep.get('btc_error')}); "
-                    "filter BTC TIDAK diterapkan pada grid ini."
-                ]
-                if (
-                    cfg.get("BTC_FILTER_ENABLED", False)
-                    and prep.get("btc_klines") is None
-                )
-                else []
-            ),
+            "warnings": [],
             "limitations": [
                 "Grid ini berjalan di atas simulasi PORTOFOLIO (satu posisi lintas "
                 "simbol, prioritas volume) dengan parameter exit yang sama seperti "
@@ -1642,7 +1596,7 @@ def _bt_run_grid_job(
                 "order book TIDAK dimodelkan, jadi order besar di koin tipis akan "
                 "lebih buruk dari hasil di sini. Filter kedalaman, ketimpangan bid/ask, dan "
                 "sell wall hanya berlaku di PAPER dan LIVE.",
-                "Filter live yang SUDAH disimulasikan dari candle: filter BTC, "
+                "Filter live yang SUDAH disimulasikan dari candle: "
                 "MAX_CHASE_PCT, MIN_SECONDS_BETWEEN_TRADES, COOLDOWN_MINUTES_AFTER_CLOSE, "
                 "equity stop, dan CLOSE_ALL_AT_LIMIT (dicek saat candle "
                 "ditutup, bukan tiap beberapa detik). Yang BELUM: spread order book "

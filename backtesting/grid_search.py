@@ -266,7 +266,6 @@ def run_grid_search(
     min_trades: int = 5,
     progress_cb: Optional[Callable[[float, str], None]] = None,
     cancel_cb: Optional[Callable[[], bool]] = None,
-    btc_klines: Optional[list[Kline]] = None,
 ) -> HasilGridSearch:
     if metrik not in METRIK_TERSEDIA:
         raise GridSearchError(
@@ -339,24 +338,14 @@ def run_grid_search(
             label = ", ".join(f"{k}={v}" for k, v in ov.items())
             _panggil_progress(progress_cb, idx / total, f"[{idx}/{total}] {label[:60]}")
 
-        res_latih = run_backtest(
-            klines_latih,
-            cfg,
-            warmup_bars=warmup_bars,
-            btc_klines=btc_klines,
-        )
+        res_latih = run_backtest(klines_latih, cfg, warmup_bars=warmup_bars)
         sum_latih = summarize(res_latih)
         skor_latih = hitung_skor(sum_latih, metrik)
 
         sum_uji: Optional[dict] = None
         skor_uji: Optional[float] = None
         if pakai_split:
-            res_uji = run_backtest(
-                klines_uji,
-                cfg,
-                warmup_bars=warmup_uji,
-                btc_klines=btc_klines,
-            )
+            res_uji = run_backtest(klines_uji, cfg, warmup_bars=warmup_uji)
             sum_uji = summarize(res_uji)
             skor_uji = hitung_skor(sum_uji, metrik)
 
@@ -465,7 +454,6 @@ def run_portfolio_grid_search(
     min_trades: int = 5,
     progress_cb: Optional[Callable] = None,
     cancel_cb: Optional[Callable[[], bool]] = None,
-    btc_klines: Optional[list[Kline]] = None,
     structure_store: Optional[KlineStore] = None,
     native_prebuilt: Optional[tuple] = None,
 ) -> HasilGridSearch:
@@ -558,7 +546,6 @@ def run_portfolio_grid_search(
         interval,
         warmup_ms=warmup_ms,
         prebuilt=prebuilt,
-        btc_klines=btc_klines,
         cancel_cb=cancel_cb,
         structure_store=structure_store,
     )
@@ -593,7 +580,6 @@ def run_portfolio_grid_search(
                 end_ms=batas_latih_ms,
                 prebuilt=prebuilt,
                 cancel_cb=cancel_cb,
-                btc_klines=btc_klines,
                 entry_signal_cache=entry_signal_cache,
             )
             sum_latih = summarize_portfolio(res_latih)
@@ -611,7 +597,6 @@ def run_portfolio_grid_search(
                     start_ms=awal_uji_ms,
                     prebuilt=prebuilt,
                     cancel_cb=cancel_cb,
-                    btc_klines=btc_klines,
                     entry_signal_cache=entry_signal_cache,
                 )
                 sum_uji = summarize_portfolio(res_uji)
@@ -806,21 +791,6 @@ def execute_grid_search(
             if not ok_symbols:
                 raise GridSearchError("Gagal mengunduh data untuk semua kandidat.")
 
-            btc_klines = None
-            if base_cfg.get("BTC_FILTER_ENABLED", False):
-                btc_symbol = "BTC" + str(base_cfg.get("QUOTE_ASSET", "USDT"))
-                if btc_symbol in ok_symbols:
-                    btc_klines = store.klines(btc_symbol)
-                else:
-                    try:
-                        from backtesting.portfolio_backtest import _klines_untuk_simbol
-
-                        btc_klines = _klines_untuk_simbol(
-                            client, btc_symbol, interval, start_ms, end_ms, cache
-                        )
-                    except Exception:
-                        btc_klines = None
-
             native_prebuilt = None
 
             def grid_cb(p: float, msg: str):
@@ -838,7 +808,6 @@ def execute_grid_search(
                 min_trades=min_trades,
                 progress_cb=grid_cb,
                 cancel_cb=cancel_cb,
-                btc_klines=btc_klines,
                 native_prebuilt=native_prebuilt,
             )
         finally:
@@ -885,19 +854,6 @@ def execute_grid_search(
                 sleep_between_calls=0.15,
             )
 
-        btc_klines = None
-        if base_cfg.get("BTC_FILTER_ENABLED", False):
-            btc_symbol = "BTC" + str(base_cfg.get("QUOTE_ASSET", "USDT"))
-            if btc_symbol == symbol:
-                btc_klines = klines
-            else:
-                try:
-                    btc_klines = _klines_untuk_simbol(
-                        client, btc_symbol, interval, start_ms, end_ms, cache
-                    )
-                except Exception:
-                    btc_klines = None
-
     finally:
         if cache is not None:
             cache.close()
@@ -916,7 +872,6 @@ def execute_grid_search(
         min_trades=min_trades,
         progress_cb=grid_cb,
         cancel_cb=cancel_cb,
-        btc_klines=btc_klines,
     )
     return hasil_grid
 
@@ -1180,7 +1135,6 @@ def selftest() -> bool:
         "_symbol": "",
         "MODE": "PAPER",
         "ENTRY_RULE_ENABLED": True,
-        "BTC_FILTER_ENABLED": False,
         "MIN_QUOTE_VOLUME_USDT_24H": 0.0,
         "ENTRY_SL_BUFFER_PCT": 0.30,
         "ENTRY_MIN_RR_RATIO": 2.0,
@@ -1248,7 +1202,6 @@ def selftest() -> bool:
         "ENTRY_RULE_ENABLED": True,
         "ENTRY_BULL_CANDLES": 3,
         "CONFIRM_LOOKBACK_BARS": 20,
-        "BTC_FILTER_ENABLED": False,
         "MIN_QUOTE_VOLUME_USDT_24H": 0.0,
         "ENTRY_SL_BUFFER_PCT": 0.30,
         "ENTRY_MIN_RR_RATIO": 2.0,

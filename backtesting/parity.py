@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from bisect import bisect_right
 import math
 from typing import Optional, Sequence
 
-from market import market_scanner as scanner
 from strategy import indicators as strategy
 from strategy.indicators import Kline
 
@@ -90,98 +88,6 @@ def same_coin_block_record(
         blocked_until.pop(symbol, None)
         return
     blocked_until[symbol] = int(exit_close_time_ms) + int(hours * 3_600_000)
-
-
-class BtcDropLookup:
-
-    def __init__(
-        self,
-        btc_klines: list[Kline],
-        arg2: int = 3,
-        arg3: int = 0,
-    ) -> None:
-        self.klines = sorted(btc_klines, key=lambda k: k.open_time)
-        self.open_times = [k.open_time for k in self.klines]
-        if int(arg2) >= 10_000 and int(arg3) < 10_000:
-            bar_ms = int(arg2)
-            lookback_bars = int(arg3 or 3)
-        else:
-            lookback_bars = int(arg2 or 3)
-            bar_ms = int(arg3)
-        self.lookback = max(1, lookback_bars)
-        self.bar_ms = max(0, bar_ms)
-        self.max_stale_ms = self.bar_ms * 2 if self.bar_ms > 0 else 0
-
-    @property
-    def usable(self) -> bool:
-        return len(self.klines) >= self.lookback + 1
-
-    def drop_pct_at(self, open_time_ms: int) -> Optional[float]:
-        if not self.usable:
-            return None
-        idx = bisect_right(self.open_times, int(open_time_ms)) - 1
-        if idx < self.lookback:
-            return None
-        if (
-            self.max_stale_ms > 0
-            and int(open_time_ms) - self.open_times[idx] > self.max_stale_ms
-        ):
-            return None
-        window = self.klines[idx - self.lookback : idx + 1]
-        if self.bar_ms > 0:
-            expected_span = self.lookback * self.bar_ms
-            actual_span = window[-1].open_time - window[0].open_time
-            if actual_span > expected_span + self.bar_ms // 2:
-                return None
-        return strategy.compute_btc_drop_pct(window, self.lookback)
-
-
-def make_btc_lookup(
-    btc_klines: Optional[list[Kline]],
-    config: dict,
-    bar_ms: int = 0,
-) -> Optional[BtcDropLookup]:
-    if not config.get("BTC_FILTER_ENABLED", False) or not btc_klines:
-        return None
-    lookback = int(config.get("BTC_LOOKBACK_BARS", 3) or 3)
-    resolved_bar_ms = int(bar_ms or 0)
-    if resolved_bar_ms <= 0:
-        interval = str(
-            config.get("MARKET_DATA_INTERVAL")
-            or config.get("CONFIRM_INTERVAL")
-            or "5m"
-        )
-        try:
-            resolved_bar_ms = strategy.interval_to_ms(interval)
-        except ValueError:
-            resolved_bar_ms = 0
-    lookup = BtcDropLookup(btc_klines, lookback, resolved_bar_ms)
-    return lookup if lookup.usable else None
-
-
-def btc_filter_warning(
-    config: dict,
-    btc_lookup: Optional[BtcDropLookup],
-) -> Optional[str]:
-    if not config.get("BTC_FILTER_ENABLED", False):
-        return None
-    if btc_lookup is not None and btc_lookup.usable:
-        return None
-    return (
-        "BTC_FILTER_ENABLED aktif tetapi candle BTCUSDT tidak tersedia untuk "
-        "periode ini; filter BTC dinonaktifkan selama simulasi ini."
-    )
-
-
-def gate_config(config: dict, btc_lookup: Optional[BtcDropLookup]) -> dict:
-    if not config.get("BTC_FILTER_ENABLED", False):
-        return config
-    cfg = dict(config)
-    if btc_lookup is not None and btc_lookup.usable:
-        cfg["_btc_filter_fail_closed"] = True
-        return cfg
-    cfg["BTC_FILTER_ENABLED"] = False
-    return cfg
 
 
 class AccountRiskControls:

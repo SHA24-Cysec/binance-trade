@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import NamedTuple, Optional, Sequence
+from typing import NamedTuple, Optional
 
 from strategy import entry_rule
 
@@ -551,21 +551,5 @@ def _valid_candle_series(klines: list[Kline]) -> bool:
 
 
 
-
-
-
-def btc_change_pct(klines: list[Kline], lookback_bars: int = 3) -> Optional[float]:
-    look = max(1, int(lookback_bars or 3))
-    if not klines or len(klines) < look + 1:
-        return None
-    prev_close = float(klines[-look - 1].close)
-    last_close = float(klines[-1].close)
-    if prev_close <= 0:
-        return None
-    return (last_close / prev_close - 1.0) * 100.0
-
-
-def compute_btc_drop_pct(klines: list[Kline], lookback_bars: int = 3) -> Optional[float]:
-    return btc_change_pct(klines, lookback_bars)
 
 

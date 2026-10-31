@@ -247,30 +247,6 @@ PARAMETER_SCHEMA: dict[str, dict] = {
             "1d",
         ],
     ),
-    "BTC_FILTER_ENABLED": _field(
-        "Monitoring Pasar",
-        "Filter kondisi BTC",
-        "Filter monitoring kondisi BTC pada jendela candle tertutup.",
-        "bool",
-    ),
-    "BTC_MAX_DROP_PCT": _field(
-        "Monitoring Pasar",
-        "Penurunan BTC maksimum",
-        "Batas penurunan BTC untuk filter monitoring.",
-        "float",
-        minimum=0.1,
-        maximum=50,
-        unit="%",
-    ),
-    "BTC_LOOKBACK_BARS": _field(
-        "Monitoring Pasar",
-        "Lookback BTC",
-        "Jumlah candle tertutup untuk mengukur penurunan BTC.",
-        "int",
-        minimum=1,
-        maximum=1000,
-        unit="candle",
-    ),
     "ENTRY_SL_BUFFER_PCT": _field(
         "Aturan Entry",
         "Buffer SL di bawah low sinyal",
@@ -933,6 +909,9 @@ def _read_doc_unlocked() -> tuple[dict, list[str]]:
 
 REMOVED_PARAMETERS = frozenset(
     {
+        "BTC_FILTER_ENABLED",
+        "BTC_MAX_DROP_PCT",
+        "BTC_LOOKBACK_BARS",
         "PUMP_MIN_24H_CHANGE_PCT",
         "PUMP_MAX_24H_CHANGE_PCT",
         "MIN_CLOSE_POSITION_IN_RANGE",
@@ -1165,8 +1144,9 @@ def load_mode_override(mode: str) -> tuple[dict, list[str]]:
         payload = doc.get("overrides", {}).get(raw_mode)
         if payload is None:
             return {}, errors
+        sebelum_migrasi = dict(payload)
         payload = _migrate_legacy_keys(payload)
-        migrated = False
+        migrated = payload != sebelum_migrasi
         try:
             _validate_override_payload(payload)
         except ValueError as exc:

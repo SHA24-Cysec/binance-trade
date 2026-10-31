@@ -5353,30 +5353,6 @@ def run(
                             "Scan: koin diblokir karena trade sebelumnya loss: %s",
                             ", ".join(sorted(diblokir)),
                         )
-                    if config.get("BTC_FILTER_ENABLED", False):
-                        scan_config["_btc_filter_fail_closed"] = True
-                        try:
-                            btc_raw = client.get_klines(
-                                "BTC" + config["QUOTE_ASSET"],
-                                config["CONFIRM_INTERVAL"],
-                                limit=int(config.get("BTC_LOOKBACK_BARS", 3) or 3) + 1,
-                            )
-                            btc_closed = [
-                                k
-                                for k in strategy.parse_klines(btc_raw)
-                                if k.close_time < state_mod.now_ms()
-                            ]
-                            look = int(config.get("BTC_LOOKBACK_BARS", 3) or 3)
-                            if len(btc_closed) >= look + 1:
-                                scan_config["_btc_drop_pct"] = (
-                                    btc_closed[-1].close / btc_closed[-look - 1].close
-                                    - 1.0
-                                ) * 100.0
-                        except Exception as exc:
-                            logger.warning(
-                                "Filter BTC tidak dapat dihitung; kandidat ditolak: %s",
-                                exc,
-                            )
                     try:
                         batas_konfirmasi = strategy.last_closed_bar_close_ms(
                             str(scan_config.get("CONFIRM_INTERVAL", "5m")),

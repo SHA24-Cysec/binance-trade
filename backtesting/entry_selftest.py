@@ -100,6 +100,9 @@ def cek_konfigurasi_bersih() -> str:
         assert kunci in bt.OVERRIDE_CASTERS, f"{kunci} hilang dari OVERRIDE_CASTERS"
 
     for kunci in (
+        "BTC_FILTER_ENABLED",
+        "BTC_MAX_DROP_PCT",
+        "BTC_LOOKBACK_BARS",
         "CONFLUENCE_FILTER_ENABLED",
         "CONFLUENCE_STRUCTURE_INTERVAL",
         "CONFLUENCE_LOOKBACK_BARS",
@@ -302,7 +305,6 @@ def cek_backtest_menghasilkan_trade() -> str:
     cfg.update(
         {
             "_symbol": "",
-            "BTC_FILTER_ENABLED": False,
             "MIN_QUOTE_VOLUME_USDT_24H": 0.0,
             "USE_RISK_PERCENT": False,
             "POSITION_SIZE_USDT": 100.0,
