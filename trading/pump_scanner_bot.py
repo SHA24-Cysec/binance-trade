@@ -255,6 +255,12 @@ DEFAULT_STATE = {
 _LOGGING_MARKER = "_pump_bot_handler"
 
 
+class _ConsoleLogFormatter(logging.Formatter):
+
+    def format(self, record: logging.LogRecord) -> str:
+        return " ".join(record.getMessage().splitlines()).strip()
+
+
 def setup_logging(config: dict) -> None:
     root = logging.getLogger()
     root.setLevel(logging.INFO)
@@ -271,7 +277,7 @@ def setup_logging(config: dict) -> None:
         "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s", "%Y-%m-%d %H:%M:%S"
     )
     console = logging.StreamHandler(sys.stdout)
-    console.setFormatter(fmt)
+    console.setFormatter(_ConsoleLogFormatter())
     setattr(console, _LOGGING_MARKER, True)
     root.addHandler(console)
     Path(str(config["LOG_FILE"])).parent.mkdir(parents=True, exist_ok=True)

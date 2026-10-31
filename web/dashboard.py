@@ -526,6 +526,36 @@ _RE_SELL = re.compile(
     r"^(?P<ts>[\d\-]+ [\d:]+).*?SELL FILLED (?P<sym>\w+) \((?P<reason>[^)]+)\): qty=(?P<qty>[\d.]+) @ avg "
     r"(?P<price>[\d.]+) \| entry=(?P<entry>[\d.]+) \| estimasi PnL=(?P<pnl>[+\-\d.]+)"
 )
+_RE_LOG_PREFIX = re.compile(
+    r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s*\|\s*"
+    r"(?P<level>CRITICAL|ERROR|WARNING|INFO|DEBUG)\s*\|\s*[^|]+?\s*\|\s*"
+    r"(?P<message>.*)$"
+)
+_LOG_MONTHS_ID = (
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "Mei",
+    "Jun",
+    "Jul",
+    "Agu",
+    "Sep",
+    "Okt",
+    "Nov",
+    "Des",
+)
+
+
+def _format_log_timestamp(value: str) -> str:
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return ""
+    return (
+        f"{parsed.day} {_LOG_MONTHS_ID[parsed.month - 1]} {parsed.year}, "
+        f"{parsed:%H:%M:%S}"
+    )
 
 
 def parse_log(max_lines: int = 4000):
@@ -606,12 +636,34 @@ def parse_log(max_lines: int = 4000):
         ln = ln.rstrip("\n")
         if not ln.strip():
             continue
+        match = _RE_LOG_PREFIX.match(ln)
+        if (
+            match is None
+            and events
+            and events[-1]["level"] in ("ERROR", "CRITICAL")
+        ):
+            events[-1]["raw"] += f"\n{ln}"
+            continue
         lvl = "INFO"
-        for nama_level in ("CRITICAL", "ERROR", "WARNING", "INFO"):
+        for nama_level in ("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"):
             if f"| {nama_level}" in ln:
                 lvl = nama_level
                 break
-        events.append({"raw": ln, "level": lvl})
+        message = ln.strip()
+        timestamp = ""
+        if match:
+            lvl = match.group("level")
+            message = match.group("message").strip()
+            timestamp = match.group("ts")
+        events.append(
+            {
+                "raw": ln,
+                "message": message or "Log tanpa pesan.",
+                "level": lvl,
+                "timestamp": timestamp,
+                "display_time": _format_log_timestamp(timestamp),
+            }
+        )
 
     ledger_path = PUMP_CONFIG.get("TRADE_LEDGER_FILE")
     try:

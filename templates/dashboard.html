@@ -1029,6 +1029,9 @@
         background: var(--border2);
         border-radius: 8px;
       }
+      .logitem {
+        min-width: 0;
+      }
       .logline {
         padding: 3px 9px;
         border-radius: 5px;
@@ -1036,6 +1039,30 @@
         overflow: hidden;
         text-overflow: ellipsis;
         max-width: 100%;
+      }
+      .logdetails {
+        margin: 2px 9px 7px;
+        color: var(--muted);
+        font-family: ui-sans-serif, system-ui, sans-serif;
+        font-size: 11px;
+      }
+      .logdetails summary {
+        width: fit-content;
+        cursor: pointer;
+        color: var(--muted);
+      }
+      .logdetails pre {
+        margin-top: 6px;
+        padding: 8px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--bg);
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        font-family: var(--mono);
+        font-size: 10.5px;
+        line-height: 1.55;
+        user-select: text;
       }
       .logline.WARNING {
         color: var(--amber);
@@ -1047,6 +1074,104 @@
       }
       .logline.INFO {
         color: var(--muted);
+      }
+      .activity-logbox {
+        padding: 8px 6px 2px 9px;
+        font-family: ui-sans-serif, system-ui, sans-serif;
+        font-size: 13px;
+        line-height: 1.55;
+      }
+      .activity-logbox .logitem {
+        position: relative;
+        display: grid;
+        grid-template-columns: 31px minmax(0, 1fr);
+        gap: 12px;
+        padding-bottom: 18px;
+      }
+      .activity-logbox .logitem:last-child {
+        padding-bottom: 6px;
+      }
+      .activity-logbox .logitem:not(:last-child)::before {
+        position: absolute;
+        top: 30px;
+        bottom: 2px;
+        left: 15px;
+        width: 1px;
+        background: var(--border2);
+        content: "";
+      }
+      .activity-logbox .log-status-icon {
+        position: relative;
+        z-index: 1;
+        display: grid;
+        width: 31px;
+        height: 31px;
+        place-items: center;
+        border: 1px solid var(--border);
+        border-radius: 50%;
+        background: var(--solid);
+      }
+      .activity-logbox .log-status-svg {
+        width: 16px;
+        height: 16px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.8;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+      .activity-logbox .INFO .log-status-icon,
+      .activity-logbox .DEBUG .log-status-icon {
+        color: var(--info);
+      }
+      .activity-logbox .WARNING .log-status-icon {
+        color: var(--amber);
+      }
+      .activity-logbox .ERROR .log-status-icon,
+      .activity-logbox .CRITICAL .log-status-icon {
+        color: #fb7185;
+      }
+      .activity-logbox .log-content {
+        min-width: 0;
+        padding-top: 1px;
+      }
+      .activity-logbox .logtime {
+        display: block;
+        margin-bottom: 2px;
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 10px;
+        line-height: 1.5;
+      }
+      .activity-logbox .logline {
+        max-width: none;
+        padding: 0;
+        border-radius: 0;
+        white-space: normal;
+        overflow: visible;
+        text-overflow: clip;
+        overflow-wrap: anywhere;
+        font-size: 12.5px;
+        line-height: 1.55;
+      }
+      .activity-logbox .logline.INFO,
+      .activity-logbox .logline.DEBUG {
+        color: var(--txt);
+      }
+      .activity-logbox .logline.WARNING {
+        color: #fbbf24;
+      }
+      .activity-logbox .logline.ERROR,
+      .activity-logbox .logline.CRITICAL {
+        color: #fda4af;
+        background: transparent;
+      }
+      .activity-logbox .logdetails {
+        margin: 7px 0 0;
+      }
+      .activity-logbox .logdetails pre {
+        max-height: 210px;
+        overflow: auto;
       }
       .chart-wrap {
         width: 100%;
@@ -2106,7 +2231,7 @@
         <div class="grid cols">
           <div class="panel">
             <h2>📜 Log Aktivitas Terbaru</h2>
-            <div class="logbox" id="logBox">
+            <div class="logbox activity-logbox" id="logBox">
               <div class="empty">Memuat log…</div>
             </div>
           </div>
@@ -3749,10 +3874,39 @@
         }).join('');
       }
 
+      let _renderedLogsSignature = null;
+      const LOG_STATUS_LABELS = {INFO:'Informasi',WARNING:'Peringatan',ERROR:'Error',CRITICAL:'Kritis',DEBUG:'Debug'};
+      const LOG_STATUS_ICON_PATHS = {
+        INFO:'<circle cx="12" cy="12" r="9"></circle><path d="M12 11v6"></path><path d="M12 7h.01"></path>',
+        WARNING:'<path d="M10.3 3.7 2.6 17a2 2 0 0 0 1.7 3h15.4a2 2 0 0 0 1.7-3L13.7 3.7a2 2 0 0 0-3.4 0Z"></path><path d="M12 9v4"></path><path d="M12 17h.01"></path>',
+        ERROR:'<circle cx="12" cy="12" r="9"></circle><path d="m9 9 6 6"></path><path d="m15 9-6 6"></path>'
+      };
+
+      function logStatusIcon(level){
+        const kind=level==='WARNING'?'WARNING':(level==='ERROR'||level==='CRITICAL'?'ERROR':'INFO');
+        return `<svg class="log-status-svg" viewBox="0 0 24 24" aria-hidden="true">${LOG_STATUS_ICON_PATHS[kind]}</svg>`;
+      }
+
       function renderLogs(events){
         const lb=document.getElementById('logBox');
-        if(!events||!events.length){lb.innerHTML='<div class="empty">Belum ada log.</div>';return;}
-        lb.innerHTML=events.map(e=>`<div class="logline ${safeLogClass(e.level)}">${esc(e.raw)}</div>`).join('');
+        const rows=Array.isArray(events)?events:[];
+        const signature=JSON.stringify(rows.map(e=>[e.level,e.message,e.raw,e.display_time]));
+        if(signature===_renderedLogsSignature)return;
+        const openDetails=new Set(Array.from(lb.querySelectorAll('.logdetails[open] pre')).map(el=>el.textContent));
+        _renderedLogsSignature=signature;
+        if(!rows.length){lb.innerHTML='<div class="empty">Belum ada log.</div>';return;}
+        lb.innerHTML=rows.map(e=>{
+          const level=safeLogClass(e.level);
+          const message=String(e.message||e.raw||'Log tanpa pesan.');
+          const raw=String(e.raw||'');
+          const timestamp=String(e.timestamp||'');
+          const displayTime=String(e.display_time||'');
+          const timeHtml=displayTime?`<time class="logtime"${timestamp?` datetime="${esc(timestamp.replace(' ','T'))}"`:''}>${esc(displayTime)}</time>`:'';
+          const statusLabel=LOG_STATUS_LABELS[level]||LOG_STATUS_LABELS.INFO;
+          const hasDetail=(level==='ERROR'||level==='CRITICAL')&&raw&&raw!==message;
+          const isOpen=hasDetail&&openDetails.has(raw);
+          return `<div class="logitem ${level}"><span class="log-status-icon" role="img" aria-label="${statusLabel}">${logStatusIcon(level)}</span><div class="log-content">${timeHtml}<div class="logline ${level}">${esc(message)}</div>${hasDetail?`<details class="logdetails"${isOpen?' open':''}><summary>Detail teknis</summary><pre>${esc(raw)}</pre></details>`:''}</div></div>`;
+        }).join('');
       }
 
       function renderChart(trades, summary){
@@ -3865,7 +4019,7 @@
       }[c]));
       const safeLogClass = v => {
         const k=String(v===null||v===undefined?'':v).toUpperCase();
-        return ({INFO:'INFO',WARNING:'WARNING',WARN:'WARNING',ERROR:'ERROR',DEBUG:'DEBUG'})[k] || 'INFO';
+        return ({INFO:'INFO',WARNING:'WARNING',WARN:'WARNING',ERROR:'ERROR',CRITICAL:'CRITICAL',DEBUG:'DEBUG'})[k] || 'INFO';
       };
       let _controlState = null;
       let _pendingBotAction = null;
