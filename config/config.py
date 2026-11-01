@@ -25,7 +25,7 @@ PUMP_CONFIG = {
     "RATE_LIMIT_SAFETY_MARGIN": 100,
     "API_KEY": os.environ.get("BINANCE_API_KEY", ""),
     "API_SECRET": os.environ.get("BINANCE_API_SECRET", ""),
-    "PAPER_INITIAL_BALANCES": {"USDT": 1000.0},
+    "PAPER_INITIAL_BALANCES": {"USDT": 10.0},
     "PAPER_ACCOUNT_STATE_FILE": "data/pump_paper_account.json",
     "PAPER_DEPTH_LIMIT": 100,
     "PAPER_LIMIT_ORDER_TIMEOUT_SECONDS": 60,

@@ -14,7 +14,7 @@ ENTRY_RULE_DEFAULTS = {
 }
 
 EXIT_PARAM_KEYS = ("EXIT_TRAILING_PCT",)
-EXIT_TAKE_PROFIT_ENABLED = False
+EXIT_TAKE_PROFIT_ENABLED = True
 EXIT_BREAKEVEN_ENABLED = True
 EXIT_BREAKEVEN_R_MULTIPLE = 1.0
 EXIT_BREAKEVEN_LOCK_PCT = 0.0
@@ -465,3 +465,16 @@ def atr_value(klines: Sequence, period: int = 14) -> Optional[float]:
     for tr in trs[period:]:
         value = (value * (period - 1) + tr) / period
     return value if math.isfinite(value) and value > 0.0 else None
+
+
+def take_profit_due(entry_price, target_price, current_price) -> bool:
+    entry = _finite(entry_price)
+    target = _finite(target_price)
+    current = _finite(current_price)
+    return bool(
+        EXIT_TAKE_PROFIT_ENABLED
+        and entry is not None
+        and target is not None
+        and current is not None
+        and 0.0 < entry < target <= current
+    )

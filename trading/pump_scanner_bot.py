@@ -39,6 +39,7 @@ from config.config import (
 from market import market_scanner as scanner
 from infrastructure.console import configure_utf8_console
 from infrastructure.storage import state as state_mod
+from infrastructure.storage.position_control import close_command_matches
 from infrastructure.storage.log_rotation import SafeRotatingFileHandler
 from infrastructure.storage.trade_ledger import append_trade_record
 from trading import strategy_drawdown as strategy_dd
@@ -56,6 +57,7 @@ from trading.accounting import (
     validate_fill_totals,
 )
 from strategy import indicators as strategy
+from strategy import entry_rule
 
 logger = logging.getLogger("pump_bot")
 _shutdown_requested = False
@@ -4786,51 +4788,27 @@ def check_manual_control(
     client: ExchangeClient, config: dict, filters_cache: dict, state: dict
 ) -> None:
     control_path = config.get("CONTROL_FILE") or get_control_file(config)
-    cmd = state_mod.load_control(control_path)
+    cmd = state_mod.consume_control(control_path)
     if not cmd:
         return
-
-    requested_at = int(cmd.get("requested_at", 0) or 0)
-    age_sec = (state_mod.now_ms() - requested_at) / 1000.0
-    MAX_AGE_SECONDS = 120
-    if requested_at <= 0 or age_sec > MAX_AGE_SECONDS:
-        logger.warning(
-            "Perintah manual dari dashboard diabaikan (kadaluarsa, umur %.0f detik): %s",
-            age_sec,
-            cmd,
-        )
-        state_mod.clear_control(control_path)
+    now = state_mod.now_ms()
+    if not close_command_matches(cmd, state, now):
+        logger.warning("Perintah jual ditolak: identitas posisi, ID, atau umur perintah tidak valid.")
         return
-
-    action = cmd.get("action")
-    if action != "CLOSE_POSITION":
-        logger.warning("Perintah manual dari dashboard tidak dikenali: %s", cmd)
-        state_mod.clear_control(control_path)
+    receipts = state.get("consumed_close_requests")
+    receipts = receipts if isinstance(receipts, dict) else {}
+    receipts = {
+        key: stamp for key, stamp in receipts.items()
+        if isinstance(stamp, int) and now - stamp <= 120_000
+    }
+    identifier = cmd["request_id"]
+    if identifier in receipts:
+        logger.warning("Perintah jual duplikat ditolak: %s", identifier)
         return
-
-    state_mod.clear_control(control_path)
-
-    if not state["current_symbol"] or state["qty"] <= 0:
-        logger.info(
-            "Perintah 'Jual Sekarang' dari dashboard diabaikan: tidak ada posisi terbuka saat ini."
-        )
-        return
-
-    requested_symbol = cmd.get("symbol")
-    if requested_symbol and requested_symbol != state["current_symbol"]:
-        logger.warning(
-            "Perintah 'Jual Sekarang' dari dashboard diabaikan: diminta untuk %s, "
-            "tapi posisi saat ini adalah %s (kemungkinan posisi sudah berganti "
-            "sejak tombol diklik).",
-            requested_symbol,
-            state["current_symbol"],
-        )
-        return
-
-    logger.info(
-        "Perintah 'Jual Sekarang' diterima dari dashboard untuk %s. Menutup posisi...",
-        state["current_symbol"],
-    )
+    receipts[identifier] = now
+    state["consumed_close_requests"] = receipts
+    state_mod.save_state(config["STATE_FILE"], state)
+    logger.info("Perintah jual terikat posisi diterima: %s (%s).", state["current_symbol"], identifier)
     close_position(client, config, filters_cache, state, "MANUAL_CLOSE_DASHBOARD")
 
 
@@ -4891,16 +4869,6 @@ def manage_exit(
                     "_native_stop_exit_blocked"
                 ):
                     return
-        if (
-            state.get("current_symbol")
-            and not state.get("native_oco")
-            and not state.get("native_stop")
-            and not state.get("_native_stop_exit_blocked")
-        ):
-            filters = filters_cache.get(state["current_symbol"])
-            if not _ensure_native_protection(client, config, filters, state):
-                if state.get("_native_stop_exit_blocked"):
-                    return
 
     entry = float(state["entry_price"])
     sl_price = _protection_stop_price(state, config)
@@ -4922,6 +4890,28 @@ def manage_exit(
             reference_price=current_price,
         )
         return
+    if entry_rule.take_profit_due(entry, state.get("tp_price"), current_price):
+        close_position(
+            client,
+            config,
+            filters_cache,
+            state,
+            "TAKE_PROFIT",
+            reference_price=current_price,
+        )
+        return
+    if _native_protection_enabled(config):
+        if (
+            state.get("current_symbol")
+            and not state.get("native_oco")
+            and not state.get("native_stop")
+            and not state.get("_native_stop_exit_blocked")
+        ):
+            filters = filters_cache.get(state["current_symbol"])
+            if not _ensure_native_protection(client, config, filters, state):
+                if state.get("_native_stop_exit_blocked"):
+                    return
+
     be_params = strategy.entry_breakeven_params(config)
     risiko_be = float(state.get("initial_sl_price") or 0.0) or sl_price
     if be_params["enabled"] and not state.get("be_active"):

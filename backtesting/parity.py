@@ -4,6 +4,7 @@ import math
 from typing import Optional, Sequence
 
 from strategy import indicators as strategy
+from strategy import entry_rule
 from strategy.indicators import Kline
 
 TIME_STOP_REASON = strategy.TIME_STOP_REASON
@@ -295,6 +296,8 @@ def evaluate_candle_exit(
 
     if candle.low <= sl_price:
         return _alasan_stop(pos, sl_price), min(sl_price, candle.open)
+    if entry_rule.take_profit_due(entry, pos.tp_price, candle.high):
+        return "TAKE_PROFIT", max(pos.tp_price, candle.open)
     be_params = strategy.entry_breakeven_params(config)
     if be_params["enabled"] and not pos.be_active:
         pemicu = strategy.entry_breakeven_trigger(

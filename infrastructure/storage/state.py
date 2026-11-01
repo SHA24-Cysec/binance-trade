@@ -137,6 +137,26 @@ def clear_control(path: str) -> None:
         _clear_control_unlocked(path)
 
 
+def consume_control(path: str) -> dict:
+    with interprocess_lock(path):
+        command = _load_control_unlocked(path)
+        _clear_control_unlocked(path)
+        return command
+
+
+def submit_control(path: str, command: dict) -> dict:
+    with interprocess_lock(path):
+        pending = _load_control_unlocked(path)
+        if pending:
+            if pending == command:
+                return pending
+            timestamp = pending.get("requested_at")
+            if not isinstance(timestamp, int) or isinstance(timestamp, bool) or now_ms() - timestamp <= 120_000:
+                raise ValueError("Masih ada perintah kontrol yang belum diproses.")
+        atomic_write_json(path, command)
+        return command
+
+
 def get_stop_control_file(control_path: str) -> str:
     path = Path(control_path)
     return str(path.with_name(f"{path.stem}.stop{path.suffix or '.json'}"))

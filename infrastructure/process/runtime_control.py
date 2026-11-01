@@ -19,6 +19,7 @@ from infrastructure.storage.atomic_io import (
 )
 from infrastructure.process import procctl
 from infrastructure.storage import state as state_mod
+from infrastructure.storage.position_control import position_id, new_close_command
 from infrastructure.paths import DATA_DIR, PROJECT_ROOT
 
 
@@ -756,20 +757,22 @@ class BotProcessManager:
                 return self.status(mode)
 
     def _position(self, config: dict) -> dict:
-        raw = (
-            state_mod.load_state(config["STATE_FILE"])
-            if Path(config["STATE_FILE"]).exists()
-            else {}
-        )
+        raw, valid, error = state_mod.load_state_snapshot(config["STATE_FILE"])
         try:
             qty = float(raw.get("qty", 0) or 0)
-        except (TypeError, ValueError):
-            qty = 0.0
+            entry = float(raw.get("entry_price", 0) or 0)
+            if not math.isfinite(qty) or not math.isfinite(entry) or qty < 0 or entry < 0:
+                raise ValueError("Angka posisi tidak valid")
+        except (TypeError, ValueError, OverflowError):
+            qty = entry = 0.0
+            valid = False
         return {
+            "state_valid": bool(valid and not error),
+            "position_id": position_id(raw) if valid and not error else None,
             "has_position": bool(raw.get("current_symbol") and qty > 0),
             "symbol": raw.get("current_symbol"),
             "qty": qty,
-            "entry_price": float(raw.get("entry_price", 0) or 0),
+            "entry_price": entry,
         }
 
     def position(self, mode: str | None = None) -> dict:
@@ -780,34 +783,36 @@ class BotProcessManager:
             cfg, _ = cfgmod.build_config_for_mode(mode)
         return self._position(cfg)
 
-    def _sell_first(self, cfg: dict, timeout: float) -> None:
-        position = self._position(cfg)
-        if not position["has_position"]:
-            return
-        state_mod.save_control(
-            cfg["CONTROL_FILE"],
-            {
-                "action": "CLOSE_POSITION",
-                "symbol": position["symbol"],
-                "requested_at": state_mod.now_ms(),
-            },
-        )
+    def _sell_first(self, cfg: dict, timeout: float, expected_position_id: str | None = None) -> None:
+        raw, valid, error = state_mod.load_state_snapshot(cfg["STATE_FILE"])
+        identity = position_id(raw) if valid and not error else None
+        if not identity or not expected_position_id or identity != expected_position_id:
+            raise BotControlError("Posisi berubah atau tidak terverifikasi. Ulangi konfirmasi SELL_FIRST.")
+        command = new_close_command(raw, state_mod.now_ms())
+        try:
+            state_mod.submit_control(cfg["CONTROL_FILE"], command)
+        except ValueError as exc:
+            raise BotControlError(str(exc)) from exc
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if not self._position(cfg)["has_position"]:
+            current = self._position(cfg)
+            if not current.get("state_valid"):
+                raise BotControlError("State tidak terverifikasi selama SELL_FIRST. Bot tetap dijalankan.")
+            if not current["has_position"]:
                 return
+            if current.get("position_id") != expected_position_id:
+                raise BotControlError("Posisi berganti selama SELL_FIRST. Bot tetap dijalankan.")
             status = self.status(cfg["MODE"])
             if status["status"] not in ("STARTING", "RUNNING", "STOPPING"):
                 raise BotControlError("Bot berhenti sebelum posisi berhasil dijual.")
             time.sleep(0.2)
-        raise BotControlError(
-            "Posisi belum berhasil dijual sebelum timeout. Bot tetap dijalankan."
-        )
+        raise BotControlError("Posisi belum berhasil dijual sebelum timeout. Bot tetap dijalankan.")
 
     def stop(
         self,
         *,
         position_policy: str = "REQUIRE_EMPTY",
+        expected_position_id: str | None = None,
         graceful_timeout: float = 25.0,
         signal_timeout: float = 8.0,
     ) -> dict:
@@ -836,9 +841,14 @@ class BotProcessManager:
                     self._sell_first(
                         cfg,
                         max(30.0, float(cfg.get("LOOP_INTERVAL_SECONDS", 15)) * 5),
+                        expected_position_id,
                     )
 
                 with self._lock:
+                    if policy == "SELL_FIRST":
+                        latest = self._position(cfg)
+                        if not latest.get("state_valid") or latest["has_position"]:
+                            raise BotControlError("Posisi belum kosong terverifikasi. Stop SELL_FIRST dibatalkan.")
                     status = self.status(mode)
                     if status["status"] in ("STOPPED", "CRASHED"):
                         return status

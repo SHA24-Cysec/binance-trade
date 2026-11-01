@@ -2487,7 +2487,7 @@
                 oninput="btRenderStrategySummary()"
               />
             </div>
-            <div class="bt-field" title="Stop dinaikkan mengikuti harga tertinggi, selalu sejauh persen ini di bawah puncak. Trailing aktif setelah untung satu kali jarak stop dan stop tidak pernah turun. Tidak ada take profit.">
+            <div class="bt-field" title="Stop dinaikkan mengikuti harga tertinggi, selalu sejauh persen ini di bawah puncak. Trailing aktif setelah untung satu kali jarak stop dan stop tidak pernah turun. Take profit menutup posisi saat target R:R tercapai.">
               <label>Jarak trailing (%)</label>
               <input type="number" id="btTrailPct" min="0.1" max="20" step="0.1" value="2.0" oninput="btRenderStrategySummary()" />
             </div>
@@ -2517,7 +2517,7 @@
             class="mut"
             style="font-size: 11.5px; margin-top: 10px; line-height: 1.6"
           >
-            Exit mengikuti struktur The Confluence Code: Take Profit dikunci otomatis pada likuiditas puncak <b>BSL $$$</b> (Swing High / Fib 0) dan Stop Loss dikunci otomatis di bawah dasar <b>Order Block / POI / Sweep Low</b> ditambah buffer SL.
+            Take Profit dihitung dari jarak Stop Loss dikali rasio R:R. Stop Loss mengikuti low candle sinyal atau rangkaian candle sesuai pengaturan, ditambah buffer SL. Exit juga memakai breakeven, trailing stop, dan batas tahan 24 jam.
           </div>
           <div
             id="btStrategySummary"
@@ -2914,8 +2914,7 @@
           <h3>⚠️ Konfirmasi Jual Sekarang</h3>
           <p>
             Anda akan menutup posisi <b id="manualCloseSymbol">-</b> saat ini
-            juga dengan harga pasar, DI LUAR logika otomatis Stop Loss struktural
-            (Order Block/POI) atau Take Profit (BSL $$$) bot. Perintah ini akan
+            juga dengan harga pasar, DI LUAR logika otomatis Stop Loss atau Take Profit dari R:R bot. Perintah ini akan
             diproses oleh bot dalam beberapa detik. Yakin lanjutkan?
           </p>
           <div class="modal-actions">
@@ -3408,11 +3407,13 @@
         renderPositionPanel(s);
         if(p.has_position){
           window._currentPositionSymbol = p.symbol;
+          window._currentPositionId = p.position_id || null;
           document.getElementById('manualCloseBtn').style.display = 'block';
         } else {
           window._currentPositionSymbol = null;
+          window._currentPositionId = null;
           document.getElementById('manualCloseBtn').style.display = 'none';
-          if(window._manualPollTimer){ clearInterval(window._manualPollTimer); window._manualPollTimer=null; }
+
         }
 
         if(!s.bot_alive && !window._manualStatusLocked){
@@ -3439,7 +3440,7 @@
 
       const _cfgLabels = {
         sl: 'Stop Loss Struktural (OB/POI)',
-        tp: 'Take Profit Struktural (BSL $$$)'
+        tp: 'Take Profit (target R:R)'
       };
       let _cfgUI = null;
 
@@ -3688,8 +3689,8 @@
         u.railDot.classList.toggle('neg', !up);
         u.railDot.classList.toggle('idle', live === null);
 
-        u.railLo.textContent = (lv.sl !== null ? 'SL OB/POI ' : 'batas ') + fmtP(lo);
-        u.railHi.textContent = (lv.tp !== null ? 'TP BSL $$$ ' : 'batas ') + fmtP(hi);
+        u.railLo.textContent = (lv.sl !== null ? 'SL ' : 'batas ') + fmtP(lo);
+        u.railHi.textContent = (lv.tp !== null ? 'TP R:R ' : 'batas ') + fmtP(hi);
         u.railChips.innerHTML = '';
 
         const marks = [];
@@ -3699,7 +3700,7 @@
         }
         if(lv.tp !== null){
           const px = entry*(1 + lv.tp/100);
-          marks.push({label:'TP BSL', at: at(px), passed: live !== null && live >= px});
+          marks.push({label:'TP', at: at(px), passed: live !== null && live >= px});
         }
         marks.sort((a2, b2) => a2.at - b2.at);
         const msig = marks.map(m => m.label + ':' + m.at.toFixed(4)).join(',');
@@ -3757,7 +3758,7 @@
           } else {
             const prog = Math.max(0, Math.min(1, pnlPct/lv.tp));
             const done = pnlPct >= lv.tp;
-            cfgPaintRow('tp', txt('tp'), prog, done ? 'target BSL tercapai' : ('sisa ' + gap(lv.tp)),
+            cfgPaintRow('tp', txt('tp'), prog, done ? 'target TP tercapai' : ('sisa ' + gap(lv.tp)),
               {hot: prog >= 0.8, chip: done ? 'tercapai' : ''});
           }
         }
@@ -3774,84 +3775,113 @@
         el.textContent = '';
       }
 
+      let _manualConfirmation = null;
+      let _manualSubmitInFlight = false;
+
       function openManualCloseModal(){
-        const sym = window._currentPositionSymbol;
-        if(!sym) return;
-        document.getElementById('manualCloseSymbol').textContent = sym;
+        const symbol = window._currentPositionSymbol;
+        const identity = window._currentPositionId;
+        if(!symbol || !identity){
+          toast('warn','Jual belum tersedia','Identitas posisi belum terverifikasi. Muat ulang dan periksa state.');
+          return;
+        }
+        const bytes = new Uint8Array(16);
+        crypto.getRandomValues(bytes);
+        _manualConfirmation = Object.freeze({
+          symbol: symbol, position_id: identity,
+          request_id: Array.from(bytes, b => b.toString(16).padStart(2, '0')).join(''),
+          opened_at: Date.now()
+        });
+        document.getElementById('manualCloseSymbol').textContent = symbol;
         document.getElementById('manualCloseModal').classList.add('show');
       }
       function closeManualCloseModal(){
+        _manualConfirmation = null;
         document.getElementById('manualCloseModal').classList.remove('show');
       }
 
       async function confirmManualClose(){
-        const sym = window._currentPositionSymbol;
+        if(_manualSubmitInFlight || !_manualConfirmation) return;
+        const snapshot = _manualConfirmation;
+        if(Date.now() - snapshot.opened_at > 120000 ||
+           snapshot.position_id !== window._currentPositionId ||
+           snapshot.symbol !== window._currentPositionSymbol){
+          closeManualCloseModal();
+          toast('warn','Konfirmasi dibatalkan','Posisi berubah atau konfirmasi kedaluwarsa. Periksa posisi dan buka konfirmasi baru.');
+          return;
+        }
+        _manualSubmitInFlight = true;
         const btn = document.getElementById('manualCloseConfirmBtn');
         btn.disabled = true; btn.textContent = 'Mengirim…';
         try{
-          const r = await fetch('/api/manual/close', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json', 'X-Admin-Token': ADMIN_TOKEN},
-            body: JSON.stringify({symbol: sym}),
+          const r = await adminFetch('/api/manual/close', {
+            body: JSON.stringify({symbol: snapshot.symbol, position_id: snapshot.position_id, request_id: snapshot.request_id})
           });
-          const d = await r.json();
+          const d = await responseJson(r);
           closeManualCloseModal();
           if(!r.ok){
-            window._manualStatusLocked = false;
-            showManualStatus('err', '❌ ' + (d.error || 'Gagal mengirim perintah jual.'));
-            toast('err','Perintah jual ditolak', d.error || 'Gagal mengirim perintah jual.');
+            window._manualStatusLocked = true;
+            showManualStatus('err', 'Perintah ditolak: ' + (d.error || 'Periksa status posisi.'));
+            toast('err','Perintah jual ditolak', d.error || 'Periksa posisi sebelum mencoba lagi.');
             return;
           }
           window._manualStatusLocked = true;
-          showManualStatus(d.bot_alive ? 'info' : 'warn', (d.bot_alive?'⏳ ':'⚠️ ') + d.message);
-          toast(d.bot_alive ? 'info' : 'warn', 'Perintah jual terkirim', d.message);
-          startManualClosePolling(sym);
+          showManualStatus(d.bot_alive ? 'info' : 'warn', d.message);
+          toast(d.bot_alive ? 'info' : 'warn', 'Perintah diterima, fill belum dikonfirmasi', d.message);
+          startManualClosePolling(snapshot.symbol, snapshot.position_id, snapshot.request_id);
         }catch(e){
           closeManualCloseModal();
-          window._manualStatusLocked = false;
-          showManualStatus('err', '❌ Gagal menghubungi server dashboard: ' + e.message);
+          window._manualStatusLocked = true;
+          showManualStatus('warn', 'Status pengiriman belum pasti: ' + e.message + ' Jangan langsung mengirim ulang. Periksa posisi dan order Binance.');
+          startManualClosePolling(snapshot.symbol, snapshot.position_id, snapshot.request_id);
         }finally{
+          _manualSubmitInFlight = false;
           btn.disabled = false; btn.textContent = 'Ya, Jual Sekarang';
         }
       }
 
-      function startManualClosePolling(symbol){
-        if(window._manualPollTimer) clearInterval(window._manualPollTimer);
-        let attempts = 0;
-        const MAX_ATTEMPTS = 40;
-        window._manualPollTimer = setInterval(async ()=>{
-          attempts++;
+      function startManualClosePolling(symbol, identity, requestId){
+        if(window._manualPollTimer) clearTimeout(window._manualPollTimer);
+        const generation = (window._manualPollGeneration || 0) + 1;
+        window._manualPollGeneration = generation;
+        const startedAt = Date.now();
+        async function poll(){
+          if(window._manualPollGeneration !== generation) return;
           try{
-            const r = await fetch('/api/manual/close/status', {cache:'no-store'});
-            const d = await r.json();
+            const r = await timedFetch('/api/manual/close/status', {cache:'no-store'}, 7000);
+            const d = await responseJson(r);
+            if(!r.ok) throw new Error(d.error || 'Status belum tersedia.');
+            if(window._manualPollGeneration !== generation) return;
             if(!d.pending && !d.has_position){
-              clearInterval(window._manualPollTimer); window._manualPollTimer = null;
-              window._manualStatusLocked = true;
-              showManualStatus('ok', `✅ Posisi ${symbol} berhasil ditutup.`);
-              toast('ok','Posisi ditutup', symbol + ' sudah terjual. Riwayat trade akan diperbarui.');
-              setTimeout(()=>{ window._manualStatusLocked = false; hideManualStatus(); }, 8000);
+              window._manualPollTimer = null;
+              showManualStatus('info', 'Posisi ' + symbol + ' tidak lagi tercatat terbuka. Verifikasi fill dan alasan penutupan di riwayat order.');
               refresh();
               return;
             }
-            if(!d.pending && d.has_position && d.current_symbol !== symbol){
-              clearInterval(window._manualPollTimer); window._manualPollTimer = null;
-              window._manualStatusLocked = false;
-              hideManualStatus();
+            if(d.has_position && d.position_id && d.position_id !== identity){
+              window._manualPollTimer = null;
+              showManualStatus('warn', 'Posisi telah berganti. Perintah lama tidak boleh menjual posisi baru. Periksa riwayat order.');
               refresh();
               return;
             }
-            if(!d.bot_alive){
-              window._manualStatusLocked = true;
-              showManualStatus('warn', '⚠️ Menunggu bot memproses... tapi proses bot sepertinya sedang tidak berjalan.');
+            if(d.pending_request_id && d.pending_request_id !== requestId){
+              window._manualPollTimer = null;
+              showManualStatus('warn', 'Ada perintah lain. Periksa status sebelum mengirim perintah baru.');
+              return;
             }
-          }catch(e){ }
-          if(attempts >= MAX_ATTEMPTS){
-            clearInterval(window._manualPollTimer); window._manualPollTimer = null;
-            window._manualStatusLocked = true;
-            showManualStatus('err', '❌ Perintah jual belum juga diproses setelah 2 menit. Cek apakah bot sedang berjalan, atau coba klik lagi.');
-            toast('err','Perintah jual tidak diproses','Sudah 2 menit tanpa konfirmasi. Pastikan proses bot sedang berjalan.',9000);
+            if(!d.bot_alive) showManualStatus('warn', 'Perintah belum terkonfirmasi; bot tidak berjalan. Periksa status posisi dan umur perintah.');
+          }catch(e){
+            if(window._manualPollGeneration !== generation) return;
+            showManualStatus('warn', 'Status jual belum dapat diverifikasi: ' + e.message);
           }
-        }, 3000);
+          if(Date.now() - startedAt >= 120000){
+            window._manualPollTimer = null;
+            showManualStatus('warn', 'Belum ada konfirmasi penutupan setelah 2 menit. Periksa posisi, log, dan order Binance sebelum mengirim ulang.');
+            return;
+          }
+          window._manualPollTimer = setTimeout(poll, 3000);
+        }
+        window._manualPollTimer = setTimeout(poll, 1000);
       }
 
       function renderSummary(sum, quote){
@@ -4047,6 +4077,7 @@
       };
       let _controlState = null;
       let _pendingBotAction = null;
+      let _pendingBotPositionId = null;
       let _localControlBusy = false;
       let _watchedControlOperationId = null;
       let _notifiedControlResult = null;
@@ -4280,6 +4311,7 @@
         }
         _pendingBotAction=action;
         const pos=_controlState&&_controlState.position;
+        _pendingBotPositionId=pos&&pos.position_id||null;
         const isResume=action==='START';
         const label=isResume?'Resume Bot':'Stop Bot';
         const missingLiveState=isResume&&_controlState&&_controlState.mode==='LIVE'&&_controlState.live_state_missing;
@@ -4321,6 +4353,7 @@
           toast('warn','Konfirmasi diperlukan','Centang pengakuan state LIVE yang hilang sebelum melanjutkan.');
           return;
         }
+        const confirmedPositionId=_pendingBotPositionId;
         const btn=document.getElementById('botActionConfirmBtn');
         btn.disabled=true;
         btn.textContent='Mengirim...';
@@ -4337,7 +4370,7 @@
         pauseBackgroundPolling();
 
         try{
-          let r=await adminFetch('/api/control/prepare',{body:JSON.stringify({action:action,position_policy:policy,acknowledge_missing_live_state:acknowledgeMissingState})});
+          let r=await adminFetch('/api/control/prepare',{body:JSON.stringify({action:action,position_policy:policy,acknowledge_missing_live_state:acknowledgeMissingState,position_id:confirmedPositionId})});
           let d=await responseJson(r);
           if(!r.ok)throw new Error(d.error||'Persiapan aksi gagal.');
           r=await adminFetch('/api/control/execute',{body:JSON.stringify({confirmation_id:d.confirmation_id})});
@@ -4395,7 +4428,7 @@
           <div class="posrow"><span class="k">Definisi candle bullish</span><span class="v mono" style="font-size:11.5px">${activeText(ruleOn)}, close di atas open dan di atas close candle sebelumnya</span></div>
           <div class="posrow"><span class="k">Stop Loss</span><span class="v mono" style="font-size:11.5px">${activeText(ruleOn)}, ${esc(anchorText)} minus buffer ${fmt(bufVal, 2)}%</span></div>
           <div class="posrow"><span class="k">Take Profit</span><span class="v mono" style="font-size:11.5px">jarak SL x ${fmt(rrVal, 2)} (R:R 1:${fmt(rrVal, 2)}), setup dengan jarak SL di atas ${fmt(maxSlVal, 2)}% ditolak</span></div>
-          <div class="posrow"><span class="k">Exit</span><span class="v mono" style="font-size:11.5px">tanpa take profit. Stop awal, breakeven di 1R, lalu trailing ${fmt(trailPct, 2)}% dari puncak, dan batas tahan 24 jam</span></div>
+          <div class="posrow"><span class="k">Exit</span><span class="v mono" style="font-size:11.5px">TP tetap dari R:R. Stop awal, breakeven di 1R, lalu trailing ${fmt(trailPct, 2)}% dari puncak, dan batas tahan 24 jam</span></div>
           <div class="posrow"><span class="k">Riwayat minimum</span><span class="v mono" style="font-size:11.5px">${fmt(d.CONFIRM_LOOKBACK_BARS || 60, 0)} candle ${esc(itv)}</span></div>`;
       }
 
@@ -5109,9 +5142,9 @@
         const p = res.params_used;
         let reasonRows = Object.entries(s.reason_counts||{}).map(([k,v])=>
           `<div class="posrow"><span class="k">${btReasonLabel(k)}</span><span class="v mono">${fmt(v,0)}x</span></div>`).join('');
-        const exitRows = `<div class="posrow"><span class="k">Mode exit</span><span class="v mono">Aturan Entry (SL low sinyal · tanpa TP · breakeven 1R · trailing persen)</span></div>
+        const exitRows = `<div class="posrow"><span class="k">Mode exit</span><span class="v mono">Aturan Entry (SL low sinyal · TP tetap R:R · breakeven 1R · trailing persen)</span></div>
              <div class="posrow"><span class="k">Buffer SL / Min R:R / Batas SL</span><span class="v mono" style="font-size:11.5px">${esc(p.ENTRY_SL_BUFFER_PCT)}% / 1:${esc(p.ENTRY_MIN_RR_RATIO)} / ${esc(p.ENTRY_MAX_SL_PCT)}%</span></div>
-             <div class="posrow"><span class="k">Exit</span><span class="v mono" style="font-size:11.5px">tanpa TP, breakeven 1R, trailing ${esc(p.EXIT_TRAILING_PCT)}%, batas tahan 24 jam</span></div>
+             <div class="posrow"><span class="k">Exit</span><span class="v mono" style="font-size:11.5px">TP tetap R:R, breakeven 1R, trailing ${esc(p.EXIT_TRAILING_PCT)}%, batas tahan 24 jam</span></div>
              <div class="posrow"><span class="k">Candle bullish / Acuan SL / Max Hold</span><span class="v mono" style="font-size:11.5px">${esc(p.ENTRY_BULL_CANDLES)} candle / ${esc(p.ENTRY_SL_ANCHOR)} / 24 jam (tetap)</span></div>`;
         const entryRow = res.entry_rule ? `
           <div class="posrow"><span class="k">Aturan Entry (${esc(entryObj.interval || '5m')})</span><span class="v mono" style="font-size:11.5px">${entryObj.enabled ? 'aktif, '+fmt(entryObj.bull_candles,0)+' candle bullish beruntun, acuan SL '+esc(entryObj.sl_anchor)+', buffer '+fmt(entryObj.sl_buffer_pct,2)+'%, R:R 1:'+fmt(entryObj.min_rr_ratio,2)+', batas SL '+fmt(entryObj.max_sl_pct,2)+'%, disaring '+fmt(entryObj.skips,0)+' dari '+fmt(entryObj.scans,0)+' sinyal' : 'nonaktif'}</span></div>` : '';

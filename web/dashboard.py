@@ -37,6 +37,7 @@ from config.config import (
 from infrastructure.network.file_descriptors import fd_status, raise_fd_limit
 from infrastructure.network.public_ip import get_public_egress_ip_status
 from infrastructure.storage import state as state_mod
+from infrastructure.storage.position_control import position_id, new_close_command, valid_request_id
 from infrastructure.storage.trade_ledger import load_trade_records
 from trading.equity import (
     SpotEquityReader,
@@ -365,6 +366,7 @@ def _run_control_operation(
     action: str,
     position_policy: str,
     allow_missing_live_state: bool = False,
+    expected_position_id: str | None = None,
 ) -> None:
     _update_control_operation(
         operation_id,
@@ -377,7 +379,9 @@ def _run_control_operation(
                 allow_missing_live_state=allow_missing_live_state
             )
         else:
-            result = _process_manager.stop(position_policy=position_policy)
+            result = _process_manager.stop(
+                position_policy=position_policy, expected_position_id=expected_position_id
+            )
     except Exception as exc:
         logger.exception("Aksi proses %s gagal: %s", action, exc)
         _update_control_operation(
@@ -741,6 +745,7 @@ def build_status():
         "quote": QUOTE,
         "fx": get_idr_rate(),
         "position": {
+            "position_id": position_id(state),
             "has_position": has_position,
             "symbol": symbol,
             "qty": qty,
@@ -2277,78 +2282,47 @@ def _bot_looks_alive() -> bool:
 
 @app.route("/api/manual/close", methods=["POST"])
 def api_manual_close():
-    if not compare_digest(request.headers.get("X-Admin-Token", ""), _ADMIN_TOKEN):
-        return jsonify({"error": "Token admin tidak valid atau tidak ada."}), 403
-
-    now = time.time()
-    with _manual_close_lock:
-        if now - _last_manual_close_request["ts"] < _MANUAL_CLOSE_COOLDOWN_SECONDS:
-            return (
-                jsonify(
-                    {
-                        "error": "Tunggu sebentar, permintaan sebelumnya baru saja dikirim."
-                    }
-                ),
-                429,
-            )
-        _last_manual_close_request["ts"] = now
-
-    def _release_cooldown() -> None:
-        with _manual_close_lock:
-            if _last_manual_close_request["ts"] == now:
-                _last_manual_close_request["ts"] = 0.0
-
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Body JSON harus berupa object."}), 400
+    if not valid_request_id(data.get("request_id")):
+        return jsonify({"error": "ID permintaan jual tidak valid."}), 400
     state = load_state()
-    symbol = state.get("current_symbol")
-    qty = float(state.get("qty", 0) or 0)
-    if not symbol or qty <= 0:
-        _release_cooldown()
-        return (
-            jsonify({"error": "Tidak ada posisi terbuka saat ini untuk dijual."}),
-            400,
-        )
-
-    data = request.get_json(force=True, silent=True) or {}
-    confirm_symbol = str(data.get("symbol", "")).strip().upper()
-    if confirm_symbol and confirm_symbol != symbol:
-        _release_cooldown()
-        return (
-            jsonify(
-                {
-                    "error": f"Simbol tidak cocok (diminta {confirm_symbol}, posisi saat ini {symbol}). "
-                    "Muat ulang dashboard dan coba lagi."
-                }
-            ),
-            409,
-        )
-
-    state_mod.save_control(
-        CONTROL_FILE,
-        {
-            "action": "CLOSE_POSITION",
-            "symbol": symbol,
-            "requested_at": int(now * 1000),
-        },
-    )
-
+    identity = position_id(state)
+    if identity is None:
+        return jsonify({"error": "Identitas posisi belum terverifikasi atau posisi sudah kosong."}), 409
+    if data.get("symbol") != state.get("current_symbol") or data.get("position_id") != identity:
+        return jsonify({"error": "Posisi berubah sejak konfirmasi. Muat ulang dan konfirmasi kembali."}), 409
+    receipts = state.get("consumed_close_requests")
+    if isinstance(receipts, dict) and data["request_id"] in receipts:
+        return jsonify({"error": "Permintaan ini sudah diproses. Periksa posisi dan riwayat order."}), 409
+    now = time.time()
+    command = new_close_command(state, int(now * 1000), data["request_id"])
+    with _manual_close_lock:
+        pending = state_mod.load_control(CONTROL_FILE)
+        if pending and pending.get("request_id") == command["request_id"]:
+            if any(pending.get(key) != command.get(key) for key in ("position_id", "symbol", "action")):
+                return jsonify({"error": "ID permintaan sudah digunakan untuk posisi lain."}), 409
+            command = pending
+        else:
+            if now - _last_manual_close_request["ts"] < _MANUAL_CLOSE_COOLDOWN_SECONDS:
+                return jsonify({"error": "Tunggu sebelum mengirim permintaan jual baru."}), 429
+        try:
+            state_mod.submit_control(CONTROL_FILE, command)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 409
+        _last_manual_close_request["ts"] = now
     bot_alive = _bot_looks_alive()
-    loop_interval = PUMP_CONFIG.get("LOOP_INTERVAL_SECONDS", 15)
-    return jsonify(
-        {
-            "ok": True,
-            "symbol": symbol,
-            "bot_alive": bot_alive,
-            "message": (
-                f"Perintah jual untuk {symbol} terkirim. Bot akan memprosesnya dalam "
-                f"maksimal {loop_interval} detik pada iterasi berikutnya."
-                if bot_alive
-                else f"Perintah jual untuk {symbol} tersimpan, TAPI proses bot sepertinya "
-                "sedang TIDAK berjalan (file state tidak diperbarui baru-baru ini). "
-                "Perintah baru akan dieksekusi setelah bot dijalankan lagi, dan akan "
-                "diabaikan otomatis kalau sudah lebih dari 2 menit."
-            ),
-        }
-    )
+    return jsonify({
+        "ok": True,
+        "accepted": True,
+        "symbol": command["symbol"],
+        "position_id": identity,
+        "request_id": command["request_id"],
+        "bot_alive": bot_alive,
+        "message": "Perintah jual terikat posisi tersimpan, belum merupakan konfirmasi fill. "
+        + ("Bot akan memeriksanya pada iterasi berikutnya." if bot_alive else "Bot tidak berjalan; perintah kedaluwarsa setelah 2 menit."),
+    })
 
 
 @app.route("/api/manual/close/status")
@@ -2363,6 +2337,8 @@ def api_manual_close_status():
                 state.get("current_symbol") and float(state.get("qty", 0) or 0) > 0
             ),
             "current_symbol": state.get("current_symbol"),
+            "position_id": position_id(state),
+            "pending_request_id": pending.get("request_id") if pending else None,
             "bot_alive": _bot_looks_alive(),
         }
     )
@@ -2512,7 +2488,9 @@ def api_control_status():
 
 @app.route("/api/control/prepare", methods=["POST"])
 def api_control_prepare():
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Body JSON harus berupa object."}), 400
     action = str(data.get("action", "")).strip().upper()
     if action not in ("START", "STOP"):
         return jsonify({"error": "Aksi hanya boleh START atau STOP."}), 400
@@ -2604,11 +2582,17 @@ def api_control_prepare():
             )
     else:
         policy = "REQUIRE_EMPTY"
+    expected_position_id = None
+    if action == "STOP" and policy == "SELL_FIRST":
+        expected_position_id = position.get("position_id")
+        if not expected_position_id or data.get("position_id") != expected_position_id:
+            return jsonify({"error": "Posisi berubah atau identitas belum terverifikasi. Konfirmasi STOP ulang."}), 409
     token = _make_confirmation(
         "process",
         {
             "action": action,
             "position_policy": policy,
+            "expected_position_id": expected_position_id,
             "mode": mode,
             "pid": status.get("pid"),
             "status": status.get("status"),
@@ -2636,7 +2620,9 @@ def api_control_prepare():
 def api_control_execute():
     global _control_operation
 
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Body JSON harus berupa object."}), 400
     payload = _take_confirmation(data.get("confirmation_id", ""), "process")
     if payload is None:
         return jsonify({"error": "Konfirmasi kedaluwarsa atau tidak valid."}), 409
@@ -2698,6 +2684,11 @@ def api_control_execute():
                 409,
             )
 
+        if action == "STOP" and payload.get("position_policy") == "SELL_FIRST":
+            expected = payload.get("expected_position_id")
+            if not expected or _process_manager.position().get("position_id") != expected:
+                return jsonify({"error": "Posisi berubah sejak konfirmasi STOP. Ulangi konfirmasi."}), 409
+
         ok, left = _cooldown("process", 2.0)
         if not ok:
             return (
@@ -2715,6 +2706,7 @@ def api_control_execute():
             "id": operation_id,
             "action": action,
             "position_policy": payload.get("position_policy", "REQUIRE_EMPTY"),
+            "expected_position_id": payload.get("expected_position_id"),
             "allow_missing_live_state": (
                 action == "START"
                 and get_mode(PUMP_CONFIG) == "LIVE"
@@ -2737,6 +2729,7 @@ def api_control_execute():
             action,
             operation["position_policy"],
             operation["allow_missing_live_state"],
+            operation["expected_position_id"],
         ),
         name=f"bot-control-{action.lower()}-{operation_id[:6]}",
         daemon=True,

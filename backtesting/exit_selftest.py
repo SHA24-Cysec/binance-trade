@@ -136,7 +136,7 @@ def cek_prioritas_exit_harga() -> str:
     assert naik.trades, "skenario harga naik tidak menghasilkan trade"
     alasan_naik = {t.reason for t in naik.trades}
     assert "STOP_LOSS" not in alasan_naik, (
-        f"stop awal terpicu pada tren naik tanpa take profit: {sorted(alasan_naik)}"
+        f"stop awal terpicu pada tren naik: {sorted(alasan_naik)}"
     )
     maks = max(t.hold_minutes for t in naik.trades) / 60.0
     assert maks <= CAP_TETAP + 0.5, f"umur {maks:.2f} jam melampaui batas {CAP_TETAP:g} jam"
@@ -370,22 +370,16 @@ def cek_trailing_persen() -> str:
     return f"aktif di 1R, stop {harap:.4f}, exit {hasil[0]} di {hasil[1]:.4f}"
 
 
-def cek_tanpa_take_profit() -> str:
+def cek_take_profit() -> str:
     cfg = config_dasar()
-    assert entry_rule.EXIT_TAKE_PROFIT_ENABLED is False, "take profit harus mati permanen"
-    pos = _posisi({})
-    for detik, (tinggi, rendah, tutup) in enumerate(
-        ((108.4, 107.9, 108.2), (112.0, 111.4, 111.8), (118.0, 117.2, 117.6))
-    ):
-        hasil = parity.evaluate_candle_exit(pos, _candle(tinggi, rendah, tutup, detik), cfg)
-        assert hasil is None, f"posisi ditutup di atas target padahal take profit sudah dihapus: {hasil}"
-    assert pos.trailing_active, "trailing tidak aktif padahal harga sudah jauh di atas 1R"
-    assert pos.trailing_stop_price > pos.entry_price, (
-        f"stop trailing {pos.trailing_stop_price} belum di atas harga entry"
-    )
-    return (
-        f"harga naik ke 118 tanpa exit, stop trailing naik ke {pos.trailing_stop_price:.4f}"
-    )
+    assert entry_rule.EXIT_TAKE_PROFIT_ENABLED is True
+    for harga in (108.0, 108.4, 118.0):
+        pos = _posisi({})
+        hasil = parity.evaluate_candle_exit(
+            pos, _candle(harga, 107.9, harga, open_price=107.9), cfg
+        )
+        assert hasil == ("TAKE_PROFIT", 108.0), hasil
+    return "TP 108 menutup posisi ketika target disentuh atau dilewati"
 
 
 def cek_breakeven_tetap() -> str:
@@ -451,7 +445,7 @@ def cek_parameter_exit_tunggal() -> str:
 
     tetap = strategy.exit_fixed_params()
     assert tetap["max_hold_hours"] == CAP_TETAP
-    assert tetap["take_profit_enabled"] is False
+    assert tetap["take_profit_enabled"] is True
     assert tetap["breakeven_enabled"] is True
     assert tetap["breakeven_r_multiple"] == 1.0 and tetap["breakeven_lock_pct"] == 0.0
     assert tetap["trailing_start_r"] == 1.0
@@ -470,7 +464,7 @@ CEK: tuple[tuple[str, Callable[[], str]], ...] = (
     ("integrasi_parameter", cek_integrasi_parameter),
     ("exit_aturan_entry", cek_exit_aturan_entry),
     ("trailing_persen", cek_trailing_persen),
-    ("tanpa_take_profit", cek_tanpa_take_profit),
+    ("take_profit", cek_take_profit),
     ("breakeven_tetap", cek_breakeven_tetap),
     ("parameter_exit_tunggal", cek_parameter_exit_tunggal),
 )
