@@ -113,7 +113,25 @@ PUMP_CONFIG = {
 PUMP_DEFAULTS = deepcopy(PUMP_CONFIG)
 PUMP_DEFAULTS["BASE_URL"] = PUMP_DEFAULTS["LIVE_BASE_URL"]
 CONFIG_LOAD_ERRORS: list[str] = []
+CONFIG_LOAD_WARNINGS: list[str] = []
 MODE_SOURCE = "default"
+
+
+def position_allocation_warnings(cfg: dict) -> list[str]:
+    warnings: list[str] = []
+    if cfg.get("USE_RISK_PERCENT"):
+        try:
+            pct = float(cfg.get("RISK_PERCENT") or 0.0)
+            buffer_pct = float(cfg.get("BALANCE_BUFFER_PCT") or 0.0)
+        except (TypeError, ValueError):
+            return warnings
+        if pct >= 99.0:
+            effective = max(0.0, pct * (1.0 - buffer_pct / 100.0))
+            warnings.append(
+                f"RISK_PERCENT={pct:g}% adalah alokasi modal per entry, bukan batas rugi per transaksi. "
+                f"Dengan BALANCE_BUFFER_PCT={buffer_pct:g}%, notional dapat mencapai sekitar {effective:g}% saldo bebas."
+            )
+    return warnings
 
 
 def _mode_from_environment(default: str) -> tuple[str, str, list[str]]:
@@ -177,6 +195,8 @@ def _load_runtime_layers(explicit_mode: str | None = None) -> None:
     PUMP_CONFIG.update(cfg)
     CONFIG_LOAD_ERRORS.clear()
     CONFIG_LOAD_ERRORS.extend(dict.fromkeys(errors))
+    CONFIG_LOAD_WARNINGS.clear()
+    CONFIG_LOAD_WARNINGS.extend(position_allocation_warnings(cfg))
 
 
 _load_runtime_layers()

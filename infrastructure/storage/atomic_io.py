@@ -24,7 +24,33 @@ except ImportError:
 
 logger = logging.getLogger("atomic_io")
 
+PRIVATE_FILE_MODE = 0o600
+PRIVATE_DIR_MODE = 0o700
 _REPLACE_DELAYS = (0.02, 0.04, 0.08, 0.16, 0.32, 0.50)
+
+
+def ensure_private_directory(path: os.PathLike | str) -> Path:
+    target = Path(path)
+    missing: list[Path] = []
+    cursor = target
+    while not cursor.exists():
+        missing.append(cursor)
+        if cursor.parent == cursor:
+            break
+        cursor = cursor.parent
+    for directory in reversed(missing):
+        directory.mkdir(mode=PRIVATE_DIR_MODE, exist_ok=True)
+    if os.name == "posix":
+        target.chmod(PRIVATE_DIR_MODE)
+    return target
+
+
+def harden_runtime_file(path: os.PathLike | str) -> None:
+    if os.name != "posix":
+        return
+    target = Path(path)
+    if target.exists():
+        target.chmod(PRIVATE_FILE_MODE)
 
 _PATH_LOCKS: dict[str, threading.RLock] = {}
 _PATH_LOCKS_GUARD = threading.Lock()
@@ -115,7 +141,7 @@ def interprocess_lock(path: os.PathLike | str) -> Iterator[None]:
     target = os.fspath(path)
     lock_path = f"{target}.lock"
     parent = os.path.dirname(lock_path) or "."
-    Path(parent).mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(parent)
     with _thread_lock_for(os.path.normcase(os.path.abspath(lock_path))):
         fd = _open_lock_fd(lock_path)
         try:
@@ -169,7 +195,9 @@ def atomic_write_text(
     path: os.PathLike | str, text: str, *, mode: int | None = None
 ) -> None:
     target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(target.parent)
+    if mode is None:
+        mode = PRIVATE_FILE_MODE
     tmp = target.with_name(f".{target.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}")
     try:
         if mode is not None and os.name == "posix":

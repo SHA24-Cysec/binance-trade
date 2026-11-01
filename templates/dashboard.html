@@ -2298,6 +2298,12 @@
               <div id="liveStateMissingWarning" class="cnotice err" role="alert">
                 <span class="cn-icon"></span><span class="cn-text"></span><button type="button" class="cn-x" aria-label="Tutup" onclick="closeNotice(this.parentNode)">×</button>
               </div>
+              <div id="stateIntegrityWarning" class="cnotice err" role="alert">
+                <span class="cn-icon"></span><span class="cn-text"></span><button type="button" class="cn-x" aria-label="Tutup" onclick="closeNotice(this.parentNode)">×</button>
+              </div>
+              <div id="configRiskWarning" class="cnotice warn" role="status">
+                <span class="cn-icon"></span><span class="cn-text"></span><button type="button" class="cn-x" aria-label="Tutup" onclick="closeNotice(this.parentNode)">×</button>
+              </div>
               <div id="openPositionWarning" class="cnotice err" role="alert">
                 <span class="cn-icon"></span><span class="cn-text"></span><button type="button" class="cn-x" aria-label="Tutup" onclick="closeNotice(this.parentNode)">×</button>
               </div>
@@ -3025,7 +3031,7 @@
         const accountLabels = {VALID: 'Snapshot bot valid', STALE: 'Snapshot kedaluwarsa', WAITING: 'Menunggu snapshot risiko bot', STOPPED: 'Bot berhenti; Max DD dari state terakhir', UNVERIFIED: 'Equity belum terverifikasi'};
         let accountText = accountLabels[account.status] || 'Data belum tersedia';
         accountText += account.stop_enabled ? ' · proteksi aktif, batas ' + pct(account.limit_pct) : ' · equity stop nonaktif dalam konfigurasi';
-        accountText += ' · reset akun ' + (account.reset_count || 0) + 'x';
+        accountText += ' · trigger rem ' + (account.reset_count || 0) + 'x';
         if (account.snapshot_id) accountText += ' · ID ' + account.snapshot_id;
         document.getElementById('ddSub').textContent = (oldResponse ? 'Respons dashboard kedaluwarsa · ' : '') + accountText;
         document.getElementById('strategyDdCurrent').textContent = pct(result && result.current_dd_pct);
@@ -4233,6 +4239,16 @@
           if(d.mode==='LIVE'&&d.live_state_missing){
             showPersistentNotice(sw,'err','⛔','<b>State LIVE tidak ditemukan.</b> Resume Bot diblokir sampai operator memeriksa posisi dan order, lalu memberi konfirmasi eksplisit untuk state serta baseline risiko baru.','live-state-missing');
           }else{hideNotice(sw);}
+          const iw=document.getElementById('stateIntegrityWarning');
+          const integrityError=String((d.flags&&d.flags.state_integrity_error)||'');
+          if(integrityError){
+            showPersistentNotice(iw,'err','⛔','<b>Integritas state bermasalah.</b> '+esc(integrityError)+' Jangan anggap posisi kosong sampai file state diverifikasi.','state-integrity');
+          }else{hideNotice(iw);}
+          const cw=document.getElementById('configRiskWarning');
+          const configWarnings=Array.isArray(d.config_warnings)?d.config_warnings:[];
+          if(configWarnings.length){
+            showPersistentNotice(cw,'warn','⚠️',configWarnings.map(esc).join(' '),'config-risk');
+          }else{hideNotice(cw);}
           const w=document.getElementById('openPositionWarning');
           if(d.position&&d.position.has_position){
             showPersistentNotice(w,'err','⚠️',`Posisi terbuka <b>${esc(d.position.symbol)}</b>, qty ${esc(d.position.qty)}. Stop dengan posisi dipertahankan membuat SL/TP bot tidak aktif.`,'pos:'+d.position.symbol+':'+d.position.qty);
@@ -4246,6 +4262,8 @@
           if(stopBtn) stopBtn.disabled=true;
           const mw=document.getElementById('modeConflictWarning');
           hideNotice(mw);
+          hideNotice(document.getElementById('stateIntegrityWarning'));
+          hideNotice(document.getElementById('configRiskWarning'));
           document.getElementById('processStatusBox').textContent='Gagal memuat status: '+e.message;
         }finally{
           if(_controlStatusController===controller) _controlStatusController=null;

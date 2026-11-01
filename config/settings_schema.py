@@ -390,7 +390,7 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "MAX_DRAWDOWN_PERCENT": _field(
         "Drawdown",
         "Drawdown maksimum",
-        "Penurunan dari peak equity sebelum stop.",
+        "Penurunan dari puncak equity kumulatif sebelum stop. Puncak tidak direset setelah trigger atau cooldown; entry tetap diblokir selama drawdown kumulatif masih di atas batas.",
         "float",
         minimum=0.01,
         maximum=100,

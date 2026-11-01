@@ -8,7 +8,12 @@ from decimal import Decimal, InvalidOperation, localcontext
 from pathlib import Path
 
 from config.config import get_mode
-from infrastructure.storage.atomic_io import atomic_write_json, interprocess_lock
+from infrastructure.storage.atomic_io import (
+    atomic_write_json,
+    ensure_private_directory,
+    harden_runtime_file,
+    interprocess_lock,
+)
 from trading.equity import equity_context, valid_snapshot
 
 
@@ -240,9 +245,10 @@ def initialize(config, initial_capital, expected_fingerprint):
             if initialization_fingerprint(config, state, raw, previous) != expected_fingerprint:
                 raise DrawdownError("State, ledger, akun, atau periode berubah sejak konfirmasi. Ulangi pemeriksaan.")
             if not ledger_path(config).exists():
-                ledger_path(config).parent.mkdir(parents=True, exist_ok=True)
+                ensure_private_directory(ledger_path(config).parent)
                 with ledger_path(config).open("xb"):
                     pass
+                harden_runtime_file(ledger_path(config))
             period = {
                 "version": 1,
                 "initialization_source": "MANUAL_RESET",
@@ -473,9 +479,10 @@ def ensure_automatic_period(client, config, state, snapshot):
                 if item["paper"] != (get_mode(config) == "PAPER") or item["quote_asset"].upper() != str(config.get("QUOTE_ASSET", "")).upper():
                     raise DrawdownError("Ledger awal tidak sesuai mode atau quote.")
             if not ledger_path(config).exists():
-                ledger_path(config).parent.mkdir(parents=True, exist_ok=True)
+                ensure_private_directory(ledger_path(config).parent)
                 with ledger_path(config).open("xb"):
                     pass
+                harden_runtime_file(ledger_path(config))
             capital = initialization_capital(config, snapshot)
             period = {
                 "version": 1,

@@ -11,6 +11,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Mapping, Optional, Sequence
 
+from infrastructure.storage.atomic_io import harden_runtime_file
 from strategy.indicators import Kline
 
 logger = logging.getLogger(__name__)
@@ -273,6 +274,7 @@ class KlineStore:
         self._closed = False
 
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        harden_runtime_file(self.db_path)
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=OFF")
             self._conn.execute("PRAGMA synchronous=OFF")

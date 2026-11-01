@@ -5,7 +5,11 @@ import os
 import sys
 import time
 
-from infrastructure.storage.atomic_io import replace_with_retry
+from infrastructure.storage.atomic_io import (
+    ensure_private_directory,
+    harden_runtime_file,
+    replace_with_retry,
+)
 
 _NOTICE_INTERVAL_SECONDS = 60.0
 
@@ -13,9 +17,18 @@ _NOTICE_INTERVAL_SECONDS = 60.0
 class SafeRotatingFileHandler(logging.handlers.RotatingFileHandler):
 
     def __init__(self, *args, **kwargs) -> None:
+        filename = kwargs.get("filename", args[0] if args else None)
+        if filename is not None:
+            ensure_private_directory(os.path.dirname(os.fspath(filename)) or ".")
         super().__init__(*args, **kwargs)
+        harden_runtime_file(self.baseFilename)
         self.last_rotation_error: str | None = None
         self._last_notice_at = 0.0
+
+    def _open(self):
+        stream = super()._open()
+        harden_runtime_file(self.baseFilename)
+        return stream
 
     def rotate(self, source: str, dest: str) -> None:
         if callable(self.rotator):

@@ -85,6 +85,16 @@ def last_completed_candle_end_ms(
     return (current_ms // interval_ms) * interval_ms - 1
 
 
+def closed_candle_end_ms(interval: str, end_ms: int) -> int:
+    minutes = INTERVAL_MINUTES.get(str(interval))
+    if minutes is None:
+        raise BacktestError(f"Interval candle '{interval}' tidak didukung.")
+    step_ms = int(minutes) * MS_PER_MIN
+    requested = int(end_ms)
+    boundary = ((requested + 1) // step_ms) * step_ms - 1
+    return min(requested, boundary)
+
+
 def initial_backtest_equity(config: dict) -> float:
     paper = (config.get("PAPER_INITIAL_BALANCES", {}) or {}).get(
         config.get("QUOTE_ASSET", "USDT"), 10_000.0
@@ -140,6 +150,9 @@ def fetch_full_klines(
 ) -> list[Kline]:
     from strategy.indicators import parse_klines
 
+    end_ms = closed_candle_end_ms(interval, end_ms)
+    if start_ms > end_ms:
+        return []
     all_rows: list = []
     cursor = start_ms
     minutes = INTERVAL_MINUTES.get(interval, 5)
@@ -182,7 +195,7 @@ def fetch_full_klines(
         seen.add(k.open_time)
         unique.append(k)
     unique.sort(key=lambda k: k.open_time)
-    return unique
+    return [k for k in unique if k.open_time <= end_ms and k.close_time <= end_ms]
 
 
 def run_backtest(
@@ -665,6 +678,10 @@ def apply_overrides(base_config: dict, overrides: Optional[dict]) -> dict:
         if key not in OVERRIDE_CASTERS or val is None or val == "":
             continue
         caster = OVERRIDE_CASTERS[key]
+        if key == "CONFIRM_INTERVAL" and str(val).strip() not in INTERVAL_MINUTES:
+            raise BacktestError(
+                f"Interval '{val}' tidak didukung. Pilihan: {', '.join(INTERVAL_MINUTES)}"
+            )
         try:
             cast_val = caster(val)
         except (ValueError, TypeError) as e:
@@ -699,6 +716,11 @@ def _rentang_schema(key: str, lo: float, hi: float) -> tuple:
 
 
 def validate_params(config: dict) -> None:
+    interval = str(config.get("CONFIRM_INTERVAL", "5m") or "5m")
+    if interval not in INTERVAL_MINUTES:
+        raise BacktestError(
+            f"Interval '{interval}' tidak didukung. Pilihan: {', '.join(INTERVAL_MINUTES)}"
+        )
     checks = [
         ("ENTRY_SL_BUFFER_PCT", 0.0, 10.0),
         ("ENTRY_MIN_RR_RATIO", 0.1, 20.0),

@@ -256,7 +256,6 @@ def setup_logging(config: dict) -> None:
     console.setFormatter(_ConsoleLogFormatter())
     setattr(console, _LOGGING_MARKER, True)
     root.addHandler(console)
-    Path(str(config["LOG_FILE"])).parent.mkdir(parents=True, exist_ok=True)
     file_handler = SafeRotatingFileHandler(
         config["LOG_FILE"], maxBytes=5_000_000, backupCount=5, encoding="utf-8"
     )
@@ -601,60 +600,68 @@ def describe_exit_mode(config: dict, state: dict) -> str:
 
 
 def update_equity_controls(state: dict, equity: float, config: dict) -> bool:
-    if state.get("peak_equity") is None or equity > state["peak_equity"]:
-        state["peak_equity"] = equity
-    all_time_peak = state.get("peak_equity_all_time")
-    if all_time_peak is None or equity > float(all_time_peak or 0.0):
-        state["peak_equity_all_time"] = equity
+    equity = float(equity)
+    candidates = [equity]
+    for key in ("peak_equity", "peak_equity_all_time"):
+        try:
+            value = float(state.get(key))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value) and value > 0:
+            candidates.append(value)
+    peak = max(candidates)
+    state["peak_equity"] = peak
+    state["peak_equity_all_time"] = peak
 
-    peak = state["peak_equity"]
-    dd_pct = (peak - equity) / peak * 100.0 if peak else 0.0
+    dd_pct = (peak - equity) / peak * 100.0 if peak > 0 else 0.0
     dd_pct = max(dd_pct, 0.0)
     if dd_pct > float(state.get("max_dd_pct") or 0.0):
         state["max_dd_pct"] = dd_pct
 
-    if (
-        config["USE_EQUITY_STOP"]
-        and not state.get("dd_stopped")
-        and state["peak_equity"]
-    ):
-        if dd_pct >= config["MAX_DRAWDOWN_PERCENT"]:
-            state["dd_stopped"] = True
-            state["dd_stop_until"] = (
-                state_mod.now_ms() + config["DD_COOLDOWN_HOURS"] * 3600 * 1000
-            )
-            state["dd_reset_count"] = int(state.get("dd_reset_count") or 0) + 1
-            logger.critical(
-                "STOP DRAWDOWN: turun %.2f%% dari puncak equity. Siklus risiko "
-                "berikutnya dimulai dari saldo sekarang, riwayat drawdown tetap "
-                "disimpan. Entry baru dijeda %d jam.",
-                dd_pct,
-                config["DD_COOLDOWN_HOURS"],
-            )
-            state["peak_equity"] = equity
-
+    limit = float(config.get("MAX_DRAWDOWN_PERCENT") or 0.0)
     if state.get("dd_stopped"):
         deadline = state.get("dd_stop_until") or 0
         if not config.get("USE_EQUITY_STOP"):
             state["dd_stopped"] = False
             state["dd_stop_until"] = 0
-            state["peak_equity"] = equity
             logger.info(
                 "USE_EQUITY_STOP nonaktif: status stop drawdown yang tersisa dilepas."
             )
         elif not deadline:
             state["dd_stopped"] = False
             state["dd_stop_until"] = 0
-            state["peak_equity"] = equity
             logger.warning(
                 "Status stop drawdown tidak punya batas waktu (state lama atau rusak). "
-                "Status dilepas dan puncak equity dihitung ulang dari nilai sekarang."
+                "Status dievaluasi ulang dengan puncak equity kumulatif."
             )
         elif state_mod.now_ms() >= deadline:
             state["dd_stopped"] = False
             state["dd_stop_until"] = 0
-            state["peak_equity"] = equity
-            logger.info("Cooldown drawdown selesai. Entry baru diaktifkan lagi.")
+            logger.info(
+                "Cooldown drawdown selesai. Entry hanya aktif lagi bila drawdown "
+                "kumulatif sudah di bawah batas."
+            )
+
+    if (
+        config.get("USE_EQUITY_STOP")
+        and not state.get("dd_stopped")
+        and peak > 0
+        and limit > 0
+        and dd_pct >= limit
+    ):
+        state["dd_stopped"] = True
+        state["dd_stop_until"] = (
+            state_mod.now_ms() + config["DD_COOLDOWN_HOURS"] * 3600 * 1000
+        )
+        state["dd_reset_count"] = int(state.get("dd_reset_count") or 0) + 1
+        logger.critical(
+            "STOP DRAWDOWN: turun %.2f%% dari puncak equity kumulatif %.12g. "
+            "Puncak tidak direset; entry dijeda %d jam dan tetap diblokir selama "
+            "drawdown kumulatif masih di atas batas.",
+            dd_pct,
+            peak,
+            config["DD_COOLDOWN_HOURS"],
+        )
 
     return bool(state.get("dd_stopped"))
 
@@ -2189,7 +2196,6 @@ def _arm_native_oco(
         bid is not None
         and all(filters.price_valid(value) for value in prices)
         and below_price < below_stop < bid < above_price <= above_stop
-        and below_stop < entry
         and entry < above_stop
         and (limit_min <= 0 or qty * below_price >= limit_min)
         and (limit_min <= 0 or qty * above_price >= limit_min)
@@ -2459,7 +2465,6 @@ def _arm_native_stop(
         and filters.market_qty_valid(qty)
         and filters.price_valid(stop_price)
         and 0 < stop_price
-        and stop_price < entry
         and stop_price < bid
         and (
             filters.min_notional <= 0
@@ -2812,6 +2817,48 @@ def _run_native_amend(
         state_mod.save_state(config["STATE_FILE"], state)
         return True
     target = str(plan.get("target") or "")
+    qty_raw = float(state.get("qty") or 0.0)
+    rounded_wanted = filters.round_price(wanted)
+    if target == "OCO" and _native_oco_enabled(config):
+        qty_pre = filters.round_limit_qty(qty_raw)
+        levels_pre = _native_oco_levels(state, filters, config)
+        below_price = float(levels_pre["below_price"])
+        below_stop = float(levels_pre["below_stop_price"])
+        above_price = float(levels_pre["above_price"])
+        above_stop = float(levels_pre["above_stop_price"])
+        limit_min = float(filters.limit_min_notional)
+        limit_max = float(filters.limit_max_notional)
+        preflight_ok = (
+            filters.limit_qty_valid(qty_pre)
+            and {"TAKE_PROFIT_LIMIT", "STOP_LOSS_LIMIT"}.issubset(filters.order_types)
+            and all(filters.price_valid(v) for v in (below_price, below_stop, above_price, above_stop))
+            and below_price < below_stop < bid < above_price <= above_stop
+            and float(state.get("entry_price") or 0.0) < above_stop
+            and (limit_min <= 0 or qty_pre * below_price >= limit_min)
+            and (limit_min <= 0 or qty_pre * above_price >= limit_min)
+            and (limit_max <= 0 or qty_pre * below_price <= limit_max)
+            and (limit_max <= 0 or qty_pre * above_price <= limit_max)
+        )
+    else:
+        qty_pre = filters.round_qty(qty_raw)
+        preflight_ok = (
+            "STOP_LOSS" in filters.order_types
+            and filters.market_qty_valid(qty_pre)
+            and filters.price_valid(rounded_wanted)
+            and 0 < rounded_wanted < bid
+            and (filters.min_notional <= 0 or Decimal(str(qty_pre * rounded_wanted)) >= filters.min_notional)
+            and (filters.max_notional <= 0 or Decimal(str(qty_pre * bid)) <= filters.max_notional)
+        )
+    if not preflight_ok:
+        state["native_protection_retry_at"] = state_mod.now_ms() + _NATIVE_AMEND_RETRY_MS
+        _mark_reconciliation(state, "NATIVE_AMEND_TARGET_INVALID", [symbol])
+        state_mod.save_state(config["STATE_FILE"], state)
+        logger.critical(
+            "Amend proteksi native %s ditunda sebelum cancel: target %.12g tidak valid terhadap bid/filter.",
+            symbol,
+            wanted,
+        )
+        return False
     if isinstance(state.get("native_oco"), dict) or isinstance(state.get("native_stop"), dict):
         plan["attempts"] = int(plan.get("attempts") or 0) + 1
         if not _cancel_native_for_amend(client, config, state, target):
@@ -4404,9 +4451,6 @@ def close_position(
         )
         return
 
-    if not _cancel_native_stop_before_exit(client, config, state):
-        return
-
     filters = filters_cache.get(symbol)
     if filters is None:
         _mark_reconciliation(state, "SELL_FILTERS_UNVERIFIED", [symbol])
@@ -4423,9 +4467,9 @@ def close_position(
         return
 
     try:
-        account = client.get_account()
+        pre_account = client.get_account()
         if live:
-            _validate_live_account_snapshot(account, config["QUOTE_ASSET"])
+            _validate_live_account_snapshot(pre_account, config["QUOTE_ASSET"])
     except BinanceAPIError as exc:
         _mark_reconciliation(state, "SELL_ACCOUNT_UNVERIFIED", [base_asset])
         state_mod.save_state(config["STATE_FILE"], state)
@@ -4436,6 +4480,57 @@ def close_position(
         )
         return
 
+    lock_tolerance = max(float(filters.step_size), 1e-12)
+    pre_locked = next(
+        (
+            float(b.get("locked", 0.0) or 0.0)
+            for b in pre_account.get("balances", [])
+            if b.get("asset") == base_asset
+        ),
+        0.0,
+    )
+    native_intent = state.get("native_stop")
+    if not isinstance(native_intent, dict):
+        native_intent = state.get("native_oco")
+    expected_native_locked = (
+        float(native_intent.get("quantity") or 0.0)
+        if isinstance(native_intent, dict)
+        else 0.0
+    )
+    if pre_locked > expected_native_locked + lock_tolerance:
+        _mark_reconciliation(state, "SELL_BASE_BALANCE_LOCKED", [base_asset])
+        state_mod.save_state(config["STATE_FILE"], state)
+        logger.critical(
+            "SELL %s ditahan karena %.12g %s locked melebihi proteksi native sendiri.",
+            symbol,
+            pre_locked,
+            base_asset,
+        )
+        return
+
+    had_native_protection = isinstance(state.get("native_oco"), dict) or isinstance(
+        state.get("native_stop"), dict
+    )
+    if not _cancel_native_stop_before_exit(client, config, state):
+        return
+
+    if had_native_protection:
+        try:
+            account = client.get_account()
+            if live:
+                _validate_live_account_snapshot(account, config["QUOTE_ASSET"])
+        except BinanceAPIError as exc:
+            _mark_reconciliation(state, "SELL_ACCOUNT_UNVERIFIED", [base_asset])
+            state_mod.save_state(config["STATE_FILE"], state)
+            logger.critical(
+                "SELL %s ditahan karena saldo/status akun tidak terverifikasi setelah cancel: %s",
+                symbol,
+                exc,
+            )
+            return
+    else:
+        account = pre_account
+
     free_base = get_balance(account, base_asset)
     locked_base = next(
         (
@@ -4445,7 +4540,7 @@ def close_position(
         ),
         0.0,
     )
-    if locked_base > 0:
+    if locked_base > lock_tolerance:
         _mark_reconciliation(state, "SELL_BASE_BALANCE_LOCKED", [base_asset])
         state_mod.save_state(config["STATE_FILE"], state)
         logger.critical(

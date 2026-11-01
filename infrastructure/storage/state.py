@@ -34,7 +34,7 @@ DEFAULT_STATE = {
 }
 
 
-def _load_state_checked_unlocked(path: str) -> tuple[dict, bool, str]:
+def _load_state_checked_unlocked(path: str, *, archive_on_corrupt: bool = True) -> tuple[dict, bool, str]:
     if not os.path.exists(path):
         logger.info("File state %s tidak ditemukan, mulai dari state kosong.", path)
         return deepcopy(DEFAULT_STATE), False, STATE_FILE_MISSING
@@ -47,12 +47,15 @@ def _load_state_checked_unlocked(path: str) -> tuple[dict, bool, str]:
         merged.update(data)
         return merged, True, ""
     except (json.JSONDecodeError, ValueError, TypeError) as exc:
-        try:
-            backup = archive_corrupt(path)
-        except OSError as backup_exc:
-            backup = None
-            logger.error("State %s rusak dan gagal diarsipkan: %s", path, backup_exc)
-        message = f"Gagal membaca state valid {path}: {exc}. Cadangan: {backup}"
+        backup = None
+        if archive_on_corrupt:
+            try:
+                backup = archive_corrupt(path)
+            except OSError as backup_exc:
+                logger.error("State %s rusak dan gagal diarsipkan: %s", path, backup_exc)
+        message = f"Gagal membaca state valid {path}: {exc}."
+        if backup is not None:
+            message = f"{message} Cadangan: {backup}"
         logger.error("%s. Membuat state default fail-closed.", message)
         return deepcopy(DEFAULT_STATE), False, message
     except OSError as exc:
@@ -64,6 +67,11 @@ def _load_state_checked_unlocked(path: str) -> tuple[dict, bool, str]:
 def load_state_checked(path: str) -> tuple[dict, bool, str]:
     with interprocess_lock(path):
         return _load_state_checked_unlocked(path)
+
+
+def load_state_snapshot(path: str) -> tuple[dict, bool, str]:
+    with interprocess_lock(path):
+        return _load_state_checked_unlocked(path, archive_on_corrupt=False)
 
 
 def load_state(path: str) -> dict:

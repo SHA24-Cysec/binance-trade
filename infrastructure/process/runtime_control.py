@@ -11,6 +11,7 @@ from typing import Any
 
 from infrastructure.storage.atomic_io import (
     atomic_write_json,
+    ensure_private_directory,
     interprocess_lock,
     read_json,
     replace_with_retry,
@@ -231,7 +232,7 @@ class BotModeLock:
             if self.global_scope
             else reclaim_lock_file(self.mode)
         )
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_private_directory(self.path.parent)
         self.token = uuid.uuid4().hex
         self.acquired = False
 

@@ -24,6 +24,7 @@ from infrastructure.paths import PROJECT_ROOT
 from config.config import (
     PUMP_CONFIG,
     CONFIG_LOAD_ERRORS,
+    CONFIG_LOAD_WARNINGS,
     get_mode,
     get_mode_source,
     get_base_url,
@@ -155,14 +156,21 @@ _manual_close_lock = threading.Lock()
 
 def _load_admin_token() -> "tuple[str, str]":
     raw = str(os.environ.get("DASHBOARD_ADMIN_TOKEN", "") or "").strip()
-    if len(raw) >= 24:
+    if len(raw) >= 24 and raw.isascii() and all(33 <= ord(ch) <= 126 for ch in raw):
         return raw, "environment"
     if raw:
         logger.warning(
-            "DASHBOARD_ADMIN_TOKEN diabaikan karena kurang dari 24 karakter; "
-            "dipakai token acak per proses."
+            "DASHBOARD_ADMIN_TOKEN diabaikan karena wajib minimal 24 karakter "
+            "ASCII printable tanpa spasi; dipakai token acak per proses."
         )
     return secrets.token_urlsafe(32), "process"
+
+
+def _admin_token_matches(supplied: str) -> bool:
+    try:
+        return compare_digest(supplied.encode("ascii"), _ADMIN_TOKEN.encode("ascii"))
+    except UnicodeEncodeError:
+        return False
 
 
 _ADMIN_TOKEN, _ADMIN_TOKEN_SOURCE = _load_admin_token()
@@ -187,7 +195,7 @@ try:
 except ValueError:
     _DASHBOARD_PORT = 8080
 _DASHBOARD_HOST = os.environ.get("DASHBOARD_HOST", "127.0.0.1").strip() or "127.0.0.1"
-app.config["TRUSTED_HOSTS"] = ["127.0.0.1", "localhost"]
+app.config["TRUSTED_HOSTS"] = None
 
 
 def _bind_is_loopback() -> bool:
@@ -201,8 +209,15 @@ def _bind_is_loopback() -> bool:
 
 def _expected_hosts() -> set[str]:
     expected = {f"127.0.0.1:{_DASHBOARD_PORT}", f"localhost:{_DASHBOARD_PORT}"}
-    if not _bind_is_loopback() and _DASHBOARD_HOST not in ("0.0.0.0", "::"):
-        expected.add(f"{_DASHBOARD_HOST.lower()}:{_DASHBOARD_PORT}")
+    bind_host = _DASHBOARD_HOST.lower()
+    try:
+        bind_ip = ipaddress.ip_address(bind_host)
+    except ValueError:
+        bind_ip = None
+    if bind_ip is not None and bind_ip.version == 6:
+        expected.add(f"[{bind_host}]:{_DASHBOARD_PORT}")
+    elif not _bind_is_loopback() and bind_host not in ("0.0.0.0", "::"):
+        expected.add(f"{bind_host}:{_DASHBOARD_PORT}")
     return expected
 
 
@@ -272,7 +287,7 @@ def _security_gate():
             recent.append(now)
             _write_attempts[rate_key] = recent
         supplied = request.headers.get("X-Admin-Token", "")
-        if not compare_digest(supplied, _ADMIN_TOKEN):
+        if not _admin_token_matches(supplied):
             return jsonify({"error": "Token admin tidak valid atau tidak ada."}), 403
     return None
 
@@ -420,13 +435,10 @@ def get_client():
 
 
 def load_state() -> dict:
-    if not os.path.exists(STATE_FILE):
-        return {}
-    try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return {}
+    snapshot, _valid, error = state_mod.load_state_snapshot(STATE_FILE)
+    if error and error != state_mod.STATE_FILE_MISSING:
+        snapshot["state_integrity_error"] = error
+    return snapshot
 
 
 def get_volume_24h_quote(symbol: str):
@@ -722,8 +734,9 @@ def build_status():
         "live_connected": live_price is not None or account_equity["equity_status"] == "VALID",
         "bot_alive": process_status["status"] in ("STARTING", "RUNNING", "STOPPING"),
         "process": process_status,
-        "config_errors": list(CONFIG_LOAD_ERRORS),
-        "read_only": not _bind_is_loopback(),
+"config_errors": list(CONFIG_LOAD_ERRORS),
+            "config_warnings": list(CONFIG_LOAD_WARNINGS),
+            "read_only": not _bind_is_loopback(),
         "has_api_key": bool(PUMP_CONFIG.get("API_KEY")),
         "quote": QUOTE,
         "fx": get_idr_rate(),
@@ -999,18 +1012,55 @@ GRID_PARAM_KEYS = tuple(
 _bt_jobs: dict = {}
 _bt_jobs_lock = threading.Lock()
 BT_JOB_TTL_SECONDS = 3600
+_bt_job_cancel_events: dict = {}
+_bt_job_threads: dict = {}
+
+
+def _bt_job_alive(job_id: str) -> bool:
+    thread = _bt_job_threads.get(job_id)
+    return bool(thread is not None and thread.is_alive())
+
+
+def _bt_running_count() -> int:
+    return sum(
+        1
+        for jid, j in _bt_jobs.items()
+        if j.get("status") == "running" or _bt_job_alive(jid)
+    )
+
+
+def _bt_launch_worker(job_id: str, target, args: tuple) -> None:
+    cancel_event = threading.Event()
+    thread = threading.Thread(target=target, args=args, daemon=True)
+    with _bt_jobs_lock:
+        _bt_job_cancel_events[job_id] = cancel_event
+        _bt_job_threads[job_id] = thread
+    try:
+        thread.start()
+    except Exception:
+        with _bt_jobs_lock:
+            _bt_job_cancel_events.pop(job_id, None)
+            _bt_job_threads.pop(job_id, None)
+            if job_id in _bt_jobs:
+                _bt_jobs[job_id].update(
+                    {"status": "error", "error": "Gagal memulai worker backtest."}
+                )
+        raise
 
 
 def _bt_cleanup_old_jobs():
     now = time.time()
     with _bt_jobs_lock:
-        stale = [
-            jid
-            for jid, j in _bt_jobs.items()
-            if now - j.get("created_at", now) > BT_JOB_TTL_SECONDS
-        ]
+        stale = []
+        for jid, j in _bt_jobs.items():
+            if j.get("status") == "running" or _bt_job_alive(jid):
+                continue
+            if now - j.get("created_at", now) > BT_JOB_TTL_SECONDS:
+                stale.append(jid)
         for jid in stale:
             _bt_jobs.pop(jid, None)
+            _bt_job_cancel_events.pop(jid, None)
+            _bt_job_threads.pop(jid, None)
 
 
 def _bt_simulation_interval(cfg: dict) -> str:
@@ -1103,7 +1153,7 @@ def _bt_prepare_universe(
         )
         warmup_ms = butuh_gerbang_ms
 
-    end_ms = int(time.time() * 1000)
+    end_ms = bt.closed_candle_end_ms(interval, int(time.time() * 1000))
     start_ms = end_ms - days * bt.MS_PER_DAY
     fetch_start_ms = start_ms - warmup_ms
 
@@ -1276,6 +1326,9 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 _bt_jobs[job_id]["updated_at"] = time.time()
 
     def cancelled():
+        event = _bt_job_cancel_events.get(job_id)
+        if event is not None and event.is_set():
+            return True
         with _bt_jobs_lock:
             job = _bt_jobs.get(job_id)
             return bool(job and job.get("cancel"))
@@ -1496,6 +1549,9 @@ def _bt_run_grid_job(
                 _bt_jobs[job_id]["updated_at"] = time.time()
 
     def cancelled():
+        event = _bt_job_cancel_events.get(job_id)
+        if event is not None and event.is_set():
+            return True
         with _bt_jobs_lock:
             job = _bt_jobs.get(job_id)
             return bool(job and job.get("cancel"))
@@ -1761,7 +1817,10 @@ def api_backtest_start():
     if max_symbols > 600:
         return jsonify({"error": "Jumlah simbol maksimal 600."}), 400
 
-    est_requests = _bt_estimate_requests(days, max_symbols, cfg_hari)
+    try:
+        est_requests = _bt_estimate_requests(days, max_symbols, cfg_hari)
+    except bt.BacktestError as exc:
+        return jsonify({"error": str(exc)}), 400
     if est_requests > 20000:
         return (
             jsonify(
@@ -1781,7 +1840,7 @@ def api_backtest_start():
         return jsonify({"error": str(exc)}), 400
 
     with _bt_jobs_lock:
-        running = sum(1 for j in _bt_jobs.values() if j["status"] == "running")
+        running = _bt_running_count()
         if running >= 1:
             return (
                 jsonify(
@@ -1806,10 +1865,7 @@ def api_backtest_start():
             "cancel": False,
         }
 
-    thread = threading.Thread(
-        target=_bt_run_job, args=(job_id, days, overrides, max_symbols), daemon=True
-    )
-    thread.start()
+    _bt_launch_worker(job_id, _bt_run_job, (job_id, days, overrides, max_symbols))
     return jsonify({"job_id": job_id})
 
 
@@ -1856,7 +1912,13 @@ def api_backtest_grid_start():
     if max_symbols < 2 or max_symbols > 600:
         return jsonify({"error": "Jumlah simbol harus di antara 2 dan 600."}), 400
 
-    est_requests = _bt_estimate_requests(days, max_symbols, PUMP_CONFIG)
+    overrides = {k: data.get(k) for k in BT_PARAM_KEYS if k in data}
+    try:
+        cfg_preview = bt.apply_overrides(PUMP_CONFIG, overrides)
+        bt.validate_params(cfg_preview)
+        est_requests = _bt_estimate_requests(days, max_symbols, cfg_preview)
+    except bt.BacktestError as exc:
+        return jsonify({"error": str(exc)}), 400
     if est_requests > 20000:
         return (
             jsonify(
@@ -1911,13 +1973,6 @@ def api_backtest_grid_start():
             ),
             400,
         )
-    overrides = {k: data.get(k) for k in BT_PARAM_KEYS if k in data}
-    try:
-        cfg_preview = bt.apply_overrides(PUMP_CONFIG, overrides)
-        bt.validate_params(cfg_preview)
-    except bt.BacktestError as exc:
-        return jsonify({"error": str(exc)}), 400
-
     minimal_hari, catatan_hari = _bt_min_days_note(
         cfg_preview, _bt_simulation_interval(cfg_preview)
     )
@@ -2004,7 +2059,7 @@ def api_backtest_grid_start():
         )
 
     with _bt_jobs_lock:
-        running = sum(1 for j in _bt_jobs.values() if j["status"] == "running")
+        running = _bt_running_count()
         if running >= 1:
             return (
                 jsonify(
@@ -2037,22 +2092,11 @@ def api_backtest_grid_start():
             "cancel": False,
         }
 
-    thread = threading.Thread(
-        target=_bt_run_grid_job,
-        args=(
-            job_id,
-            days,
-            max_symbols,
-            spec,
-            rasio_latih,
-            metrik,
-            min_trades,
-            total,
-            overrides,
-        ),
-        daemon=True,
+    _bt_launch_worker(
+        job_id,
+        _bt_run_grid_job,
+        (job_id, days, max_symbols, spec, rasio_latih, metrik, min_trades, total, overrides),
     )
-    thread.start()
     return jsonify({"job_id": job_id})
 
 
@@ -2098,8 +2142,13 @@ def api_backtest_cancel(job_id):
         return blocked
     with _bt_jobs_lock:
         job = _bt_jobs.get(job_id)
-        if job is None:
+        event = _bt_job_cancel_events.get(job_id)
+        if job is None and event is None:
             return jsonify({"error": "Job tidak ditemukan."}), 404
+        if event is not None:
+            event.set()
+        if job is None:
+            return jsonify({"ok": True, "message": "Pembatalan dikirim ke worker lama."})
         if job["status"] != "running":
             return jsonify({"ok": True, "message": "Job sudah selesai."})
         job["cancel"] = True

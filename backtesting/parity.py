@@ -124,6 +124,13 @@ class AccountRiskControls:
         now_ms = int(now_ms)
         eq = max(0.0, float(equity))
 
+        if eq > self.peak_equity:
+            self.peak_equity = eq
+
+        dd = self.drawdown_pct(eq)
+        if dd > self.max_drawdown_seen_pct:
+            self.max_drawdown_seen_pct = dd
+
         if self._in_pause:
             if (
                 not self.use_equity_stop
@@ -132,17 +139,9 @@ class AccountRiskControls:
             ):
                 self._in_pause = False
                 self.paused_until_ms = 0
-                self.peak_equity = eq
                 self.cooldown_R_resets += 1
             else:
                 return True
-
-        if eq > self.peak_equity:
-            self.peak_equity = eq
-
-        dd = self.drawdown_pct(eq)
-        if dd > self.max_drawdown_seen_pct:
-            self.max_drawdown_seen_pct = dd
 
         if (
             self.use_equity_stop

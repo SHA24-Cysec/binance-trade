@@ -7,12 +7,13 @@ import time
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
+from infrastructure.storage.atomic_io import ensure_private_directory, harden_runtime_file
 from strategy.indicators import Kline
 
 logger = logging.getLogger(__name__)
 
 
-CACHE_SCHEMA_VERSION = 1
+CACHE_SCHEMA_VERSION = 2
 
 DEFAULT_FRESH_HOURS = 24
 DEFAULT_TTL_DAYS = 30
@@ -123,7 +124,7 @@ class KlineCache:
         self.rows_downloaded = 0
         self.ranges_downloaded = 0
 
-        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        ensure_private_directory(Path(self.path).parent)
         self._conn = sqlite3.connect(self.path, check_same_thread=False, timeout=30.0)
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
@@ -132,6 +133,8 @@ class KlineCache:
             self._conn.executescript(_SCHEMA_SQL)
             self._conn.commit()
             self._enforce_schema_version()
+            for suffix in ("", "-wal", "-shm"):
+                harden_runtime_file(f"{self.path}{suffix}")
 
     def _enforce_schema_version(self) -> None:
         cur = self._conn.execute(
@@ -248,6 +251,8 @@ class KlineCache:
                 float(k.quote_volume),
             )
             for k in klines
+            if int(k.open_time) >= int(range_start_ms)
+            and int(k.close_time) <= int(range_end_ms)
         ]
         with self._lock:
             self._require_open()
@@ -283,6 +288,7 @@ class KlineCache:
                 quote_volume=float(r[7]),
             )
             for r in rows
+            if int(r[5]) <= int(end_ms)
         ]
         self.rows_served += len(hasil)
         return hasil

@@ -24,6 +24,7 @@ from backtesting.backtest import (
     INTERVAL_MINUTES,
     MS_PER_MIN,
     bars_per_day,
+    closed_candle_end_ms,
     compute_rolling_24h_stats,
     entry_execution_params,
     fetch_full_klines,
@@ -232,17 +233,24 @@ def _klines_untuk_simbol(
     end_ms: int,
     cache: Optional[KlineCache],
 ) -> list[Kline]:
+    closed_end_ms = closed_candle_end_ms(interval, end_ms)
+    if start_ms > closed_end_ms:
+        return []
     if cache is None:
         return fetch_full_klines(
-            client, symbol, interval, start_ms, end_ms, sleep_between_calls=0.0
+            client, symbol, interval, start_ms, closed_end_ms, sleep_between_calls=0.0
         )
 
-    for awal, akhir in cache.missing_ranges(symbol, interval, start_ms, end_ms):
+    for awal, akhir in cache.missing_ranges(symbol, interval, start_ms, closed_end_ms):
         bagian = fetch_full_klines(
             client, symbol, interval, awal, akhir, sleep_between_calls=0.0
         )
         cache.put(symbol, interval, bagian, awal, akhir)
-    return cache.read(symbol, interval, start_ms, end_ms)
+    return [
+        bar
+        for bar in cache.read(symbol, interval, start_ms, closed_end_ms)
+        if bar.close_time <= closed_end_ms
+    ]
 
 
 def fetch_native_klines(

@@ -7,7 +7,11 @@ import os
 from pathlib import Path
 from typing import Any
 
-from infrastructure.storage.atomic_io import interprocess_lock
+from infrastructure.storage.atomic_io import (
+    ensure_private_directory,
+    harden_runtime_file,
+    interprocess_lock,
+)
 
 _INDEX_SUFFIX = ".revisions.log"
 _INDEX_VERSION = 4
@@ -179,6 +183,7 @@ def _rewrite_index(target: Path, revisions: dict[str, int]) -> None:
         with tmp.open("w", encoding="utf-8", newline="") as handle:
             _tulis_baris(handle, fingerprint, list(revisions.items()))
             handle.flush()
+        harden_runtime_file(tmp)
         os.replace(tmp, index)
     except OSError:
         return
@@ -200,6 +205,7 @@ def _append_index(
         with _index_path(target).open("a", encoding="utf-8", newline="") as handle:
             _tulis_baris(handle, fingerprint, [(trade_id, revision)])
             handle.flush()
+        harden_runtime_file(_index_path(target))
     except OSError:
         return
     _cache_put(target, fingerprint, revisions, lines + 1)
@@ -240,7 +246,7 @@ def append_trade_record(path: os.PathLike | str, record: dict) -> bool:
     payload["revision"] = revision
     line = json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
     target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(target.parent)
     with interprocess_lock(target):
         revisions: dict[str, int] = {}
         lines_sebelum = 0
@@ -266,6 +272,7 @@ def append_trade_record(path: os.PathLike | str, record: dict) -> bool:
             handle.write(line + "\n")
             handle.flush()
             os.fsync(handle.fileno())
+        harden_runtime_file(target)
         revisions[trade_id] = max(revision, revisions.get(trade_id, 0))
         fingerprint = _fingerprint(target)
         if fingerprint is not None:
