@@ -31,6 +31,7 @@ PUMP_CONFIG = {
     "PAPER_LIMIT_ORDER_TIMEOUT_SECONDS": 60,
     "USE_WEBSOCKET": True,
     "WS_BASE_URL": "wss://stream.binance.com:9443",
+    "PROXY_URL": "",
     "MAX_MARKET_DATA_AGE_SECONDS": 10.0,
     "TICKER_SNAPSHOT_TTL_SECONDS": 30,
     "WS_LAST_PRICE_OVERLAY_ENABLED": True,
@@ -249,6 +250,16 @@ def backtest_enabled(config: dict = None) -> bool:
 def get_base_url(config: dict = None) -> str:
     cfg = PUMP_CONFIG if config is None else config
     return cfg.get("LIVE_BASE_URL", "https://api.binance.com")
+
+
+def get_request_proxies(config: dict = None) -> dict:
+    cfg = PUMP_CONFIG if config is None else config
+    raw = str(cfg.get("PROXY_URL", "") or "").strip()
+    if not raw:
+        raw = str(os.environ.get("PROXY_URL", "") or "").strip()
+    if not raw:
+        return {}
+    return {"http": raw, "https": raw}
 
 
 def use_websocket(config: dict = None) -> bool:

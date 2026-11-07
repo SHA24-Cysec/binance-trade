@@ -4,6 +4,7 @@ import json
 import logging
 import threading
 import time
+import urllib.parse
 from collections import OrderedDict
 from typing import Any, Optional
 
@@ -22,6 +23,19 @@ _MAX_STREAMS_PER_CONNECTION = 1024
 _MAX_BOOK_TICKER_STREAMS = _MAX_STREAMS_PER_CONNECTION - 1
 _PING_INTERVAL = 20
 _PING_TIMEOUT = 10
+
+WS_FALLBACK_BASE_URLS = (
+    "wss://data-stream.binance.vision",
+    "wss://stream.binance.com:443",
+)
+
+_SKEMA_PROXY_WS = {
+    "http": "http",
+    "https": "http",
+    "socks4": "socks4",
+    "socks5": "socks5",
+    "socks5h": "socks5h",
+}
 
 
 class _StreamCache:
@@ -62,7 +76,12 @@ class _StreamCache:
 
 class MarketWebSocket:
 
-    def __init__(self, ws_base_url: str = "wss://stream.binance.com:9443") -> None:
+    def __init__(
+        self,
+        ws_base_url: str = "wss://stream.binance.com:9443",
+        fallback_base_urls: Optional[list] = None,
+        proxy_url: str = "",
+    ) -> None:
         if not _WS_AVAILABLE:
             raise RuntimeError(
                 "Paket 'websocket-client' belum terpasang. Jalankan "
@@ -70,6 +89,13 @@ class MarketWebSocket:
                 "di config untuk memakai REST polling penuh."
             )
         self.ws_base_url = ws_base_url.rstrip("/")
+        kandidat = [self.ws_base_url]
+        for url in (fallback_base_urls or WS_FALLBACK_BASE_URLS):
+            bersih = str(url or "").rstrip("/")
+            if bersih and bersih not in kandidat:
+                kandidat.append(bersih)
+        self._base_candidates = kandidat
+        self._proxy_kwargs = self._parse_proxy(proxy_url)
         self._app: "Optional[WebSocketApp]" = None
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
@@ -232,14 +258,67 @@ class MarketWebSocket:
             return 1.0
         return min(float(current) * 2.0, 60.0)
 
+    @staticmethod
+    def _parse_proxy(proxy_url: str) -> dict:
+        raw = str(proxy_url or "").strip()
+        if not raw:
+            return {}
+        if any(karakter.isspace() for karakter in raw):
+            return {}
+        bagian = urllib.parse.urlsplit(raw)
+        if not bagian.hostname or not bagian.scheme:
+            return {}
+        skema = bagian.scheme.lower()
+        jenis = _SKEMA_PROXY_WS.get(skema)
+        if jenis is None:
+            return {}
+        port_bawaan = (
+            443
+            if skema == "https"
+            else 1080
+            if skema.startswith("socks")
+            else 80
+        )
+        hasil = {
+            "proxy_type": jenis,
+            "http_proxy_host": bagian.hostname,
+            "http_proxy_port": bagian.port or port_bawaan,
+        }
+        if bagian.username:
+            hasil["http_proxy_auth"] = (
+                urllib.parse.unquote(bagian.username),
+                urllib.parse.unquote(bagian.password or ""),
+            )
+        return hasil
+
+    def _rotate_base(self) -> bool:
+        if len(self._base_candidates) < 2:
+            return False
+        with self._sub_lock:
+            try:
+                indeks = self._base_candidates.index(self.ws_base_url)
+            except ValueError:
+                indeks = 0
+            baru = self._base_candidates[(indeks + 1) % len(self._base_candidates)]
+            if baru == self.ws_base_url:
+                return False
+            lama = self.ws_base_url
+            self.ws_base_url = baru
+        logger.warning(
+            "Endpoint WebSocket %s tidak dapat dipakai. Beralih ke %s.", lama, baru
+        )
+        return True
+
     def _run_loop(self) -> None:
         backoff = 1.0
+        sisa_rotasi = len(self._base_candidates) - 1
         while not self._stop.is_set():
             url = self._build_url()
             self._last_connect_ts = time.monotonic()
             self._connected_once = False
             logger.info(
-                "WebSocket menyambung dengan %d/%d stream.",
+                "WebSocket menyambung ke %s dengan %d/%d stream.",
+                self.ws_base_url,
                 self._configured_stream_count(),
                 _MAX_STREAMS_PER_CONNECTION,
             )
@@ -255,6 +334,7 @@ class MarketWebSocket:
                     ping_interval=_PING_INTERVAL,
                     ping_timeout=_PING_TIMEOUT,
                     reconnect=None,
+                    **self._proxy_kwargs,
                 )
             except Exception as exc:
                 logger.warning("WebSocket run_forever error: %s", exc)
@@ -262,6 +342,12 @@ class MarketWebSocket:
             self._connected.clear()
             if self._stop.is_set():
                 break
+            if not connected_before_close and sisa_rotasi > 0 and self._rotate_base():
+                sisa_rotasi -= 1
+                continue
+            if connected_before_close:
+                backoff = 1.0
+            sisa_rotasi = len(self._base_candidates) - 1
             wait = backoff
             logger.info("WebSocket terputus. Menyambung ulang dalam %.0f detik.", wait)
             if self._stop.wait(timeout=wait):
@@ -279,8 +365,6 @@ class MarketWebSocket:
         )
 
     def _on_error(self, _app, error) -> None:
-        if "451" in str(error) and self.ws_base_url != "wss://data-stream.binance.vision":
-            self.ws_base_url = "wss://data-stream.binance.vision"
         logger.debug("WebSocket error: %s", error)
 
     def _on_close(self, _app, status_code, msg) -> None:

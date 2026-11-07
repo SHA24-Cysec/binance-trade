@@ -57,16 +57,27 @@ class BinanceTransportError(BinanceAPIError):
 
 MAX_SESSIONS_DEFAULT = 16
 
+PUBLIC_FALLBACK_BASE_URLS = (
+    "https://data-api.binance.vision",
+    "https://api1.binance.com",
+    "https://api2.binance.com",
+    "https://api3.binance.com",
+    "https://api4.binance.com",
+)
+
 
 class _SessionRegistry:
 
-    def __init__(self, max_sessions: int = MAX_SESSIONS_DEFAULT) -> None:
+    def __init__(
+        self, max_sessions: int = MAX_SESSIONS_DEFAULT, proxies: dict | None = None
+    ) -> None:
         self._tls = threading.local()
         self._lock = threading.Lock()
         self._entries: "weakref.WeakKeyDictionary[threading.Thread, list]" = (
             weakref.WeakKeyDictionary()
         )
         self._headers: dict = {}
+        self._proxies = dict(proxies or {})
         self.max_sessions = max(2, int(max_sessions))
         self.dibuat = 0
         self.ditutup = 0
@@ -97,6 +108,8 @@ class _SessionRegistry:
         self._konfigurasi_pool(session)
         if self._headers:
             session.headers.update(self._headers)
+        if self._proxies:
+            session.proxies.update(self._proxies)
         return session
 
     def bind(self, headers: dict | None = None) -> None:
@@ -260,14 +273,22 @@ class BinanceSpotClient:
         rate_limit_limit: int = 6000,
         rate_limit_safety_margin: int = 100,
         max_sessions: int = MAX_SESSIONS_DEFAULT,
+        public_base_urls: Optional[list] = None,
+        proxies: Optional[dict] = None,
     ):
         self.api_key = api_key
         self.api_secret = api_secret
         self.base_url = base_url.rstrip("/")
+        kandidat = [self.base_url]
+        for url in (public_base_urls or PUBLIC_FALLBACK_BASE_URLS):
+            bersih = str(url or "").rstrip("/")
+            if bersih and bersih not in kandidat:
+                kandidat.append(bersih)
+        self._public_base_candidates = kandidat
         self._public_base_url = self.base_url
         self.timeout = timeout
         self.allow_signed = allow_signed
-        self._registry = _SessionRegistry(max_sessions=max_sessions)
+        self._registry = _SessionRegistry(max_sessions=max_sessions, proxies=proxies)
         self._prime_session()
         self._time_offset_ms = 0
         self._rate_limiter = SharedRequestWeightLimiter(
@@ -393,6 +414,14 @@ class BinanceSpotClient:
         route = (str(method or "GET").upper(), str(path or ""))
         return self._sapi_rate_limiters.get(route, self._rate_limiter)
 
+    @staticmethod
+    def _gagal_blokir_public(exc: BaseException) -> bool:
+        if isinstance(exc, BinanceRateLimitError):
+            return False
+        if isinstance(exc, BinanceAPIError):
+            return exc.status_code in (403, 451)
+        return isinstance(exc, requests.exceptions.RequestException)
+
     def _request(
         self,
         method: str,
@@ -407,7 +436,20 @@ class BinanceSpotClient:
                 "dibuat dengan allow_signed=False (mode data pasar publik/PAPER)."
             )
         base_params = dict(params or {})
-        max_retries = max(1, int(max_retries or 1))
+        percobaan_maks = max(1, int(max_retries or 1))
+        urutan_base = None
+        batas_langkah = percobaan_maks
+        if not signed:
+            try:
+                indeks = self._public_base_candidates.index(self._public_base_url)
+            except ValueError:
+                indeks = 0
+            urutan_base = (
+                self._public_base_candidates[indeks:]
+                + self._public_base_candidates[:indeks]
+            )
+            batas_langkah = max(percobaan_maks, len(urutan_base))
+        kandidat_ke = 0
 
         def build_url() -> str:
             local_params = dict(base_params)
@@ -429,7 +471,7 @@ class BinanceSpotClient:
         request_limiter = self._limiter_for_request(method, path)
         last_exc = None
         skip_shared_block = False
-        for attempt in range(1, max_retries + 1):
+        for attempt in range(1, batas_langkah + 1):
             try:
                 try:
                     if skip_shared_block:
@@ -449,13 +491,6 @@ class BinanceSpotClient:
                     resp = sesi.request(method, url, timeout=self.timeout)
 
                 self._record_used_weight(resp.headers, method, path)
-
-                if resp.status_code == 451 and not signed and self._public_base_url != "https://data-api.binance.vision":
-                    self._public_base_url = "https://data-api.binance.vision"
-                    url = build_url()
-                    with self._registry.use() as sesi:
-                        resp = sesi.request(method, url, timeout=self.timeout)
-                    self._record_used_weight(resp.headers, method, path)
 
                 if resp.status_code >= 400:
                     try:
@@ -489,6 +524,25 @@ class BinanceSpotClient:
             except (requests.exceptions.RequestException, BinanceAPIError) as exc:
                 last_exc = exc
 
+                if (
+                    urutan_base is not None
+                    and kandidat_ke + 1 < len(urutan_base)
+                    and self._gagal_blokir_public(exc)
+                ):
+                    kandidat_ke += 1
+                    lama = self._public_base_url
+                    self._public_base_url = urutan_base[kandidat_ke]
+                    logger.warning(
+                        "Endpoint publik %s tidak dapat dipakai (%s). Beralih ke %s "
+                        "(kandidat %d/%d).",
+                        lama,
+                        self._ringkas_galat(exc),
+                        self._public_base_url,
+                        kandidat_ke + 1,
+                        len(urutan_base),
+                    )
+                    continue
+
                 if isinstance(exc, BinanceRateLimitError):
                     wait = (
                         max(5.0, float(exc.retry_after))
@@ -503,7 +557,7 @@ class BinanceSpotClient:
                         path,
                         wait,
                         attempt,
-                        max_retries,
+                        percobaan_maks,
                     )
                     if exc.status_code == 418:
                         logger.error(
@@ -512,7 +566,7 @@ class BinanceSpotClient:
                             wait,
                         )
                         raise
-                    if attempt < max_retries:
+                    if attempt < percobaan_maks:
                         time.sleep(wait)
                         skip_shared_block = True
                         continue
@@ -531,14 +585,14 @@ class BinanceSpotClient:
                         )
                         self.sync_time()
 
-                if retryable and attempt < max_retries:
+                if retryable and attempt < percobaan_maks:
                     wait = min(2**attempt, 10)
                     logger.warning(
                         "Request %s %s gagal sementara (percobaan %d/%d): %s. Tunggu %ds.",
                         method,
                         path,
                         attempt,
-                        max_retries,
+                        percobaan_maks,
                         self._ringkas_galat(exc),
                         wait,
                     )
@@ -559,7 +613,7 @@ class BinanceSpotClient:
                     method,
                     path,
                     attempt,
-                    max_retries,
+                    batas_langkah,
                     self._ringkas_galat(exc),
                 )
 

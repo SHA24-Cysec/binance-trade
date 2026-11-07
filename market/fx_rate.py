@@ -301,6 +301,7 @@ class IdrRateProvider:
             return self._client
         with self._client_lock:
             if self._client is None:
+                from config.config import get_request_proxies
                 from trading.clients.binance_client import BinanceSpotClient
 
                 cfg = self._cfg
@@ -314,6 +315,7 @@ class IdrRateProvider:
                     rate_limit_safety_margin=int(
                         cfg.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100
                     ),
+                    proxies=get_request_proxies(cfg),
                 )
         return self._client
 

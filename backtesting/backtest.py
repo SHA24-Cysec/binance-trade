@@ -1147,7 +1147,7 @@ def main():
         raise SystemExit(0 if entry_ok and exit_ok else 1)
 
     from trading.clients.binance_client import BinanceSpotClient
-    from config.config import PUMP_CONFIG, get_base_url
+    from config.config import PUMP_CONFIG, get_base_url, get_request_proxies
 
     overrides = {}
     if args.interval:
@@ -1171,6 +1171,7 @@ def main():
         rate_limit_safety_margin=int(
             PUMP_CONFIG.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100
         ),
+        proxies=get_request_proxies(PUMP_CONFIG),
     )
 
     def cli_progress(p: float, msg: str):

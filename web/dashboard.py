@@ -28,6 +28,7 @@ from config.config import (
     get_mode,
     get_mode_source,
     get_base_url,
+    get_request_proxies,
     is_paper,
     backtest_enabled,
     get_state_file,
@@ -81,6 +82,7 @@ class _PaperDashboardClient:
             rate_limit_safety_margin=int(
                 PUMP_CONFIG.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100
             ),
+            proxies=get_request_proxies(PUMP_CONFIG),
         )
         self._account_file = PUMP_CONFIG.get(
             "PAPER_ACCOUNT_STATE_FILE", "data/pump_paper_account_paper.json"
@@ -432,6 +434,7 @@ def get_client():
                         rate_limit_safety_margin=int(
                             PUMP_CONFIG.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100
                         ),
+                        proxies=get_request_proxies(PUMP_CONFIG),
                     )
             except Exception:
                 _client = None
@@ -1173,6 +1176,7 @@ def _bt_prepare_universe(
             rate_limit_safety_margin=int(
                 cfg.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100
             ),
+            proxies=get_request_proxies(cfg),
         )
 
 

@@ -5,7 +5,7 @@ import time
 from typing import Optional
 
 from trading.clients.binance_client import BinanceAPIError, BinanceSpotClient
-from config.config import get_base_url
+from config.config import get_base_url, get_request_proxies
 from trading.clients.exchange_client import (
     ACCOUNT_SPOT_PERMISSION_SOURCE,
     ACCOUNT_SPOT_PERMISSION_VERIFIED,
@@ -33,6 +33,7 @@ class LiveClient(ExchangeClient):
             rate_limit_safety_margin=int(
                 config.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100
             ),
+            proxies=get_request_proxies(config),
         )
         self.market = MarketDataProvider(config)
         self._spot_permission_verified_until = 0.0

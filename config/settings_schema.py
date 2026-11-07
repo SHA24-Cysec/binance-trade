@@ -39,6 +39,7 @@ def _field(
     editor: str | None = None,
     options: list | None = None,
     managed_by: str | None = None,
+    allow_empty: bool = False,
 ) -> dict:
     return {
         "group": group,
@@ -53,6 +54,7 @@ def _field(
         "editor": editor or kind,
         "options": options,
         "managed_by": managed_by,
+        "allow_empty": allow_empty,
     }
 
 
@@ -85,6 +87,16 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         "Endpoint produksi yang dikunci oleh aplikasi.",
         "str",
         read_only=True,
+    ),
+    "PROXY_URL": _field(
+        "Sistem",
+        "Proxy HTTP/SOCKS",
+        "Proxy opsional untuk seluruh koneksi REST ke Binance. Isi http://host:port "
+        "atau socks5h://host:port, kosongkan bila koneksi langsung. Bisa juga lewat "
+        "PROXY_URL di file .env.",
+        "str",
+        editor="proxy",
+        allow_empty=True,
     ),
     "RATE_LIMIT_STATE_FILE": _field(
         "Sistem",
@@ -1238,13 +1250,23 @@ def coerce_field(key: str, value: Any, candidate: dict) -> Any:
             raise ValueError("harus berupa teks")
         result = value.strip()
         if not result:
-            raise ValueError("tidak boleh kosong")
-        if len(result) > 2048:
+            if not spec.get("allow_empty"):
+                raise ValueError("tidak boleh kosong")
+        elif len(result) > 2048:
             raise ValueError("teks terlalu panjang")
-        if spec.get("editor") == "asset":
+        elif spec.get("editor") == "asset":
             result = result.upper()
             if not _ASSET_RE.fullmatch(result):
                 raise ValueError("kode aset tidak valid")
+        elif spec.get("editor") == "proxy":
+            skema = result.split("://", 1)[0].lower() if "://" in result else ""
+            if skema not in {"http", "https", "socks4", "socks5", "socks5h"}:
+                raise ValueError(
+                    "skema proxy harus http://, https://, socks4://, socks5://, "
+                    "atau socks5h://"
+                )
+            if any(karakter.isspace() for karakter in result):
+                raise ValueError("URL proxy tidak boleh memuat spasi")
         options = spec.get("options")
         if options and result not in options:
             raise ValueError("nilai tidak termasuk pilihan yang diizinkan")

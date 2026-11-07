@@ -9,7 +9,7 @@ from decimal import Decimal
 from typing import Optional
 
 from trading.clients.binance_client import BinanceSpotClient
-from config.config import get_base_url, use_websocket
+from config.config import get_base_url, get_request_proxies, use_websocket
 
 logger = logging.getLogger("market_data")
 
@@ -39,6 +39,7 @@ class MarketDataProvider:
             rate_limit_safety_margin=int(
                 config.get("RATE_LIMIT_SAFETY_MARGIN", 100) or 100
             ),
+            proxies=get_request_proxies(config),
         )
 
         self._use_ws = use_websocket(config)
@@ -82,7 +83,8 @@ class MarketDataProvider:
                     from market.market_ws import MarketWebSocket
 
                     self._ws = MarketWebSocket(
-                        self.config.get("WS_BASE_URL", "wss://stream.binance.com:9443")
+                        self.config.get("WS_BASE_URL", "wss://stream.binance.com:9443"),
+                        proxy_url=get_request_proxies(self.config).get("https", ""),
                     )
                     self._ws.start(all_mini_ticker=True)
                     logger.info("Lapisan data pasar: WebSocket AKTIF (hybrid).")
