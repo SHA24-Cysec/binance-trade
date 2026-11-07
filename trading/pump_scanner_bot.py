@@ -64,124 +64,6 @@ _shutdown_requested = False
 _shutdown_event = threading.Event()
 
 
-class HtfKlineCache:
-
-    def __init__(self, client, config: dict) -> None:
-        self._client = client
-        self._config = config
-        self._lock = threading.RLock()
-        self._cache: dict[str, tuple[int, list]] = {}
-        self._negative_cache: dict[str, tuple[float, str, bool]] = {}
-
-    def interval(self) -> str:
-        raise NotImplementedError
-
-    def window_bars(self) -> int:
-        raise NotImplementedError
-
-    def verdict(self, symbol: str, now_ms: int) -> dict:
-        raise NotImplementedError
-
-    def _interval_ms(self) -> int:
-        return int(strategy.INTERVAL_MINUTES[self.interval()]) * 60_000
-
-    def negative_cache_ttl_seconds(self) -> float:
-        return 0.0
-
-    def require_latest_closed_bar(self) -> bool:
-        return False
-
-    def _last_closed_open_time(self, now_ms: int) -> int:
-        step = self._interval_ms()
-        return ((int(now_ms) // step) - 1) * step
-
-    def _simpan_kegagalan(
-        self, symbol: str, reason: str, *, gagal: bool, ttl: float
-    ) -> None:
-        if ttl <= 0:
-            return
-        with self._lock:
-            self._negative_cache[symbol] = (
-                time.monotonic() + ttl,
-                str(reason),
-                bool(gagal),
-            )
-
-    def window_klines(self, symbol: str, now_ms: int) -> list:
-        jendela = self.window_bars()
-        if jendela <= 0:
-            return []
-        terakhir_tutup = self._last_closed_open_time(now_ms)
-        ttl_gagal = max(0.0, float(self.negative_cache_ttl_seconds()))
-        with self._lock:
-            tersimpan = self._cache.get(symbol)
-            if tersimpan is not None:
-                cache_cocok = (
-                    tersimpan[0] == terakhir_tutup
-                    if self.require_latest_closed_bar()
-                    else tersimpan[0] >= terakhir_tutup
-                )
-                if cache_cocok:
-                    return list(tersimpan[1])
-            negatif = self._negative_cache.get(symbol)
-            if negatif is not None:
-                sampai, alasan, gagal = negatif
-                if time.monotonic() < sampai:
-                    if gagal:
-                        raise RuntimeError(
-                            f"pengambilan candle {self.interval()} sebelumnya gagal "
-                            f"(retry ditahan sementara): {alasan}"
-                        )
-                    return []
-                self._negative_cache.pop(symbol, None)
-
-        try:
-            raw = self._client.get_klines(
-                symbol,
-                self.interval(),
-                limit=min(strategy.TREND_KLINE_LIMIT, jendela + 2),
-            )
-            closed = [
-                k
-                for k in strategy.parse_klines(raw or [])
-                if int(k.close_time) < int(now_ms)
-            ]
-        except Exception as exc:
-            self._simpan_kegagalan(symbol, str(exc), gagal=True, ttl=ttl_gagal)
-            raise
-
-        siap = closed[-(jendela + 1) :]
-        if not siap:
-            self._simpan_kegagalan(
-                symbol,
-                f"tidak ada candle {self.interval()} tertutup yang tersedia",
-                gagal=False,
-                ttl=ttl_gagal,
-            )
-            return []
-        if (
-            self.require_latest_closed_bar()
-            and int(siap[-1].open_time) != int(terakhir_tutup)
-        ):
-            alasan = (
-                f"candle {self.interval()} tertutup terbaru belum tersedia atau basi "
-                f"(open_time {int(siap[-1].open_time)}, seharusnya {int(terakhir_tutup)}; "
-                "ditolak demi keamanan)"
-            )
-            self._simpan_kegagalan(
-                symbol, alasan, gagal=True, ttl=ttl_gagal
-            )
-            raise RuntimeError(alasan)
-
-        with self._lock:
-            self._cache[symbol] = (int(siap[-1].open_time), siap)
-            self._negative_cache.pop(symbol, None)
-        return list(siap)
-
-    def provider(self, symbol: str) -> list:
-        return self.window_klines(symbol, state_mod.now_ms())
-
-
 DEFAULT_STATE = {
     "current_symbol": None,
     "entry_price": 0.0,
@@ -195,6 +77,7 @@ DEFAULT_STATE = {
     "trail_stop_price": 0.0,
     "peak_price": 0.0,
     "initial_sl_price": 0.0,
+    "atr_at_entry": 0.0,
     "sl_pct": 0.0,
     "tp_pct": 0.0,
     "exit_source": "",
@@ -584,20 +467,24 @@ def account_risk_gate(config: dict) -> "tuple[bool, str]":
 
 
 def describe_exit_mode(config: dict, state: dict) -> str:
-    buf = float(config.get("ENTRY_SL_BUFFER_PCT", 0.30) or 0.0)
-    min_rr = float(config.get("ENTRY_MIN_RR_RATIO", 2.0) or 2.0)
+    params = strategy.exit_atr_params(config)
+    min_rr = float(params["min_rr"])
     if state.get("current_symbol") and float(state.get("qty", 0) or 0) > 0:
         sl_p = float(state.get("sl_pct", 0) or 0)
         tp_p = float(state.get("tp_pct", 0) or 0)
         sl_px = float(state.get("sl_price", 0) or 0)
         tp_px = float(state.get("tp_price", 0) or 0)
+        atr_entry = float(state.get("atr_at_entry", 0) or 0)
         return (
-            f"Exit aturan entry aktif (SL={sl_px:.8g} [-{sl_p:.2f}%], "
-            f"TP={tp_px:.8g} [+{tp_p:.2f}%], buffer={buf:.2f}%, min R:R=1:{min_rr:.2f})"
+            f"Exit ATR aktif (SL={sl_px:.8g} [-{sl_p:.2f}%], "
+            f"TP={tp_px:.8g} [+{tp_p:.2f}%], ATR entry={atr_entry:.8g}, "
+            f"stop {params['sl_mult']:g}x ATR, trailing {params['trail_mult']:g}x ATR, "
+            f"min R:R=1:{min_rr:.2f})"
         )
     return (
-        f"Exit aturan entry (SL di bawah low candle sinyal +{buf:.2f}% buffer, "
-        f"TP dari R:R 1:{min_rr:.2f})"
+        f"Exit ATR (stop {params['sl_mult']:g}x ATR periode {params['period']}, "
+        f"target {params['tp_mult']:g}x ATR, trailing {params['trail_mult']:g}x ATR, "
+        f"breakeven {params['breakeven_mult']:g}x ATR, min R:R=1:{min_rr:.2f})"
     )
 
 
@@ -1132,6 +1019,7 @@ def reset_position(state: dict) -> None:
     state["trail_stop_price"] = 0.0
     state["peak_price"] = 0.0
     state["initial_sl_price"] = 0.0
+    state["atr_at_entry"] = 0.0
     state["sl_pct"] = 0.0
     state["tp_pct"] = 0.0
     state["exit_source"] = ""
@@ -4182,7 +4070,7 @@ def open_position(
     sl_distance = float(preview.get("sl_pct") or 0.0)
     if not (0.0 < sl_distance < 100.0):
         logger.critical(
-            "Entry %s dilewati: jarak SL struktural %.10g%% tidak masuk akal terhadap "
+            "Entry %s dilewati: jarak SL ATR %.10g%% tidak masuk akal terhadap "
             "harga acuan %.10g.",
             candidate.symbol,
             sl_distance,
@@ -4190,7 +4078,7 @@ def open_position(
         )
         return
     risk_quote = notional * sl_distance / 100.0
-    risk_basis = "notional x jarak SL struktural Confluence"
+    risk_basis = "notional x jarak SL ATR"
     exposure_pct = (notional / usdt_free * 100.0) if usdt_free > 0 else 0.0
     risk_pct_free = (risk_quote / usdt_free * 100.0) if usdt_free > 0 else 0.0
     log_risk = logger.info if risk_pct_free < 10.0 else logger.warning
@@ -4358,6 +4246,7 @@ def open_position(
     state["trail_stop_price"] = 0.0
     state["peak_price"] = fill_price
     state["initial_sl_price"] = float(filled_levels.get("sl_price") or 0.0)
+    state["atr_at_entry"] = float(filled_levels.get("atr") or 0.0)
     state["sl_pct"] = filled_levels["sl_pct"]
     state["tp_pct"] = filled_levels["tp_pct"]
     state["exit_source"] = filled_levels["source"]
@@ -4813,11 +4702,12 @@ def check_manual_control(
 
 
 _MAX_HOLD_CACHE: dict = {}
+_ATR_ENTRY_WARNED: set = set()
 _MAX_HOLD_WARNED: set = set()
 
 
 def _max_hold_cap_ms(config: dict) -> int:
-    interval = str(config.get("CONFIRM_INTERVAL", "5m") or "5m")
+    interval = str(config.get("CONFIRM_INTERVAL", "1h") or "1h")
     kunci = interval
     cached = _MAX_HOLD_CACHE.get(kunci)
     if cached is not None:
@@ -4841,7 +4731,7 @@ def _time_stop_due(config: dict, state: dict) -> bool:
     if entry_ms <= 0:
         return False
     bar_ms = strategy.interval_to_ms(
-        str(config.get("CONFIRM_INTERVAL", "5m") or "5m")
+        str(config.get("CONFIRM_INTERVAL", "1h") or "1h")
     )
     return strategy.time_stop_due(entry_ms, state_mod.now_ms(), cap_ms, bar_ms)
 
@@ -4912,66 +4802,52 @@ def manage_exit(
                 if state.get("_native_stop_exit_blocked"):
                     return
 
-    be_params = strategy.entry_breakeven_params(config)
-    risiko_be = float(state.get("initial_sl_price") or 0.0) or sl_price
-    if be_params["enabled"] and not state.get("be_active"):
-        pemicu = strategy.entry_breakeven_trigger(
-            entry, risiko_be, be_params["r_multiple"]
+    simbol_aktif = str(state.get("current_symbol") or "")
+    filters_aktif = filters_cache.get(simbol_aktif)
+    atr_entry = float(state.get("atr_at_entry") or 0.0)
+    if atr_entry > 0.0:
+        rencana = strategy.exit_advance(
+            state, current_price, config, atr=atr_entry
         )
-        if pemicu > entry and current_price >= pemicu:
-            level_be = strategy.entry_breakeven_price(
-                entry, risiko_be, be_params["r_multiple"], be_params["lock_pct"]
-            )
-            symbol_be = str(state.get("current_symbol") or "")
-            filters_be = filters_cache.get(symbol_be)
-            if filters_be is not None:
-                level_be = float(filters_be.round_price(level_be))
-            if 0.0 < level_be < current_price and level_be > sl_price:
-                state["be_active"] = True
-                state["be_stop_price"] = level_be
-                state["sl_price"] = level_be
-                state_mod.save_state(config["STATE_FILE"], state)
+        sl_target = float(rencana.get("sl_price") or 0.0)
+        if filters_aktif is not None and sl_target > 0.0:
+            sl_target = float(filters_aktif.round_price(sl_target))
+        if 0.0 < sl_target < current_price and sl_target > sl_price:
+            state["peak_price"] = float(rencana.get("peak_price") or 0.0)
+            for event, dari, ke in rencana.get("events") or []:
                 logger.info(
-                    "BREAKEVEN %s aktif: stop dipindah dari %.8f ke %.8f "
-                    "(pemicu %.2fxR di %.8f, harga sekarang %.8f).",
-                    symbol_be,
-                    sl_price,
-                    level_be,
-                    be_params["r_multiple"],
-                    pemicu,
+                    "%s %s: stop dipindah dari %.8f ke %.8f (ATR entry %.8f, "
+                    "harga sekarang %.8f).",
+                    event,
+                    simbol_aktif,
+                    float(dari),
+                    float(ke),
+                    atr_entry,
                     current_price,
                 )
-                sl_price = level_be
-    trail_params = strategy.exit_trailing_params(config)
-    puncak = max(float(state.get("peak_price") or 0.0), float(current_price))
-    if trail_params["enabled"] and puncak > 0.0:
-        state["peak_price"] = puncak
-        pemicu_trail = strategy.exit_trailing_start_price(
-            entry, float(state.get("initial_sl_price") or sl_price), trail_params["start_r"]
-        )
-        if pemicu_trail > 0.0 and puncak >= pemicu_trail:
-            kandidat = strategy.exit_trailing_stop_price(puncak, trail_params["pct"])
-            if 0.0 < kandidat < current_price and kandidat > sl_price:
-                simbol_trail = str(state.get("current_symbol") or "")
-                filters_trail = filters_cache.get(simbol_trail)
-                if filters_trail is not None:
-                    kandidat = float(filters_trail.round_price(kandidat))
-                if 0.0 < kandidat < current_price and kandidat > sl_price:
-                    state["trail_active"] = True
-                    state["trail_stop_price"] = kandidat
-                    state["sl_price"] = kandidat
-                    state_mod.save_state(config["STATE_FILE"], state)
-                    logger.info(
-                        "TRAILING %s: stop dipindah dari %.8f ke %.8f "
-                        "(puncak %.8f, jarak %.2f%%, harga sekarang %.8f).",
-                        simbol_trail,
-                        sl_price,
-                        kandidat,
-                        puncak,
-                        trail_params["pct"],
-                        current_price,
-                    )
-                    sl_price = kandidat
+            if rencana.get("trail_active"):
+                state["trail_active"] = True
+                state["trail_stop_price"] = sl_target
+            if rencana.get("be_active"):
+                state["be_active"] = True
+                state["be_stop_price"] = float(rencana.get("be_stop_price") or 0.0)
+            state["sl_price"] = sl_target
+            state_mod.save_state(config["STATE_FILE"], state)
+            sl_price = sl_target
+        else:
+            puncak = float(rencana.get("peak_price") or 0.0)
+            if puncak > float(state.get("peak_price") or 0.0):
+                state["peak_price"] = puncak
+                state_mod.save_state(config["STATE_FILE"], state)
+    else:
+        kunci_atr = (simbol_aktif, "ATR_ENTRY_KOSONG")
+        if kunci_atr not in _ATR_ENTRY_WARNED:
+            _ATR_ENTRY_WARNED.add(kunci_atr)
+            logger.warning(
+                "ATR entry %s tidak tersimpan sehingga trailing dan breakeven ATR "
+                "dilewati. Stop awal tetap aktif, posisi baru akan memakai ATR.",
+                simbol_aktif,
+            )
     if _time_stop_due(config, state):
         close_position(
             client,
@@ -5103,7 +4979,7 @@ def run(
     if have_bars < need_setup:
         logger.warning(
             "CONFIRM_LOOKBACK_BARS=%d lebih kecil dari %d candle yang dibutuhkan "
-            "gerbang entry M5. Bot tetap mengambil %d candle per konfirmasi agar deteksi "
+            "filter momentum. Bot tetap mengambil %d candle per konfirmasi agar deteksi "
             "tidak selalu gagal, tetapi perbaiki nilai config ini supaya backtest dan live "
             "benar-benar memakai angka yang sama.",
             have_bars,
@@ -5111,20 +4987,36 @@ def run(
             strategy.confirm_window_bars(config),
         )
     if strategy.entry_rule_enabled(config):
+        mom_bot = strategy.entry_momentum_params(config)
+        atr_bot = strategy.exit_atr_params(config)
+        vol_bot = strategy.volume_rise_params(config)
         logger.info(
-            "Aturan entry AKTIF: %d candle bullish beruntun di timeframe %s "
-            "(close di atas open dan di atas close sebelumnya), SL di bawah low candle "
-            "sinyal minus %.2f%%, TP dari R:R 1:%.2f, batas jarak SL %.2f%%.",
-            strategy.entry_bull_candles(config),
-            config.get("CONFIRM_INTERVAL", "5m"),
-            float(config.get("ENTRY_SL_BUFFER_PCT", 0.30) or 0.0),
-            float(config.get("ENTRY_MIN_RR_RATIO", 2.0) or 2.0),
-            float(config.get("ENTRY_MAX_SL_PCT", 3.0) or 0.0),
+            "Filter momentum AKTIF di timeframe %s: close candle terakhir harus "
+            "menembus high %d candle sebelumnya, body minimal %.2f x ATR, volume "
+            "minimal %.2f x rata-rata %d candle. Stop %.2f x ATR periode %d, target "
+            "%.2f x ATR, trailing %.2f x ATR, batas jarak stop %.2f%%. "
+            "Syarat turnover 24 jam %s.",
+            config.get("CONFIRM_INTERVAL", "1h"),
+            int(mom_bot["lookback"]),
+            float(mom_bot["body_atr_mult"]),
+            float(mom_bot["volume_mult"]),
+            int(mom_bot["volume_lookback"]),
+            float(atr_bot["sl_mult"]),
+            int(atr_bot["period"]),
+            float(atr_bot["tp_mult"]),
+            float(atr_bot["trail_mult"]),
+            float(atr_bot["max_sl_pct"]),
+            (
+                "AKTIF, turnover 24 jam minimal %.2f x rata-rata %d hari"
+                % (float(vol_bot["mult"]), int(vol_bot["days"]))
+                if vol_bot["enabled"]
+                else "NONAKTIF"
+            ),
         )
     else:
         logger.info(
-            "Aturan entry NONAKTIF: kandidat yang lolos gerbang 24 jam dan proteksi "
-            "orderbook langsung memenuhi syarat entry."
+            "Aturan entry NONAKTIF: kandidat yang lolos gerbang 24 jam, syarat "
+            "turnover, dan proteksi orderbook langsung memenuhi syarat entry."
         )
     logger.info("=" * 70)
 
@@ -5440,7 +5332,7 @@ def run(
                         )
                     try:
                         batas_konfirmasi = strategy.last_closed_bar_close_ms(
-                            str(scan_config.get("CONFIRM_INTERVAL", "5m")),
+                            str(scan_config.get("CONFIRM_INTERVAL", "1h")),
                             state_mod.now_ms(),
                         )
                     except (KeyError, ValueError):

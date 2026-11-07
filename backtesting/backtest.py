@@ -11,6 +11,7 @@ from strategy import entry_rule
 from strategy import indicators as strategy
 from market import market_scanner as scanner
 from backtesting import parity
+from backtesting import stop_stats
 
 MS_PER_MIN = 60_000
 MS_PER_DAY = 24 * 60 * MS_PER_MIN
@@ -204,7 +205,7 @@ def run_backtest(
     warmup_bars: int,
     progress_cb: Optional[Callable[[float], None]] = None,
 ) -> BacktestResult:
-    interval = config.get("CONFIRM_INTERVAL", "5m")
+    interval = config.get("CONFIRM_INTERVAL", "1h")
     window = bars_per_day(interval)
     stats = compute_rolling_24h_stats(klines, window)
 
@@ -298,7 +299,7 @@ def run_backtest(
                 and st is not None
                 and st["vol24h"] >= min_vol
                 and candle.open_time >= next_entry_allowed_at
-                and scanner.market_gate_ok_at(st["vol24h"], config)
+                and scanner.market_gate_ok_at(st["pct24h"], st["vol24h"], config)
             ):
                 window_klines = klines[max(0, i - lookback + 1) : i + 1]
                 if strategy.entry_rule_enabled(config):
@@ -441,10 +442,14 @@ def run_backtest(
             f"({max_chase_pct:g}%), sama seperti bot live."
         )
     if entry_rule_skips:
+        mom_bt = strategy.entry_momentum_params(config)
+        atr_bt = strategy.exit_atr_params(config)
         warnings.append(
-            f"{entry_rule_skips} dari {entry_rule_scans} sinyal dilewati aturan entry "
-            f"({strategy.entry_bull_candles(config)} candle bullish beruntun di {interval}, "
-            "SL di bawah low candle sinyal, atau jarak SL melebihi batas)."
+            f"{entry_rule_skips} dari {entry_rule_scans} sinyal dilewati filter momentum "
+            f"({interval}: close harus menembus high {mom_bt['lookback']} candle, body "
+            f"minimal {mom_bt['body_atr_mult']:g} x ATR, volume minimal "
+            f"{mom_bt['volume_mult']:g} x rata-rata, lalu stop "
+            f"{atr_bt['sl_mult']:g} x ATR harus muat dalam batas jarak stop)."
         )
     risk_summary = controls.summary()
     if risk_summary["kill_switch_triggers"] > 0:
@@ -606,6 +611,12 @@ def summarize(result: BacktestResult) -> dict:
         "avg_hold_minutes": avg_hold,
         "reason_counts": reason_counts,
         "by_reason": by_reason,
+        "stop_distance_pct": stop_stats.distribusi_jarak_stop(
+            trades,
+            max_sl_pct=stop_stats.angka_atau_none(
+                (result.params or {}).get("EXIT_ATR_MAX_SL_PCT")
+            ),
+        ),
         "equity_curve": equity_curve,
         "initial_equity": initial,
         "realized_equity": realized_equity,
@@ -638,15 +649,26 @@ def _cast_bool(v) -> bool:
 
 OVERRIDE_CASTERS = {
     "MIN_QUOTE_VOLUME_USDT_24H": float,
+    "GAINER_MIN_CHANGE_PCT": float,
+    "GAINER_MAX_CHANGE_PCT": float,
+    "GAINER_VOLUME_FILTER_ENABLED": _cast_bool,
+    "GAINER_VOLUME_RISE_MULT": float,
+    "GAINER_VOLUME_AVG_DAYS": int,
     "CONFIRM_INTERVAL": str,
     "CONFIRM_LOOKBACK_BARS": int,
     "ENTRY_RULE_ENABLED": _cast_bool,
-    "ENTRY_BULL_CANDLES": int,
-    "ENTRY_SL_ANCHOR": str,
-    "ENTRY_SL_BUFFER_PCT": float,
+    "MOMENTUM_BREAKOUT_LOOKBACK": int,
+    "MOMENTUM_BODY_ATR_MULT": float,
+    "MOMENTUM_VOLUME_MULT": float,
+    "MOMENTUM_VOLUME_LOOKBACK": int,
+    "ENTRY_ATR_PERIOD": int,
+    "EXIT_ATR_SL_MULT": float,
+    "EXIT_ATR_TP_MULT": float,
+    "EXIT_ATR_TRAIL_MULT": float,
+    "EXIT_ATR_BREAKEVEN_MULT": float,
+    "EXIT_ATR_MAX_SL_PCT": float,
+    "EXIT_MAX_HOLD_HOURS": float,
     "ENTRY_MIN_RR_RATIO": float,
-    "ENTRY_MAX_SL_PCT": float,
-    "EXIT_TRAILING_PCT": float,
     "TAKER_FEE_PCT": float,
     "USE_BNB_FEE_DISCOUNT": _cast_bool,
     "USE_RISK_PERCENT": _cast_bool,
@@ -716,20 +738,28 @@ def _rentang_schema(key: str, lo: float, hi: float) -> tuple:
 
 
 def validate_params(config: dict) -> None:
-    interval = str(config.get("CONFIRM_INTERVAL", "5m") or "5m")
+    interval = str(config.get("CONFIRM_INTERVAL", "1h") or "1h")
     if interval not in INTERVAL_MINUTES:
         raise BacktestError(
             f"Interval '{interval}' tidak didukung. Pilihan: {', '.join(INTERVAL_MINUTES)}"
         )
     checks = [
-        ("ENTRY_SL_BUFFER_PCT", 0.0, 10.0),
         ("ENTRY_MIN_RR_RATIO", 0.1, 20.0),
-        ("ENTRY_MAX_SL_PCT", 0.0, 50.0),
-        (
-            "EXIT_TRAILING_PCT",
-            entry_rule.EXIT_TRAILING_MIN_PCT,
-            entry_rule.EXIT_TRAILING_MAX_PCT,
-        ),
+        ("GAINER_MIN_CHANGE_PCT", -100.0, 100000.0),
+        ("GAINER_MAX_CHANGE_PCT", 0.0, 100000.0),
+        ("GAINER_VOLUME_RISE_MULT", 0.0, 20.0),
+        ("GAINER_VOLUME_AVG_DAYS", 1, 14),
+        ("MOMENTUM_BREAKOUT_LOOKBACK", 1, 20),
+        ("MOMENTUM_BODY_ATR_MULT", 0.0, 5.0),
+        ("MOMENTUM_VOLUME_MULT", 0.0, 20.0),
+        ("MOMENTUM_VOLUME_LOOKBACK", 3, 120),
+        ("ENTRY_ATR_PERIOD", 2, 200),
+        ("EXIT_ATR_SL_MULT", 0.1, 20.0),
+        ("EXIT_ATR_TP_MULT", 0.1, 50.0),
+        ("EXIT_ATR_TRAIL_MULT", 0.1, 20.0),
+        ("EXIT_ATR_BREAKEVEN_MULT", 0.0, 20.0),
+        ("EXIT_ATR_MAX_SL_PCT", 0.0, 50.0),
+        ("EXIT_MAX_HOLD_HOURS", 0.0, entry_rule.MAX_HOLD_HOURS_LIMIT),
     ]
     for key, lo, hi in checks:
         lo, hi = _rentang_schema(key, lo, hi)
@@ -739,18 +769,7 @@ def validate_params(config: dict) -> None:
                 f"Parameter '{key}'={val} di luar rentang wajar ({lo:g}..{hi:g})."
             )
 
-    bull = config.get("ENTRY_BULL_CANDLES")
-    if bull is None or not (2 <= int(bull) <= 10):
-        raise BacktestError(
-            f"Parameter 'ENTRY_BULL_CANDLES'={bull} harus di antara 2 dan 10."
-        )
-    anchor = str(config.get("ENTRY_SL_ANCHOR") or "").strip().upper()
-    if anchor not in ("SIGNAL", "SEQUENCE"):
-        raise BacktestError(
-            f"Parameter 'ENTRY_SL_ANCHOR' hanya menerima SIGNAL atau SEQUENCE, bukan {anchor!r}."
-        )
-
-    interval = config.get("CONFIRM_INTERVAL", "5m")
+    interval = config.get("CONFIRM_INTERVAL", "1h")
     if interval not in INTERVAL_MINUTES:
         raise BacktestError(f"Interval '{interval}' tidak dikenal.")
 
@@ -787,7 +806,7 @@ def execute_backtest(
     config["_symbol"] = symbol
     validate_params(config)
 
-    interval = config.get("CONFIRM_INTERVAL", "5m")
+    interval = config.get("CONFIRM_INTERVAL", "1h")
     bar_minutes = INTERVAL_MINUTES[interval]
     window_24h = bars_per_day(interval)
     warmup_bars = max(
@@ -912,7 +931,7 @@ def execute_backtest(
 
     spread_pct, slip_pct, delay_bars = entry_execution_params(config)
     assumptions = [
-        "Simulasi 1 koin mengikuti aturan entry candle bullish beruntun dan logika exit yang sama dengan bot.",
+        "Simulasi 1 koin mengikuti aturan momentum H1 yang sama dengan bot: penembusan high candle sebelumnya, kekuatan body terhadap ATR, dan lonjakan volume. Logika exit juga memakai modul ATR yang sama.",
         (
             f"Eksekusi entry menunggu {delay_bars} bar setelah sinyal lalu membeli pada harga open + "
             f"setengah spread ({spread_pct / 2:.3f}%) + slippage ({slippage_label(slip_pct)}%). "
@@ -971,19 +990,36 @@ def print_report(data: dict) -> None:
     )
     print("-" * 72)
     exit_info = (
-        f"SL buffer={p.get('ENTRY_SL_BUFFER_PCT', 0.3)}% "
-        f"Min R:R=1:{p.get('ENTRY_MIN_RR_RATIO', 2.0)} "
-        f"MaxHold={strategy.exit_fixed_params()['max_hold_hours']:g}h"
+        f"SL {p.get('EXIT_ATR_SL_MULT', 1.5)}x ATR, "
+        f"TP {p.get('EXIT_ATR_TP_MULT', 3.0)}x ATR, "
+        f"trailing {p.get('EXIT_ATR_TRAIL_MULT', 2.0)}x ATR, "
+        f"breakeven {p.get('EXIT_ATR_BREAKEVEN_MULT', 1.0)}x ATR, "
+        f"batas stop {p.get('EXIT_ATR_MAX_SL_PCT', 5.0)}%, "
+        f"Min R:R=1:{p.get('ENTRY_MIN_RR_RATIO', 2.0)}, "
+        f"MaxHold={p.get('EXIT_MAX_HOLD_HOURS', 24.0):g}h"
     )
     entry_info = (
-        f"{p.get('ENTRY_BULL_CANDLES', 3)} candle bullish di {p.get('CONFIRM_INTERVAL', '5m')} "
-        f"(SL anchor {p.get('ENTRY_SL_ANCHOR', 'SIGNAL')})"
+        f"momentum {p.get('CONFIRM_INTERVAL', '1h')}: tembus high "
+        f"{p.get('MOMENTUM_BREAKOUT_LOOKBACK', 1)} candle, body "
+        f"{p.get('MOMENTUM_BODY_ATR_MULT', 0.5)}x ATR, volume "
+        f"{p.get('MOMENTUM_VOLUME_MULT', 1.5)}x rata-rata"
         if p.get("ENTRY_RULE_ENABLED", True)
         else "OFF"
+    )
+    gainer_info = (
+        f"gainer naik >= {p.get('GAINER_MIN_CHANGE_PCT', 3.0)}% 24 jam, "
+        f"turnover >= {p.get('MIN_QUOTE_VOLUME_USDT_24H', 0):,.0f} USDT, "
+        + (
+            f"turnover naik >= {p.get('GAINER_VOLUME_RISE_MULT', 1.2)}x rata-rata "
+            f"{p.get('GAINER_VOLUME_AVG_DAYS', 3)} hari"
+            if p.get("GAINER_VOLUME_FILTER_ENABLED", True)
+            else "syarat kenaikan turnover OFF"
+        )
     )
     print(
         f"Parameter utama : Entry={entry_info}  |  Exit: {exit_info}"
     )
+    print(f"Semesta koin    : {gainer_info}")
     print("-" * 72)
     print(f"Total trade     : {s['total_trades']}")
     if s["total_trades"] == 0:
@@ -1085,22 +1121,70 @@ def main():
         help="Override CONFIRM_INTERVAL (1m/3m/5m/15m/1h)",
     )
     parser.add_argument(
-        "--sl-buffer",
+        "--atr-sl",
         type=float,
         default=None,
-        help="Override ENTRY_SL_BUFFER_PCT",
+        help="Override EXIT_ATR_SL_MULT, jarak stop dalam kelipatan ATR.",
+    )
+    parser.add_argument(
+        "--atr-tp",
+        type=float,
+        default=None,
+        help="Override EXIT_ATR_TP_MULT, jarak target dalam kelipatan ATR.",
+    )
+    parser.add_argument(
+        "--atr-trail",
+        type=float,
+        default=None,
+        help="Override EXIT_ATR_TRAIL_MULT, jarak trailing dalam kelipatan ATR.",
+    )
+    parser.add_argument(
+        "--atr-period",
+        type=int,
+        default=None,
+        help="Override ENTRY_ATR_PERIOD.",
+    )
+    parser.add_argument(
+        "--momentum-body",
+        type=float,
+        default=None,
+        help="Override MOMENTUM_BODY_ATR_MULT, kekuatan body minimal.",
+    )
+    parser.add_argument(
+        "--momentum-volume",
+        type=float,
+        default=None,
+        help="Override MOMENTUM_VOLUME_MULT, lonjakan volume minimal.",
+    )
+    parser.add_argument(
+        "--gainer-min",
+        type=float,
+        default=None,
+        help="Override GAINER_MIN_CHANGE_PCT, kenaikan 24 jam minimum.",
     )
     parser.add_argument(
         "--min-rr",
         type=float,
         default=None,
-        help="Override ENTRY_MIN_RR_RATIO",
+        help="Override ENTRY_MIN_RR_RATIO.",
     )
     parser.add_argument(
-        "--bull-candles",
+        "--volume-rise",
+        type=float,
+        default=None,
+        help="Override GAINER_VOLUME_RISE_MULT, kenaikan turnover 24 jam minimal.",
+    )
+    parser.add_argument(
+        "--volume-days",
         type=int,
         default=None,
-        help="Override ENTRY_BULL_CANDLES (2-10)",
+        help="Override GAINER_VOLUME_AVG_DAYS, jumlah hari pembanding turnover.",
+    )
+    parser.add_argument(
+        "--max-hold",
+        type=float,
+        default=None,
+        help="Override EXIT_MAX_HOLD_HOURS, batas tahan posisi dalam jam.",
     )
     parser.add_argument(
         "--grid",
@@ -1152,12 +1236,28 @@ def main():
     overrides = {}
     if args.interval:
         overrides["CONFIRM_INTERVAL"] = args.interval
-    if args.sl_buffer is not None:
-        overrides["ENTRY_SL_BUFFER_PCT"] = args.sl_buffer
+    if args.atr_sl is not None:
+        overrides["EXIT_ATR_SL_MULT"] = args.atr_sl
+    if args.atr_tp is not None:
+        overrides["EXIT_ATR_TP_MULT"] = args.atr_tp
+    if args.atr_trail is not None:
+        overrides["EXIT_ATR_TRAIL_MULT"] = args.atr_trail
+    if args.atr_period is not None:
+        overrides["ENTRY_ATR_PERIOD"] = args.atr_period
+    if args.momentum_body is not None:
+        overrides["MOMENTUM_BODY_ATR_MULT"] = args.momentum_body
+    if args.momentum_volume is not None:
+        overrides["MOMENTUM_VOLUME_MULT"] = args.momentum_volume
+    if args.gainer_min is not None:
+        overrides["GAINER_MIN_CHANGE_PCT"] = args.gainer_min
     if args.min_rr is not None:
         overrides["ENTRY_MIN_RR_RATIO"] = args.min_rr
-    if args.bull_candles is not None:
-        overrides["ENTRY_BULL_CANDLES"] = args.bull_candles
+    if args.volume_rise is not None:
+        overrides["GAINER_VOLUME_RISE_MULT"] = args.volume_rise
+    if args.volume_days is not None:
+        overrides["GAINER_VOLUME_AVG_DAYS"] = args.volume_days
+    if args.max_hold is not None:
+        overrides["EXIT_MAX_HOLD_HOURS"] = args.max_hold
 
     client = BinanceSpotClient(
         "",

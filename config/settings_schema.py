@@ -23,6 +23,20 @@ VALID_MODES = ("PAPER", "LIVE")
 
 _SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,40}$")
 _ASSET_RE = re.compile(r"^[A-Z0-9]{2,12}$")
+_INTERVAL_MENIT = {
+    "1m": 1,
+    "3m": 3,
+    "5m": 5,
+    "15m": 15,
+    "30m": 30,
+    "1h": 60,
+    "2h": 120,
+    "4h": 240,
+    "6h": 360,
+    "8h": 480,
+    "12h": 720,
+    "1d": 1440,
+}
 
 
 def _field(
@@ -232,69 +246,124 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "MIN_QUOTE_VOLUME_USDT_24H": _field(
         "Scan",
         "Minimum volume kuotasi",
-        "Volume 24 jam minimum.",
+        "Ambang likuiditas 24 jam. Koin yang turnover-nya di bawah nilai ini tidak masuk daftar pemantauan walau kenaikannya besar, supaya bot tidak masuk ke pasar yang sepi dan licin.",
         "float",
         minimum=0,
         maximum=1e15,
         unit="USDT",
     ),
-    "MARKET_DATA_INTERVAL": _field(
-        "Scan",
-        "Interval data pasar",
-        "Interval candle yang digunakan untuk monitoring pasar.",
-        "str",
-        editor="select",
-        options=[
-            "1m",
-            "3m",
-            "5m",
-            "15m",
-            "30m",
-            "1h",
-            "2h",
-            "4h",
-            "6h",
-            "8h",
-            "12h",
-            "1d",
-        ],
-    ),
-    "ENTRY_SL_BUFFER_PCT": _field(
-        "Aturan Entry",
-        "Buffer SL di bawah low sinyal",
-        "Jarak tambahan di bawah low candle sinyal untuk menempatkan Stop Loss. Nilai kecil seperti 0.3 persen menghindari stop yang menempel tepat di low.",
+    "GAINER_MIN_CHANGE_PCT": _field(
+        "Pemilihan Koin",
+        "Kenaikan 24 jam minimum",
+        "Batas bawah perubahan harga 24 jam agar koin masuk peringkat top gainer. Isi 0 bila semua koin boleh masuk.",
         "float",
-        minimum=0.0,
-        maximum=10.0,
+        minimum=-100.0,
+        maximum=100000.0,
         unit="%",
     ),
+    "GAINER_MAX_CHANGE_PCT": _field(
+        "Pemilihan Koin",
+        "Kenaikan 24 jam maksimum",
+        "Batas atas perubahan harga 24 jam. Berguna untuk menghindari koin yang sudah terbang jauh sebelum bot memeriksa momentum. 0 berarti tanpa batas.",
+        "float",
+        minimum=0.0,
+        maximum=100000.0,
+        unit="%",
+    ),
+    "GAINER_VOLUME_FILTER_ENABLED": _field(
+        "Pemilihan Koin",
+        "Syarat kenaikan volume 24 jam",
+        "Bila aktif, koin hanya masuk peringkat kalau turnover 24 jam terakhir lebih tinggi dari rata-rata beberapa hari sebelumnya. Ini yang menyingkirkan koin yang naik harga tetapi minat pasarnya sedang mengering.",
+        "bool",
+    ),
+    "GAINER_VOLUME_RISE_MULT": _field(
+        "Pemilihan Koin",
+        "Kenaikan turnover minimum",
+        "Turnover 24 jam terakhir minimal sekian kali rata-rata turnover 24 jam beberapa hari sebelumnya. Nilai 1.2 berarti volume harus naik minimal dua puluh persen dari kebiasaannya.",
+        "float",
+        minimum=0.0,
+        maximum=20.0,
+        unit="x",
+    ),
+    "GAINER_VOLUME_AVG_DAYS": _field(
+        "Pemilihan Koin",
+        "Rata-rata turnover (hari)",
+        "Berapa hari sebelumnya dipakai sebagai pembanding turnover 24 jam. Nilai 3 berarti volume hari ini dibanding rata-rata tiga hari sebelumnya.",
+        "int",
+        minimum=1,
+        maximum=14,
+        unit="hari",
+    ),
+    "EXIT_MAX_HOLD_HOURS": _field(
+        "Exit ATR",
+        "Batas tahan posisi",
+        "Umur maksimum posisi sebelum ditutup paksa. 0 berarti tanpa batas, sehingga posisi hanya ditutup oleh stop, target, breakeven, atau trailing ATR.",
+        "float",
+        minimum=0.0,
+        maximum=720.0,
+        unit="jam",
+    ),
     "ENTRY_MIN_RR_RATIO": _field(
-        "Aturan Entry",
+        "Exit ATR",
         "Minimum Risk:Reward",
-        "Rasio imbal hasil terhadap risiko. Take Profit dihitung dari jarak Stop Loss dikali nilai ini, jadi tidak perlu menebak target harga.",
+        "Batas bawah rasio imbal hasil terhadap risiko. Nilai ini dibandingkan dengan hasil bagi EXIT_ATR_TP_MULT dibagi EXIT_ATR_SL_MULT. Setup ditolak bila rasio ATR yang dipakai lebih kecil dari angka ini.",
         "float",
         minimum=0.1,
         maximum=20.0,
         unit="x",
     ),
-    "ENTRY_MAX_SL_PCT": _field(
-        "Aturan Entry",
-        "Batas jarak SL",
-        "Setup ditolak bila jarak Stop Loss melebihi persen ini terhadap harga entry. Berguna agar scalping tidak masuk pada candle yang terlalu panjang. 0 berarti tanpa batas.",
-        "float",
-        minimum=0.0,
-        maximum=50.0,
-        unit="%",
+    "ENTRY_ATR_PERIOD": _field(
+        "Exit ATR",
+        "Periode ATR",
+        "Jumlah candle untuk menghitung Average True Range pada timeframe momentum. ATR inilah yang menjadi satuan jarak stop, target, dan trailing.",
+        "int",
+        minimum=2,
+        maximum=200,
+        unit="candle",
     ),
-    "EXIT_TRAILING_PCT": _field(
-        "SL dan TP",
-        "Jarak trailing stop",
-        "Stop dinaikkan mengikuti harga tertinggi, selalu sejauh persen ini di bawah "
-        "puncak yang sudah dicapai. Trailing aktif setelah untung mencapai satu kali "
-        "jarak stop, dan stop tidak pernah turun.",
+    "EXIT_ATR_SL_MULT": _field(
+        "Exit ATR",
+        "Stop Loss (x ATR)",
+        "Jarak stop awal dari harga entry, dihitung sebagai sekian kali ATR. Nilai 1.5 berarti stop berada 1.5 ATR di bawah entry.",
         "float",
         minimum=0.1,
         maximum=20.0,
+        unit="x ATR",
+    ),
+    "EXIT_ATR_TP_MULT": _field(
+        "Exit ATR",
+        "Take Profit (x ATR)",
+        "Jarak target profit dari harga entry dalam kelipatan ATR. Rasio TP dibagi SL menjadi R:R efektif strategi.",
+        "float",
+        minimum=0.1,
+        maximum=50.0,
+        unit="x ATR",
+    ),
+    "EXIT_ATR_TRAIL_MULT": _field(
+        "Exit ATR",
+        "Trailing stop (x ATR)",
+        "Setelah profit mencapai satu kali jarak stop, stop dinaikkan mengikuti harga tertinggi dan selalu berjarak sekian kali ATR di bawah puncak. Stop tidak pernah diturunkan.",
+        "float",
+        minimum=0.1,
+        maximum=20.0,
+        unit="x ATR",
+    ),
+    "EXIT_ATR_BREAKEVEN_MULT": _field(
+        "Exit ATR",
+        "Breakeven (x ATR)",
+        "Profit minimal dalam kelipatan ATR sebelum stop dipindah ke harga entry. Isi 0 untuk mematikan breakeven.",
+        "float",
+        minimum=0.0,
+        maximum=20.0,
+        unit="x ATR",
+    ),
+    "EXIT_ATR_MAX_SL_PCT": _field(
+        "Exit ATR",
+        "Batas jarak stop",
+        "Setup ditolak bila 1.5 ATR ternyata lebih lebar dari persen ini terhadap harga entry, tanda volatilitas terlalu besar untuk ukuran posisi saat ini. 0 berarti tanpa batas.",
+        "float",
+        minimum=0.0,
+        maximum=50.0,
         unit="%",
     ),
     "EXTRA_EXCLUDE_SYMBOLS": _field(
@@ -347,7 +416,7 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "USE_NATIVE_OCO": _field(
         "SL dan TP",
         "OCO exchange-side LIVE",
-        "Pasang OCO SELL native berisi TP limit (BSL $$$) dan SL limit struktural pada posisi yang terdeteksi.",
+        "Pasang OCO SELL native berisi TP limit dan SL limit hasil hitungan ATR pada posisi yang terdeteksi.",
         "bool",
         dangerous=True,
     ),
@@ -550,9 +619,9 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         unit="%",
     ),
     "CONFIRM_INTERVAL": _field(
-        "Scan",
-        "Interval konfirmasi",
-        "Timeframe candle yang dipakai aturan entry. Bot menilai rangkaian candle bullish pada timeframe ini, jadi pilihan timeframe menentukan frekuensi entry dan rata-rata durasi posisi.",
+        "Momentum H1",
+        "Interval momentum",
+        "Timeframe candle untuk filter momentum entry. Default 1h karena strategi ini membaca momentum H1. Mengubah ke 15m membuat sinyal lebih sering tetapi jauh lebih berisik.",
         "str",
         editor="select",
         options=[
@@ -571,9 +640,9 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         ],
     ),
     "CONFIRM_LOOKBACK_BARS": _field(
-        "Scan",
-        "Jumlah candle konfirmasi",
-        "Jumlah candle tertutup untuk pemicu eksekusi The Confluence Code. Limit endpoint klines 1000 per panggilan.",
+        "Momentum H1",
+        "Jumlah candle yang diunduh",
+        "Banyaknya candle terakhir yang diambil untuk menilai momentum dan ATR. Harus lebih besar dari periode ATR dan panjang rata-rata volume. Limit endpoint klines Binance 1000 per panggilan.",
         "int",
         minimum=15,
         maximum=1000,
@@ -768,27 +837,46 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         maximum=1000,
     ),
     "ENTRY_RULE_ENABLED": _field(
-        "Aturan Entry",
-        "Aktifkan aturan entry",
-        "Gerbang entry utama: bot hanya masuk setelah sejumlah candle bullish beruntun tertutup. Jika nonaktif, kandidat yang lolos seleksi 24 jam dan proteksi orderbook langsung memenuhi syarat entry.",
+        "Momentum H1",
+        "Aktifkan filter momentum",
+        "Gerbang entry utama. Saat aktif, bot hanya masuk bila candle H1 terakhir menembus high candle sebelumnya, body-nya cukup besar dibanding ATR, dan volumenya melonjak. Jika nonaktif, kandidat yang lolos peringkat gainer langsung diproses ke proteksi orderbook.",
         "bool",
     ),
-    "ENTRY_BULL_CANDLES": _field(
-        "Aturan Entry",
-        "Jumlah candle bullish beruntun",
-        "Berapa candle bullish berurutan yang wajib tertutup sebelum entry. Satu candle dihitung bullish bila close di atas open dan close di atas close candle sebelumnya.",
+    "MOMENTUM_BREAKOUT_LOOKBACK": _field(
+        "Momentum H1",
+        "Lookback breakout",
+        "Berapa candle sebelumnya yang high-nya harus ditembus oleh close candle terakhir. Nilai 1 berarti cukup menembus high satu candle sebelumnya.",
         "int",
-        minimum=2,
-        maximum=10,
+        minimum=1,
+        maximum=20,
         unit="candle",
     ),
-    "ENTRY_SL_ANCHOR": _field(
-        "Aturan Entry",
-        "Titik acuan Stop Loss",
-        "SIGNAL memakai low candle sinyal terakhir. SEQUENCE memakai low terendah dari seluruh rangkaian candle bullish, sehingga stop lebih longgar tetapi lebih jarang tersapu.",
-        "str",
-        editor="select",
-        options=["SIGNAL", "SEQUENCE"],
+    "MOMENTUM_BODY_ATR_MULT": _field(
+        "Momentum H1",
+        "Kekuatan body (x ATR)",
+        "Body candle momentum minimal sebesar sekian kali ATR. Menyaring candle yang naik tipis sehingga breakout palsu lebih jarang lolos. 0 berarti tanpa syarat body.",
+        "float",
+        minimum=0.0,
+        maximum=5.0,
+        unit="x ATR",
+    ),
+    "MOMENTUM_VOLUME_MULT": _field(
+        "Momentum H1",
+        "Lonjakan volume (x rata-rata)",
+        "Volume candle momentum minimal sekian kali rata-rata volume sejumlah candle sebelumnya. Ini yang memisahkan breakout dengan partisipasi nyata dari pergerakan tipis. 0 berarti tanpa syarat volume.",
+        "float",
+        minimum=0.0,
+        maximum=20.0,
+        unit="x",
+    ),
+    "MOMENTUM_VOLUME_LOOKBACK": _field(
+        "Momentum H1",
+        "Panjang rata-rata volume",
+        "Berapa candle sebelumnya dipakai sebagai pembanding volume normal.",
+        "int",
+        minimum=3,
+        maximum=120,
+        unit="candle",
     ),
     "USE_RISK_PERCENT": _field(
         "Ukuran Posisi",
@@ -921,6 +1009,12 @@ def _read_doc_unlocked() -> tuple[dict, list[str]]:
 
 REMOVED_PARAMETERS = frozenset(
     {
+        "ENTRY_BULL_CANDLES",
+        "ENTRY_SL_ANCHOR",
+        "MARKET_DATA_INTERVAL",
+        "ENTRY_SL_BUFFER_PCT",
+        "ENTRY_MAX_SL_PCT",
+        "EXIT_TRAILING_PCT",
         "BTC_FILTER_ENABLED",
         "BTC_MAX_DROP_PCT",
         "BTC_LOOKBACK_BARS",
@@ -1328,25 +1422,49 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
             )
 
     if _flag_untuk_relasi(cfg, "ENTRY_RULE_ENABLED", True):
-        bull = _angka_untuk_relasi(cfg, "ENTRY_BULL_CANDLES")
-        if bull is not None:
-            butuh = max(15, int(bull) + 2)
-            lookback = _angka_untuk_relasi(cfg, "CONFIRM_LOOKBACK_BARS")
-            if lookback is not None and lookback < butuh:
-                keluar["CONFIRM_LOOKBACK_BARS"] = (
-                    f"minimal {butuh} candle agar aturan {int(bull)} candle bullish "
-                    "beruntun bisa dinilai bersama riwayatnya"
+        perlu = _angka_untuk_relasi(cfg, "ENTRY_ATR_PERIOD")
+        panjang_volume = _angka_untuk_relasi(cfg, "MOMENTUM_VOLUME_LOOKBACK")
+        lookback_kandidat = [
+            int(nilai) for nilai in (perlu, panjang_volume) if nilai is not None
+        ]
+        butuh = max([15] + [int(nilai) + 2 for nilai in lookback_kandidat])
+        lookback = _angka_untuk_relasi(cfg, "CONFIRM_LOOKBACK_BARS")
+        if lookback is not None and lookback < butuh:
+            keluar["CONFIRM_LOOKBACK_BARS"] = (
+                f"minimal {butuh} candle agar periode ATR dan rata-rata volume "
+                "punya cukup riwayat untuk dinilai"
+            )
+        if _flag_untuk_relasi(cfg, "GAINER_VOLUME_FILTER_ENABLED", True):
+            menit_interval = _INTERVAL_MENIT.get(
+                str(cfg.get("CONFIRM_INTERVAL", "1h") or "1h").strip().lower()
+            )
+            hari = _angka_untuk_relasi(cfg, "GAINER_VOLUME_AVG_DAYS")
+            if menit_interval and hari is not None:
+                per_hari = max(1, 1440 // int(menit_interval))
+                butuh_volume = per_hari * 2
+                if lookback is not None and lookback < butuh_volume:
+                    keluar["CONFIRM_LOOKBACK_BARS"] = (
+                        f"minimal {butuh_volume} candle agar syarat kenaikan "
+                        f"turnover bisa dibandingkan dengan periode sebelumnya "
+                        f"pada interval {cfg.get('CONFIRM_INTERVAL', '1h')}"
+                    )
+        sl_mult = _angka_untuk_relasi(cfg, "EXIT_ATR_SL_MULT")
+        tp_mult = _angka_untuk_relasi(cfg, "EXIT_ATR_TP_MULT")
+        min_rr = _angka_untuk_relasi(cfg, "ENTRY_MIN_RR_RATIO")
+        if sl_mult is not None and sl_mult <= 0:
+            keluar["EXIT_ATR_SL_MULT"] = "harus lebih besar dari nol"
+        if tp_mult is not None and sl_mult is not None and sl_mult > 0 and min_rr is not None:
+            if tp_mult / sl_mult + 1e-9 < min_rr:
+                keluar["EXIT_ATR_TP_MULT"] = (
+                    f"R:R dari kelipatan ATR hanya 1:{tp_mult / sl_mult:.2f}, "
+                    f"di bawah ENTRY_MIN_RR_RATIO 1:{min_rr:.2f}"
                 )
-        anchor = str(cfg.get("ENTRY_SL_ANCHOR", "SIGNAL") or "").strip().upper()
-        if anchor not in ("SIGNAL", "SEQUENCE"):
-            keluar["ENTRY_SL_ANCHOR"] = "hanya boleh SIGNAL atau SEQUENCE"
-        buffer_pct = _angka_untuk_relasi(cfg, "ENTRY_SL_BUFFER_PCT")
-        batas_sl = _angka_untuk_relasi(cfg, "ENTRY_MAX_SL_PCT")
-        if buffer_pct is not None and batas_sl is not None and batas_sl > 0:
-            if buffer_pct >= batas_sl:
-                keluar["ENTRY_SL_BUFFER_PCT"] = (
-                    "harus lebih kecil dari ENTRY_MAX_SL_PCT supaya setiap setup "
-                    "tidak otomatis ditolak"
+        batas_sl = _angka_untuk_relasi(cfg, "EXIT_ATR_MAX_SL_PCT")
+        if batas_sl is not None and batas_sl > 0 and sl_mult is not None:
+            if batas_sl < 0.2:
+                keluar["EXIT_ATR_MAX_SL_PCT"] = (
+                    "terlalu sempit, hampir semua setup akan ditolak; isi 0 untuk "
+                    "mematikan batas atau pakai minimal 0.2 persen"
                 )
 
     return keluar
@@ -1390,8 +1508,9 @@ def validate_candidate(
 
         if not cleaned.get("ENTRY_RULE_ENABLED"):
             warnings.append(
-                "ENTRY_RULE_ENABLED nonaktif: bot masuk tanpa menunggu rangkaian "
-                "candle bullish, hanya mengandalkan seleksi 24 jam dan proteksi orderbook."
+                "ENTRY_RULE_ENABLED nonaktif: bot masuk tanpa menunggu candle "
+                "momentum H1, hanya mengandalkan seleksi gainer 24 jam dan "
+                "proteksi orderbook."
             )
         relation(
             "RATE_LIMIT_SAFETY_MARGIN",

@@ -3,38 +3,78 @@ from __future__ import annotations
 import math
 from typing import Optional, Sequence
 
+from strategy import exit_atr
+
 ENTRY_RULE_DEFAULTS = {
     "ENTRY_RULE_ENABLED": True,
-    "ENTRY_BULL_CANDLES": 3,
-    "ENTRY_SL_ANCHOR": "SIGNAL",
-    "ENTRY_SL_BUFFER_PCT": 0.30,
-    "ENTRY_MIN_RR_RATIO": 2.0,
-    "ENTRY_MAX_SL_PCT": 3.0,
-    "EXIT_TRAILING_PCT": 2.0,
+    "CONFIRM_INTERVAL": "1h",
+    "MOMENTUM_BREAKOUT_LOOKBACK": 1,
+    "MOMENTUM_BODY_ATR_MULT": 0.5,
+    "MOMENTUM_VOLUME_MULT": 1.5,
+    "MOMENTUM_VOLUME_LOOKBACK": 20,
+    "ENTRY_ATR_PERIOD": exit_atr.DEFAULT_ATR_PERIOD,
+    "EXIT_ATR_SL_MULT": exit_atr.DEFAULT_SL_MULT,
+    "EXIT_ATR_TP_MULT": exit_atr.DEFAULT_TP_MULT,
+    "EXIT_ATR_TRAIL_MULT": exit_atr.DEFAULT_TRAIL_MULT,
+    "EXIT_ATR_BREAKEVEN_MULT": exit_atr.DEFAULT_BREAKEVEN_MULT,
+    "EXIT_ATR_MAX_SL_PCT": exit_atr.DEFAULT_MAX_SL_PCT,
+    "ENTRY_MIN_RR_RATIO": exit_atr.DEFAULT_MIN_RR,
+    "EXIT_MAX_HOLD_HOURS": 24.0,
+    "GAINER_VOLUME_FILTER_ENABLED": True,
+    "GAINER_VOLUME_RISE_MULT": 1.2,
+    "GAINER_VOLUME_AVG_DAYS": 3,
 }
 
-EXIT_PARAM_KEYS = ("EXIT_TRAILING_PCT",)
+MOMENTUM_PARAM_KEYS = (
+    "MOMENTUM_BREAKOUT_LOOKBACK",
+    "MOMENTUM_BODY_ATR_MULT",
+    "MOMENTUM_VOLUME_MULT",
+    "MOMENTUM_VOLUME_LOOKBACK",
+)
+
+EXIT_PARAM_KEYS = exit_atr.ATR_PARAM_KEYS
+
 EXIT_TAKE_PROFIT_ENABLED = True
 EXIT_BREAKEVEN_ENABLED = True
-EXIT_BREAKEVEN_R_MULTIPLE = 1.0
+EXIT_BREAKEVEN_R_MULTIPLE = exit_atr.DEFAULT_BREAKEVEN_MULT
 EXIT_BREAKEVEN_LOCK_PCT = 0.0
-EXIT_TRAILING_START_R = 1.0
+EXIT_TRAILING_START_R = exit_atr.DEFAULT_SL_MULT
+EXIT_TRAILING_ATR_MULT = exit_atr.DEFAULT_TRAIL_MULT
 EXIT_TRAILING_MIN_PCT = 0.1
 EXIT_TRAILING_MAX_PCT = 20.0
 EXIT_MAX_HOLD_HOURS = 24.0
+MAX_HOLD_HOURS_LIMIT = 720.0
+EXIT_FALLBACK_SL_PCT = 1.0
+MOMENTUM_CONFIRM_CANDLES = 1
+
 EXIT_FIXED = {
     "take_profit_enabled": EXIT_TAKE_PROFIT_ENABLED,
     "breakeven_enabled": EXIT_BREAKEVEN_ENABLED,
     "breakeven_r_multiple": EXIT_BREAKEVEN_R_MULTIPLE,
     "breakeven_lock_pct": EXIT_BREAKEVEN_LOCK_PCT,
     "trailing_start_r": EXIT_TRAILING_START_R,
+    "trailing_atr_mult": EXIT_TRAILING_ATR_MULT,
     "max_hold_hours": EXIT_MAX_HOLD_HOURS,
 }
 
-SL_ANCHORS = ("SIGNAL", "SEQUENCE")
+
+def exit_fixed_params(config: Optional[dict] = None) -> dict:
+    hasil = dict(EXIT_FIXED)
+    params = exit_atr.atr_params(config or {})
+    hasil["breakeven_r_multiple"] = params["breakeven_mult"]
+    hasil["trailing_atr_mult"] = params["trail_mult"]
+    hasil["max_hold_hours"] = max_hold_hours(config)
+    return hasil
+
+SL_ANCHOR_ATR = "ATR"
+
 STAGE_HISTORY = "HISTORY_ENTRY"
 STAGE_CANDLE = "CANDLE_ENTRY"
-STAGE_SEQUENCE = "BULL_SEQUENCE"
+STAGE_SEQUENCE = "MOMENTUM_BULL"
+STAGE_BODY = "MOMENTUM_BODY"
+STAGE_BREAKOUT = "MOMENTUM_BREAKOUT"
+STAGE_VOLUME = "MOMENTUM_VOLUME"
+STAGE_VOLUME_24H = "VOLUME_24H"
 STAGE_RISK = "RISK_SL"
 STAGE_OK = "OK"
 STAGE_DISABLED = "DISABLED"
@@ -50,18 +90,21 @@ def _finite(value) -> Optional[float]:
     return number
 
 
-def _cfg_float(config: dict, key: str, default: float) -> float:
-    value = _finite(config.get(key, default))
-    return default if value is None else value
+def _cfg_float(config: dict, key: str, default: float, low: float, high: float) -> float:
+    sumber = config if isinstance(config, dict) else {}
+    nilai = _finite(sumber.get(key, default))
+    if nilai is None:
+        nilai = default
+    return max(low, min(high, nilai))
 
 
-def _cfg_int(config: dict, key: str, default: int, minimum: int, maximum: int) -> int:
-    value = _cfg_float(config, key, float(default))
-    return max(minimum, min(maximum, int(value)))
+def _cfg_int(config: dict, key: str, default: int, low: int, high: int) -> int:
+    return int(round(_cfg_float(config, key, float(default), float(low), float(high))))
 
 
 def _cfg_bool(config: dict, key: str, default: bool) -> bool:
-    raw = config.get(key, default)
+    sumber = config if isinstance(config, dict) else {}
+    raw = sumber.get(key, default)
     if isinstance(raw, str):
         return raw.strip().lower() in {"1", "true", "yes", "on", "aktif"}
     return bool(raw)
@@ -71,107 +114,175 @@ def rule_enabled(config: dict) -> bool:
     return _cfg_bool(config, "ENTRY_RULE_ENABLED", True)
 
 
-def bull_candles(config: dict) -> int:
-    return _cfg_int(config, "ENTRY_BULL_CANDLES", 3, 2, 10)
+def momentum_params(config: dict) -> dict:
+    return {
+        "lookback": _cfg_int(config, "MOMENTUM_BREAKOUT_LOOKBACK", 1, 1, 20),
+        "body_atr_mult": _cfg_float(config, "MOMENTUM_BODY_ATR_MULT", 0.5, 0.0, 5.0),
+        "volume_mult": _cfg_float(config, "MOMENTUM_VOLUME_MULT", 1.5, 0.0, 20.0),
+        "volume_lookback": _cfg_int(config, "MOMENTUM_VOLUME_LOOKBACK", 20, 3, 120),
+    }
 
 
-def sl_anchor(config: dict) -> str:
-    raw = str(config.get("ENTRY_SL_ANCHOR", "SIGNAL") or "SIGNAL").strip().upper()
-    return raw if raw in SL_ANCHORS else "SIGNAL"
+def volume_rise_params(config: dict) -> dict:
+    return {
+        "enabled": _cfg_bool(config, "GAINER_VOLUME_FILTER_ENABLED", True),
+        "mult": _cfg_float(config, "GAINER_VOLUME_RISE_MULT", 1.2, 0.0, 20.0),
+        "days": _cfg_int(config, "GAINER_VOLUME_AVG_DAYS", 3, 1, 14),
+    }
 
 
-def sl_buffer_pct(config: dict) -> float:
-    return max(0.0, min(5.0, _cfg_float(config, "ENTRY_SL_BUFFER_PCT", 0.30)))
+def _interval_minutes(interval: str) -> int:
+    from strategy.indicators import INTERVAL_MINUTES
+
+    menit = INTERVAL_MINUTES.get(str(interval).strip().lower())
+    if menit is None:
+        raise ValueError(
+            f"Interval '{interval}' tidak dikenal; pilihan: "
+            + ", ".join(sorted(INTERVAL_MINUTES, key=INTERVAL_MINUTES.get))
+        )
+    return int(menit)
+
+
+def bars_per_day(config: dict) -> int:
+    menit = _interval_minutes(momentum_interval(config))
+    per_hari = 1440 // menit
+    return max(1, int(per_hari))
+
+
+def volume_rise_bars(config: dict) -> int:
+    params = volume_rise_params(config)
+    return bars_per_day(config) * (params["days"] + 1)
+
+
+def _turnover(chunk: Sequence) -> Optional[float]:
+    total = 0.0
+    for bar in chunk:
+        try:
+            nilai = float(getattr(bar, "quote_volume", 0.0) or 0.0)
+            if nilai <= 0.0:
+                nilai = float(bar.close) * float(bar.volume)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if not math.isfinite(nilai) or nilai < 0.0:
+            return None
+        total += nilai
+    return total
+
+
+def turnover_windows_available(bars: int, per_day: int) -> int:
+    if per_day <= 0:
+        return 0
+    return max(0, int(bars) // int(per_day) - 1)
+
+
+def turnover_rise_ratio(bars: Sequence, per_day: int, days: int) -> Optional[float]:
+    if per_day <= 0 or days <= 0:
+        return None
+    tersedia = turnover_windows_available(len(bars), per_day)
+    if tersedia < 1:
+        return None
+    hari = min(int(days), tersedia)
+    butuh = per_day * (hari + 1)
+    ekor = list(bars[-butuh:])
+    sekarang = _turnover(ekor[-per_day:])
+    if sekarang is None:
+        return None
+    lampau = [_turnover(ekor[i * per_day : (i + 1) * per_day]) for i in range(hari)]
+    if any(nilai is None for nilai in lampau):
+        return None
+    rata = sum(lampau) / float(hari)
+    if rata <= 0.0:
+        return None
+    return sekarang / rata
+
+
+def volume_rise_check(klines: Sequence, config: dict) -> dict:
+    params = volume_rise_params(config)
+    hasil = {
+        "ok": True,
+        "skipped": False,
+        "ratio": None,
+        "stage": STAGE_VOLUME_24H,
+        "reason": "",
+    }
+    if not params["enabled"] or params["mult"] <= 0.0:
+        hasil["reason"] = "syarat kenaikan volume 24 jam nonaktif"
+        return hasil
+    per_hari = bars_per_day(config)
+    hari = min(int(params["days"]), turnover_windows_available(len(klines), per_hari))
+    rasio = turnover_rise_ratio(klines, per_hari, params["days"])
+    if rasio is None:
+        hasil["skipped"] = True
+        hasil["reason"] = (
+            f"turnover 24 jam tidak bisa dinilai, candle "
+            f"{momentum_interval(config)} kurang dari {2 * per_hari} bar"
+        )
+        return hasil
+    hasil["ratio"] = rasio
+    hasil["days"] = hari
+    if rasio + 1e-12 < params["mult"]:
+        hasil["ok"] = False
+        hasil["reason"] = (
+            f"turnover 24 jam hanya {rasio:.2f} x rata-rata {hari} hari, "
+            f"di bawah syarat {params['mult']:g} x"
+        )
+        return hasil
+    hasil["reason"] = f"turnover 24 jam {rasio:.2f} x rata-rata {hari} hari"
+    return hasil
+
+
+def momentum_interval(config: dict) -> str:
+    sumber = config if isinstance(config, dict) else {}
+    raw = str(sumber.get("CONFIRM_INTERVAL", "1h") or "1h").strip().lower()
+    return raw or "1h"
 
 
 def min_rr_ratio(config: dict) -> float:
-    return max(0.1, min(20.0, _cfg_float(config, "ENTRY_MIN_RR_RATIO", 2.0)))
+    return max(0.1, min(20.0, _cfg_float(config, "ENTRY_MIN_RR_RATIO", 2.0, 0.1, 20.0)))
 
 
 def max_sl_pct(config: dict) -> float:
-    return max(0.0, min(50.0, _cfg_float(config, "ENTRY_MAX_SL_PCT", 3.0)))
+    return max(0.0, min(50.0, _cfg_float(config, "EXIT_ATR_MAX_SL_PCT", 5.0, 0.0, 50.0)))
+
+
+def atr_period(config: dict) -> int:
+    return exit_atr.atr_period(config)
 
 
 def required_bars(config: dict) -> int:
-    return max(15, bull_candles(config) + 2)
+    momentum = momentum_params(config)
+    minimal = max(
+        15,
+        atr_period(config) + 2,
+        momentum["volume_lookback"] + 2,
+        momentum["lookback"] + 2,
+    )
+    return int(minimal)
 
 
-def breakeven_params(config: dict) -> dict:
-    if not rule_enabled(config):
-        return {"enabled": False, "r_multiple": 0.0, "lock_pct": 0.0}
-    return {
-        "enabled": EXIT_BREAKEVEN_ENABLED,
-        "r_multiple": EXIT_BREAKEVEN_R_MULTIPLE,
-        "lock_pct": EXIT_BREAKEVEN_LOCK_PCT,
-    }
+def atr_window_bars(config: dict) -> int:
+    return max(required_bars(config), _cfg_int(config, "CONFIRM_LOOKBACK_BARS", 60, 15, 1000))
 
 
-def max_hold_hours() -> float:
-    return EXIT_MAX_HOLD_HOURS
+def max_hold_hours(config: Optional[dict] = None) -> float:
+    if config is None:
+        return EXIT_MAX_HOLD_HOURS
+    return _cfg_float(
+        config, "EXIT_MAX_HOLD_HOURS", EXIT_MAX_HOLD_HOURS, 0.0, MAX_HOLD_HOURS_LIMIT
+    )
 
 
-def trailing_params(config: dict) -> dict:
-    if not rule_enabled(config):
-        return {"enabled": False, "start_r": 0.0, "pct": 0.0}
-    return {
-        "enabled": True,
-        "start_r": EXIT_TRAILING_START_R,
-        "pct": max(
-            EXIT_TRAILING_MIN_PCT,
-            min(
-                EXIT_TRAILING_MAX_PCT,
-                _cfg_float(config, "EXIT_TRAILING_PCT", 2.0),
-            ),
-        ),
-    }
-
-
-def trailing_start_price(
-    entry_price: float,
-    stop_price: float,
-    start_r: float,
-) -> float:
-    entry = float(entry_price or 0.0)
-    stop = float(stop_price or 0.0)
-    kelipatan = float(start_r or 0.0)
-    if entry <= 0.0 or stop <= 0.0 or stop >= entry or kelipatan <= 0.0:
-        return 0.0
-    return entry + kelipatan * (entry - stop)
-
-
-def trailing_stop_price(highest_price: float, pct: float) -> float:
-    puncak = float(highest_price or 0.0)
-    jarak = float(pct or 0.0)
-    if puncak <= 0.0 or jarak <= 0.0:
-        return 0.0
-    return puncak * (1.0 - jarak / 100.0)
+def trailing_stop_price(highest_price: float, atr: float, mult: float) -> float:
+    return exit_atr.trailing_stop_price(highest_price, atr, mult)
 
 
 def breakeven_price(
     entry_price: float,
-    sl_price: float,
-    r_multiple: float,
+    sl_price: float = 0.0,
+    r_multiple: float = 0.0,
     lock_pct: float = 0.0,
 ) -> float:
-    entry = float(entry_price or 0.0)
-    stop = float(sl_price or 0.0)
-    kelipatan = float(r_multiple or 0.0)
-    if entry <= 0.0 or stop <= 0.0 or stop >= entry or kelipatan <= 0.0:
-        return 0.0
-    return entry * (1.0 + max(0.0, float(lock_pct or 0.0)) / 100.0)
-
-
-def breakeven_trigger(
-    entry_price: float,
-    sl_price: float,
-    r_multiple: float,
-) -> float:
-    entry = float(entry_price or 0.0)
-    stop = float(sl_price or 0.0)
-    kelipatan = float(r_multiple or 0.0)
-    if entry <= 0.0 or stop <= 0.0 or stop >= entry or kelipatan <= 0.0:
-        return 0.0
-    return entry + kelipatan * (entry - stop)
+    return exit_atr.breakeven_price(entry_price, lock_pct)
 
 
 def candles_valid(bars: Sequence) -> bool:
@@ -223,19 +334,91 @@ def count_bull_run(bars: Sequence) -> int:
     return total
 
 
+def atr_value(klines: Sequence, period: int = 14) -> Optional[float]:
+    period = int(period)
+    if period <= 0 or len(klines) < period:
+        return None
+    trs: list[float] = []
+    for index, candle in enumerate(klines):
+        try:
+            prev_close_raw = klines[index - 1].close if index else candle.close
+            prev_close = float(prev_close_raw)
+            high = float(candle.high)
+            low = float(candle.low)
+            close = float(candle.close)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if not all(math.isfinite(x) and x > 0.0 for x in (high, low, close)):
+            return None
+        trs.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
+    seed = sum(trs[:period]) / period
+    nilai = seed
+    for tr in trs[period:]:
+        nilai = (nilai * (period - 1) + tr) / period
+    return nilai if math.isfinite(nilai) and nilai > 0.0 else None
+
+
+def candle_body(bar) -> float:
+    try:
+        return abs(float(bar.close) - float(bar.open))
+    except (AttributeError, TypeError, ValueError):
+        return 0.0
+
+
+def breakout_level(bars: Sequence, lookback: int) -> Optional[float]:
+    jumlah = int(lookback)
+    if jumlah <= 0 or len(bars) < jumlah + 1:
+        return None
+    sebelumnya = bars[-(jumlah + 1) : -1]
+    tertinggi = 0.0
+    for bar in sebelumnya:
+        try:
+            high = float(bar.high)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if not math.isfinite(high) or high <= 0.0:
+            return None
+        tertinggi = max(tertinggi, high)
+    return tertinggi if tertinggi > 0.0 else None
+
+
+def volume_ratio(bars: Sequence, lookback: int) -> Optional[float]:
+    jumlah = int(lookback)
+    if jumlah <= 0 or len(bars) < jumlah + 1:
+        return None
+    sebelumnya = bars[-(jumlah + 1) : -1]
+    volume: list[float] = []
+    for bar in sebelumnya:
+        try:
+            nilai = float(bar.volume)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if not math.isfinite(nilai) or nilai < 0.0:
+            return None
+        volume.append(nilai)
+    rata = sum(volume) / len(volume)
+    if rata <= 0.0:
+        return None
+    try:
+        terakhir = float(bars[-1].volume)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if not math.isfinite(terakhir) or terakhir < 0.0:
+        return None
+    return terakhir / rata
+
+
 def exit_levels(
     entry_price: float,
     anchor_low: float,
     config: dict,
     *,
+    atr: Optional[float] = None,
     fallback_allowed: bool = False,
 ) -> dict:
     entry = _finite(entry_price) or 0.0
     low = _finite(anchor_low) or 0.0
-    buffer_pct = sl_buffer_pct(config)
-    rr_target = min_rr_ratio(config)
-    cap_pct = max_sl_pct(config)
-
+    jarak = _finite(atr)
     dasar = {
         "ok": False,
         "stage": STAGE_RISK,
@@ -245,66 +428,65 @@ def exit_levels(
         "sl_pct": None,
         "tp_pct": None,
         "rr_ratio": None,
-        "sl_buffer_pct": buffer_pct,
-        "min_rr_ratio": rr_target,
-        "max_sl_pct": cap_pct,
+        "min_rr_ratio": min_rr_ratio(config),
+        "max_sl_pct": max_sl_pct(config),
         "anchor_low": low if low > 0.0 else None,
+        "atr": jarak if jarak and jarak > 0.0 else None,
     }
 
     if entry <= 0.0:
-        if not fallback_allowed:
-            dasar["reason"] = "harga entry tidak valid untuk menghitung SL"
-            return dasar
-        entry = 100.0
+        dasar["reason"] = "harga entry tidak valid untuk menghitung level ATR"
+        return dasar
 
-    if low <= 0.0 or low >= entry:
-        if not fallback_allowed:
-            dasar["reason"] = (
-                f"low acuan SL {low if low > 0.0 else 'n/a'} tidak berada di bawah "
-                f"harga entry {entry:.6g}"
-            )
-            return dasar
-        sl_price = entry * (1.0 - max(0.5, buffer_pct * 10.0) / 100.0)
-    else:
-        sl_price = low * max(0.0001, 1.0 - buffer_pct / 100.0)
+    if jarak is not None and jarak > 0.0:
+        rencana = exit_atr.plan_levels(entry, jarak, config)
+        dasar.update(
+            {
+                "ok": bool(rencana["ok"]),
+                "reason": str(rencana["reason"]),
+                "sl_price": rencana["sl_price"],
+                "tp_price": rencana["tp_price"],
+                "sl_pct": rencana["sl_pct"],
+                "tp_pct": rencana["tp_pct"],
+                "rr_ratio": rencana["rr_ratio"],
+                "atr": rencana["atr"],
+                "sl_mult": rencana["sl_mult"],
+                "tp_mult": rencana["tp_mult"],
+                "trail_mult": rencana["trail_mult"],
+                "breakeven_mult": rencana["breakeven_mult"],
+            }
+        )
+        if dasar["ok"]:
+            dasar["stage"] = STAGE_OK
+        return dasar
 
-    if not (0.0 < sl_price < entry):
+    if not fallback_allowed:
         dasar["reason"] = (
-            f"level SL {sl_price:.6g} tidak valid terhadap harga entry {entry:.6g}"
+            "ATR tidak tersedia sehingga stop ATR tidak bisa dihitung; entry ditolak "
+            "daripada memakai stop tebakan"
         )
         return dasar
 
-    sl_pct = (entry - sl_price) / entry * 100.0
-    if cap_pct > 0.0 and sl_pct > cap_pct + 1e-9:
-        dasar["sl_price"] = sl_price
-        dasar["sl_pct"] = sl_pct
-        dasar["reason"] = (
-            f"jarak SL {sl_pct:.2f}% melebihi batas {cap_pct:.2f}% "
-            f"(SL {sl_price:.6g}, entry {entry:.6g})"
-        )
-        return dasar
-
-    tp_price = entry + (entry - sl_price) * rr_target
-    tp_pct = (tp_price - entry) / entry * 100.0
-    hasil = {
-        "ok": True,
-        "stage": STAGE_OK,
-        "reason": (
-            f"SL {sl_price:.6g} (-{sl_pct:.2f}%) di bawah {low:.6g} buffer "
-            f"{buffer_pct:g}%, TP {tp_price:.6g} (+{tp_pct:.2f}%), "
-            f"R:R 1:{rr_target:.2f}"
-        ),
-        "sl_price": sl_price,
-        "tp_price": tp_price,
-        "sl_pct": sl_pct,
-        "tp_pct": tp_pct,
-        "rr_ratio": rr_target,
-        "sl_buffer_pct": buffer_pct,
-        "min_rr_ratio": rr_target,
-        "max_sl_pct": cap_pct,
-        "anchor_low": low,
-    }
-    return hasil
+    sl_pct = EXIT_FALLBACK_SL_PCT
+    rr = min_rr_ratio(config)
+    sl = entry * (1.0 - sl_pct / 100.0)
+    tp = entry + (entry - sl) * rr
+    dasar.update(
+        {
+            "ok": True,
+            "stage": STAGE_OK,
+            "sl_price": sl,
+            "tp_price": tp,
+            "sl_pct": sl_pct,
+            "tp_pct": (tp - entry) / entry * 100.0,
+            "rr_ratio": rr,
+            "reason": (
+                f"ATR tidak tersedia, dipakai stop cadangan {sl_pct:g}% dan TP "
+                f"R:R 1:{rr:.2f} sebagai level sementara"
+            ),
+        }
+    )
+    return dasar
 
 
 def _empty_result(interval: str, bars: int, required: int, bull: int) -> dict:
@@ -327,10 +509,16 @@ def _empty_result(interval: str, bars: int, required: int, bull: int) -> dict:
         "sl_pct": None,
         "tp_pct": None,
         "rr_ratio": None,
+        "body_atr": None,
+        "volume_ratio": None,
+        "breakout_level": None,
         "checks": {
             "history": False,
             "candles": False,
             "bull_sequence": False,
+            "momentum_body": False,
+            "momentum_breakout": False,
+            "momentum_volume": False,
             "risk": False,
         },
         "values": {},
@@ -342,8 +530,9 @@ def evaluate_entry_rule(
     config: dict,
     signal_close_time_ms: Optional[int] = None,
 ) -> dict:
-    interval = str(config.get("CONFIRM_INTERVAL", "5m") or "5m").strip().lower()
-    bull = bull_candles(config)
+    interval = momentum_interval(config)
+    momentum = momentum_params(config)
+    period = atr_period(config)
     need = required_bars(config)
     rows = [
         k
@@ -352,25 +541,25 @@ def evaluate_entry_rule(
         or int(getattr(k, "close_time", 0)) <= int(signal_close_time_ms)
     ]
     window = rows[-need:] if need > 0 else list(rows)
-    result = _empty_result(interval, len(window), need, bull)
+    result = _empty_result(interval, len(window), need, MOMENTUM_CONFIRM_CANDLES)
 
     if not rule_enabled(config):
         result["ok"] = True
         result["stage"] = STAGE_DISABLED
-        result["reason"] = "aturan entry nonaktif di konfigurasi"
-        result["checks"]["history"] = True
-        result["checks"]["candles"] = True
-        result["checks"]["bull_sequence"] = True
-        result["checks"]["risk"] = True
+        result["reason"] = "filter momentum nonaktif di konfigurasi"
+        for kunci in result["checks"]:
+            result["checks"][kunci] = True
         if window:
             last = window[-1]
             entry = float(last.close)
-            anchor_low = float(last.low)
-            info = exit_levels(entry, anchor_low, config, fallback_allowed=True)
+            jarak = atr_value(rows[-atr_window_bars(config) :], period)
+            info = exit_levels(
+                entry, float(last.low), config, atr=jarak, fallback_allowed=True
+            )
             result["signal_close"] = entry
             result["signal_close_time"] = int(last.close_time)
-            result["entry_low"] = anchor_low
-            result["atr"] = atr_value(window, 14)
+            result["entry_low"] = float(last.low)
+            result["atr"] = jarak
             result["sl_price"] = info["sl_price"]
             result["tp_price"] = info["tp_price"]
             result["sl_pct"] = info["sl_pct"]
@@ -391,31 +580,81 @@ def evaluate_entry_rule(
         return result
     result["checks"]["candles"] = True
 
-    urut = window[-(bull + 1) :]
-    jumlah = count_bull_run(urut)
-    result["bull_count"] = jumlah
-    if jumlah < bull:
+    sinyal = window[-1]
+    sebelumnya = window[-2] if len(window) >= 2 else None
+    entry = float(sinyal.close)
+    jarak = atr_value(rows[-atr_window_bars(config) :], period)
+    result["signal_close"] = entry
+    result["signal_close_time"] = int(sinyal.close_time)
+    result["entry_low"] = float(sinyal.low)
+    result["atr"] = jarak
+    result["bull_count"] = count_bull_run(window)
+
+    if jarak is None or jarak <= 0.0:
+        result["stage"] = STAGE_RISK
+        result["reason"] = (
+            f"ATR periode {period} pada {interval} tidak dapat dihitung dari "
+            f"{len(window)} candle, momentum tidak bisa dinilai"
+        )
+        return result
+
+    if not is_bullish(sinyal, sebelumnya):
         result["stage"] = STAGE_SEQUENCE
         result["reason"] = (
-            f"baru {jumlah} candle bullish beruntun di {interval}, "
-            f"butuh {bull} berturut-turut"
+            f"candle {interval} terakhir tidak bullish (close {entry:.6g} tidak di atas "
+            f"open {float(sinyal.open):.6g} dan close sebelumnya)"
         )
         return result
     result["checks"]["bull_sequence"] = True
 
-    sinyal = window[-1]
-    entry = float(sinyal.close)
-    urutan_bull = window[-bull:]
-    if sl_anchor(config) == "SEQUENCE":
-        anchor_low = min(float(k.low) for k in urutan_bull)
-    else:
-        anchor_low = float(sinyal.low)
-    result["signal_close"] = entry
-    result["signal_close_time"] = int(sinyal.close_time)
-    result["entry_low"] = anchor_low
-    result["atr"] = atr_value(window, 14)
+    body = candle_body(sinyal)
+    rasio_body = body / jarak if jarak > 0.0 else 0.0
+    result["body_atr"] = rasio_body
+    if momentum["body_atr_mult"] > 0.0 and rasio_body + 1e-12 < momentum["body_atr_mult"]:
+        result["stage"] = STAGE_BODY
+        result["reason"] = (
+            f"body candle {interval} hanya {rasio_body:.2f} x ATR, "
+            f"di bawah syarat {momentum['body_atr_mult']:g} x ATR"
+        )
+        return result
+    result["checks"]["momentum_body"] = True
 
-    info = exit_levels(entry, anchor_low, config)
+    batas = breakout_level(window, momentum["lookback"])
+    result["breakout_level"] = batas
+    if batas is None:
+        result["stage"] = STAGE_BREAKOUT
+        result["reason"] = f"high acuan breakout {interval} tidak tersedia"
+        return result
+    if entry <= batas + 1e-12:
+        result["stage"] = STAGE_BREAKOUT
+        result["reason"] = (
+            f"close {entry:.6g} belum melewati high {momentum['lookback']} candle "
+            f"{interval} sebelumnya di {batas:.6g}"
+        )
+        return result
+    result["checks"]["momentum_breakout"] = True
+
+    rasio_volume = volume_ratio(window, momentum["volume_lookback"])
+    result["volume_ratio"] = rasio_volume
+    if momentum["volume_mult"] > 0.0:
+        if rasio_volume is None:
+            result["stage"] = STAGE_VOLUME
+            result["reason"] = (
+                f"volume {momentum['volume_lookback']} candle {interval} tidak bisa "
+                "dihitung sehingga lonjakan volume tidak terverifikasi"
+            )
+            return result
+        if rasio_volume + 1e-12 < momentum["volume_mult"]:
+            result["stage"] = STAGE_VOLUME
+            result["reason"] = (
+                f"volume candle {interval} hanya {rasio_volume:.2f} x rata-rata "
+                f"{momentum['volume_lookback']} candle, di bawah syarat "
+                f"{momentum['volume_mult']:g} x"
+            )
+            return result
+    result["checks"]["momentum_volume"] = True
+
+    info = exit_levels(entry, float(sinyal.low), config, atr=jarak)
     result["sl_price"] = info["sl_price"]
     result["tp_price"] = info["tp_price"]
     result["sl_pct"] = info["sl_pct"]
@@ -429,42 +668,22 @@ def evaluate_entry_rule(
     result["ok"] = True
     result["stage"] = STAGE_OK
     result["reason"] = (
-        f"{jumlah} candle bullish beruntun di {interval} (close {entry:.6g}), "
-        + info["reason"]
+        f"momentum {interval} terpenuhi: close {entry:.6g} menembus high "
+        f"{batas:.6g}, body {rasio_body:.2f} x ATR, volume {rasio_volume:.2f} x "
+        f"rata-rata; " + info["reason"]
     )
     result["values"] = {
-        **dict(result.get("values") or {}),
-        "entry_low": anchor_low,
+        "entry_low": float(sinyal.low),
         "sl_price": info["sl_price"],
         "tp_price": info["tp_price"],
         "rr_ratio": info["rr_ratio"],
-        "bull_count": jumlah,
+        "bull_count": result["bull_count"],
+        "atr": jarak,
+        "body_atr": rasio_body,
+        "volume_ratio": rasio_volume,
+        "breakout_level": batas,
     }
     return result
-
-
-def atr_value(klines: Sequence, period: int = 14) -> Optional[float]:
-    period = int(period)
-    if period <= 0 or len(klines) < period:
-        return None
-    trs: list[float] = []
-    for index, candle in enumerate(klines):
-        prev_close = float(klines[index - 1].close) if index else float(candle.close)
-        try:
-            trs.append(
-                max(
-                    float(candle.high) - float(candle.low),
-                    abs(float(candle.high) - prev_close),
-                    abs(float(candle.low) - prev_close),
-                )
-            )
-        except (AttributeError, TypeError, ValueError):
-            return None
-    seed = sum(trs[:period]) / period
-    value = seed
-    for tr in trs[period:]:
-        value = (value * (period - 1) + tr) / period
-    return value if math.isfinite(value) and value > 0.0 else None
 
 
 def take_profit_due(entry_price, target_price, current_price) -> bool:

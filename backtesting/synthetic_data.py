@@ -3,6 +3,7 @@ from __future__ import annotations
 from strategy.indicators import Kline
 
 MS_PER_BAR = 300_000
+VOLUME_SPIKE_MULT = 3.0
 
 
 def make_candle(
@@ -104,7 +105,12 @@ def blok_setup(harga: float, mulai_index: int, volume: float = 5_000_000.0):
     level = harga * 1.012
     out.append(
         make_candle(
-            i, harga * 1.002, level * 1.013, harga * 0.999, level * 1.012, volume
+            i,
+            harga * 1.002,
+            level * 1.013,
+            harga * 0.999,
+            level * 1.012,
+            volume * VOLUME_SPIKE_MULT,
         )
     )
     i += 1

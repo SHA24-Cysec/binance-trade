@@ -794,10 +794,10 @@ def build_status():
             "lock_pct": float(_EXIT_TETAP["breakeven_lock_pct"]),
             "active": bool(state.get("be_active")),
             "stop_price": float(state.get("be_stop_price") or 0.0),
-            "trigger_price": strategy.entry_breakeven_trigger(
+            "trigger_price": strategy.exit_atr_breakeven_trigger(
                 float(state.get("entry_price") or 0.0),
-                float(state.get("sl_price") or 0.0),
-                float(_EXIT_TETAP["breakeven_r_multiple"]),
+                float(state.get("atr_at_entry") or 0.0),
+                PUMP_CONFIG,
             )
             if state.get("current_symbol")
             else 0.0,
@@ -826,18 +826,21 @@ def build_status():
             "tp_pct": state.get("tp_pct") or None,
             "sl_price": state.get("sl_price") or None,
             "tp_price": state.get("tp_price") or None,
-            "exit_source": state.get("exit_source") or "ENTRY_RULE",
-            "entry_sl_buffer_pct": float(
-                PUMP_CONFIG.get("ENTRY_SL_BUFFER_PCT", 0.30) or 0.0
-            ),
+            "exit_source": state.get("exit_source") or "ATR",
             "entry_min_rr_ratio": float(
                 PUMP_CONFIG.get("ENTRY_MIN_RR_RATIO", 2.0) or 2.0
             ),
-            "entry_bull_candles": int(
-                PUMP_CONFIG.get("ENTRY_BULL_CANDLES", 3) or 3
+            "breakout_lookback": int(
+                strategy.entry_momentum_params(PUMP_CONFIG)["lookback"]
             ),
-            "max_hold_hours": float(_EXIT_TETAP["max_hold_hours"]),
-            "trailing_pct": float(strategy.exit_trailing_params(PUMP_CONFIG)["pct"]),
+            "max_hold_hours": float(
+                strategy.exit_fixed_params(PUMP_CONFIG)["max_hold_hours"]
+            ),
+            "gain_volume": strategy.volume_rise_params(PUMP_CONFIG),
+            "atr_entry": float(state.get("atr_at_entry") or 0.0),
+            "confirm_interval": str(PUMP_CONFIG.get("CONFIRM_INTERVAL", "1h")),
+            "momentum": strategy.entry_momentum_params(PUMP_CONFIG),
+            "exit_atr": strategy.exit_atr_params(PUMP_CONFIG),
         },
     }
 
@@ -845,13 +848,11 @@ def build_status():
 def entry_rule_status(config: dict) -> dict:
     try:
         interval = strategy.confirm_interval(config)
-        bull = strategy.entry_bull_candles(config)
         lookback = strategy.required_lookback_bars(config)
         enabled = strategy.entry_rule_enabled(config)
         config_error = ""
     except (TypeError, ValueError) as exc:
         interval = str(config.get("CONFIRM_INTERVAL", "") or "")
-        bull = 0
         lookback = 0
         enabled = False
         config_error = str(exc)[:200]
@@ -859,14 +860,12 @@ def entry_rule_status(config: dict) -> dict:
         "enabled": enabled,
         "config_error": config_error,
         "interval": interval,
-        "bull_candles": bull,
         "lookback_bars": lookback,
-        "sl_anchor": str(config.get("ENTRY_SL_ANCHOR", "SIGNAL") or "SIGNAL").upper(),
-        "sl_buffer_pct": float(config.get("ENTRY_SL_BUFFER_PCT", 0.30) or 0.0),
+        "sl_anchor": "ATR",
         "min_rr_ratio": float(config.get("ENTRY_MIN_RR_RATIO", 2.0) or 2.0),
-        "max_sl_pct": float(config.get("ENTRY_MAX_SL_PCT", 3.0) or 0.0),
-        "trailing_pct": strategy.exit_trailing_params(config)["pct"],
-        "exit_fixed": strategy.exit_fixed_params(),
+        "max_sl_pct": float(config.get("EXIT_ATR_MAX_SL_PCT", 5.0) or 0.0),
+        "momentum": strategy.entry_momentum_params(config),
+        "exit_atr": strategy.exit_atr_params(config),
     }
 
 
@@ -889,8 +888,9 @@ def evaluate_entry_symbol(symbol: str, config: dict) -> dict:
             f"dari minimum {strategy.required_lookback_bars(config)}"
         )
     verdict = strategy.evaluate_entry(klines, config)
+    syarat_volume = strategy.volume_rise_check(klines, config)
     sinyal = klines[-1]
-    urut = klines[-(strategy.entry_bull_candles(config) + 3) :]
+    urut = klines[-(strategy.entry_momentum_params(config)["lookback"] + 3) :]
     riwayat = [
         {
             "open_time": _fmt_ms(int(k.open_time)),
@@ -914,11 +914,25 @@ def evaluate_entry_symbol(symbol: str, config: dict) -> dict:
         "as_of": _fmt_ms(int(sinyal.close_time)),
         "price": float(sinyal.close),
         "verdict": {
-            "ok": bool(verdict.get("ok")),
-            "stage": str(verdict.get("stage") or ""),
-            "reason": str(verdict.get("reason") or ""),
+            "ok": bool(verdict.get("ok")) and bool(syarat_volume["ok"]),
+            "stage": (
+                str(syarat_volume["stage"])
+                if not syarat_volume["ok"]
+                else str(verdict.get("stage") or "")
+            ),
+            "reason": (
+                str(syarat_volume["reason"])
+                if not syarat_volume["ok"]
+                else str(verdict.get("reason") or "")
+            ),
+            "turnover_ratio": syarat_volume.get("ratio"),
+            "turnover_skipped": bool(syarat_volume.get("skipped")),
             "bull_count": int(verdict.get("bull_count") or 0),
             "bull_required": int(verdict.get("bull_required") or 0),
+            "atr": verdict.get("atr"),
+            "body_atr": verdict.get("body_atr"),
+            "volume_ratio": verdict.get("volume_ratio"),
+            "breakout_level": verdict.get("breakout_level"),
             "checks": dict(verdict.get("checks") or {}),
         },
         "candles": riwayat,
@@ -1001,12 +1015,23 @@ def _reject_if_backtest_disabled():
 
 BT_PARAM_KEYS = (
     "ENTRY_RULE_ENABLED",
-    "ENTRY_BULL_CANDLES",
-    "ENTRY_SL_ANCHOR",
-    "ENTRY_SL_BUFFER_PCT",
+    "GAINER_MIN_CHANGE_PCT",
+    "GAINER_MAX_CHANGE_PCT",
+    "GAINER_VOLUME_FILTER_ENABLED",
+    "GAINER_VOLUME_RISE_MULT",
+    "GAINER_VOLUME_AVG_DAYS",
+    "MOMENTUM_BREAKOUT_LOOKBACK",
+    "MOMENTUM_BODY_ATR_MULT",
+    "MOMENTUM_VOLUME_MULT",
+    "MOMENTUM_VOLUME_LOOKBACK",
+    "ENTRY_ATR_PERIOD",
+    "EXIT_ATR_SL_MULT",
+    "EXIT_ATR_TP_MULT",
+    "EXIT_ATR_TRAIL_MULT",
+    "EXIT_ATR_BREAKEVEN_MULT",
+    "EXIT_ATR_MAX_SL_PCT",
+    "EXIT_MAX_HOLD_HOURS",
     "ENTRY_MIN_RR_RATIO",
-    "ENTRY_MAX_SL_PCT",
-    "EXIT_TRAILING_PCT",
     "CONFIRM_INTERVAL",
     "CONFIRM_LOOKBACK_BARS",
 )
@@ -1072,15 +1097,7 @@ def _bt_cleanup_old_jobs():
 
 
 def _bt_simulation_interval(cfg: dict) -> str:
-    return str(cfg.get("CONFIRM_INTERVAL", "5m") or "5m")
-
-
-def _bt_native_htf_intervals(cfg: dict) -> list[str]:
-    return []
-
-
-def _bt_native_prebuilt(prep: dict, cfg: dict):
-    return None
+    return str(cfg.get("CONFIRM_INTERVAL", "1h") or "1h")
 
 
 def _bt_simulation_warmup_bars(cfg: dict) -> int:
@@ -1089,8 +1106,6 @@ def _bt_simulation_warmup_bars(cfg: dict) -> int:
         bt.bars_per_day(interval) + 30,
         strategy.confirm_window_bars(cfg),
     )
-    if _bt_native_htf_intervals(cfg):
-        return dasar
     try:
         return max(dasar, pbt.parity.gate_warmup_bars(cfg, interval))
     except ValueError:
@@ -1099,13 +1114,11 @@ def _bt_simulation_warmup_bars(cfg: dict) -> int:
 
 def _bt_estimate_requests(days: int, max_symbols: int, cfg: dict) -> int:
     interval = _bt_simulation_interval(cfg)
-    bars_per_hari = 1440 // bt.INTERVAL_MINUTES.get(interval, 5)
+    bars_per_hari = 1440 // bt.INTERVAL_MINUTES.get(interval, 60)
     warmup_bars = _bt_simulation_warmup_bars(cfg)
     total_bars = (days + 1) * bars_per_hari + warmup_bars
     halaman = max(1, -(-total_bars // 1000))
-    per_interval = max_symbols * halaman
-    htf = max_symbols * len(_bt_native_htf_intervals(cfg))
-    return per_interval + htf
+    return max_symbols * halaman
 
 
 def _bt_direction_warmup_note(cfg: dict, interval: str) -> str:
@@ -1128,7 +1141,7 @@ def _bt_timing_note(cfg: dict, interval: str) -> str:
     return (
         f"Aturan entry membutuhkan {candle} candle tertutup {interval} "
         f"(sekitar {jam:.2f} jam) sebelum bar pertama bisa dinilai, dan entry terjadi "
-        "di close candle bullish terakhir yang memenuhi syarat."
+        "di close candle H1 terakhir yang memenuhi seluruh syarat momentum."
     )
 
 
@@ -1359,7 +1372,6 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
         klien = prep.get("client")
 
         set_progress(0.82, "menjalankan simulasi portofolio...")
-        prebuilt = _bt_native_prebuilt(prep, cfg)
         result = pbt.run_portfolio_backtest(
             store,
             cfg,
@@ -1369,7 +1381,7 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 0.82 + f * 0.17, "menjalankan simulasi portofolio..."
             ),
             cancel_cb=cancelled,
-            prebuilt=prebuilt,
+            prebuilt=None,
         )
         summary = pbt.summarize_portfolio(result)
 
@@ -1392,6 +1404,9 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "pnl_pct": t.pnl_pct,
                 "gross_pnl_pct": getattr(t, "gross_pnl_pct", 0.0),
                 "fee_pct": getattr(t, "fee_pct", 0.0),
+                "sl_pct": getattr(t, "sl_pct", None),
+                "tp_pct": getattr(t, "tp_pct", None),
+                "exit_source": getattr(t, "exit_source", None),
                 "rank_at_entry": t.rank_at_entry,
             }
             for t in result.trades
@@ -1428,12 +1443,11 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
             "summary": summary,
             "entry_rule": {
                 "enabled": bool(strategy.entry_rule_enabled(cfg)),
-                "interval": str(cfg.get("CONFIRM_INTERVAL", "5m") or "5m"),
-                "bull_candles": int(cfg.get("ENTRY_BULL_CANDLES", 3) or 3),
-                "sl_anchor": str(cfg.get("ENTRY_SL_ANCHOR", "SIGNAL") or "SIGNAL").upper(),
-                "sl_buffer_pct": float(cfg.get("ENTRY_SL_BUFFER_PCT", 0.30) or 0.0),
+                "interval": str(cfg.get("CONFIRM_INTERVAL", "1h") or "1h"),
+                "momentum": strategy.entry_momentum_params(cfg),
+                "exit_atr": strategy.exit_atr_params(cfg),
                 "min_rr_ratio": float(cfg.get("ENTRY_MIN_RR_RATIO", 2.0) or 2.0),
-                "max_sl_pct": float(cfg.get("ENTRY_MAX_SL_PCT", 3.0) or 0.0),
+                "max_sl_pct": float(cfg.get("EXIT_ATR_MAX_SL_PCT", 5.0) or 0.0),
                 "lookback_bars": int(cfg.get("CONFIRM_LOOKBACK_BARS", 60) or 60),
                 "skips": int(getattr(result, "entry_rule_skips", 0)),
                 "scans": int(getattr(result, "entry_rule_scans", 0)),
@@ -1442,6 +1456,14 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
             "skipped": skipped_out,
             "warnings": list(result.warnings) + _bt_peringatan_timing(cfg, days),
             "limitations": [
+                (
+                    "Aturan entry DINONAKTIFKAN, jadi simulasi memakai level cadangan: stop "
+                    "tetap 1 persen dari harga entry dan target mengikuti rasio minimum, bukan "
+                    "kelipatan ATR. Hasil di bawah ini tidak menggambarkan exit ATR."
+                    if not strategy.entry_rule_enabled(cfg)
+                    else "Aturan entry aktif, jadi seluruh level exit dihitung dari kelipatan ATR "
+                    "seperti bot live."
+                ),
                 "SURVIVORSHIP BIAS, dan ini tidak bisa diperbaiki: Binance hanya menyediakan "
                 "data historis untuk pair yang MASIH listing hari ini. Koin yang sudah "
                 "didelisting, sering justru yang kolaps setelah pump, tidak ada dalam data. "
@@ -1450,35 +1472,62 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "ticker/24hr historis (Binance tidak menyediakannya). Nilainya sangat dekat "
                 "tetapi tidak identik dengan yang dilihat bot saat itu. Volume itulah yang "
                 "menentukan simbol mana yang masuk top-N kandidat per bar.",
+                "Syarat kenaikan turnover 24 jam "
+                + (
+                    f"disimulasikan: turnover 24 jam terakhir harus minimal "
+                    f"{float(cfg.get('GAINER_VOLUME_RISE_MULT', 1.2) or 0.0):g} kali rata-rata "
+                    f"{int(cfg.get('GAINER_VOLUME_AVG_DAYS', 3) or 1)} hari sebelumnya, dihitung "
+                    "dari jumlah quote volume candle. Bila candle tidak cukup untuk satu "
+                    "periode pembanding, syarat ini dilewati dan alasan itu tercatat, "
+                    "bukan dianggap lolos."
+                    if bool(cfg.get("GAINER_VOLUME_FILTER_ENABLED", True))
+                    else "sedang DINONAKTIFKAN, jadi peringkat gainer hanya disaring "
+                    "turnover minimum tanpa melihat arah kenaikan volume."
+                ),
                 "Fill exit memperhitungkan gap: candle yang DIBUKA sudah menembus level "
-                "SL struktural (di bawah Order Block/POI) atau TP struktural (BSL $$$) "
-                "diisi pada harga pembukaan candle itu, konsisten dengan simulasi PAPER, "
-                "bukan pada harga levelnya. Candle tempat posisi dibuka (termasuk candle "
-                "entry saat ada jeda eksekusi) juga ikut dievaluasi.",
+                "SL atau TP hasil hitungan ATR diisi pada harga pembukaan candle itu, "
+                "konsisten dengan simulasi PAPER, bukan pada harga levelnya. Candle "
+                "tempat posisi dibuka (termasuk candle entry saat ada jeda eksekusi) "
+                "juga ikut dievaluasi.",
                 "Exit dievaluasi per-candle "
                 + prep["interval"]
                 + " (bukan tiap "
                 + str(PUMP_CONFIG.get("LOOP_INTERVAL_SECONDS", 15))
                 + " detik seperti bot asli). "
-                "Urutan konservatif: STOP_LOSS struktural diperiksa lebih dulu daripada "
-                "TAKE_PROFIT (BSL $$$) jika keduanya tersentuh di dalam satu candle. "
-                "TIME_STOP (batas tahan tetap 24 jam) diperiksa paling akhir dan menutup posisi di "
-                "harga close candle terakhir yang umurnya masih di dalam batas.",
+                "Mesin exit ATR yang dipakai sama persis dengan bot live: SL awal dan TP "
+                "diukur dari ATR saat entry, breakeven menggeser stop ke harga entry "
+                "setelah profit mencapai ambang ATR, lalu Chandelier trailing mengikuti "
+                "puncak harga dikurangi kelipatan ATR. Bila SL dan TP tersentuh di candle "
+                "yang sama, SL yang dipakai. TIME_STOP (batas tahan "
+                + (
+                    f"{float(cfg.get('EXIT_MAX_HOLD_HOURS', 24.0) or 0.0):g} jam"
+                    if float(cfg.get("EXIT_MAX_HOLD_HOURS", 24.0) or 0.0) > 0.0
+                    else "dimatikan karena batas tahan 0"
+                )
+                + ") diperiksa paling akhir dan menutup posisi di harga close candle "
+                "terakhir yang umurnya masih di dalam batas.",
                 "Entry memodelkan spread (BACKTEST_ENTRY_SPREAD_PCT), slippage "
                 "(BACKTEST_SLIPPAGE_PCT), dan jeda eksekusi (BACKTEST_ENTRY_DELAY_BARS). "
                 "Fee taker beli dan jual sudah dipotong. Kedalaman order book belum "
                 "dimodelkan, jadi order besar di koin tipis akan lebih buruk dari ini. "
                 "Filter kedalaman, ketimpangan bid/ask, dan sell wall juga hanya berlaku di "
                 "PAPER dan LIVE (snapshot order book tidak tersedia historis).",
-                "Aturan entry SUDAH disimulasikan memakai logika yang sama dengan bot "
-                "live: candle dihitung bullish bila close di atas open dan di atas close "
-                "candle sebelumnya, entry terjadi setelah "
-                + str(int(cfg.get("ENTRY_BULL_CANDLES", 3) or 3))
-                + " candle bullish beruntun di "
+                "Filter momentum SUDAH disimulasikan memakai logika yang sama dengan "
+                "bot live: close candle "
                 + prep["interval"]
-                + ", SL diletakkan di bawah low candle sinyal dikurangi buffer, dan TP "
-                "dihitung dari kelipatan risiko. Setup dengan jarak SL melebihi batas juga "
-                "ditolak. "
+                + " terakhir harus menembus high "
+                + str(int(strategy.entry_momentum_params(cfg)["lookback"]))
+                + " candle sebelumnya, body minimal "
+                + f"{float(strategy.entry_momentum_params(cfg)['body_atr_mult']):g}"
+                + " x ATR, volume minimal "
+                + f"{float(strategy.entry_momentum_params(cfg)['volume_mult']):g}"
+                + " x rata-rata. Level exit memakai ATR: stop "
+                + f"{float(strategy.exit_atr_params(cfg)['sl_mult']):g}"
+                + " x ATR, target "
+                + f"{float(strategy.exit_atr_params(cfg)['tp_mult']):g}"
+                + " x ATR, dan setup ditolak bila jarak stop melebihi "
+                + f"{float(strategy.exit_atr_params(cfg)['max_sl_pct']):g}"
+                + " persen. "
                 + _bt_direction_warmup_note(cfg, prep["interval"])
                 + " "
                 + _bt_timing_note(cfg, prep["interval"])
@@ -1581,7 +1630,6 @@ def _bt_run_grid_job(
         kline_cache = prep["kline_cache"]
         klien = prep.get("client")
 
-        prebuilt = _bt_native_prebuilt(prep, cfg)
         set_progress(0.30, f"menjalankan grid search ({total_kombinasi} kombinasi)...")
         hasil = gs.run_portfolio_grid_search(
             store,
@@ -1598,7 +1646,7 @@ def _bt_run_grid_job(
                 f"({int(round(f * total_kombinasi))}/{total_kombinasi})",
             ),
             cancel_cb=cancelled,
-            native_prebuilt=prebuilt,
+            native_prebuilt=None,
         )
         rows = gs.ringkas_untuk_tabel(hasil, top_n=20)
 
@@ -1648,12 +1696,15 @@ def _bt_run_grid_job(
                 "Split latih/uji di sini satu kali berdasarkan urutan waktu (bukan "
                 "walk-forward bergulir). Untuk keyakinan lebih, ulangi dengan beberapa "
                 "rasio dan rentang hari yang berbeda.",
-                "Yang disapu grid hanya parameter exit (ENTRY_SL_BUFFER_PCT, "
-                "ENTRY_MIN_RR_RATIO dan ENTRY_MAX_SL_PCT). Setelan aturan "
-                "entry (ENTRY_BULL_CANDLES, ENTRY_SL_ANCHOR, CONFIRM_INTERVAL) diambil dari "
-                "konfigurasi backtest dan tetap sama pada semua kombinasi. Untuk "
-                "membandingkan setelan entry, jalankan backtest portofolio terpisah per "
-                "setelan.",
+                "Grid portofolio menyapu level exit ATR (EXIT_ATR_SL_MULT, "
+                "EXIT_ATR_TP_MULT, EXIT_ATR_TRAIL_MULT, EXIT_ATR_BREAKEVEN_MULT, "
+                "EXIT_ATR_MAX_SL_PCT, ENTRY_MIN_RR_RATIO) dan ambang momentum H1 "
+                "(MOMENTUM_BREAKOUT_LOOKBACK, MOMENTUM_BODY_ATR_MULT, "
+                "MOMENTUM_VOLUME_MULT). Sinyal entry dihitung ulang untuk setiap "
+                "kombinasi ambang momentum, karena ambang itulah yang menentukan koin "
+                f"mana yang lolos; jumlah kombinasi momentum dibatasi {gs.MAX_KOMBINASI_MOMENTUM} "
+                "supaya waktu jalan tetap wajar. Kombinasi yang melanggar aturan relasi "
+                "atau batas R:R otomatis dilewati dan dihitung pada kolom dilewati.",
                 "Statistik 24 jam DIREKONSTRUKSI dari candle, bukan snapshot "
                 "ticker/24hr historis. Volume itulah yang menentukan simbol mana yang "
                 "masuk top-N kandidat per bar.",
@@ -1725,7 +1776,7 @@ def _bt_min_days_note(cfg: dict, interval: str) -> tuple[int, str]:
 def _bt_peringatan_timing(cfg: dict, days: int) -> list:
     if not strategy.entry_rule_enabled(cfg):
         return []
-    interval = str(cfg.get("CONFIRM_INTERVAL", "5m") or "5m")
+    interval = str(cfg.get("CONFIRM_INTERVAL", "1h") or "1h")
     bar_uji = int(days) * 1440 // max(1, bt.INTERVAL_MINUTES.get(interval, 5))
     butuh = strategy.required_lookback_bars(cfg)
     if bar_uji >= butuh:
@@ -2184,18 +2235,25 @@ def api_backtest_defaults():
         out["warmup_bars"] / float(bt.bars_per_day(_bt_simulation_interval(PUMP_CONFIG))),
         1,
     )
-    out["native_intervals"] = _bt_native_htf_intervals(PUMP_CONFIG)
-    out["native_history_days"] = round(
-        strategy.native_history_ms(PUMP_CONFIG) / float(bt.MS_PER_DAY), 1
-    )
     out["entry_rule_enabled"] = bool(
         PUMP_CONFIG.get("ENTRY_RULE_ENABLED", True)
     )
-    out["entry_bull_candles"] = int(PUMP_CONFIG.get("ENTRY_BULL_CANDLES", 3) or 3)
-    out["entry_sl_anchor"] = str(
-        PUMP_CONFIG.get("ENTRY_SL_ANCHOR", "SIGNAL") or "SIGNAL"
-    ).upper()
-    out["confirm_interval"] = str(PUMP_CONFIG.get("CONFIRM_INTERVAL", "5m"))
+    out["entry_momentum"] = strategy.entry_momentum_params(PUMP_CONFIG)
+    out["exit_atr"] = strategy.exit_atr_params(PUMP_CONFIG)
+    out["EXIT_MAX_HOLD_HOURS"] = float(
+        PUMP_CONFIG.get("EXIT_MAX_HOLD_HOURS", _EXIT_TETAP["max_hold_hours"]) or 0.0
+    )
+    out["GAINER_VOLUME_FILTER_ENABLED"] = bool(
+        PUMP_CONFIG.get("GAINER_VOLUME_FILTER_ENABLED", True)
+    )
+    out["GAINER_VOLUME_RISE_MULT"] = float(
+        PUMP_CONFIG.get("GAINER_VOLUME_RISE_MULT", 1.2) or 0.0
+    )
+    out["GAINER_VOLUME_AVG_DAYS"] = int(
+        PUMP_CONFIG.get("GAINER_VOLUME_AVG_DAYS", 3) or 1
+    )
+    out["gain_volume"] = strategy.volume_rise_params(PUMP_CONFIG)
+    out["confirm_interval"] = str(PUMP_CONFIG.get("CONFIRM_INTERVAL", "1h"))
     out["confirm_lookback_bars"] = int(
         PUMP_CONFIG.get("CONFIRM_LOOKBACK_BARS", 60) or 60
     )

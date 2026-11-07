@@ -70,7 +70,7 @@ HasilKombinasi = BarisGrid
 @dataclass
 class HasilGridSearch:
     symbol: str = ""
-    interval: str = "5m"
+    interval: str = "1h"
     metrik: str = "total_return_pct"
     total_kombinasi: int = 0
     dipangkas: int = 0
@@ -83,16 +83,28 @@ class HasilGridSearch:
     dibatalkan: bool = False
 
 
-_KUNCI_SIMULASI_SAJA = {
-    "ENTRY_SL_BUFFER_PCT",
+_KUNCI_EXIT_ATR = (
+    "EXIT_ATR_SL_MULT",
+    "EXIT_ATR_TP_MULT",
+    "EXIT_ATR_TRAIL_MULT",
+    "EXIT_ATR_BREAKEVEN_MULT",
+    "EXIT_ATR_MAX_SL_PCT",
     "ENTRY_MIN_RR_RATIO",
-    "ENTRY_MAX_SL_PCT",
-    "EXIT_TRAILING_PCT",
-}
+)
 
-PARAMETER_GRID_DIIZINKAN = set(_KUNCI_SIMULASI_SAJA)
-PARAMETER_GRID_PORTOFOLIO = set(_KUNCI_SIMULASI_SAJA)
-KUNCI_GRID_PORTOFOLIO = frozenset(_KUNCI_SIMULASI_SAJA)
+_KUNCI_MOMENTUM = (
+    "MOMENTUM_BREAKOUT_LOOKBACK",
+    "MOMENTUM_BODY_ATR_MULT",
+    "MOMENTUM_VOLUME_MULT",
+)
+
+PARAMETER_GRID_DIIZINKAN = set(_KUNCI_EXIT_ATR) | set(_KUNCI_MOMENTUM)
+PARAMETER_GRID_PORTOFOLIO = set(_KUNCI_EXIT_ATR) | set(_KUNCI_MOMENTUM)
+KUNCI_GRID_PORTOFOLIO = frozenset(PARAMETER_GRID_PORTOFOLIO)
+
+# Setiap kombinasi ambang momentum yang berbeda menuntut perhitungan ulang
+# sinyal entry pada seluruh semesta. Batas ini menjaga waktu jalan tetap wajar.
+MAX_KOMBINASI_MOMENTUM = 8
 
 
 def buat_rentang(
@@ -195,13 +207,14 @@ def expand_grid(
     return unik, dipangkas
 
 
-def _pastikan_grid_portofolio_hanya_exit(spec: dict) -> None:
+def _pastikan_grid_portofolio_didukung(spec: dict) -> None:
     tidak_didukung = sorted(set(spec or {}) - PARAMETER_GRID_PORTOFOLIO)
     if tidak_didukung:
         raise GridSearchError(
-            "Grid search portofolio memakai cache sinyal entry agar setiap "
-            "kombinasi diuji cepat pada universe yang sama. Parameter non-exit "
-            f"tidak didukung di mode ini: {', '.join(tidak_didukung)}."
+            "Grid search portofolio menyapu level exit ATR dan ambang momentum "
+            "H1 pada semesta koin yang sama. Parameter lain tidak didukung di "
+            f"mode ini: {', '.join(tidak_didukung)}. "
+            f"Yang boleh: {', '.join(sorted(PARAMETER_GRID_PORTOFOLIO))}."
         )
 
 
@@ -210,15 +223,23 @@ def _kombinasi_masuk_akal(cfg: dict) -> tuple[bool, str]:
     if pelanggaran:
         kunci, pesan = next(iter(pelanggaran.items()))
         return False, f"{kunci} {pesan}"
-    sl_buf = float(cfg.get("ENTRY_SL_BUFFER_PCT", 0.30) or 0.0)
     min_rr = float(cfg.get("ENTRY_MIN_RR_RATIO", 2.0) or 0.0)
-    max_sl = float(cfg.get("ENTRY_MAX_SL_PCT", 3.0) or 0.0)
-    if not (0.0 <= sl_buf <= 10.0):
-        return False, "ENTRY_SL_BUFFER_PCT harus di antara 0 dan 10"
     if not (0.1 <= min_rr <= 20.0):
         return False, "ENTRY_MIN_RR_RATIO harus di antara 0.1 dan 20"
-    if not (0.0 <= max_sl <= 50.0):
-        return False, "ENTRY_MAX_SL_PCT harus di antara 0 dan 50"
+    batas = (
+        ("EXIT_ATR_SL_MULT", 0.1, 20.0),
+        ("EXIT_ATR_TP_MULT", 0.1, 50.0),
+        ("EXIT_ATR_TRAIL_MULT", 0.1, 20.0),
+        ("EXIT_ATR_BREAKEVEN_MULT", 0.0, 20.0),
+        ("EXIT_ATR_MAX_SL_PCT", 0.0, 50.0),
+        ("MOMENTUM_BREAKOUT_LOOKBACK", 1.0, 20.0),
+        ("MOMENTUM_BODY_ATR_MULT", 0.0, 5.0),
+        ("MOMENTUM_VOLUME_MULT", 0.0, 20.0),
+    )
+    for kunci, bawah, atas in batas:
+        nilai = float(cfg.get(kunci, bawah) or 0.0)
+        if not (bawah <= nilai <= atas):
+            return False, f"{kunci} harus di antara {bawah:g} dan {atas:g}"
     return True, ""
 
 
@@ -275,7 +296,7 @@ def run_grid_search(
         raise GridSearchError("rasio_latih harus berada di antara 0.1 dan 1.0.")
 
     kombinasi, dipangkas = expand_grid(spec, base_config)
-    interval_konfirmasi = str(base_config.get("CONFIRM_INTERVAL", "5m"))
+    interval_konfirmasi = str(base_config.get("CONFIRM_INTERVAL", "1h"))
     butuh_warmup = strategy.gate_warmup_bars(base_config, interval_konfirmasi)
     peringatan_warmup: list[str] = []
     if int(warmup_bars) < butuh_warmup:
@@ -416,7 +437,7 @@ def run_grid_search(
 
     return HasilGridSearch(
         symbol=str(base_config.get("_symbol", "")),
-        interval=str(base_config.get("CONFIRM_INTERVAL", "5m")),
+        interval=str(base_config.get("CONFIRM_INTERVAL", "1h")),
         metrik=metrik,
         total_kombinasi=total,
         dipangkas=dipangkas,
@@ -474,7 +495,7 @@ def run_portfolio_grid_search(
     if not (0.1 <= rasio_latih <= 1.0):
         raise GridSearchError("rasio_latih harus berada di antara 0.1 dan 1.0.")
 
-    _pastikan_grid_portofolio_hanya_exit(spec)
+    _pastikan_grid_portofolio_didukung(spec)
     kombinasi, dipangkas = expand_grid(spec, base_config)
     butuh_warmup_ms = strategy.gate_warmup_ms(base_config, interval)
     peringatan_warmup: list[str] = []
@@ -532,23 +553,69 @@ def run_portfolio_grid_search(
     _panggil_progress(
         progress_cb, 0.0, "Menghitung sinyal entry portofolio sekali untuk seluruh grid..."
     )
-    precompute_cfg = dict(base_config)
-    if (
-        "ENTRY_MIN_RR_RATIO" in (spec or {})
-        or "ENTRY_SL_BUFFER_PCT" in (spec or {})
-        or "ENTRY_MAX_SL_PCT" in (spec or {})
-    ):
-        precompute_cfg["ENTRY_MIN_RR_RATIO"] = 0.1
-        precompute_cfg["ENTRY_MAX_SL_PCT"] = 0.0
-    entry_signal_cache = precompute_entry_signals(
-        store,
-        precompute_cfg,
-        interval,
-        warmup_ms=warmup_ms,
-        prebuilt=prebuilt,
-        cancel_cb=cancel_cb,
-        structure_store=structure_store,
-    )
+    kunci_momentum_dalam_spec = [
+        kunci for kunci in (spec or {}) if kunci in _KUNCI_MOMENTUM
+    ]
+    # Setiap kombinasi ambang momentum yang berbeda harus dihitung sinyalnya
+    # sendiri, karena ambang itu menentukan koin mana yang lolos entry.
+    cache_momentum: dict[tuple, object] = {}
+
+    def cache_untuk(ov: dict):
+        kunci_mom = tuple(
+            sorted((k, ov[k]) for k in ov if k in _KUNCI_MOMENTUM)
+        )
+        cache = cache_momentum.get(kunci_mom)
+        if cache is not None:
+            return cache
+        precompute_cfg = dict(base_config)
+        for kunci, nilai in kunci_mom:
+            precompute_cfg[kunci] = nilai
+        if any(
+            kunci in (spec or {})
+            for kunci in ("ENTRY_MIN_RR_RATIO", "EXIT_ATR_MAX_SL_PCT")
+        ):
+            # Level exit dihitung ulang saat kombinasi dijalankan, jadi
+            # penyaringan R:R dan batas SL jangan sampai membuang sinyal lebih awal.
+            precompute_cfg["ENTRY_MIN_RR_RATIO"] = 0.1
+            precompute_cfg["EXIT_ATR_MAX_SL_PCT"] = 0.0
+        _panggil_progress(
+            progress_cb,
+            0.0,
+            (
+                "Menghitung sinyal entry untuk ambang momentum "
+                f"{', '.join(f'{k}={v}' for k, v in kunci_mom) or 'bawaan'}..."
+            ),
+        )
+        cache = precompute_entry_signals(
+            store,
+            precompute_cfg,
+            interval,
+            warmup_ms=warmup_ms,
+            prebuilt=prebuilt,
+            cancel_cb=cancel_cb,
+            structure_store=structure_store,
+        )
+        if len(cache_momentum) >= MAX_KOMBINASI_MOMENTUM:
+            raise GridSearchError(
+                f"Grid memuat lebih dari {MAX_KOMBINASI_MOMENTUM} kombinasi ambang "
+                "momentum. Setiap kombinasi menghitung ulang sinyal entry seluruh "
+                "semesta, jadi jumlahnya dibatasi. Persempit rentang momentum atau "
+                "bagi menjadi beberapa kali jalan."
+            )
+        cache_momentum[kunci_mom] = cache
+        return cache
+
+    if kunci_momentum_dalam_spec:
+        jumlah_momentum = 1
+        for kunci in kunci_momentum_dalam_spec:
+            jumlah_momentum *= len(spec[kunci])
+        if jumlah_momentum > MAX_KOMBINASI_MOMENTUM:
+            raise GridSearchError(
+                f"Rentang momentum menghasilkan {jumlah_momentum} kombinasi, "
+                f"melebihi batas {MAX_KOMBINASI_MOMENTUM}. Setiap kombinasi "
+                "momentum menghitung ulang sinyal entry seluruh semesta. "
+                "Persempit rentang atau perbesar langkahnya."
+            )
 
     for idx, ov in enumerate(kombinasi, start=1):
         if cancel_cb is not None and cancel_cb():
@@ -580,7 +647,7 @@ def run_portfolio_grid_search(
                 end_ms=batas_latih_ms,
                 prebuilt=prebuilt,
                 cancel_cb=cancel_cb,
-                entry_signal_cache=entry_signal_cache,
+                entry_signal_cache=cache_untuk(ov),
             )
             sum_latih = summarize_portfolio(res_latih)
             skor_latih = hitung_skor(sum_latih, metrik)
@@ -597,7 +664,7 @@ def run_portfolio_grid_search(
                     start_ms=awal_uji_ms,
                     prebuilt=prebuilt,
                     cancel_cb=cancel_cb,
-                    entry_signal_cache=entry_signal_cache,
+                    entry_signal_cache=cache_untuk(ov),
                 )
                 sum_uji = summarize_portfolio(res_uji)
                 skor_uji = hitung_skor(sum_uji, metrik)
@@ -727,7 +794,7 @@ def execute_grid_search(
 
     mode_norm = (mode or "portfolio").strip().lower()
     if mode_norm == "portfolio":
-        _pastikan_grid_portofolio_hanya_exit(spec)
+        _pastikan_grid_portofolio_didukung(spec)
     kombinasi, _ = expand_grid(spec, base_config)
     if not kombinasi:
         raise GridSearchError("Tidak ada kombinasi parameter untuk diuji.")
@@ -735,7 +802,7 @@ def execute_grid_search(
     base_cfg = apply_overrides(base_config, base_overrides)
     validate_params(base_cfg)
 
-    interval = str(base_cfg.get("CONFIRM_INTERVAL", "5m"))
+    interval = str(base_cfg.get("CONFIRM_INTERVAL", "1h"))
     bar_minutes = INTERVAL_MINUTES[interval]
     window_24h = bars_per_day(interval)
 
@@ -898,6 +965,10 @@ def ringkas_untuk_tabel(hasil: HasilGridSearch, top_n: int = 20) -> list[dict]:
             "maxdd_latih": round(float(h.latih.get("max_drawdown_pct", 0.0)), 3),
             "pf_latih": _pf_aman(h.latih.get("profit_factor")),
             "skor_latih": round(h.skor_latih, 4),
+            "sl_median_latih": (h.latih.get("stop_distance_pct") or {}).get(
+                "median_pct"
+            ),
+            "sl_p90_latih": (h.latih.get("stop_distance_pct") or {}).get("p90_pct"),
         }
         if h.uji is not None:
             b.update(
@@ -912,6 +983,9 @@ def ringkas_untuk_tabel(hasil: HasilGridSearch, top_n: int = 20) -> list[dict]:
                     ),
                     "degradasi": (
                         round(h.degradasi, 4) if h.degradasi is not None else None
+                    ),
+                    "sl_median_uji": (h.uji.get("stop_distance_pct") or {}).get(
+                        "median_pct"
                     ),
                 }
             )
@@ -1047,6 +1121,148 @@ def parse_spec_cli(teks: str) -> dict:
     return spec
 
 
+def _uji_grid_portofolio_momentum(check) -> None:
+    """Uji integrasi: sapuan ambang momentum benar-benar berjalan di portofolio."""
+
+    from copy import deepcopy
+
+    from config.config import PUMP_CONFIG
+    from backtesting.portfolio_backtest import new_backtest_store
+    from backtesting.synthetic_data import seri_banyak_setup
+
+    cfg = deepcopy(PUMP_CONFIG)
+    cfg.update(
+        {
+            "MODE": "PAPER",
+            "ENTRY_RULE_ENABLED": True,
+            "MIN_QUOTE_VOLUME_USDT_24H": 0.0,
+            "GAINER_MIN_CHANGE_PCT": 0.0,
+            "GAINER_MAX_CHANGE_PCT": 0.0,
+            "GAINER_VOLUME_FILTER_ENABLED": False,
+            "SAME_COIN_BLOCK_HOURS": 0.0,
+            "ENTRY_MIN_RR_RATIO": 2.0,
+            "EXIT_ATR_MAX_SL_PCT": 5.0,
+            "TAKER_FEE_PCT": 0.1,
+            "USE_BNB_FEE_DISCOUNT": False,
+            "USE_RISK_PERCENT": False,
+            "POSITION_SIZE_USDT": 100.0,
+            "MAX_POSITION_USDT": 0.0,
+            "BACKTEST_INITIAL_EQUITY_USDT": 1000.0,
+            "COOLDOWN_MINUTES_AFTER_CLOSE": 0,
+            "MIN_SECONDS_BETWEEN_TRADES": 0,
+            "MAX_CHASE_PCT": 0.0,
+            "TOP_N_CANDIDATES_TO_CONFIRM": 10,
+        }
+    )
+    store = new_backtest_store(cfg)
+    try:
+        store.write_symbol(
+            "AAAUSDT", seri_banyak_setup(harga=100.0, siklus=10, volume=9_000_000.0)
+        )
+        store.write_symbol(
+            "BBBUSDT", seri_banyak_setup(harga=200.0, siklus=10, volume=5_000_000.0)
+        )
+        warmup_ms = 300 * 5 * 60 * 1000
+        hasil = run_portfolio_grid_search(
+            store,
+            cfg,
+            "5m",
+            warmup_ms,
+            {"MOMENTUM_BODY_ATR_MULT": [0.4, 0.8]},
+            rasio_latih=1.0,
+            min_trades=1,
+        )
+        nilai = sorted(
+            float(b.params.get("MOMENTUM_BODY_ATR_MULT", -1)) for b in hasil.hasil
+        )
+        check(
+            "grid portofolio menjalankan sapuan momentum",
+            hasil.total_kombinasi == 2 and nilai == [0.4, 0.8],
+            f"kombinasi={hasil.total_kombinasi}, nilai={nilai}",
+        )
+
+        # Ambang momentum longgar vs ketat harus memberi semesta entry berbeda.
+        lebar = run_portfolio_grid_search(
+            store,
+            cfg,
+            "5m",
+            warmup_ms,
+            {"MOMENTUM_BODY_ATR_MULT": [0.2, 5.0]},
+            rasio_latih=1.0,
+            min_trades=1,
+        )
+        per_ambang = {
+            float(b.params.get("MOMENTUM_BODY_ATR_MULT", -1)): int(
+                b.latih.get("total_trades", 0)
+            )
+            for b in lebar.hasil
+        }
+        check(
+            "ambang momentum longgar memberi trade, ambang ketat tidak",
+            per_ambang.get(0.2, 0) > 0 and per_ambang.get(5.0) == 0,
+            f"trade per ambang={per_ambang}",
+        )
+
+        # Hasil lewat cache per momentum harus sama dengan jalur tanpa cache.
+        from backtesting.portfolio_backtest import (
+            build_timeline as _build_timeline,
+            run_portfolio_backtest as _run_pf,
+            summarize_portfolio as _sum_pf,
+        )
+
+        cfg_satu = apply_overrides(cfg, {"MOMENTUM_BODY_ATR_MULT": 0.2})
+        tl = _build_timeline(store, "5m", config=cfg, include_ohlcv=True)
+        langsung = _run_pf(
+            store, cfg_satu, "5m", warmup_ms=warmup_ms, prebuilt=tl
+        )
+        ringkas_langsung = _sum_pf(langsung)
+        baris_lebar = next(
+            (
+                b
+                for b in lebar.hasil
+                if float(b.params.get("MOMENTUM_BODY_ATR_MULT", -1)) == 0.2
+            ),
+            None,
+        )
+        check(
+            "hasil grid lewat cache sama dengan jalur tanpa cache",
+            baris_lebar is not None
+            and int(baris_lebar.latih.get("total_trades", -1))
+            == int(ringkas_langsung.get("total_trades", -2))
+            and abs(
+                float(baris_lebar.latih.get("total_return_pct", 0.0))
+                - float(ringkas_langsung.get("total_return_pct", 0.0))
+            )
+            < 1e-9,
+            (
+                f"grid={baris_lebar.latih.get('total_trades') if baris_lebar else None}"
+                f"/{ringkas_langsung.get('total_trades')}"
+            ),
+        )
+        check(
+            "setiap kombinasi momentum punya ringkasan sebaran stop",
+            all(
+                (b.latih.get("stop_distance_pct") or {}).get("count", 0) >= 0
+                for b in hasil.hasil
+            ),
+            f"{len(hasil.hasil)} baris",
+        )
+    finally:
+        store.close()
+
+    try:
+        run_portfolio_grid_search(
+            store=None,  # type: ignore[arg-type]
+            base_config=cfg,
+            interval="5m",
+            warmup_ms=0,
+            spec={"CONFIRM_LOOKBACK_BARS": [60, 90]},
+        )
+        check("grid portofolio menolak parameter di luar dukungan", False)
+    except (GridSearchError, AttributeError, TypeError):
+        check("grid portofolio menolak parameter di luar dukungan", True)
+
+
 def selftest() -> bool:
     from copy import deepcopy
 
@@ -1082,7 +1298,7 @@ def selftest() -> bool:
         check("expand_grid menolak kunci tanpa efek", True)
 
     kombinasi, dipangkas = expand_grid(
-        {"ENTRY_SL_BUFFER_PCT": [0.1, 0.2, 0.2], "ENTRY_MIN_RR_RATIO": [1.2, 1.5]}
+        {"EXIT_ATR_SL_MULT": [1.2, 1.5, 1.5], "ENTRY_MIN_RR_RATIO": [1.2, 1.5]}
     )
     check(
         "expand_grid menghasilkan kombinasi unik",
@@ -1090,22 +1306,40 @@ def selftest() -> bool:
         f"{len(kombinasi)} kombinasi, {dipangkas} dipangkas",
     )
     try:
-        expand_grid({"ENTRY_SL_BUFFER_PCT": []})
+        expand_grid({"EXIT_ATR_SL_MULT": []})
         check("expand_grid menolak daftar kosong", False)
     except GridSearchError:
         check("expand_grid menolak daftar kosong", True)
     try:
-        _pastikan_grid_portofolio_hanya_exit(
-            {"ENTRY_BULL_CANDLES": [2, 3]}
-        )
-        check("grid portofolio menolak parameter entry", False)
+        _pastikan_grid_portofolio_didukung({"MOMENTUM_BODY_ATR_MULT": [0.4, 0.6]})
+        check("grid portofolio menerima ambang momentum", True)
     except GridSearchError:
-        check("grid portofolio menolak parameter entry", True)
+        check("grid portofolio menerima ambang momentum", False)
     try:
-        _pastikan_grid_portofolio_hanya_exit({"ENTRY_SL_BUFFER_PCT": [0.1, 0.2]})
+        _pastikan_grid_portofolio_didukung(
+            {"MOMENTUM_BREAKOUT_LOOKBACK": [1, 2], "MOMENTUM_VOLUME_MULT": [1.2, 1.5]}
+        )
+        check("grid portofolio menerima beberapa ambang momentum", True)
+    except GridSearchError:
+        check("grid portofolio menerima beberapa ambang momentum", False)
+    try:
+        _pastikan_grid_portofolio_didukung({"CONFIRM_LOOKBACK_BARS": [60, 90]})
+        check("grid portofolio menolak parameter non-exit non-momentum", False)
+    except GridSearchError:
+        check("grid portofolio menolak parameter non-exit non-momentum", True)
+    try:
+        _pastikan_grid_portofolio_didukung({"EXIT_ATR_SL_MULT": [1.2, 1.5]})
         check("grid portofolio menerima parameter exit", True)
     except GridSearchError:
         check("grid portofolio menerima parameter exit", False)
+
+    _uji_grid_portofolio_momentum(check)
+
+    check(
+        "batas kombinasi momentum masuk akal",
+        MAX_KOMBINASI_MOMENTUM >= 2 and MAX_KOMBINASI_MOMENTUM <= 32,
+        f"batas={MAX_KOMBINASI_MOMENTUM}",
+    )
 
     check("hitung_skor total_return_pct", hitung_skor({"total_return_pct": 5.0}, "total_return_pct") == 5.0)
     check("hitung_skor profit_factor", hitung_skor({"profit_factor": 2.5}, "profit_factor") == 2.5)
@@ -1120,10 +1354,10 @@ def selftest() -> bool:
     except GridSearchError:
         check("hitung_skor menolak metrik tidak dikenal", True)
 
-    spec = parse_spec_cli("ENTRY_SL_BUFFER_PCT=0.1:0.3:0.1,ENTRY_MIN_RR_RATIO=1.2|1.5")
-    check("parse_spec_cli rentang", spec["ENTRY_SL_BUFFER_PCT"] == [0.1, 0.2, 0.3], spec.get("ENTRY_SL_BUFFER_PCT"))
+    spec = parse_spec_cli("EXIT_ATR_SL_MULT=1.2:1.8:0.3,ENTRY_MIN_RR_RATIO=1.2|1.5")
+    check("parse_spec_cli rentang", spec["EXIT_ATR_SL_MULT"] == [1.2, 1.5, 1.8], spec.get("EXIT_ATR_SL_MULT"))
     check("parse_spec_cli daftar", spec["ENTRY_MIN_RR_RATIO"] == [1.2, 1.5])
-    for teks in ("", "   ", "tanpa_sama_dengan", "KUNCI=", "ENTRY_SL_BUFFER_PCT=1:2", "ENTRY_SL_BUFFER_PCT=abc"):
+    for teks in ("", "   ", "tanpa_sama_dengan", "KUNCI=", "EXIT_ATR_SL_MULT=1:2", "EXIT_ATR_SL_MULT=abc"):
         try:
             parse_spec_cli(teks)
             check(f"parse_spec_cli menolak {teks!r}", False)
@@ -1136,9 +1370,9 @@ def selftest() -> bool:
         "MODE": "PAPER",
         "ENTRY_RULE_ENABLED": True,
         "MIN_QUOTE_VOLUME_USDT_24H": 0.0,
-        "ENTRY_SL_BUFFER_PCT": 0.30,
+        "EXIT_ATR_SL_MULT": 1.5,
         "ENTRY_MIN_RR_RATIO": 2.0,
-        "ENTRY_MAX_SL_PCT": 5.0,
+        "EXIT_ATR_MAX_SL_PCT": 5.0,
         "TAKER_FEE_PCT": 0.1,
         "USE_BNB_FEE_DISCOUNT": False,
         "USE_RISK_PERCENT": False,
@@ -1149,20 +1383,24 @@ def selftest() -> bool:
         "MIN_SECONDS_BETWEEN_TRADES": 0,
         "MAX_CHASE_PCT": 0.0,
     })
+    cfg["GAINER_MIN_CHANGE_PCT"] = 0.0
+    cfg["GAINER_MAX_CHANGE_PCT"] = 0.0
+    cfg["GAINER_VOLUME_FILTER_ENABLED"] = False
+    cfg["SAME_COIN_BLOCK_HOURS"] = 0.0
     klines = sd.seri_banyak_setup(harga=100.0, siklus=10, volume=9_000_000.0)
 
     try:
-        run_grid_search(klines[:50], cfg, {"ENTRY_SL_BUFFER_PCT": [0.2]}, 300)
+        run_grid_search(klines[:50], cfg, {"EXIT_ATR_SL_MULT": [1.2]}, 300)
         check("run_grid_search menolak data pendek", False)
     except GridSearchError:
         check("run_grid_search menolak data pendek", True)
     try:
-        run_grid_search(klines, cfg, {"ENTRY_SL_BUFFER_PCT": [0.2]}, 300, metrik="metrik_bohong")
+        run_grid_search(klines, cfg, {"EXIT_ATR_SL_MULT": [1.2]}, 300, metrik="metrik_bohong")
         check("run_grid_search menolak metrik tidak dikenal", False)
     except GridSearchError:
         check("run_grid_search menolak metrik tidak dikenal", True)
     try:
-        run_grid_search(klines, cfg, {"ENTRY_SL_BUFFER_PCT": [0.2]}, 300, rasio_latih=1.5)
+        run_grid_search(klines, cfg, {"EXIT_ATR_SL_MULT": [1.2]}, 300, rasio_latih=1.5)
         check("run_grid_search menolak rasio latih di luar rentang", False)
     except GridSearchError:
         check("run_grid_search menolak rasio latih di luar rentang", True)
@@ -1170,7 +1408,7 @@ def selftest() -> bool:
     hasil_tunggal = run_grid_search(
         klines,
         cfg,
-        {"ENTRY_SL_BUFFER_PCT": [0.15, 0.25]},
+        {"EXIT_ATR_SL_MULT": [1.2, 1.5]},
         300,
         min_trades=1,
     )
@@ -1186,7 +1424,7 @@ def selftest() -> bool:
     hasil = run_grid_search(
         klines,
         cfg,
-        {"ENTRY_SL_BUFFER_PCT": [0.15, 0.25], "ENTRY_MIN_RR_RATIO": [1.2, 1.8]},
+        {"EXIT_ATR_SL_MULT": [1.2, 1.5], "ENTRY_MIN_RR_RATIO": [1.2, 1.8]},
         300,
         min_trades=1,
     )
@@ -1200,18 +1438,18 @@ def selftest() -> bool:
         "_symbol": "",
         "MODE": "PAPER",
         "ENTRY_RULE_ENABLED": True,
-        "ENTRY_BULL_CANDLES": 3,
+        "MOMENTUM_BODY_ATR_MULT": 0.5,
         "CONFIRM_LOOKBACK_BARS": 20,
         "MIN_QUOTE_VOLUME_USDT_24H": 0.0,
-        "ENTRY_SL_BUFFER_PCT": 0.30,
+        "EXIT_ATR_SL_MULT": 1.5,
         "ENTRY_MIN_RR_RATIO": 2.0,
-        "ENTRY_MAX_SL_PCT": 5.0,
+        "EXIT_ATR_MAX_SL_PCT": 5.0,
     })
     klines_panjang = sd.seri_5m_trend(harga=100.0, jam_trend=120)
     hasil_pendek = run_grid_search(
         klines_panjang,
         cfg_pendek,
-        {"ENTRY_SL_BUFFER_PCT": [0.15, 0.25]},
+        {"EXIT_ATR_SL_MULT": [1.2, 1.5]},
         10,
         min_trades=1,
     )

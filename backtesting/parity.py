@@ -5,6 +5,7 @@ from typing import Optional, Sequence
 
 from strategy import indicators as strategy
 from strategy import entry_rule
+from strategy import exit_atr
 from strategy.indicators import Kline
 
 TIME_STOP_REASON = strategy.TIME_STOP_REASON
@@ -215,11 +216,11 @@ class PositionState:
         tp_p = float(levels_dict.get("tp_pct") or 0.0)
         if not (0.0 < sl_p < 100.0):
             raise ValueError(
-                f"Persen SL struktural ({sl_p}%) tidak valid; wajib di antara 0 dan 100."
+                f"Persen SL ATR ({sl_p}%) tidak valid; wajib di antara 0 dan 100."
             )
         if not (tp_p > 0.0 and math.isfinite(tp_p)):
             raise ValueError(
-                f"Persen TP struktural ({tp_p}%) tidak valid; wajib > 0."
+                f"Persen TP ATR ({tp_p}%) tidak valid; wajib > 0."
             )
         raw_sl_price = levels_dict.get("sl_price")
         raw_tp_price = levels_dict.get("tp_price")
@@ -298,37 +299,43 @@ def evaluate_candle_exit(
         return _alasan_stop(pos, sl_price), min(sl_price, candle.open)
     if entry_rule.take_profit_due(entry, pos.tp_price, candle.high):
         return "TAKE_PROFIT", max(pos.tp_price, candle.open)
-    be_params = strategy.entry_breakeven_params(config)
-    if be_params["enabled"] and not pos.be_active:
-        pemicu = strategy.entry_breakeven_trigger(
-            entry, pos.initial_sl_price, be_params["r_multiple"]
+    atr_entry = pos.levels.get("atr")
+    try:
+        atr_entry = float(atr_entry) if atr_entry is not None else 0.0
+    except (TypeError, ValueError):
+        atr_entry = 0.0
+    if atr_entry > 0.0:
+        rencana = exit_atr.advance(
+            {
+                "entry_price": entry,
+                "initial_sl_price": pos.initial_sl_price,
+                "sl_price": sl_price,
+                "tp_price": pos.tp_price,
+                "peak_price": max(puncak_sebelum, float(candle.high)),
+                "be_active": pos.be_active,
+                "be_stop_price": pos.be_stop,
+                "trail_active": pos.trailing_active,
+                "trail_stop_price": pos.trailing_stop_price,
+                "atr_at_entry": atr_entry,
+            },
+            puncak_sebelum,
+            config,
+            atr=atr_entry,
         )
-        if pemicu > entry and candle.high >= pemicu:
-            level_be = strategy.entry_breakeven_price(
-                entry, pos.initial_sl_price, be_params["r_multiple"], be_params["lock_pct"]
-            )
-            if level_be > sl_price:
-                pos.be_stop = level_be
+        if float(rencana.get("peak_price") or 0.0) > pos.highest_price:
+            pos.highest_price = float(rencana["peak_price"])
+        kandidat = float(rencana.get("sl_price") or 0.0)
+        if kandidat > sl_price:
+            if rencana.get("be_active") and not pos.be_active:
                 pos.be_active = True
                 pos.be_activated = True
-                pos.sl_price = level_be
-                pos.levels["sl_price"] = level_be
-                sl_price = level_be
-    trail_params = strategy.exit_trailing_params(config)
-    if trail_params["enabled"]:
-        pemicu_trail = strategy.exit_trailing_start_price(
-            entry, pos.initial_sl_price, trail_params["start_r"]
-        )
-        if pemicu_trail > 0.0 and puncak_sebelum >= pemicu_trail:
-            kandidat = strategy.exit_trailing_stop_price(
-                puncak_sebelum, trail_params["pct"]
-            )
-            if kandidat > 0.0 and kandidat > sl_price:
+                pos.be_stop = float(rencana.get("be_stop_price") or 0.0)
+            if rencana.get("trail_active"):
                 pos.trailing_active = True
                 pos.trailing_stop_price = kandidat
-                pos.sl_price = kandidat
-                pos.levels["sl_price"] = kandidat
-                sl_price = kandidat
+            pos.sl_price = kandidat
+            pos.levels["sl_price"] = kandidat
+            sl_price = kandidat
     if candle.low <= sl_price:
         return _alasan_stop(pos, sl_price), min(sl_price, candle.open)
     if strategy.time_stop_due(pos.entry_time, candle.close_time, cap_ms, bar_ms):
@@ -337,31 +344,16 @@ def evaluate_candle_exit(
     return None
 
 
-def entry_warmup_bars(config: dict, interval: str = "5m") -> int:
+def entry_warmup_bars(config: dict, interval: str = "1h") -> int:
     return strategy.entry_warmup_bars(config, str(interval))
 
 
-def entry_warmup_ms(config: dict, interval: str = "5m") -> int:
-    return strategy.gate_warmup_ms(config, str(interval))
-
-
-def gate_warmup_bars(config: dict, interval: str = "5m") -> int:
+def gate_warmup_bars(config: dict, interval: str = "1h") -> int:
     return strategy.gate_warmup_bars(config, str(interval))
 
 
-def gate_warmup_ms(config: dict, interval: str = "5m") -> int:
+def gate_warmup_ms(config: dict, interval: str = "1h") -> int:
     return strategy.gate_warmup_ms(config, str(interval))
-
-
-def same_coin_block_until_ms(
-    close_time_ms: int, pnl_quote: float, config: dict
-) -> int:
-    hours = same_coin_block_hours(config)
-    if hours <= 0:
-        return 0
-    if bool(config.get("SAME_COIN_BLOCK_LOSS_ONLY", True)) and float(pnl_quote) >= 0:
-        return 0
-    return int(close_time_ms) + int(round(hours * 3_600_000))
 
 
 def per_trade_metrics(trades: Sequence) -> dict:

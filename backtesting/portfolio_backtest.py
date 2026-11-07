@@ -14,6 +14,7 @@ from market import market_scanner as scanner
 from backtesting import backtest_storage as storage
 from backtesting import backtest_cache as kcache
 from backtesting import parity
+from backtesting import stop_stats
 from backtesting.backtest_storage import KlineStore, SymbolSeries
 from backtesting.backtest_cache import KlineCache
 
@@ -110,6 +111,16 @@ def select_universe(
     if max_symbols is not None and max_symbols > 0:
         symbols = symbols[:max_symbols]
     return symbols
+
+
+def exit_level_signature(config: dict) -> tuple:
+    params = strategy.exit_atr_params(config)
+    return (
+        round(float(params["min_rr"]), 9),
+        round(float(params["sl_mult"]), 9),
+        round(float(params["tp_mult"]), 9),
+        round(float(params["max_sl_pct"]), 9),
+    )
 
 
 def new_backtest_store(config: Optional[dict] = None) -> KlineStore:
@@ -253,80 +264,6 @@ def _klines_untuk_simbol(
     ]
 
 
-def fetch_native_klines(
-    client,
-    symbols: list[str],
-    interval: str,
-    start_ms: int,
-    end_ms: int,
-    cache: Optional[KlineCache] = None,
-    max_workers: int = 1,
-    progress_cb: Optional[Callable[[float, str], None]] = None,
-) -> dict[str, list[Kline]]:
-    unique = [str(sym) for sym in dict.fromkeys(symbols or ())]
-    if not unique:
-        return {}
-    out: dict[str, list[Kline]] = {}
-    workers = max(1, int(max_workers or 1))
-    done = 0
-    total = max(1, len(unique))
-
-    def _one(sym: str) -> list[Kline]:
-        return _klines_untuk_simbol(client, sym, interval, start_ms, end_ms, cache)
-
-    if workers == 1 or len(unique) == 1:
-        for sym in unique:
-            try:
-                out[sym] = _one(sym)
-            except Exception:
-                out[sym] = []
-            done += 1
-            if progress_cb is not None:
-                progress_cb(done / total, sym)
-        return out
-
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="backtest-htf") as pool:
-        futures = {pool.submit(_one, sym): sym for sym in unique}
-        for future in as_completed(futures):
-            sym = futures[future]
-            try:
-                out[sym] = future.result()
-            except Exception:
-                out[sym] = []
-            done += 1
-            if progress_cb is not None:
-                progress_cb(done / total, sym)
-    return out
-
-
-def build_native_lookups(
-    series_by_symbol: dict[str, list],
-    config: dict,
-    factory,
-) -> dict:
-    lookups: dict = {}
-    for sym, klines in (series_by_symbol or {}).items():
-        if not klines:
-            continue
-        lookup = factory(klines, config)
-        if lookup is not None:
-            lookups[sym] = lookup
-    return lookups
-
-
-def fetch_native_lookups(
-    client,
-    symbols: list[str],
-    config: dict,
-    start_ms: int,
-    end_ms: int,
-    cache: Optional[KlineCache] = None,
-    max_workers: int = 1,
-    progress_cb: Optional[Callable[[float, str], None]] = None,
-) -> dict:
-    return {}
-
-
 def build_timeline(
     store: KlineStore,
     interval: str,
@@ -337,7 +274,7 @@ def build_timeline(
 ) -> tuple:
     window = bars_per_day(interval)
     series_of: dict[str, SymbolSeries] = {}
-    struktur_of: dict = {}
+    deret_of: dict = {}
     all_times: set = set()
     daftar = symbols if symbols is not None else store.symbols()
 
@@ -353,7 +290,7 @@ def build_timeline(
     timeline = sorted(all_times)
     if config is None:
         return timeline, series_of
-    return timeline, series_of, struktur_of
+    return timeline, series_of, deret_of
 
 
 def unpack_prebuilt(prebuilt: Optional[tuple]) -> tuple:
@@ -368,7 +305,7 @@ def unpack_prebuilt(prebuilt: Optional[tuple]) -> tuple:
     )
 
 
-def _siapkan_struktur(
+def _siapkan_deret(
     prebuilt: Optional[tuple],
     store: KlineStore,
     series_of: dict,
@@ -387,8 +324,7 @@ class EntrySignalCache:
     entry_rule_events: list = field(default_factory=list)
     entry_rule_scans_by_time: dict = field(default_factory=dict)
     entry_rule_skips_by_time: dict = field(default_factory=dict)
-    sl_buffer_pct: float = 0.30
-    min_rr_ratio: float = 2.0
+    exit_signature: tuple = ()
 
     def get(self, t_now: int, default=None):
         return self.signals.get(t_now, default)
@@ -439,15 +375,15 @@ def precompute_entry_signals(
     if not symbols:
         return EntrySignalCache({})
 
-    timeline, series_of, struktur_of = unpack_prebuilt(prebuilt)
+    timeline, series_of, deret_of = unpack_prebuilt(prebuilt)
     if timeline is None:
-        timeline, series_of, struktur_of = build_timeline(
+        timeline, series_of, deret_of = build_timeline(
             store, interval, symbols, config, structure_store=structure_store
         )
     else:
         symbols = [sym for sym in symbols if sym in series_of]
-        if not struktur_of:
-            struktur_of = _siapkan_struktur(
+        if not deret_of:
+            deret_of = _siapkan_deret(
                 prebuilt,
                 store,
                 series_of,
@@ -471,11 +407,7 @@ def precompute_entry_signals(
         ot, ct, pct_arr, vol_arr, ready_arr = series_of[sym].board_arrays()
         papan_input.append((sym, ot, ct, pct_arr, vol_arr, ready_arr, len(ot)))
 
-    signals = EntrySignalCache(
-        {},
-        sl_buffer_pct=float(config.get("ENTRY_SL_BUFFER_PCT", 0.30) or 0.0),
-        min_rr_ratio=float(config.get("ENTRY_MIN_RR_RATIO", 2.0) or 2.0),
-    )
+    signals = EntrySignalCache({}, exit_signature=exit_level_signature(config))
     total_bars = len(timeline)
 
     for bi, t_now in enumerate(timeline):
@@ -496,17 +428,18 @@ def precompute_entry_signals(
             vol24 = vol_arr[pos]
             if vol24 < min_vol:
                 continue
-            gate_ok, _ = scanner.evaluate_market_gate(vol24, config)
+            pct24 = pct_arr[pos]
+            gate_ok, _ = scanner.evaluate_market_gate(pct24, vol24, config)
             if not gate_ok:
                 continue
-            board.append((vol24, sym, pos, ct[pos]))
+            board.append((pct24, vol24, sym, pos, ct[pos]))
 
         if not board:
             continue
-        board.sort(key=lambda x: -x[0])
+        board.sort(key=lambda x: (-x[0], -x[1]))
 
         lolos = []
-        for rank, (vol24, sym, i, close_time) in enumerate(
+        for rank, (pct24, vol24, sym, i, close_time) in enumerate(
             board[:top_n], start=1
         ):
             if i + 1 < lookback:
@@ -607,7 +540,7 @@ def run_portfolio_backtest(
         raise BacktestError("Tidak ada data yang lolos policy semesta bersama.")
     lolos_policy = len(symbols)
 
-    timeline, series_of, struktur_of = unpack_prebuilt(prebuilt)
+    timeline, series_of, deret_of = unpack_prebuilt(prebuilt)
     if timeline is None:
         timeline, series_of = build_timeline(store, interval, symbols)
     if not timeline:
@@ -819,11 +752,14 @@ def run_portfolio_backtest(
                 vol24 = vol_arr[pos]
                 if vol24 < min_vol:
                     continue
-                gate_ok, _gate_reason = scanner.evaluate_market_gate(vol24, config)
+                pct24 = pct_arr[pos]
+                gate_ok, _gate_reason = scanner.evaluate_market_gate(
+                    pct24, vol24, config
+                )
                 if not gate_ok:
                     continue
-                board.append((vol24, sym, pos))
-            board.sort(key=lambda x: -x[0])
+                board.append((pct24, vol24, sym, pos))
+            board.sort(key=lambda x: (-x[0], -x[1]))
 
         if holding is not None:
             held_series = series_of[holding]
@@ -932,7 +868,7 @@ def run_portfolio_backtest(
 
             if len(skipped) < max_skipped_records:
                 if entry_signal_cache is None:
-                    for _rank, (_vol24, sym, i) in enumerate(
+                    for _rank, (_pct24, _vol24, sym, i) in enumerate(
                         board[:top_n], start=1
                     ):
                         if sym == holding:
@@ -981,7 +917,7 @@ def run_portfolio_backtest(
         if t_now < next_entry_allowed_at:
             if len(skipped) < max_skipped_records:
                 if entry_signal_cache is None and board:
-                    for _vol24, sym, i in board[:top_n]:
+                    for _pct24, _vol24, sym, i in board[:top_n]:
                         kl = store.klines(sym)
                         window_kl = kl[max(0, i - lookback + 1) : i + 1]
                         if scanner.detect_entry_setup(
@@ -1021,7 +957,7 @@ def run_portfolio_backtest(
 
             eligible = board[:top_n]
             lolos = []
-            for rank, (vol24, sym, i) in enumerate(eligible, start=1):
+            for rank, (pct24, vol24, sym, i) in enumerate(eligible, start=1):
                 if i + 1 < lookback:
                     continue
                 kl = store.klines(sym)
@@ -1073,11 +1009,8 @@ def run_portfolio_backtest(
             eligible_count, raw_lolos = cached_entry
             if not raw_lolos:
                 continue
-            cfg_buf = float(config.get("ENTRY_SL_BUFFER_PCT", 0.30) or 0.0)
-            cfg_rr = float(config.get("ENTRY_MIN_RR_RATIO", 2.0) or 2.0)
-            same_exit_cfg = (
-                abs(cfg_buf - getattr(entry_signal_cache, "sl_buffer_pct", 0.30)) < 1e-9
-                and abs(cfg_rr - getattr(entry_signal_cache, "min_rr_ratio", 2.0)) < 1e-9
+            same_exit_cfg = tuple(exit_level_signature(config)) == tuple(
+                getattr(entry_signal_cache, "exit_signature", ())
             )
             if same_exit_cfg:
                 lolos = list(raw_lolos)
@@ -1252,10 +1185,14 @@ def run_portfolio_backtest(
             f"({max_chase_pct:g}%), sama seperti bot live."
         )
     if entry_rule_skips:
+        mom_pb = strategy.entry_momentum_params(config)
+        atr_pb = strategy.exit_atr_params(config)
         warnings.append(
-            f"{entry_rule_skips} dari {entry_rule_scans} kandidat top-N dilewati aturan "
-            f"entry ({strategy.entry_bull_candles(config)} candle bullish beruntun di "
-            f"{interval} dengan batas jarak SL)."
+            f"{entry_rule_skips} dari {entry_rule_scans} kandidat top gainer dilewati "
+            f"filter momentum ({interval}: close harus menembus high "
+            f"{mom_pb['lookback']} candle, body minimal {mom_pb['body_atr_mult']:g} x ATR, "
+            f"volume minimal {mom_pb['volume_mult']:g} x rata-rata, stop "
+            f"{atr_pb['sl_mult']:g} x ATR dalam batas jarak)."
         )
     risk_summary = controls.summary()
     if risk_summary["kill_switch_triggers"] > 0:
@@ -1457,6 +1394,12 @@ def summarize_portfolio(result: PortfolioResult) -> dict:
         "reason_counts": reason_counts,
         "by_reason": by_reason,
         "by_coin": by_coin,
+        "stop_distance_pct": stop_stats.distribusi_jarak_stop(
+            trades,
+            max_sl_pct=stop_stats.angka_atau_none(
+                (getattr(result, "params", None) or {}).get("EXIT_ATR_MAX_SL_PCT")
+            ),
+        ),
         "equity_curve": equity_curve,
         "initial_equity": initial,
         "realized_equity": realized_equity,
@@ -1544,7 +1487,7 @@ def execute_portfolio_backtest(
             "Coba turunkan MIN_QUOTE_VOLUME_USDT_24H."
         )
 
-    interval = config.get("CONFIRM_INTERVAL", "5m")
+    interval = config.get("CONFIRM_INTERVAL", "1h")
     bar_minutes = INTERVAL_MINUTES[interval]
     window_24h = bars_per_day(interval)
     warmup_bars = max(window_24h, strategy.required_lookback_bars(config))
@@ -1722,9 +1665,12 @@ def selftest() -> bool:
                 "MODE": "PAPER",
                 "ENTRY_RULE_ENABLED": True,
                 "MIN_QUOTE_VOLUME_USDT_24H": 0.0,
-                "ENTRY_SL_BUFFER_PCT": 0.30,
+                "GAINER_MIN_CHANGE_PCT": 0.0,
+                "GAINER_MAX_CHANGE_PCT": 0.0,
+                "GAINER_VOLUME_FILTER_ENABLED": False,
+                "SAME_COIN_BLOCK_HOURS": 0.0,
                 "ENTRY_MIN_RR_RATIO": 2.0,
-                "ENTRY_MAX_SL_PCT": 5.0,
+                "EXIT_ATR_MAX_SL_PCT": 5.0,
                 "TAKER_FEE_PCT": 0.1,
                 "USE_BNB_FEE_DISCOUNT": False,
                 "USE_RISK_PERCENT": False,

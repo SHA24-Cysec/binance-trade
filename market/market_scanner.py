@@ -67,6 +67,9 @@ class SetupResult:
     sl_pct: Optional[float] = None
     tp_pct: Optional[float] = None
     rr_ratio: Optional[float] = None
+    body_atr: Optional[float] = None
+    volume_ratio: Optional[float] = None
+    breakout_level: Optional[float] = None
 
 
 @dataclass
@@ -75,6 +78,7 @@ class Candidate:
     base_asset: str
     quote_volume: float
     last_price: float
+    change_pct: float = 0.0
     confirmed: bool = False
     confirm_reason: str = ""
     setup: Optional[SetupResult] = None
@@ -121,14 +125,23 @@ class ScanDiagnostics:
     def log_lines(self, config: dict) -> list[str]:
         if not self.checked_candidates:
             return []
-        interval = str(config.get("CONFIRM_INTERVAL", "5m"))
-        bull = strategy.entry_bull_candles(config)
+        interval = str(config.get("CONFIRM_INTERVAL", "1h"))
+        momentum = strategy.entry_momentum_params(config)
         labels = {
-            "ENTRY_RULE": f"aturan {bull} candle bullish {interval}",
+            "ENTRY_RULE": f"filter momentum {interval}",
             "CANDLE_CONFIRM": f"candle {interval} gagal diambil",
             "HISTORY_CONFIRM": f"riwayat {interval} kurang",
-            "BULL_SEQUENCE": f"rangkaian candle bullish {interval}",
-            "RISK_SL": "jarak Stop Loss",
+            "MOMENTUM_BULL": f"candle {interval} tidak bullish",
+            "MOMENTUM_BODY": (
+                f"body candle {interval} di bawah {momentum['body_atr_mult']:g} x ATR"
+            ),
+            "MOMENTUM_BREAKOUT": f"close belum menembus high {interval} sebelumnya",
+            "MOMENTUM_VOLUME": (
+                f"volume di bawah {momentum['volume_mult']:g} x rata-rata "
+                f"{momentum['volume_lookback']} candle"
+            ),
+            "RISK_SL": "jarak Stop ATR",
+            "VOLUME_24H": "turnover 24 jam tidak naik dibanding rata-rata",
         }
         candle = "belum tersedia"
         if self.latest_signal_close_ms > 0:
@@ -147,8 +160,11 @@ class ScanDiagnostics:
         if strategy.entry_rule_enabled(config):
             lines.insert(
                 0,
-                f"Status aturan entry ({interval}): AKTIF, butuh {bull} candle bullish "
-                "beruntun tertutup; kegagalan data menolak entry.",
+                f"Status filter momentum ({interval}): AKTIF, close candle terakhir "
+                f"harus menembus high {momentum['lookback']} candle sebelumnya, "
+                f"body minimal {momentum['body_atr_mult']:g} x ATR, volume minimal "
+                f"{momentum['volume_mult']:g} x rata-rata "
+                f"{momentum['volume_lookback']} candle.",
             )
         for stage in sorted(self.rejection_counts):
             count = self.rejection_counts.get(stage, 0)
@@ -204,24 +220,68 @@ def _angka_wajar(nilai) -> bool:
     return angka >= 0.0
 
 
-def evaluate_market_gate(*args) -> tuple[bool, str]:
-    if len(args) == 2:
-        quote_volume, config = args
-    elif len(args) == 3 and isinstance(args[1], dict):
-        quote_volume, config, _unused = args
-    elif len(args) == 3:
-        _unused_change, quote_volume, config = args
-    else:
-        raise TypeError("Argumen evaluate_market_gate tidak sesuai.")
+def _angka_perubahan(value) -> Optional[float]:
+    try:
+        angka = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(angka):
+        return None
+    return angka
 
+
+def min_change_pct(config: dict) -> float:
+    try:
+        nilai = float(config.get("GAINER_MIN_CHANGE_PCT", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(nilai):
+        return 0.0
+    return max(-100.0, nilai)
+
+
+def max_change_pct(config: dict) -> float:
+    try:
+        nilai = float(config.get("GAINER_MAX_CHANGE_PCT", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(nilai):
+        return 0.0
+    return max(0.0, nilai)
+
+
+def evaluate_market_gate(
+    change_pct, quote_volume, config: dict
+) -> tuple[bool, str]:
     if not _angka_wajar(quote_volume):
         return False, f"quote_volume 24 jam tidak wajar ({quote_volume!r})"
 
-    return True, "filter pasar lolos"
+    perubahan = _angka_perubahan(change_pct)
+    if perubahan is None:
+        return False, f"perubahan harga 24 jam tidak wajar ({change_pct!r})"
+
+    batas_bawah = min_change_pct(config)
+    if perubahan < batas_bawah:
+        return False, (
+            f"kenaikan 24 jam {perubahan:.2f}% di bawah ambang top gainer "
+            f"{batas_bawah:.2f}%"
+        )
+
+    batas_atas = max_change_pct(config)
+    if batas_atas > 0.0 and perubahan > batas_atas:
+        return False, (
+            f"kenaikan 24 jam {perubahan:.2f}% melampaui batas {batas_atas:.2f}%, "
+            "koin sudah terlalu jauh untuk dikejar"
+        )
+
+    return True, (
+        f"lolos filter pasar (naik {perubahan:.2f}%, turnover "
+        f"{float(quote_volume):.0f} USDT)"
+    )
 
 
-def market_gate_ok_at(*args) -> bool:
-    ok, _r = evaluate_market_gate(*args)
+def market_gate_ok_at(change_pct, quote_volume, config: dict) -> bool:
+    ok, _r = evaluate_market_gate(change_pct, quote_volume, config)
     return ok
 
 
@@ -235,7 +295,8 @@ def filter_and_rank_candidates(
     quote_asset = config["QUOTE_ASSET"]
     min_vol = float(config.get("MIN_QUOTE_VOLUME_USDT_24H", 0) or 0)
 
-    lolos_struktural = 0
+    lolos_likuid = 0
+    ditolak_gain = 0
     out: list[Candidate] = []
 
     for t in tickers:
@@ -251,18 +312,23 @@ def filter_and_rank_candidates(
         except (KeyError, ValueError, TypeError):
             continue
 
+        perubahan = _angka_perubahan(t.get("priceChangePercent"))
+
         if not math.isfinite(last_price) or last_price <= 0:
             continue
         if not _angka_wajar(quote_volume):
             continue
         if quote_volume < min_vol:
             continue
+        if perubahan is None:
+            continue
 
-        lolos_struktural += 1
+        lolos_likuid += 1
 
         if apply_market_gate:
-            ok_market, alasan = evaluate_market_gate(quote_volume, config)
+            ok_market, alasan = evaluate_market_gate(perubahan, quote_volume, config)
             if not ok_market:
+                ditolak_gain += 1
                 logger.debug("Filter pasar menolak %s: %s", symbol, alasan)
                 continue
 
@@ -272,18 +338,28 @@ def filter_and_rank_candidates(
                 base_asset=base_asset,
                 quote_volume=quote_volume,
                 last_price=last_price,
+                change_pct=perubahan,
             )
         )
 
-    out.sort(key=lambda c: c.quote_volume, reverse=True)
+    out.sort(key=lambda c: (-c.change_pct, -c.quote_volume))
 
     if apply_market_gate:
         logger.info(
-            "Filter pasar: %d kandidat lolos dari %d simbol yang lolos "
-            "saringan likuiditas.",
+            "Peringkat top gainer: %d kandidat lolos dari %d simbol likuid "
+            "(%d ditolak karena ambang kenaikan). Teratas: %s",
             len(out),
-            lolos_struktural,
+            lolos_likuid,
+            ditolak_gain,
+            (
+                ", ".join(
+                    f"{c.symbol} {c.change_pct:+.2f}%"
+                    for c in out[:5]
+                )
+                or "belum ada"
+            ),
         )
+        logger.debug("Simbol lolos saringan likuiditas 24 jam: %d", lolos_likuid)
     return out
 
 
@@ -452,11 +528,22 @@ def detect_entry_setup(
         )
 
     last_bar = klines[-1]
+    syarat_volume = strategy.volume_rise_check(klines, config)
+    if not syarat_volume["ok"]:
+        return SetupResult(
+            ok=False,
+            stage=str(syarat_volume["stage"]),
+            reason=str(syarat_volume["reason"]),
+            entry_interval=str(strategy.momentum_interval(config)),
+            volume_ratio=syarat_volume["ratio"],
+        )
     verdict = strategy.evaluate_entry(klines, config, signal_close_time_ms)
-    atr_value = strategy.atr(klines, 14)
+    atr_value = verdict.get("atr")
+    if atr_value is None:
+        atr_value = strategy.atr(klines, strategy.atr_period(config))
     return SetupResult(
         ok=bool(verdict.get("ok", False)),
-        stage=str(verdict.get("stage") or "BULL_SEQUENCE"),
+        stage=str(verdict.get("stage") or "MOMENTUM_BULL"),
         reason=str(verdict.get("reason") or ""),
         signal_close=float(verdict.get("signal_close") or last_bar.close),
         signal_close_time=int(
@@ -472,6 +559,9 @@ def detect_entry_setup(
         sl_pct=verdict.get("sl_pct"),
         tp_pct=verdict.get("tp_pct"),
         rr_ratio=verdict.get("rr_ratio"),
+        body_atr=verdict.get("body_atr"),
+        volume_ratio=verdict.get("volume_ratio"),
+        breakout_level=verdict.get("breakout_level"),
     )
 
 
@@ -480,9 +570,14 @@ STAGE_GROUPS = {
     "CANDLE_ENTRY": "CANDLE_ENTRY",
     "HISTORY_CONFIRM": "HISTORY_ENTRY",
     "CANDLE_CONFIRM": "CANDLE_ENTRY",
-    "BULL_SEQUENCE": "ENTRY_RULE",
-    "RISK_SL": "ENTRY_RULE",
-    "ENTRY_RULE": "ENTRY_RULE",
+    "MOMENTUM_BULL": "MOMENTUM_BULL",
+    "MOMENTUM_BODY": "MOMENTUM_BODY",
+    "MOMENTUM_BREAKOUT": "MOMENTUM_BREAKOUT",
+    "MOMENTUM_VOLUME": "MOMENTUM_VOLUME",
+    "VOLUME_24H": "VOLUME_24H",
+    "BULL_SEQUENCE": "MOMENTUM_BULL",
+    "RISK_SL": "RISK_SL",
+    "ENTRY_RULE": "MOMENTUM_BULL",
     "DISABLED": "ENTRY_RULE",
     "OK": "ENTRY_RULE",
 }
@@ -494,11 +589,11 @@ def diagnostic_stage(stage: str, reason: str) -> str:
         return STAGE_GROUPS[kunci]
     if str(reason or "").startswith("data candle kurang"):
         return "HISTORY_ENTRY"
-    return "ENTRY_RULE"
+    return "MOMENTUM_BULL"
 
 
 def setup_quality_key(setup: Optional[SetupResult], candidate: Candidate) -> tuple:
-    return (-float(candidate.quote_volume),)
+    return (-float(candidate.change_pct), -float(candidate.quote_volume))
 
 
 def find_best_candidate(
@@ -528,23 +623,23 @@ def find_best_candidate(
         except Exception as exc:
             logger.debug("Pemanasan harga kandidat dilewati: %s", exc)
 
-    lolos_struktur: list[Candidate] = list(top_n)
+    lolos_saring: list[Candidate] = list(top_n)
 
-    if not lolos_struktur:
+    if not lolos_saring:
         return None
 
     diprakira: dict = {}
-    if klines_fetcher_many is not None and len(lolos_struktur) > 1:
+    if klines_fetcher_many is not None and len(lolos_saring) > 1:
         try:
             diprakira = (
-                klines_fetcher_many([cand.symbol for cand in lolos_struktur]) or {}
+                klines_fetcher_many([cand.symbol for cand in lolos_saring]) or {}
             )
         except Exception as exc:
             logger.debug("Pengambilan candle paralel dilewati: %s", exc)
             diprakira = {}
 
     lolos: list[Candidate] = []
-    for cand in lolos_struktur:
+    for cand in lolos_saring:
         try:
             if cand.symbol in diprakira:
                 klines = diprakira.get(cand.symbol)

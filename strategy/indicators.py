@@ -4,6 +4,7 @@ import math
 from typing import NamedTuple, Optional
 
 from strategy import entry_rule
+from strategy import exit_atr
 
 
 class Kline(NamedTuple):
@@ -32,36 +33,23 @@ INTERVAL_MINUTES = {
     "1d": 1440,
 }
 
-STRUCTURE_DEFAULT_INTERVAL = "4h"
-TIMING_DEFAULT_INTERVAL = "4h"
-DIRECTION_DEFAULT_INTERVAL = STRUCTURE_DEFAULT_INTERVAL
 TREND_KLINE_LIMIT = 1000
 
 MS_PER_HOUR = 3_600_000
 TIME_STOP_REASON = "TIME_STOP"
-MAX_HOLD_HOURS_LIMIT = 720.0
+MAX_HOLD_HOURS_LIMIT = entry_rule.MAX_HOLD_HOURS_LIMIT
 
 ENTRY_DEFAULTS = dict(entry_rule.ENTRY_RULE_DEFAULTS)
 
 
-def interval_ratio(target: str, source: str) -> int:
-    source_minutes = INTERVAL_MINUTES.get(str(source).strip().lower())
-    target_minutes = INTERVAL_MINUTES.get(str(target).strip().lower())
-    if source_minutes is None:
-        raise ValueError(f"Interval sumber '{source}' tidak dikenal.")
-    if target_minutes is None:
-        raise ValueError(f"Interval target '{target}' tidak dikenal.")
-    if target_minutes % source_minutes:
+def interval_to_ms(interval: str) -> int:
+    menit = INTERVAL_MINUTES.get(str(interval).strip().lower())
+    if menit is None:
         raise ValueError(
-            f"Interval target '{target}' ({target_minutes} menit) harus kelipatan "
-            f"bulat dari interval sumber '{source}' ({source_minutes} menit) "
-            "supaya candle bisa dirangkai dari data yang sudah diunduh."
+            f"Interval '{interval}' tidak dikenal; pilihan: "
+            + ", ".join(sorted(INTERVAL_MINUTES, key=INTERVAL_MINUTES.get))
         )
-    return target_minutes // source_minutes
-
-
-def interval_to_ms(interval: str, default_minutes: int = 5) -> int:
-    return int(INTERVAL_MINUTES.get(str(interval), default_minutes)) * 60_000
+    return int(menit) * 60_000
 
 
 def last_closed_bar_close_ms(interval: str, now_ms: int) -> int:
@@ -133,69 +121,66 @@ def _interval_from_config(config: dict, key: str, default: str) -> str:
 
 
 def confirm_interval(config: dict) -> str:
-    return _interval_from_config(config, "CONFIRM_INTERVAL", TIMING_DEFAULT_INTERVAL)
-
-
-def confirm_interval_minutes(config: dict) -> int:
-    return int(INTERVAL_MINUTES[confirm_interval(config)])
+    return _interval_from_config(config, "CONFIRM_INTERVAL", "1h")
 
 
 def entry_rule_enabled(config: dict) -> bool:
     return entry_rule.rule_enabled(config)
 
 
-def entry_bull_candles(config: dict) -> int:
-    return entry_rule.bull_candles(config)
-
-
-def entry_required_bars(config: dict) -> int:
+def required_lookback_bars(config: dict) -> int:
     return entry_rule.required_bars(config)
 
 
-def required_lookback_bars(config: dict) -> int:
-    return entry_required_bars(config)
+def exit_atr_params(config: dict) -> dict:
+    return exit_atr.atr_params(config)
 
 
-
-def exit_trailing_params(config: dict) -> dict:
-    return entry_rule.trailing_params(config)
-
-
-def exit_trailing_start_price(
-    entry_price: float, stop_price: float, start_r: float
-) -> float:
-    return entry_rule.trailing_start_price(entry_price, stop_price, start_r)
+def exit_atr_breakeven_trigger(entry_price: float, atr: float, config: dict) -> float:
+    params = exit_atr.atr_params(config)
+    return exit_atr.breakeven_trigger_price(entry_price, atr, params["breakeven_mult"])
 
 
-def exit_trailing_stop_price(highest_price: float, pct: float) -> float:
-    return entry_rule.trailing_stop_price(highest_price, pct)
+def exit_advance(
+    state: dict, price: float, config: dict, *, atr: Optional[float] = None
+) -> dict:
+    return exit_atr.advance(state, price, config, atr=atr)
 
 
-def exit_fixed_params() -> dict:
-    return dict(entry_rule.EXIT_FIXED)
+def exit_fixed_params(config: Optional[dict] = None) -> dict:
+    return entry_rule.exit_fixed_params(config)
 
 
+def entry_momentum_params(config: dict) -> dict:
+    return entry_rule.momentum_params(config)
 
 
-def entry_breakeven_params(config: dict) -> dict:
-    return entry_rule.breakeven_params(config)
+def momentum_interval(config: dict) -> str:
+    return entry_rule.momentum_interval(config)
 
 
-def entry_breakeven_price(
-    entry_price: float,
-    sl_price: float,
-    r_multiple: float,
-    lock_pct: float = 0.0,
-) -> float:
-    return entry_rule.breakeven_price(entry_price, sl_price, r_multiple, lock_pct)
+def atr_period(config: dict) -> int:
+    return entry_rule.atr_period(config)
 
 
-def entry_breakeven_trigger(
-    entry_price: float,
-    sl_price: float,
-    r_multiple: float,
-) -> float:
-    return entry_rule.breakeven_trigger(entry_price, sl_price, r_multiple)
+def volume_rise_params(config: dict) -> dict:
+    return entry_rule.volume_rise_params(config)
+
+
+def volume_rise_check(klines: list[Kline], config: dict) -> dict:
+    return entry_rule.volume_rise_check(klines, config)
+
+
+def volume_rise_bars(config: dict) -> int:
+    return entry_rule.volume_rise_bars(config)
+
+
+def breakout_level(bars, lookback: int):
+    return entry_rule.breakout_level(bars, lookback)
+
+
+def volume_ratio(bars, lookback: int):
+    return entry_rule.volume_ratio(bars, lookback)
 
 
 def entry_warmup_bars(config: dict, interval: str) -> int:
@@ -214,14 +199,10 @@ def gate_warmup_bars(config: dict, interval: str) -> int:
     return entry_warmup_bars(config, interval)
 
 
-def gate_warmup_ms(config: dict, interval: str = "5m") -> int:
+def gate_warmup_ms(config: dict, interval: str = "1h") -> int:
     if not entry_rule_enabled(config):
         return 0
     return int(entry_warmup_bars(config, interval) * interval_to_ms(interval))
-
-
-def native_history_ms(config: dict) -> int:
-    return 0
 
 
 def compute_entry_exit_levels(
@@ -249,86 +230,82 @@ def resolve_exit_levels(
     ep_raw = entry_price if entry_price is not None else config.get("_entry_price")
     ep = float(ep_raw) if ep_raw is not None and float(ep_raw) > 0 else 0.0
 
-    buffer_pct = entry_rule.sl_buffer_pct(config)
-    rr_target = entry_rule.min_rr_ratio(config)
+    if setup is not None and ep <= 0.0:
+        sig_c = getattr(setup, "signal_close", None)
+        if sig_c is not None and float(sig_c) > 0:
+            ep = float(sig_c)
 
-    sl_price = config.get("_sl_price")
-    tp_price = config.get("_tp_price")
-    sl_pct = config.get("_sl_pct")
-    tp_pct = config.get("_tp_pct")
-
-    if setup is not None:
-        if sl_price is None:
-            sl_price = getattr(setup, "sl_price", None)
-        if tp_price is None:
-            tp_price = getattr(setup, "tp_price", None)
-        if sl_pct is None:
-            sl_pct = getattr(setup, "sl_pct", None)
-        if tp_pct is None:
-            tp_pct = getattr(setup, "tp_pct", None)
-        if ep <= 0.0:
-            sig_c = getattr(setup, "signal_close", None)
-            if sig_c is not None and float(sig_c) > 0:
-                ep = float(sig_c)
-
-    if (
-        ep > 0.0
-        and sl_price is not None
-        and tp_price is not None
-        and 0.0 < float(sl_price) < ep < float(tp_price)
-    ):
-        sl_p = (ep - float(sl_price)) / ep * 100.0
-        tp_p = (float(tp_price) - ep) / ep * 100.0
-        sl_px = float(sl_price)
-        tp_px = float(tp_price)
-    elif (
-        sl_pct is not None
-        and tp_pct is not None
-        and 0.0 < float(sl_pct) < 100.0
-        and float(tp_pct) > 0.0
-    ):
-        sl_p = float(sl_pct)
-        tp_p = float(tp_pct)
-        sl_px = ep * (1.0 - sl_p / 100.0) if ep > 0.0 else None
-        tp_px = ep * (1.0 + tp_p / 100.0) if ep > 0.0 else None
-    else:
-        anchor_low = getattr(setup, "entry_low", None) if setup is not None else None
-        info = entry_rule.exit_levels(
-            ep if ep > 0.0 else 100.0,
-            anchor_low,
-            config,
-            fallback_allowed=True,
-        )
-        sl_p = float(info["sl_pct"])
-        tp_p = float(info["tp_pct"])
-        sl_px = float(info["sl_price"]) if ep > 0.0 else None
-        tp_px = float(info["tp_price"]) if ep > 0.0 else None
-
-    rr_ratio = (tp_p / sl_p) if sl_p > 0.0 else 0.0
+    anchor_low = getattr(setup, "entry_low", None) if setup is not None else None
     atr_nilai = getattr(setup, "atr_value", None) if setup is not None else None
+    if atr_nilai is None:
+        atr_nilai = config.get("_atr")
     try:
         atr_nilai = float(atr_nilai) if atr_nilai is not None else None
     except (TypeError, ValueError):
         atr_nilai = None
     if atr_nilai is not None and atr_nilai <= 0.0:
         atr_nilai = None
+
+    params = exit_atr.atr_params(config)
+    plan = entry_rule.exit_levels(
+        ep if ep > 0.0 else 0.0,
+        anchor_low,
+        config,
+        atr=atr_nilai,
+        fallback_allowed=True,
+    )
+
+    sl_px = plan["sl_price"]
+    tp_px = plan["tp_price"]
+    sl_p = plan["sl_pct"]
+    tp_p = plan["tp_pct"]
+    sumber = "ATR"
+
+    valid = (
+        ep > 0.0
+        and sl_px is not None
+        and tp_px is not None
+        and 0.0 < float(sl_px) < ep < float(tp_px)
+    )
+    if not valid:
+        sl_px = None
+        tp_px = None
+        sl_p = 0.0
+        tp_p = 0.0
+        sumber = "TIDAK_TERSEDIA"
+
+    rr_ratio = (tp_p / sl_p) if sl_p and sl_p > 0.0 else 0.0
+
+    def _pct_dari_atr(mult: float) -> float:
+        if ep <= 0.0 or atr_nilai is None or mult <= 0.0:
+            return 0.0
+        return atr_nilai * mult / ep * 100.0
+
     return {
         "atr": atr_nilai,
+        "atr_period": params["period"],
+        "sl_mult": params["sl_mult"],
+        "tp_mult": params["tp_mult"],
+        "trail_mult": params["trail_mult"],
+        "breakeven_mult": params["breakeven_mult"],
         "sl_pct": sl_p,
         "tp_pct": tp_p,
         "sl_price": sl_px,
         "tp_price": tp_px,
         "rr_ratio": rr_ratio,
-        "sl_buffer_pct": buffer_pct,
-        "min_rr_ratio": rr_target,
-        "be_trigger_pct": 0.0,
+        "min_rr_ratio": params["min_rr"],
+        "be_trigger_pct": _pct_dari_atr(params["breakeven_mult"]),
         "be_lock_pct": 0.0,
-        "trail_start_pct": 0.0,
-        "trail_step_pct": 0.0,
-        "source": "ENTRY_RULE",
+        "trail_start_pct": _pct_dari_atr(params["sl_mult"]),
+        "trail_step_pct": _pct_dari_atr(params["trail_mult"]),
+        "source": sumber,
         "note": (
-            f"Level exit aturan entry: SL -{sl_p:.2f}% (di bawah low candle sinyal, "
-            f"buffer {buffer_pct:g}%), TP +{tp_p:.2f}% (R:R 1:{rr_ratio:.2f})"
+            plan["reason"]
+            if plan["reason"]
+            else (
+                f"Level ATR: SL {params['sl_mult']:g} x ATR, "
+                f"TP {params['tp_mult']:g} x ATR, trailing {params['trail_mult']:g} x ATR"
+            )
         ),
     }
 
@@ -341,24 +318,9 @@ def evaluate_entry(
     return entry_rule.evaluate_entry_rule(klines, config, signal_close_time_ms)
 
 
-
-
-
-
-
-
-
-
-
-
-
 def confirm_window_bars(config: dict) -> int:
     lookback = int(config.get("CONFIRM_LOOKBACK_BARS", 60) or 60)
     return max(1, min(1000, max(lookback, required_lookback_bars(config))))
-
-
-
-
 
 
 def resolve_position_notional(config: dict, quote_free: float) -> dict:
@@ -416,31 +378,11 @@ def backtest_sell_execution_price(
 
 
 def atr(klines: list[Kline], period: int = 14) -> float | None:
-    period = int(period)
-    if period <= 0 or not klines:
-        return None
-    trs: list[float] = []
-    for i, candle in enumerate(klines):
-        prev_close = klines[i - 1].close if i else candle.close
-        trs.append(
-            max(
-                candle.high - candle.low,
-                abs(candle.high - prev_close),
-                abs(candle.low - prev_close),
-            )
-        )
-    if len(trs) < period:
-        return None
-    result = sum(trs[:period]) / period
-    for tr in trs[period:]:
-        result = (result * (period - 1) + tr) / period
-    return result if math.isfinite(result) and result > 0 else None
-
-
+    return entry_rule.atr_value(klines, period)
 
 
 def max_hold_ms(config: dict, interval: str) -> int:
-    cap_h = float(entry_rule.max_hold_hours())
+    cap_h = float(entry_rule.max_hold_hours(config))
     if cap_h <= 0.0:
         return 0
     if cap_h > MAX_HOLD_HOURS_LIMIT:
@@ -466,90 +408,3 @@ def time_stop_due(entry_time: int, now_ms: int, cap_ms: int, bar_ms: int) -> boo
     if entry <= 0 or now <= 0:
         return False
     return (now - entry) + int(bar_ms) > int(cap_ms)
-
-
-def _resolve_minutes(val: int | str) -> int:
-    if isinstance(val, str):
-        s = val.strip().lower()
-        if s in INTERVAL_MINUTES:
-            return int(INTERVAL_MINUTES[s])
-        return int(s)
-    return int(val)
-
-
-def aggregate_klines(
-    klines: list[Kline],
-    target_minutes: int | str,
-    source_minutes: Optional[int | str] = None,
-) -> list[Kline]:
-    target_m = _resolve_minutes(target_minutes)
-    if source_minutes is None:
-        if len(klines) >= 2:
-            source_m = max(
-                1, (int(klines[1].open_time) - int(klines[0].open_time)) // 60_000
-            )
-        else:
-            source_m = target_m
-    else:
-        source_m = _resolve_minutes(source_minutes)
-    if target_m < source_m:
-        target_m, source_m = source_m, target_m
-    target_ms = target_m * 60_000
-    source_ms = source_m * 60_000
-    if source_ms <= 0 or target_ms % source_ms:
-        raise ValueError(
-            f"Interval sumber {source_m} menit tidak bisa dirangkai ke "
-            f"{target_m} menit (harus pembagi bulat)."
-        )
-    rasio = target_ms // source_ms
-    if rasio <= 1:
-        return list(klines)
-
-    tersusun: dict[int, list[Kline]] = {}
-    for candle in sorted(klines, key=lambda k: int(k.open_time)):
-        bucket = (int(candle.open_time) // target_ms) * target_ms
-        tersusun.setdefault(bucket, []).append(candle)
-
-    hasil: list[Kline] = []
-    for bucket in sorted(tersusun):
-        rows = tersusun[bucket]
-        if len(rows) != rasio:
-            continue
-        if any(int(rows[i].open_time) != bucket + i * source_ms for i in range(rasio)):
-            continue
-        hasil.append(
-            Kline(
-                open_time=bucket,
-                open=float(rows[0].open),
-                high=max(float(k.high) for k in rows),
-                low=min(float(k.low) for k in rows),
-                close=float(rows[-1].close),
-                close_time=bucket + target_ms - 1,
-                volume=sum(float(k.volume) for k in rows),
-                quote_volume=sum(float(k.quote_volume) for k in rows),
-            )
-        )
-    return hasil
-
-
-def _valid_candle_series(klines: list[Kline]) -> bool:
-    if not klines:
-        return False
-    for candle in klines:
-        try:
-            o = float(candle.open)
-            h = float(candle.high)
-            l = float(candle.low)
-            c = float(candle.close)
-        except (AttributeError, TypeError, ValueError):
-            return False
-        if not all(math.isfinite(x) and x > 0 for x in (o, h, l, c)):
-            return False
-        if h < max(o, c, l) or l > min(o, c, h):
-            return False
-    return True
-
-
-
-
-
