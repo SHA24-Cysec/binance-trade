@@ -282,7 +282,7 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "PUMP_FALLBACK_MAX_CHANGE_PCT": _field("Pump Dinamis 24 Jam", "Maksimum fallback", "Batas atas cadangan saat jumlah sampel tidak cukup.", "float", minimum=0.0, maximum=1000.0, unit="%"),
     "PUMP_RANK_CHANGE_WEIGHT": _field("Ranking Hybrid", "Bobot perubahan 24 jam", "Bobot persentil perubahan harga pada skor hybrid.", "float", minimum=0.0, maximum=100.0, unit="bobot"),
     "PUMP_RANK_TURNOVER_WEIGHT": _field("Ranking Hybrid", "Bobot turnover", "Bobot persentil log turnover pada skor hybrid.", "float", minimum=0.0, maximum=100.0, unit="bobot"),
-    "PUMP_RANK_ENGULFING_WEIGHT": _field("Ranking Hybrid", "Bobot engulfing", "Bobot kekuatan body engulfing pada skor akhir.", "float", minimum=0.0, maximum=100.0, unit="bobot"),
+    "PUMP_RANK_ENGULFING_WEIGHT": _field("Ranking Hybrid", "Bobot candle bullish", "Bobot kekuatan body candle bullish terhadap ATR pada skor akhir.", "float", minimum=0.0, maximum=100.0, unit="bobot"),
     "PUMP_RANK_PRICE_EMA_WEIGHT": _field("Ranking Hybrid", "Bobot jarak harga dari EMA", "Bobot jarak close di atas EMA lambat yang dinormalisasi ATR.", "float", minimum=0.0, maximum=100.0, unit="bobot"),
     "PUMP_RANK_EMA_TREND_WEIGHT": _field("Ranking Hybrid", "Bobot tren EMA", "Bobot jarak EMA cepat di atas EMA lambat yang dinormalisasi ATR.", "float", minimum=0.0, maximum=100.0, unit="bobot"),
     "GAINER_VOLUME_FILTER_ENABLED": _field(
@@ -652,9 +652,9 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         unit="%",
     ),
     "CONFIRM_INTERVAL": _field(
-        "Bullish Engulfing + EMA",
+        "Candle Bullish + EMA",
         "Interval sinyal",
-        "Timeframe candle untuk pola bullish engulfing dan EMA. Default 1h. Timeframe lebih rendah menghasilkan sinyal lebih sering, tetapi umumnya lebih berisik.",
+        "Timeframe candle untuk sinyal candle bullish dan EMA. Default 30m. Timeframe lebih rendah menghasilkan sinyal lebih sering, tetapi umumnya lebih berisik.",
         "str",
         editor="select",
         options=[
@@ -673,9 +673,9 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         ],
     ),
     "CONFIRM_LOOKBACK_BARS": _field(
-        "Bullish Engulfing + EMA",
+        "Candle Bullish + EMA",
         "Jumlah candle yang diunduh",
-        "Banyaknya candle terakhir yang diambil untuk menghitung pola, EMA, dan ATR. Limit endpoint klines Binance 1000 per panggilan.",
+        "Banyaknya candle terakhir yang diambil untuk menghitung candle bullish, EMA, dan ATR. Limit endpoint klines Binance 1000 per panggilan.",
         "int",
         minimum=15,
         maximum=1000,
@@ -870,13 +870,13 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         maximum=1000,
     ),
     "ENTRY_RULE_ENABLED": _field(
-        "Bullish Engulfing + EMA",
+        "Candle Bullish + EMA",
         "Aktifkan filter entry",
-        "Bot hanya entry pada bullish engulfing body ketat, close di atas EMA cepat dan lambat, serta EMA cepat di atas EMA lambat.",
+        "Bot hanya entry pada candle bullish (close > open), close di atas EMA cepat dan lambat, serta EMA cepat di atas EMA lambat.",
         "bool",
     ),
     "EMA_FAST_PERIOD": _field(
-        "Bullish Engulfing + EMA",
+        "Candle Bullish + EMA",
         "Periode EMA cepat",
         "Periode EMA cepat untuk menyaring arah tren. Nilai default 20.",
         "int",
@@ -885,7 +885,7 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         unit="candle",
     ),
     "EMA_SLOW_PERIOD": _field(
-        "Bullish Engulfing + EMA",
+        "Candle Bullish + EMA",
         "Periode EMA lambat",
         "Periode EMA lambat untuk menyaring arah tren. Nilai default 50 dan harus lebih besar dari EMA cepat.",
         "int",
@@ -894,9 +894,9 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         unit="candle",
     ),
     "ENTRY_SL_ATR_BUFFER_MULT": _field(
-        "Bullish Engulfing + EMA",
-        "Buffer SL di bawah pola",
-        "Stop Loss ditempatkan di bawah low terendah dari dua candle pola, dikurangi buffer ATR ini.",
+        "Candle Bullish + EMA",
+        "Buffer SL di bawah low candle",
+        "Stop Loss ditempatkan di bawah low candle bullish sinyal, dikurangi buffer ATR ini.",
         "float",
         minimum=0.0,
         maximum=10.0,
@@ -1482,7 +1482,7 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
             )
         if _flag_untuk_relasi(cfg, "GAINER_VOLUME_FILTER_ENABLED", True):
             menit_interval = _INTERVAL_MENIT.get(
-                str(cfg.get("CONFIRM_INTERVAL", "1h") or "1h").strip().lower()
+                str(cfg.get("CONFIRM_INTERVAL", "15m") or "15m").strip().lower()
             )
             hari = _angka_untuk_relasi(cfg, "GAINER_VOLUME_AVG_DAYS")
             if menit_interval and hari is not None:
@@ -1492,7 +1492,7 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
                     keluar["CONFIRM_LOOKBACK_BARS"] = (
                         f"minimal {butuh_volume} candle agar syarat kenaikan "
                         f"turnover bisa dibandingkan dengan periode sebelumnya "
-                        f"pada interval {cfg.get('CONFIRM_INTERVAL', '1h')}"
+                        f"pada interval {cfg.get('CONFIRM_INTERVAL', '15m')}"
                     )
         batas_sl = _angka_untuk_relasi(cfg, "EXIT_ATR_MAX_SL_PCT")
         if batas_sl is not None and batas_sl > 0:
@@ -1544,7 +1544,7 @@ def validate_candidate(
         if not cleaned.get("ENTRY_RULE_ENABLED"):
             warnings.append(
                 "ENTRY_RULE_ENABLED nonaktif: bot masuk tanpa menunggu candle "
-                "bullish engulfing + EMA, hanya mengandalkan seleksi gainer 24 jam dan "
+                "bullish + EMA, hanya mengandalkan seleksi gainer 24 jam dan "
                 "proteksi orderbook."
             )
         relation(

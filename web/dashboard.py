@@ -837,7 +837,7 @@ def build_status():
             ),
             "gain_volume": strategy.volume_rise_params(PUMP_CONFIG),
             "atr_entry": float(state.get("atr_at_entry") or 0.0),
-            "confirm_interval": str(PUMP_CONFIG.get("CONFIRM_INTERVAL", "1h")),
+            "confirm_interval": str(PUMP_CONFIG.get("CONFIRM_INTERVAL", "15m")),
             "entry_signal": strategy.entry_signal_params(PUMP_CONFIG),
             "exit_atr": strategy.exit_atr_params(PUMP_CONFIG),
         },
@@ -860,7 +860,7 @@ def entry_rule_status(config: dict) -> dict:
         "config_error": config_error,
         "interval": interval,
         "lookback_bars": lookback,
-        "sl_anchor": "ENGULFING_LOW_ATR_BUFFER",
+        "sl_anchor": "BULLISH_CANDLE_LOW_ATR_BUFFER",
         "min_rr_ratio": float(config.get("ENTRY_MIN_RR_RATIO", 3.0) or 3.0),
         "max_sl_pct": float(config.get("EXIT_ATR_MAX_SL_PCT", 5.0) or 0.0),
         "entry_signal": strategy.entry_signal_params(config),
@@ -1112,7 +1112,7 @@ def _bt_cleanup_old_jobs():
 
 
 def _bt_simulation_interval(cfg: dict) -> str:
-    return str(cfg.get("CONFIRM_INTERVAL", "1h") or "1h")
+    return str(cfg.get("CONFIRM_INTERVAL", "15m") or "15m")
 
 
 def _bt_simulation_warmup_bars(cfg: dict) -> int:
@@ -1156,7 +1156,7 @@ def _bt_timing_note(cfg: dict, interval: str) -> str:
     return (
         f"Aturan entry membutuhkan {candle} candle tertutup {interval} "
         f"(sekitar {jam:.2f} jam) sebelum bar pertama bisa dinilai, dan entry terjadi "
-        "pada close candle sinyal terakhir yang memenuhi bullish engulfing dan EMA."
+        "pada close candle sinyal terakhir yang memenuhi candle bullish dan EMA."
     )
 
 
@@ -1458,12 +1458,12 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
             "summary": summary,
             "entry_rule": {
                 "enabled": bool(strategy.entry_rule_enabled(cfg)),
-                "interval": str(cfg.get("CONFIRM_INTERVAL", "1h") or "1h"),
+                "interval": str(cfg.get("CONFIRM_INTERVAL", "15m") or "15m"),
                 "entry_signal": strategy.entry_signal_params(cfg),
                 "exit_atr": strategy.exit_atr_params(cfg),
                 "min_rr_ratio": float(cfg.get("ENTRY_MIN_RR_RATIO", 2.0) or 2.0),
                 "max_sl_pct": float(cfg.get("EXIT_ATR_MAX_SL_PCT", 5.0) or 0.0),
-                "lookback_bars": int(cfg.get("CONFIRM_LOOKBACK_BARS", 60) or 60),
+                "lookback_bars": int(cfg.get("CONFIRM_LOOKBACK_BARS", 192) or 192),
                 "skips": int(getattr(result, "entry_rule_skips", 0)),
                 "scans": int(getattr(result, "entry_rule_scans", 0)),
             },
@@ -1527,20 +1527,18 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "dimodelkan, jadi order besar di koin tipis akan lebih buruk dari ini. "
                 "Filter kedalaman, ketimpangan bid/ask, dan sell wall juga hanya berlaku di "
                 "PAPER dan LIVE (snapshot order book tidak tersedia historis).",
-                "Filter bullish engulfing + EMA SUDAH disimulasikan memakai logika yang sama dengan "
-                "bot live: close candle "
+                "Filter candle bullish + EMA SUDAH disimulasikan memakai logika yang sama dengan "
+                "bot live: candle "
                 + prep["interval"]
-                + " terakhir harus menembus high "
+                + " terakhir harus bullish (close > open), close di atas EMA "
                 + str(int(strategy.entry_signal_params(cfg)["ema_fast"]))
-                + " candle sebelumnya, body minimal "
-                + f"{float(strategy.entry_signal_params(cfg)['ema_slow']):g}"
-                + " x ATR, volume minimal "
+                + " dan EMA "
+                + str(int(strategy.entry_signal_params(cfg)["ema_slow"]))
+                + ", serta EMA cepat di atas EMA lambat. SL memakai low candle dikurangi buffer "
                 + f"{float(strategy.entry_signal_params(cfg)['sl_atr_buffer_mult']):g}"
-                + " x rata-rata. Level exit memakai ATR: stop "
-                + f"{float(strategy.exit_atr_params(cfg)['sl_mult']):g}"
-                + " x ATR, target "
-                + f"{float(strategy.exit_atr_params(cfg)['tp_mult']):g}"
-                + " x ATR, dan setup ditolak bila jarak stop melebihi "
+                + " x ATR, target mengikuti R:R 1:"
+                + f"{float(cfg.get('ENTRY_MIN_RR_RATIO', 3.0) or 3.0):g}"
+                + ", dan setup ditolak bila jarak stop melebihi "
                 + f"{float(strategy.exit_atr_params(cfg)['max_sl_pct']):g}"
                 + " persen. "
                 + _bt_direction_warmup_note(cfg, prep["interval"])
@@ -1713,7 +1711,7 @@ def _bt_run_grid_job(
                 "rasio dan rentang hari yang berbeda.",
                 "Grid portofolio menyapu level exit ATR (EXIT_ATR_SL_MULT, "
                 "EXIT_ATR_TP_MULT, EXIT_ATR_TRAIL_MULT, EXIT_BREAKEVEN_TRIGGER_R, EXIT_TRAILING_START_R, "
-                "EXIT_ATR_MAX_SL_PCT, ENTRY_MIN_RR_RATIO) dan ambang bullish engulfing + EMA "
+                "EXIT_ATR_MAX_SL_PCT, ENTRY_MIN_RR_RATIO) dan ambang candle bullish + EMA "
                 "(EMA_FAST_PERIOD, EMA_SLOW_PERIOD, "
                 "ENTRY_SL_ATR_BUFFER_MULT). Sinyal entry dihitung ulang untuk setiap "
                 "kombinasi parameter sinyal, karena parameter itulah yang menentukan koin "
@@ -1791,7 +1789,7 @@ def _bt_min_days_note(cfg: dict, interval: str) -> tuple[int, str]:
 def _bt_peringatan_timing(cfg: dict, days: int) -> list:
     if not strategy.entry_rule_enabled(cfg):
         return []
-    interval = str(cfg.get("CONFIRM_INTERVAL", "1h") or "1h")
+    interval = str(cfg.get("CONFIRM_INTERVAL", "15m") or "15m")
     bar_uji = int(days) * 1440 // max(1, bt.INTERVAL_MINUTES.get(interval, 5))
     butuh = strategy.required_lookback_bars(cfg)
     if bar_uji >= butuh:
@@ -2268,9 +2266,9 @@ def api_backtest_defaults():
         PUMP_CONFIG.get("GAINER_VOLUME_AVG_DAYS", 3) or 1
     )
     out["gain_volume"] = strategy.volume_rise_params(PUMP_CONFIG)
-    out["confirm_interval"] = str(PUMP_CONFIG.get("CONFIRM_INTERVAL", "1h"))
+    out["confirm_interval"] = str(PUMP_CONFIG.get("CONFIRM_INTERVAL", "15m"))
     out["confirm_lookback_bars"] = int(
-        PUMP_CONFIG.get("CONFIRM_LOOKBACK_BARS", 60) or 60
+        PUMP_CONFIG.get("CONFIRM_LOOKBACK_BARS", 192) or 192
     )
     return jsonify(out)
 

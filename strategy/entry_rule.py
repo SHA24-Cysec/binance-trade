@@ -7,18 +7,18 @@ from strategy import exit_atr
 
 ENTRY_RULE_DEFAULTS = {
     "ENTRY_RULE_ENABLED": True,
-    "CONFIRM_INTERVAL": "1h",
+    "CONFIRM_INTERVAL": "30m",
     "EMA_FAST_PERIOD": 20,
     "EMA_SLOW_PERIOD": 50,
-    "ENTRY_SL_ATR_BUFFER_MULT": 0.1,
+    "ENTRY_SL_ATR_BUFFER_MULT": 2.0,
     "ENTRY_ATR_PERIOD": exit_atr.DEFAULT_ATR_PERIOD,
-    "EXIT_ATR_TRAIL_MULT": exit_atr.DEFAULT_TRAIL_MULT,
+    "EXIT_ATR_TRAIL_MULT": 3.0,
     "EXIT_ATR_BREAKEVEN_MULT": exit_atr.DEFAULT_BREAKEVEN_MULT,
-    "EXIT_ATR_MAX_SL_PCT": exit_atr.DEFAULT_MAX_SL_PCT,
-    "ENTRY_MIN_RR_RATIO": 3.0,
+    "EXIT_ATR_MAX_SL_PCT": 8.0,
+    "ENTRY_MIN_RR_RATIO": 2.5,
     "EXIT_MAX_HOLD_HOURS": 24.0,
     "GAINER_VOLUME_FILTER_ENABLED": True,
-    "GAINER_VOLUME_RISE_MULT": 1.2,
+    "GAINER_VOLUME_RISE_MULT": 2.0,
     "GAINER_VOLUME_AVG_DAYS": 3,
 }
 
@@ -46,20 +46,21 @@ EXIT_FIXED = {
     "trailing_atr_mult": EXIT_TRAILING_ATR_MULT,
     "max_hold_hours": EXIT_MAX_HOLD_HOURS,
 }
-SL_ANCHOR_ATR = "ENGULFING_LOW_ATR_BUFFER"
+SL_ANCHOR_ATR = "BULLISH_CANDLE_LOW_ATR_BUFFER"
 STAGE_HISTORY = "HISTORY_ENTRY"
 STAGE_CANDLE = "CANDLE_ENTRY"
-STAGE_ENGULFING = "BULLISH_ENGULFING"
+STAGE_BULLISH_CANDLE = "BULLISH_CANDLE"
+STAGE_ENGULFING = STAGE_BULLISH_CANDLE
 STAGE_EMA_PRICE = "EMA_PRICE"
 STAGE_EMA_TREND = "EMA_TREND"
 STAGE_VOLUME_24H = "VOLUME_24H"
 STAGE_RISK = "RISK_SL"
 STAGE_OK = "OK"
 STAGE_DISABLED = "DISABLED"
-STAGE_SEQUENCE = STAGE_ENGULFING
-STAGE_BODY = STAGE_ENGULFING
-STAGE_BREAKOUT = STAGE_ENGULFING
-STAGE_VOLUME = STAGE_ENGULFING
+STAGE_SEQUENCE = STAGE_BULLISH_CANDLE
+STAGE_BODY = STAGE_BULLISH_CANDLE
+STAGE_BREAKOUT = STAGE_BULLISH_CANDLE
+STAGE_VOLUME = STAGE_BULLISH_CANDLE
 
 
 def _finite(value) -> Optional[float]:
@@ -111,7 +112,7 @@ def volume_rise_params(config: dict) -> dict:
 
 
 def momentum_interval(config: dict) -> str:
-    return str((config or {}).get("CONFIRM_INTERVAL", "1h") or "1h").strip().lower()
+    return str((config or {}).get("CONFIRM_INTERVAL", "15m") or "15m").strip().lower()
 
 
 def _interval_minutes(interval: str) -> int:
@@ -199,11 +200,11 @@ def atr_period(config: dict) -> int:
 
 def required_bars(config: dict) -> int:
     params = signal_params(config)
-    return max(3, params["ema_slow"] + 1, atr_period(config) + 1)
+    return max(2, params["ema_slow"] + 1, atr_period(config) + 1)
 
 
 def atr_window_bars(config: dict) -> int:
-    return max(required_bars(config), _cfg_int(config, "CONFIRM_LOOKBACK_BARS", 121, 3, 1000))
+    return max(required_bars(config), _cfg_int(config, "CONFIRM_LOOKBACK_BARS", 192, 3, 1000))
 
 
 def max_hold_hours(config: Optional[dict] = None) -> float:
@@ -282,6 +283,14 @@ def ema_value(bars: Sequence, period: int) -> Optional[float]:
     return values[-1] if values else None
 
 
+def is_bullish_candle(candle) -> bool:
+    try:
+        co, cc = float(candle.open), float(candle.close)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return math.isfinite(co) and math.isfinite(cc) and co > 0.0 and cc > co
+
+
 def is_bullish_engulfing(previous, current, strict: bool = True) -> bool:
     try:
         po, pc = float(previous.open), float(previous.close)
@@ -303,7 +312,7 @@ def exit_levels(entry_price: float, anchor_low: float, config: dict, *, atr: Opt
     buffer_mult = signal_params(config)["sl_atr_buffer_mult"]
     result = {"ok": False, "stage": STAGE_RISK, "reason": "", "sl_price": None, "tp_price": None, "sl_pct": None, "tp_pct": None, "rr_ratio": None, "min_rr_ratio": rr, "max_sl_pct": max_sl_pct(config), "anchor_low": low or None, "atr": distance if distance and distance > 0 else None, "sl_atr_buffer_mult": buffer_mult}
     if entry <= 0.0 or low <= 0.0:
-        result["reason"] = "harga entry atau low pola engulfing tidak valid"
+        result["reason"] = "harga entry atau low candle sinyal tidak valid"
         return result
     if distance is None or distance <= 0.0:
         if not fallback_allowed:
@@ -312,22 +321,22 @@ def exit_levels(entry_price: float, anchor_low: float, config: dict, *, atr: Opt
         distance = 0.0
     sl = low - distance * buffer_mult
     if sl <= 0.0 or sl >= entry:
-        result["reason"] = f"SL {sl:.6g} dari low pola tidak berada di bawah entry {entry:.6g}"
+        result["reason"] = f"SL {sl:.6g} dari low candle tidak berada di bawah entry {entry:.6g}"
         return result
     sl_pct = (entry - sl) / entry * 100.0
     limit = max_sl_pct(config)
     if limit > 0.0 and sl_pct > limit + 1e-9:
         result.update(sl_price=sl, sl_pct=sl_pct)
-        result["reason"] = f"jarak SL pola {sl_pct:.2f}% melampaui batas {limit:.2f}%"
+        result["reason"] = f"jarak SL candle {sl_pct:.2f}% melampaui batas {limit:.2f}%"
         return result
     tp = entry + (entry - sl) * rr
     tp_pct = (tp - entry) / entry * 100.0
-    result.update(ok=True, stage=STAGE_OK, sl_price=sl, tp_price=tp, sl_pct=sl_pct, tp_pct=tp_pct, rr_ratio=rr, atr=distance, reason=f"SL {sl:.6g} di bawah low pola {low:.6g} dengan buffer {buffer_mult:g} x ATR, TP {tp:.6g}, R:R 1:{rr:.2f}")
+    result.update(ok=True, stage=STAGE_OK, sl_price=sl, tp_price=tp, sl_pct=sl_pct, tp_pct=tp_pct, rr_ratio=rr, atr=distance, reason=f"SL {sl:.6g} di bawah low candle {low:.6g} dengan buffer {buffer_mult:g} x ATR, TP {tp:.6g}, R:R 1:{rr:.2f}")
     return result
 
 
 def _empty_result(interval: str, bars: int, required: int) -> dict:
-    return {"ok": False, "stage": STAGE_HISTORY, "reason": "", "interval": interval, "bars": bars, "required": required, "window": required, "bull_count": 0, "bull_required": 1, "signal_close": None, "signal_close_time": None, "entry_low": None, "atr": None, "sl_price": None, "tp_price": None, "sl_pct": None, "tp_pct": None, "rr_ratio": None, "ema_fast": None, "ema_slow": None, "engulfing_strength": None, "price_ema_atr": None, "ema_trend_atr": None, "checks": {"history": False, "candles": False, "bullish_engulfing": False, "price_above_ema": False, "ema_trend": False, "risk": False}, "values": {}}
+    return {"ok": False, "stage": STAGE_HISTORY, "reason": "", "interval": interval, "bars": bars, "required": required, "window": required, "bull_count": 0, "bull_required": 1, "signal_close": None, "signal_close_time": None, "entry_low": None, "atr": None, "sl_price": None, "tp_price": None, "sl_pct": None, "tp_pct": None, "rr_ratio": None, "ema_fast": None, "ema_slow": None, "candle_strength": None, "engulfing_strength": None, "price_ema_atr": None, "ema_trend_atr": None, "checks": {"history": False, "candles": False, "bullish_candle": False, "bullish_engulfing": False, "price_above_ema": False, "ema_trend": False, "risk": False}, "values": {}}
 
 
 def evaluate_entry_rule(klines: Sequence, config: dict, signal_close_time_ms: Optional[int] = None) -> dict:
@@ -345,25 +354,27 @@ def evaluate_entry_rule(klines: Sequence, config: dict, signal_close_time_ms: Op
         result.update(stage=STAGE_CANDLE, reason=f"data OHLC candle {interval} tidak valid")
         return result
     result["checks"]["candles"] = True
-    current, previous = window[-1], window[-2]
+    current = window[-1]
     entry = float(current.close)
     atr = atr_value(window, atr_period(config))
-    pattern_low = min(float(previous.low), float(current.low))
-    result.update(signal_close=entry, signal_close_time=int(current.close_time), entry_low=pattern_low, atr=atr)
+    candle_low = float(current.low)
+    result.update(signal_close=entry, signal_close_time=int(current.close_time), entry_low=candle_low, atr=atr)
     if not rule_enabled(config):
-        levels = exit_levels(entry, pattern_low, config, atr=atr, fallback_allowed=True)
-        result.update(ok=True, stage=STAGE_DISABLED, reason="filter bullish engulfing dan EMA nonaktif", sl_price=levels["sl_price"], tp_price=levels["tp_price"], sl_pct=levels["sl_pct"], tp_pct=levels["tp_pct"], rr_ratio=levels["rr_ratio"])
+        levels = exit_levels(entry, candle_low, config, atr=atr, fallback_allowed=True)
+        result.update(ok=True, stage=STAGE_DISABLED, reason="filter candle bullish dan EMA nonaktif", sl_price=levels["sl_price"], tp_price=levels["tp_price"], sl_pct=levels["sl_pct"], tp_pct=levels["tp_pct"], rr_ratio=levels["rr_ratio"])
         for key in result["checks"]:
             result["checks"][key] = True
         return result
-    if not is_bullish_engulfing(previous, current, strict=True):
-        result.update(stage=STAGE_ENGULFING, reason=f"dua candle terakhir {interval} bukan bullish engulfing body ketat")
+    if not is_bullish_candle(current):
+        result.update(stage=STAGE_BULLISH_CANDLE, reason=f"candle terakhir {interval} bukan candle bullish (close {entry:.6g} <= open {float(current.open):.6g})")
         return result
-    previous_body = abs(float(previous.open) - float(previous.close))
     current_body = abs(float(current.close) - float(current.open))
-    engulfing_strength = current_body / previous_body if previous_body > 0.0 else 0.0
-    result["engulfing_strength"] = engulfing_strength
+    candle_range = max(1e-12, float(current.high) - float(current.low))
+    candle_strength = (current_body / atr) if (atr is not None and atr > 0.0) else (current_body / candle_range)
+    result["candle_strength"] = candle_strength
+    result["engulfing_strength"] = candle_strength
     result["bull_count"] = 1
+    result["checks"]["bullish_candle"] = True
     result["checks"]["bullish_engulfing"] = True
     fast = ema_value(window, params["ema_fast"])
     slow = ema_value(window, params["ema_slow"])
@@ -381,14 +392,14 @@ def evaluate_entry_rule(klines: Sequence, config: dict, signal_close_time_ms: Op
         result.update(stage=STAGE_EMA_TREND, reason=f"EMA {params['ema_fast']} {fast:.6g} belum di atas EMA {params['ema_slow']} {slow:.6g}")
         return result
     result["checks"]["ema_trend"] = True
-    levels = exit_levels(entry, pattern_low, config, atr=atr)
+    levels = exit_levels(entry, candle_low, config, atr=atr)
     result.update(sl_price=levels["sl_price"], tp_price=levels["tp_price"], sl_pct=levels["sl_pct"], tp_pct=levels["tp_pct"], rr_ratio=levels["rr_ratio"])
     if not levels["ok"]:
         result.update(stage=STAGE_RISK, reason=levels["reason"])
         return result
     result["checks"]["risk"] = True
-    result.update(ok=True, stage=STAGE_OK, reason=f"bullish engulfing {interval} valid, close di atas EMA {params['ema_fast']}/{params['ema_slow']}, EMA cepat di atas EMA lambat; {levels['reason']}")
-    result["values"] = {"entry_low": pattern_low, "sl_price": levels["sl_price"], "tp_price": levels["tp_price"], "rr_ratio": levels["rr_ratio"], "atr": atr, "ema_fast": fast, "ema_slow": slow, "engulfing_strength": engulfing_strength, "price_ema_atr": price_ema_atr, "ema_trend_atr": ema_trend_atr}
+    result.update(ok=True, stage=STAGE_OK, reason=f"candle bullish {interval} valid, close di atas EMA {params['ema_fast']}/{params['ema_slow']}, EMA cepat di atas EMA lambat; {levels['reason']}")
+    result["values"] = {"entry_low": candle_low, "sl_price": levels["sl_price"], "tp_price": levels["tp_price"], "rr_ratio": levels["rr_ratio"], "atr": atr, "ema_fast": fast, "ema_slow": slow, "candle_strength": candle_strength, "engulfing_strength": candle_strength, "price_ema_atr": price_ema_atr, "ema_trend_atr": ema_trend_atr}
     return result
 
 

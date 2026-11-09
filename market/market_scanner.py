@@ -70,6 +70,7 @@ class SetupResult:
     turnover_ratio: Optional[float] = None
     ema_fast: Optional[float] = None
     ema_slow: Optional[float] = None
+    candle_strength: Optional[float] = None
     engulfing_strength: Optional[float] = None
     price_ema_atr: Optional[float] = None
     ema_trend_atr: Optional[float] = None
@@ -131,16 +132,17 @@ class ScanDiagnostics:
     def log_lines(self, config: dict) -> list[str]:
         if not self.checked_candidates:
             return []
-        interval = str(config.get("CONFIRM_INTERVAL", "1h"))
+        interval = str(config.get("CONFIRM_INTERVAL", "15m"))
         signal = strategy.entry_signal_params(config)
         labels = {
-            "ENTRY_RULE": f"filter engulfing + EMA {interval}",
+            "ENTRY_RULE": f"filter candle bullish + EMA {interval}",
             "CANDLE_CONFIRM": f"candle {interval} gagal diambil",
             "HISTORY_CONFIRM": f"riwayat {interval} kurang",
-            "BULLISH_ENGULFING": f"pola bullish engulfing {interval} tidak valid",
+            "BULLISH_CANDLE": f"candle {interval} bukan bullish",
+            "BULLISH_ENGULFING": f"candle {interval} bukan bullish",
             "EMA_PRICE": f"close belum di atas EMA {signal['ema_fast']}/{signal['ema_slow']}",
             "EMA_TREND": f"EMA {signal['ema_fast']} belum di atas EMA {signal['ema_slow']}",
-            "RISK_SL": "jarak Stop Loss pola",
+            "RISK_SL": "jarak Stop Loss candle",
             "VOLUME_24H": "turnover 24 jam tidak naik dibanding rata-rata",
         }
         candle = "belum tersedia"
@@ -154,7 +156,7 @@ class ScanDiagnostics:
             "Diagnostik: setiap simbol dicatat pada gerbang pertama yang gagal.",
         ]
         if strategy.entry_rule_enabled(config):
-            lines.insert(0, f"Filter bullish engulfing + EMA AKTIF di {interval}: body candle bullish harus menelan body candle bearish sebelumnya secara ketat, close di atas EMA {signal['ema_fast']} dan EMA {signal['ema_slow']}, serta EMA cepat di atas EMA lambat.")
+            lines.insert(0, f"Filter candle bullish + EMA AKTIF di {interval}: candle terakhir harus bullish (close > open), close di atas EMA {signal['ema_fast']} dan EMA {signal['ema_slow']}, serta EMA cepat di atas EMA lambat.")
         for stage in sorted(self.rejection_counts):
             count = self.rejection_counts.get(stage, 0)
             if not count:
@@ -219,7 +221,6 @@ def _angka_perubahan(value) -> Optional[float]:
     return angka
 
 
-
 def _cfg_number(config: dict, key: str, default: float) -> float:
     try:
         value = float(config.get(key, default))
@@ -266,6 +267,7 @@ def _percentile_ranks(values: list[float]) -> list[float]:
     for rank, (_value, index) in enumerate(ordered):
         result[index] = rank / denominator * 100.0
     return result
+
 
 def min_change_pct(config: dict) -> float:
     try:
@@ -604,9 +606,12 @@ def detect_entry_setup(
     atr_value = verdict.get("atr")
     if atr_value is None:
         atr_value = strategy.atr(klines, strategy.atr_period(config))
+    strength_val = verdict.get("candle_strength")
+    if strength_val is None:
+        strength_val = verdict.get("engulfing_strength")
     return SetupResult(
         ok=bool(verdict.get("ok", False)),
-        stage=str(verdict.get("stage") or "BULLISH_ENGULFING"),
+        stage=str(verdict.get("stage") or "BULLISH_CANDLE"),
         reason=str(verdict.get("reason") or ""),
         signal_close=float(verdict.get("signal_close") or last_bar.close),
         signal_close_time=int(
@@ -625,7 +630,8 @@ def detect_entry_setup(
         turnover_ratio=syarat_volume.get("ratio"),
         ema_fast=verdict.get("ema_fast"),
         ema_slow=verdict.get("ema_slow"),
-        engulfing_strength=verdict.get("engulfing_strength"),
+        candle_strength=strength_val,
+        engulfing_strength=strength_val,
         price_ema_atr=verdict.get("price_ema_atr"),
         ema_trend_atr=verdict.get("ema_trend_atr"),
     )
@@ -636,7 +642,8 @@ STAGE_GROUPS = {
     "CANDLE_ENTRY": "CANDLE_ENTRY",
     "HISTORY_CONFIRM": "HISTORY_ENTRY",
     "CANDLE_CONFIRM": "CANDLE_ENTRY",
-    "BULLISH_ENGULFING": "BULLISH_ENGULFING",
+    "BULLISH_CANDLE": "BULLISH_CANDLE",
+    "BULLISH_ENGULFING": "BULLISH_CANDLE",
     "EMA_PRICE": "EMA_PRICE",
     "EMA_TREND": "EMA_TREND",
     "VOLUME_24H": "VOLUME_24H",
@@ -646,30 +653,41 @@ STAGE_GROUPS = {
     "OK": "ENTRY_RULE",
 }
 
+
 def diagnostic_stage(stage: str, reason: str) -> str:
     kunci = str(stage or "").strip().upper()
     if kunci in STAGE_GROUPS:
         return STAGE_GROUPS[kunci]
     if str(reason or "").startswith("data candle kurang"):
         return "HISTORY_ENTRY"
-    return "BULLISH_ENGULFING"
+    return "BULLISH_CANDLE"
 
 
 def setup_quality_key(setup: Optional[SetupResult], candidate: Candidate) -> tuple:
-    return (-float(candidate.hybrid_score), -float(candidate.market_score), -float(candidate.quote_volume))
+    hybrid = float(candidate.hybrid_score or 0.0)
+    if hybrid <= 0.0 and setup is not None:
+        c_str = min(3.0, max(0.0, float(setup.candle_strength if setup.candle_strength is not None else (setup.engulfing_strength or 0.0))))
+        p_atr = min(5.0, max(0.0, float(setup.price_ema_atr or 0.0)))
+        t_atr = min(3.0, max(0.0, float(setup.ema_trend_atr or 0.0)))
+        sl_pen = min(30.0, max(0.0, float(setup.sl_pct or 0.0)) * 3.0)
+        hybrid = max(0.0, c_str * 10.0 + p_atr * 8.0 + t_atr * 6.0 - sl_pen)
+    return (-hybrid, -float(candidate.market_score), -float(candidate.quote_volume))
 
 
 def apply_hybrid_scores(candidates: list[Candidate], config: dict) -> None:
     if not candidates:
         return
-    engulf_values = [min(3.0, max(1.0, float(c.setup.engulfing_strength or 1.0))) for c in candidates]
+    candle_values = [
+        min(3.0, max(0.0, float((c.setup.candle_strength if c.setup and c.setup.candle_strength is not None else (c.setup.engulfing_strength if c.setup else 0.0)) or 0.0)))
+        for c in candidates
+    ]
     price_values = [min(5.0, max(0.0, float(c.setup.price_ema_atr or 0.0))) for c in candidates]
     trend_values = [min(3.0, max(0.0, float(c.setup.ema_trend_atr or 0.0))) for c in candidates]
-    engulf_ranks = _percentile_ranks(engulf_values)
+    candle_ranks = _percentile_ranks(candle_values)
     price_ranks = _percentile_ranks(price_values)
     trend_ranks = _percentile_ranks(trend_values)
     weights = {
-        "engulf": _cfg_number(config, "PUMP_RANK_ENGULFING_WEIGHT", 30.0),
+        "candle": _cfg_number(config, "PUMP_RANK_ENGULFING_WEIGHT", 30.0),
         "price": _cfg_number(config, "PUMP_RANK_PRICE_EMA_WEIGHT", 25.0),
         "trend": _cfg_number(config, "PUMP_RANK_EMA_TREND_WEIGHT", 20.0),
         "market": _cfg_number(config, "PUMP_RANK_CHANGE_WEIGHT", 10.0) + _cfg_number(config, "PUMP_RANK_TURNOVER_WEIGHT", 15.0),
@@ -677,8 +695,8 @@ def apply_hybrid_scores(candidates: list[Candidate], config: dict) -> None:
     total = max(1e-12, sum(weights.values()))
     for index, candidate in enumerate(candidates):
         risk_penalty = min(30.0, max(0.0, float(candidate.setup.sl_pct or 0.0)) * 3.0)
-        candidate.signal_score = (engulf_ranks[index] * weights["engulf"] + price_ranks[index] * weights["price"] + trend_ranks[index] * weights["trend"]) / max(1e-12, weights["engulf"] + weights["price"] + weights["trend"])
-        candidate.hybrid_score = max(0.0, (candidate.signal_score * (weights["engulf"] + weights["price"] + weights["trend"]) + candidate.market_score * weights["market"]) / total - risk_penalty)
+        candidate.signal_score = (candle_ranks[index] * weights["candle"] + price_ranks[index] * weights["price"] + trend_ranks[index] * weights["trend"]) / max(1e-12, weights["candle"] + weights["price"] + weights["trend"])
+        candidate.hybrid_score = max(0.0, (candidate.signal_score * (weights["candle"] + weights["price"] + weights["trend"]) + candidate.market_score * weights["market"]) / total - risk_penalty)
 
 
 def find_best_candidate(

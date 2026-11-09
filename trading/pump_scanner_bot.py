@@ -4707,7 +4707,7 @@ _MAX_HOLD_WARNED: set = set()
 
 
 def _max_hold_cap_ms(config: dict) -> int:
-    interval = str(config.get("CONFIRM_INTERVAL", "1h") or "1h")
+    interval = str(config.get("CONFIRM_INTERVAL", "15m") or "15m")
     kunci = interval
     cached = _MAX_HOLD_CACHE.get(kunci)
     if cached is not None:
@@ -4731,7 +4731,7 @@ def _time_stop_due(config: dict, state: dict) -> bool:
     if entry_ms <= 0:
         return False
     bar_ms = strategy.interval_to_ms(
-        str(config.get("CONFIRM_INTERVAL", "1h") or "1h")
+        str(config.get("CONFIRM_INTERVAL", "15m") or "15m")
     )
     return strategy.time_stop_due(entry_ms, state_mod.now_ms(), cap_ms, bar_ms)
 
@@ -4975,11 +4975,11 @@ def run(
             lifecycle.write("STOPPED", reason=risk_reason)
         return 2
     need_setup = strategy.required_lookback_bars(config)
-    have_bars = int(config.get("CONFIRM_LOOKBACK_BARS", 48))
+    have_bars = int(config.get("CONFIRM_LOOKBACK_BARS", 192))
     if have_bars < need_setup:
         logger.warning(
             "CONFIRM_LOOKBACK_BARS=%d lebih kecil dari %d candle yang dibutuhkan "
-            "filter bullish engulfing + EMA. Bot tetap mengambil %d candle per konfirmasi agar deteksi "
+            "filter candle bullish + EMA. Bot tetap mengambil %d candle per konfirmasi agar deteksi "
             "tidak selalu gagal, tetapi perbaiki nilai config ini supaya backtest dan live "
             "benar-benar memakai angka yang sama.",
             have_bars,
@@ -4991,8 +4991,8 @@ def run(
         atr_bot = strategy.exit_atr_params(config)
         vol_bot = strategy.volume_rise_params(config)
         logger.info(
-            "Filter bullish engulfing + EMA AKTIF di timeframe %s: body bullish harus menelan body bearish sebelumnya secara ketat, close di atas EMA %d/%d, dan EMA cepat di atas EMA lambat. SL di bawah low pola dengan buffer %.2f x ATR periode %d, target R:R 1:%.2f, trailing %.2f x ATR, batas jarak stop %.2f%%. Syarat turnover 24 jam %s.",
-            config.get("CONFIRM_INTERVAL", "1h"),
+            "Filter candle bullish + EMA AKTIF di timeframe %s: candle terakhir harus bullish (close > open), close di atas EMA %d/%d, dan EMA cepat di atas EMA lambat. SL di bawah low candle dengan buffer %.2f x ATR periode %d, target R:R 1:%.2f, trailing %.2f x ATR, batas jarak stop %.2f%%. Syarat turnover 24 jam %s.",
+            config.get("CONFIRM_INTERVAL", "15m"),
             int(signal_bot["ema_fast"]), int(signal_bot["ema_slow"]),
             float(signal_bot["sl_atr_buffer_mult"]), int(atr_bot["period"]),
             float(config.get("ENTRY_MIN_RR_RATIO", 3.0)), float(atr_bot["trail_mult"]),
@@ -5318,7 +5318,7 @@ def run(
                         )
                     try:
                         batas_konfirmasi = strategy.last_closed_bar_close_ms(
-                            str(scan_config.get("CONFIRM_INTERVAL", "1h")),
+                            str(scan_config.get("CONFIRM_INTERVAL", "15m")),
                             state_mod.now_ms(),
                         )
                     except (KeyError, ValueError):

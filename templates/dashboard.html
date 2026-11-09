@@ -2406,7 +2406,7 @@
             </div>
             <div
               class="bt-field"
-              title="Saklar filter bullish engulfing + EMA. Bila aktif, entry hanya terjadi setelah candle H1 terakhir yang sudah tertutup menembus high candle sebelumnya, dengan body dan volume sesuai syarat di bawah. Bila dimatikan, bot masuk hanya berdasarkan peringkat gainer dan proteksi orderbook."
+              title="Saklar filter candle bullish + EMA. Bila aktif, entry hanya terjadi setelah candle sinyal terakhir tertutup bullish (close > open) dan berada di atas EMA 20/50. Bila dimatikan, bot masuk hanya berdasarkan peringkat gainer dan proteksi orderbook."
             >
               <label for="btEntryRuleEnabled">Filter Momentum Aktif</label>
               <div style="display:flex;align-items:center;gap:8px;min-height:38px">
@@ -2417,7 +2417,7 @@
                   style="width:16px;height:16px;max-width:16px;padding:0;accent-color:var(--accent)"
                   onchange="btSyncEntryRuleAvailability(); btUpdateEstimate()"
                 />
-                <span class="mut" style="font-size:11.5px">Entry menunggu bullish engulfing tertutup dan konfirmasi EMA</span>
+                <span class="mut" style="font-size:11.5px">Entry menunggu candle bullish tertutup dan konfirmasi EMA</span>
               </div>
             </div>
             <div class="bt-field" style="grid-column:1/-1">
@@ -2462,14 +2462,14 @@
               <input type="number" id="btGainerVolDays" min="1" max="14" step="1" value="3" oninput="btRenderStrategySummary()" />
             </div>
             <div class="bt-field" style="grid-column:1/-1">
-              <label style="color:var(--accent);font-size:11px;letter-spacing:.6px">BULLISH ENGULFING + EMA</label>
+              <label style="color:var(--accent);font-size:11px;letter-spacing:.6px">CANDLE BULLISH + EMA</label>
             </div>
-            <div class="bt-field" title="Timeframe candle untuk pola bullish engulfing dan EMA.">
+            <div class="bt-field" title="Timeframe candle untuk sinyal candle bullish dan EMA.">
               <label>Interval sinyal</label>
               <select id="btInterval" onchange="btRenderStrategySummary()">
-                <option value="15m">15m</option>
+                <option value="15m" selected>15m</option>
                 <option value="30m">30m</option>
-                <option value="1h" selected>1h</option>
+                <option value="1h">1h</option>
                 <option value="2h">2h</option>
                 <option value="4h">4h</option>
               </select>
@@ -2482,13 +2482,13 @@
               <label>EMA lambat</label>
               <input type="number" id="btEmaSlow" min="3" max="1000" step="1" value="50" oninput="btRenderStrategySummary()" />
             </div>
-            <div class="bt-field" title="Ruang tambahan Stop Loss di bawah low terendah pola dalam kelipatan ATR.">
+            <div class="bt-field" title="Ruang tambahan Stop Loss di bawah low candle bullish sinyal dalam kelipatan ATR.">
               <label>Buffer SL (x ATR)</label>
               <input type="number" id="btSlBufferAtr" min="0" max="10" step="0.05" value="0.1" oninput="btRenderStrategySummary()" />
             </div>
-            <div class="bt-field" title="Jumlah candle terakhir yang diunduh untuk menghitung pola, EMA, dan ATR.">
+            <div class="bt-field" title="Jumlah candle terakhir yang diunduh untuk menghitung candle bullish, EMA, dan ATR.">
               <label>Riwayat candle</label>
-              <input type="number" id="btLookback" min="15" max="1000" step="1" value="121" oninput="btRenderStrategySummary()" />
+              <input type="number" id="btLookback" min="15" max="1000" step="1" value="192" oninput="btRenderStrategySummary()" />
             </div>
             <div class="bt-field" style="grid-column:1/-1">
               <label style="color:var(--accent);font-size:11px;letter-spacing:.6px">EXIT ATR</label>
@@ -3471,7 +3471,7 @@
         const modeTxt='ATURAN ENTRY';
         const noteTxt=p.has_position
           ? ('SL terkunci di '+fmtP(c.sl_price)+' · TP terkunci di '+fmtP(c.tp_price)+'.')
-          : ('Entry pada bullish engulfing body ketat '+(c.confirm_interval||'1h')+' · close di atas EMA '+fmt((c.entry_signal||{}).ema_fast||20,0)+'/'+fmt((c.entry_signal||{}).ema_slow||50,0)+' · SL low pola - '+fmt((c.entry_signal||{}).sl_atr_buffer_mult||0.1,2)+'x ATR · TP 1:'+fmt(c.entry_min_rr_ratio||3,1)+'R.');
+          : ('Entry pada candle bullish '+(c.confirm_interval||'15m')+' · close di atas EMA '+fmt((c.entry_signal||{}).ema_fast||20,0)+'/'+fmt((c.entry_signal||{}).ema_slow||50,0)+' · SL low candle - '+fmt((c.entry_signal||{}).sl_atr_buffer_mult||0.1,2)+'x ATR · TP 1:'+fmt(c.entry_min_rr_ratio||3,1)+'R.');
 
         renderConfigPanel(s, false, '', modeTxt, noteTxt);
       }
@@ -4478,7 +4478,7 @@
           const raw = el ? el.value : '';
           return raw === '' || raw === null || raw === undefined ? fallback : raw;
         };
-        const itv = val('btInterval', d.CONFIRM_INTERVAL || '1h');
+        const itv = val('btInterval', d.CONFIRM_INTERVAL || '15m');
         const gainMin = val('btGainerMin', d.GAINER_MIN_CHANGE_PCT ?? 3.0);
         const gainMax = val('btGainerMax', d.GAINER_MAX_CHANGE_PCT ?? 0);
         const emaFast = val('btEmaFast', d.EMA_FAST_PERIOD ?? 20);
@@ -4496,15 +4496,15 @@
         const volDays = val('btGainerVolDays', d.GAINER_VOLUME_AVG_DAYS ?? 3);
         const maxTxt = parseFloat(gainMax) > 0 ? fmt(gainMax, 1) + '%' : 'tanpa batas';
         const flowText = !ruleOn
-          ? 'Filter bullish engulfing + EMA nonaktif (hanya peringkat gainer dan proteksi orderbook)'
-          : 'bullish engulfing body ketat pada ' + esc(itv) + ', close di atas EMA ' + fmt(emaFast, 0) + '/' + fmt(emaSlow, 0) + ', dan EMA cepat di atas EMA lambat';
+          ? 'Filter candle bullish + EMA nonaktif (hanya peringkat gainer dan proteksi orderbook)'
+          : 'candle bullish pada ' + esc(itv) + ', close di atas EMA ' + fmt(emaFast, 0) + '/' + fmt(emaSlow, 0) + ', dan EMA cepat di atas EMA lambat';
         strategySummary.innerHTML = `
           <div class="posrow"><span class="k">Peringkat koin</span><span class="v mono" style="font-size:11.5px">kenaikan 24 jam terbesar, minimum ${fmt(gainMin, 1)}%, maksimum ${esc(maxTxt)}, ${volOn ? 'turnover harus naik &ge; ' + fmt(volRise, 2) + 'x rata-rata ' + fmt(volDays, 0) + ' hari' : 'syarat kenaikan turnover nonaktif'}</span></div>
           <div class="posrow"><span class="k">Alur entry aktif</span><span class="v mono" style="font-size:11.5px">${flowText}</span></div>
-          <div class="posrow"><span class="k">Stop dan target</span><span class="v mono" style="font-size:11.5px">SL di bawah low pola dengan buffer ${fmt(slBuffer, 2)}x ATR periode ${fmt(atrP, 0)}, TP R:R 1:${fmt(rrMin, 2)}</span></div>
+          <div class="posrow"><span class="k">Stop dan target</span><span class="v mono" style="font-size:11.5px">SL di bawah low candle dengan buffer ${fmt(slBuffer, 2)}x ATR periode ${fmt(atrP, 0)}, TP R:R 1:${fmt(rrMin, 2)}</span></div>
           <div class="posrow"><span class="k">Pengelolaan posisi</span><span class="v mono" style="font-size:11.5px">breakeven di ${fmt(atrBe, 1)}R + biaya, trailing mulai 1,5R, trailing ${fmt(atrTrail, 1)}x ATR dari puncak, ${parseFloat(maxHold) > 0 ? 'batas tahan ' + fmt(maxHold, 1) + ' jam' : 'tanpa batas waktu'}</span></div>
           <div class="posrow"><span class="k">Batas risiko</span><span class="v mono" style="font-size:11.5px">setup ditolak bila jarak stop di atas ${fmt(atrMaxSl, 1)}%</span></div>
-          <div class="posrow"><span class="k">Riwayat minimum</span><span class="v mono" style="font-size:11.5px">${fmt(val('btLookback', d.CONFIRM_LOOKBACK_BARS ?? 121), 0)} candle ${esc(itv)}</span></div>`;
+          <div class="posrow"><span class="k">Riwayat minimum</span><span class="v mono" style="font-size:11.5px">${fmt(val('btLookback', d.CONFIRM_LOOKBACK_BARS ?? 192), 0)} candle ${esc(itv)}</span></div>`;
       }
 
       function btSyncEntryRuleAvailability(){

@@ -205,7 +205,7 @@ def run_backtest(
     warmup_bars: int,
     progress_cb: Optional[Callable[[float], None]] = None,
 ) -> BacktestResult:
-    interval = config.get("CONFIRM_INTERVAL", "1h")
+    interval = config.get("CONFIRM_INTERVAL", "15m")
     window = bars_per_day(interval)
     stats = compute_rolling_24h_stats(klines, window)
 
@@ -351,6 +351,11 @@ def run_backtest(
                     lv = strategy.resolve_exit_levels(
                         config, setup=setup, entry_price=exec_entry_price
                     )
+                    if not lv.get("sl_price") or float(lv.get("sl_pct") or 0.0) <= 0.0:
+                        if strategy.entry_rule_enabled(config):
+                            entry_rule_skips += 1
+                        i += 1
+                        continue
                     pos = parity.PositionState(
                         exec_entry_price, lv, entry_time=entry_time_value
                     )
@@ -444,9 +449,9 @@ def run_backtest(
     if entry_rule_skips:
         signal_bt = strategy.entry_signal_params(config)
         warnings.append(
-            f"{entry_rule_skips} dari {entry_rule_scans} sinyal dilewati filter bullish engulfing + EMA "
+            f"{entry_rule_skips} dari {entry_rule_scans} sinyal dilewati filter candle bullish + EMA "
             f"({interval}: close di atas EMA {signal_bt['ema_fast']}/{signal_bt['ema_slow']}, "
-            f"EMA cepat di atas EMA lambat, SL low pola dengan buffer {signal_bt['sl_atr_buffer_mult']:g} x ATR)."
+            f"EMA cepat di atas EMA lambat, SL low candle dengan buffer {signal_bt['sl_atr_buffer_mult']:g} x ATR)."
         )
     risk_summary = controls.summary()
     if risk_summary["kill_switch_triggers"] > 0:
@@ -751,7 +756,7 @@ def _rentang_schema(key: str, lo: float, hi: float) -> tuple:
 
 
 def validate_params(config: dict) -> None:
-    interval = str(config.get("CONFIRM_INTERVAL", "1h") or "1h")
+    interval = str(config.get("CONFIRM_INTERVAL", "15m") or "15m")
     if interval not in INTERVAL_MINUTES:
         raise BacktestError(
             f"Interval '{interval}' tidak didukung. Pilihan: {', '.join(INTERVAL_MINUTES)}"
@@ -783,7 +788,7 @@ def validate_params(config: dict) -> None:
                 f"Parameter '{key}'={val} di luar rentang wajar ({lo:g}..{hi:g})."
             )
 
-    interval = config.get("CONFIRM_INTERVAL", "1h")
+    interval = config.get("CONFIRM_INTERVAL", "15m")
     if interval not in INTERVAL_MINUTES:
         raise BacktestError(f"Interval '{interval}' tidak dikenal.")
 
@@ -820,7 +825,7 @@ def execute_backtest(
     config["_symbol"] = symbol
     validate_params(config)
 
-    interval = config.get("CONFIRM_INTERVAL", "1h")
+    interval = config.get("CONFIRM_INTERVAL", "15m")
     bar_minutes = INTERVAL_MINUTES[interval]
     window_24h = bars_per_day(interval)
     warmup_bars = max(
@@ -945,7 +950,7 @@ def execute_backtest(
 
     spread_pct, slip_pct, delay_bars = entry_execution_params(config)
     assumptions = [
-        "Simulasi 1 koin mengikuti aturan bullish engulfing body ketat dan tren EMA yang sama dengan bot. SL memakai low pola dengan buffer ATR, TP memakai R:R, serta breakeven dan trailing memakai mesin exit yang sama.",
+        "Simulasi 1 koin mengikuti aturan candle bullish dan tren EMA yang sama dengan bot. SL memakai low candle dengan buffer ATR, TP memakai R:R, serta breakeven dan trailing memakai mesin exit yang sama.",
         (
             f"Eksekusi entry menunggu {delay_bars} bar setelah sinyal lalu membeli pada harga open + "
             f"setengah spread ({spread_pct / 2:.3f}%) + slippage ({slippage_label(slip_pct)}%). "
@@ -1004,7 +1009,7 @@ def print_report(data: dict) -> None:
     )
     print("-" * 72)
     exit_info = (
-        f"SL low pola - {p.get('ENTRY_SL_ATR_BUFFER_MULT', 0.1)}x ATR, "
+        f"SL low candle - {p.get('ENTRY_SL_ATR_BUFFER_MULT', 0.1)}x ATR, "
         f"TP R:R 1:{p.get('ENTRY_MIN_RR_RATIO', 3.0)}, "
         f"trailing {p.get('EXIT_ATR_TRAIL_MULT', 2.0)}x ATR, "
         f"breakeven {p.get('EXIT_ATR_BREAKEVEN_MULT', 1.0)}x ATR, "
@@ -1012,7 +1017,7 @@ def print_report(data: dict) -> None:
         f"MaxHold={p.get('EXIT_MAX_HOLD_HOURS', 24.0):g}h"
     )
     entry_info = (
-        f"bullish engulfing ketat {p.get('CONFIRM_INTERVAL', '1h')}, close di atas EMA "
+        f"candle bullish {p.get('CONFIRM_INTERVAL', '15m')}, close di atas EMA "
         f"{p.get('EMA_FAST_PERIOD', 20)}/{p.get('EMA_SLOW_PERIOD', 50)}, "
         f"EMA cepat di atas EMA lambat"
         if p.get("ENTRY_RULE_ENABLED", True)

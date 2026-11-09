@@ -13,12 +13,12 @@ from strategy import entry_rule, exit_atr
 
 def config_dasar() -> dict:
     cfg = deepcopy(PUMP_CONFIG)
-    cfg.update({"GAINER_VOLUME_FILTER_ENABLED": False, "GAINER_MIN_CHANGE_PCT": 0.0, "MIN_QUOTE_VOLUME_USDT_24H": 0.0, "ENTRY_MIN_RR_RATIO": 3.0, "ENTRY_SL_ATR_BUFFER_MULT": 0.1, "EXIT_ATR_MAX_SL_PCT": 10.0, "CONFIRM_INTERVAL": "5m", "USE_RISK_PERCENT": False, "POSITION_SIZE_USDT": 100.0, "MAX_POSITION_USDT": 100.0, "BACKTEST_INITIAL_EQUITY_USDT": 1000.0, "COOLDOWN_MINUTES_AFTER_CLOSE": 0, "MIN_SECONDS_BETWEEN_TRADES": 0})
+    cfg.update({"GAINER_VOLUME_FILTER_ENABLED": False, "GAINER_MIN_CHANGE_PCT": 0.0, "GAINER_MAX_CHANGE_PCT": 0.0, "PUMP_FALLBACK_MIN_CHANGE_PCT": 0.0, "PUMP_FALLBACK_MAX_CHANGE_PCT": 0.0, "MIN_QUOTE_VOLUME_USDT_24H": 0.0, "ENTRY_MIN_RR_RATIO": 3.0, "ENTRY_SL_ATR_BUFFER_MULT": 0.1, "EXIT_ATR_MAX_SL_PCT": 10.0, "CONFIRM_INTERVAL": "5m", "USE_RISK_PERCENT": False, "POSITION_SIZE_USDT": 100.0, "MAX_POSITION_USDT": 100.0, "BACKTEST_INITIAL_EQUITY_USDT": 1000.0, "COOLDOWN_MINUTES_AFTER_CLOSE": 0, "MIN_SECONDS_BETWEEN_TRADES": 0})
     return cfg
 
 
 def _posisi(levels: dict) -> parity.PositionState:
-    data = {"source": "ENGULFING_LOW_ATR_BUFFER", "sl_pct": 2.0, "tp_pct": 8.0, "sl_price": 98.0, "tp_price": 108.0}
+    data = {"source": entry_rule.SL_ANCHOR_ATR, "sl_pct": 2.0, "tp_pct": 8.0, "sl_price": 98.0, "tp_price": 108.0}
     data.update(levels)
     return parity.PositionState(100.0, data)
 
@@ -67,17 +67,17 @@ def run(verbose: bool = False) -> tuple[bool, list[str]]:
     def backtest_trade():
         cfg = config_dasar()
         result = bt.run_backtest(sd.seri_banyak_setup(siklus=4), cfg, warmup_bars=120)
-        assert result.trades, "fixture engulfing tidak menghasilkan trade"
+        assert result.trades, "fixture candle bullish tidak menghasilkan trade"
         for trade in result.trades:
             assert trade.sl_pct > 0.0 and trade.tp_pct > 0.0
             assert abs(trade.tp_pct / trade.sl_pct - 3.0) < 0.05
 
-    test("SL low pola dengan buffer ATR dan TP R:R 1:3", level_pola)
-    test("batas jarak stop pola", batas_stop)
+    test("SL low candle dengan buffer ATR dan TP R:R 1:3", level_pola)
+    test("batas jarak stop candle", batas_stop)
     test("breakeven ATR tetap aktif", breakeven)
     test("trailing stop tidak pernah turun", trailing_tidak_turun)
     test("pemicu take profit", target)
-    test("integrasi backtest engulfing", backtest_trade)
+    test("integrasi backtest candle bullish", backtest_trade)
 
     ok = True
     for name, fn in tests:
@@ -95,7 +95,7 @@ def run(verbose: bool = False) -> tuple[bool, list[str]]:
 
 
 def main() -> int:
-    print("Selftest exit pola + ATR:")
+    print("Selftest exit candle bullish + ATR:")
     ok, _ = run(verbose=True)
     print("HASIL: SEMUA LULUS" if ok else "HASIL: ADA YANG GAGAL")
     return 0 if ok else 1

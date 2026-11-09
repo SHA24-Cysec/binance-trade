@@ -1021,6 +1021,7 @@ def run_portfolio_backtest(
                         float(r_setup.signal_close or 0.0),
                         config,
                         anchor_low=getattr(r_setup, "entry_low", None),
+                        atr=getattr(r_setup, "atr_value", None),
                         fallback_allowed=True,
                     )
                     if not info["ok"]:
@@ -1135,6 +1136,16 @@ def run_portfolio_backtest(
         lv = strategy.resolve_exit_levels(
             config, setup=setup_terpilih, entry_price=exec_entry_price
         )
+        if not lv.get("sl_price") or float(lv.get("sl_pct") or 0.0) <= 0.0:
+            if strategy.entry_rule_enabled(config):
+                entry_rule_skips += 1
+            if len(skipped) < max_skipped_records:
+                skipped.append(
+                    SkippedSignal(
+                        time=t_now, symbol=sym, reason="FILTER_ENTRY_RULE", holding=None
+                    )
+                )
+            continue
         holding = sym
         position = parity.PositionState(
             exec_entry_price, lv, entry_time=entry_time_value
@@ -1188,9 +1199,9 @@ def run_portfolio_backtest(
         signal_pb = strategy.entry_signal_params(config)
         warnings.append(
             f"{entry_rule_skips} dari {entry_rule_scans} kandidat top gainer dilewati "
-            f"filter bullish engulfing + EMA ({interval}: close di atas EMA "
+            f"filter candle bullish + EMA ({interval}: close di atas EMA "
             f"{signal_pb['ema_fast']}/{signal_pb['ema_slow']}, EMA cepat di atas EMA lambat, "
-            f"SL low pola dengan buffer {signal_pb['sl_atr_buffer_mult']:g} x ATR)."
+            f"SL low candle dengan buffer {signal_pb['sl_atr_buffer_mult']:g} x ATR)."
         )
     risk_summary = controls.summary()
     if risk_summary["kill_switch_triggers"] > 0:
@@ -1485,7 +1496,7 @@ def execute_portfolio_backtest(
             "Coba turunkan MIN_QUOTE_VOLUME_USDT_24H."
         )
 
-    interval = config.get("CONFIRM_INTERVAL", "1h")
+    interval = config.get("CONFIRM_INTERVAL", "15m")
     bar_minutes = INTERVAL_MINUTES[interval]
     window_24h = bars_per_day(interval)
     warmup_bars = max(window_24h, strategy.required_lookback_bars(config))

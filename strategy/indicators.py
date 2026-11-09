@@ -121,7 +121,7 @@ def _interval_from_config(config: dict, key: str, default: str) -> str:
 
 
 def confirm_interval(config: dict) -> str:
-    return _interval_from_config(config, "CONFIRM_INTERVAL", "1h")
+    return _interval_from_config(config, "CONFIRM_INTERVAL", "15m")
 
 
 def entry_rule_enabled(config: dict) -> bool:
@@ -191,7 +191,7 @@ def gate_warmup_bars(config: dict, interval: str) -> int:
     return entry_warmup_bars(config, interval)
 
 
-def gate_warmup_ms(config: dict, interval: str = "1h") -> int:
+def gate_warmup_ms(config: dict, interval: str = "15m") -> int:
     if not entry_rule_enabled(config):
         return 0
     return int(entry_warmup_bars(config, interval) * interval_to_ms(interval))
@@ -202,12 +202,14 @@ def compute_entry_exit_levels(
     config: dict,
     *,
     anchor_low: Optional[float] = None,
+    atr: Optional[float] = None,
     fallback_allowed: bool = False,
 ) -> dict:
     return entry_rule.exit_levels(
         entry_price,
         anchor_low,
         config,
+        atr=atr,
         fallback_allowed=fallback_allowed,
     )
 
@@ -248,7 +250,7 @@ def resolve_exit_levels(
         "be_lock_pct": 0.0,
         "trail_start_pct": 0.0,
         "trail_step_pct": 0.0,
-        "source": "ENGULFING_LOW_ATR_BUFFER" if valid else "TIDAK_TERSEDIA",
+        "source": entry_rule.SL_ANCHOR_ATR if valid else "TIDAK_TERSEDIA",
         "note": plan["reason"],
     }
 
@@ -262,7 +264,7 @@ def evaluate_entry(
 
 
 def confirm_window_bars(config: dict) -> int:
-    lookback = int(config.get("CONFIRM_LOOKBACK_BARS", 60) or 60)
+    lookback = int(config.get("CONFIRM_LOOKBACK_BARS", 192) or 192)
     return max(1, min(1000, max(lookback, required_lookback_bars(config))))
 
 
