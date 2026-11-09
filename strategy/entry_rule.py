@@ -8,32 +8,23 @@ from strategy import exit_atr
 ENTRY_RULE_DEFAULTS = {
     "ENTRY_RULE_ENABLED": True,
     "CONFIRM_INTERVAL": "1h",
-    "MOMENTUM_BREAKOUT_LOOKBACK": 1,
-    "MOMENTUM_BODY_ATR_MULT": 0.5,
-    "MOMENTUM_VOLUME_MULT": 1.5,
-    "MOMENTUM_VOLUME_LOOKBACK": 20,
+    "EMA_FAST_PERIOD": 20,
+    "EMA_SLOW_PERIOD": 50,
+    "ENTRY_SL_ATR_BUFFER_MULT": 0.1,
     "ENTRY_ATR_PERIOD": exit_atr.DEFAULT_ATR_PERIOD,
-    "EXIT_ATR_SL_MULT": exit_atr.DEFAULT_SL_MULT,
-    "EXIT_ATR_TP_MULT": exit_atr.DEFAULT_TP_MULT,
     "EXIT_ATR_TRAIL_MULT": exit_atr.DEFAULT_TRAIL_MULT,
     "EXIT_ATR_BREAKEVEN_MULT": exit_atr.DEFAULT_BREAKEVEN_MULT,
     "EXIT_ATR_MAX_SL_PCT": exit_atr.DEFAULT_MAX_SL_PCT,
-    "ENTRY_MIN_RR_RATIO": exit_atr.DEFAULT_MIN_RR,
+    "ENTRY_MIN_RR_RATIO": 3.0,
     "EXIT_MAX_HOLD_HOURS": 24.0,
     "GAINER_VOLUME_FILTER_ENABLED": True,
     "GAINER_VOLUME_RISE_MULT": 1.2,
     "GAINER_VOLUME_AVG_DAYS": 3,
 }
 
-MOMENTUM_PARAM_KEYS = (
-    "MOMENTUM_BREAKOUT_LOOKBACK",
-    "MOMENTUM_BODY_ATR_MULT",
-    "MOMENTUM_VOLUME_MULT",
-    "MOMENTUM_VOLUME_LOOKBACK",
-)
-
+SIGNAL_PARAM_KEYS = ("EMA_FAST_PERIOD", "EMA_SLOW_PERIOD", "ENTRY_SL_ATR_BUFFER_MULT")
+MOMENTUM_PARAM_KEYS = SIGNAL_PARAM_KEYS
 EXIT_PARAM_KEYS = exit_atr.ATR_PARAM_KEYS
-
 EXIT_TAKE_PROFIT_ENABLED = True
 EXIT_BREAKEVEN_ENABLED = True
 EXIT_BREAKEVEN_R_MULTIPLE = exit_atr.DEFAULT_BREAKEVEN_MULT
@@ -46,7 +37,6 @@ EXIT_MAX_HOLD_HOURS = 24.0
 MAX_HOLD_HOURS_LIMIT = 720.0
 EXIT_FALLBACK_SL_PCT = 1.0
 MOMENTUM_CONFIRM_CANDLES = 1
-
 EXIT_FIXED = {
     "take_profit_enabled": EXIT_TAKE_PROFIT_ENABLED,
     "breakeven_enabled": EXIT_BREAKEVEN_ENABLED,
@@ -56,28 +46,20 @@ EXIT_FIXED = {
     "trailing_atr_mult": EXIT_TRAILING_ATR_MULT,
     "max_hold_hours": EXIT_MAX_HOLD_HOURS,
 }
-
-
-def exit_fixed_params(config: Optional[dict] = None) -> dict:
-    hasil = dict(EXIT_FIXED)
-    params = exit_atr.atr_params(config or {})
-    hasil["breakeven_r_multiple"] = params["breakeven_mult"]
-    hasil["trailing_atr_mult"] = params["trail_mult"]
-    hasil["max_hold_hours"] = max_hold_hours(config)
-    return hasil
-
-SL_ANCHOR_ATR = "ATR"
-
+SL_ANCHOR_ATR = "ENGULFING_LOW_ATR_BUFFER"
 STAGE_HISTORY = "HISTORY_ENTRY"
 STAGE_CANDLE = "CANDLE_ENTRY"
-STAGE_SEQUENCE = "MOMENTUM_BULL"
-STAGE_BODY = "MOMENTUM_BODY"
-STAGE_BREAKOUT = "MOMENTUM_BREAKOUT"
-STAGE_VOLUME = "MOMENTUM_VOLUME"
+STAGE_ENGULFING = "BULLISH_ENGULFING"
+STAGE_EMA_PRICE = "EMA_PRICE"
+STAGE_EMA_TREND = "EMA_TREND"
 STAGE_VOLUME_24H = "VOLUME_24H"
 STAGE_RISK = "RISK_SL"
 STAGE_OK = "OK"
 STAGE_DISABLED = "DISABLED"
+STAGE_SEQUENCE = STAGE_ENGULFING
+STAGE_BODY = STAGE_ENGULFING
+STAGE_BREAKOUT = STAGE_ENGULFING
+STAGE_VOLUME = STAGE_ENGULFING
 
 
 def _finite(value) -> Optional[float]:
@@ -85,17 +67,12 @@ def _finite(value) -> Optional[float]:
         number = float(value)
     except (TypeError, ValueError):
         return None
-    if not math.isfinite(number):
-        return None
-    return number
+    return number if math.isfinite(number) else None
 
 
 def _cfg_float(config: dict, key: str, default: float, low: float, high: float) -> float:
-    sumber = config if isinstance(config, dict) else {}
-    nilai = _finite(sumber.get(key, default))
-    if nilai is None:
-        nilai = default
-    return max(low, min(high, nilai))
+    value = _finite((config or {}).get(key, default))
+    return max(low, min(high, default if value is None else value))
 
 
 def _cfg_int(config: dict, key: str, default: int, low: int, high: int) -> int:
@@ -103,8 +80,7 @@ def _cfg_int(config: dict, key: str, default: int, low: int, high: int) -> int:
 
 
 def _cfg_bool(config: dict, key: str, default: bool) -> bool:
-    sumber = config if isinstance(config, dict) else {}
-    raw = sumber.get(key, default)
+    raw = (config or {}).get(key, default)
     if isinstance(raw, str):
         return raw.strip().lower() in {"1", "true", "yes", "on", "aktif"}
     return bool(raw)
@@ -114,13 +90,16 @@ def rule_enabled(config: dict) -> bool:
     return _cfg_bool(config, "ENTRY_RULE_ENABLED", True)
 
 
-def momentum_params(config: dict) -> dict:
+def signal_params(config: dict) -> dict:
     return {
-        "lookback": _cfg_int(config, "MOMENTUM_BREAKOUT_LOOKBACK", 1, 1, 20),
-        "body_atr_mult": _cfg_float(config, "MOMENTUM_BODY_ATR_MULT", 0.5, 0.0, 5.0),
-        "volume_mult": _cfg_float(config, "MOMENTUM_VOLUME_MULT", 1.5, 0.0, 20.0),
-        "volume_lookback": _cfg_int(config, "MOMENTUM_VOLUME_LOOKBACK", 20, 3, 120),
+        "ema_fast": _cfg_int(config, "EMA_FAST_PERIOD", 20, 2, 500),
+        "ema_slow": _cfg_int(config, "EMA_SLOW_PERIOD", 50, 3, 1000),
+        "sl_atr_buffer_mult": _cfg_float(config, "ENTRY_SL_ATR_BUFFER_MULT", 0.1, 0.0, 10.0),
     }
+
+
+def momentum_params(config: dict) -> dict:
+    return signal_params(config)
 
 
 def volume_rise_params(config: dict) -> dict:
@@ -131,118 +110,87 @@ def volume_rise_params(config: dict) -> dict:
     }
 
 
+def momentum_interval(config: dict) -> str:
+    return str((config or {}).get("CONFIRM_INTERVAL", "1h") or "1h").strip().lower()
+
+
 def _interval_minutes(interval: str) -> int:
     from strategy.indicators import INTERVAL_MINUTES
-
-    menit = INTERVAL_MINUTES.get(str(interval).strip().lower())
-    if menit is None:
-        raise ValueError(
-            f"Interval '{interval}' tidak dikenal; pilihan: "
-            + ", ".join(sorted(INTERVAL_MINUTES, key=INTERVAL_MINUTES.get))
-        )
-    return int(menit)
+    value = INTERVAL_MINUTES.get(str(interval).strip().lower())
+    if value is None:
+        raise ValueError(f"Interval '{interval}' tidak dikenal; pilihan: " + ", ".join(sorted(INTERVAL_MINUTES, key=INTERVAL_MINUTES.get)))
+    return int(value)
 
 
 def bars_per_day(config: dict) -> int:
-    menit = _interval_minutes(momentum_interval(config))
-    per_hari = 1440 // menit
-    return max(1, int(per_hari))
+    return max(1, 1440 // _interval_minutes(momentum_interval(config)))
 
 
 def volume_rise_bars(config: dict) -> int:
-    params = volume_rise_params(config)
-    return bars_per_day(config) * (params["days"] + 1)
+    return bars_per_day(config) * (volume_rise_params(config)["days"] + 1)
 
 
 def _turnover(chunk: Sequence) -> Optional[float]:
     total = 0.0
     for bar in chunk:
         try:
-            nilai = float(getattr(bar, "quote_volume", 0.0) or 0.0)
-            if nilai <= 0.0:
-                nilai = float(bar.close) * float(bar.volume)
+            value = float(getattr(bar, "quote_volume", 0.0) or 0.0)
+            if value <= 0.0:
+                value = float(bar.close) * float(bar.volume)
         except (AttributeError, TypeError, ValueError):
             return None
-        if not math.isfinite(nilai) or nilai < 0.0:
+        if not math.isfinite(value) or value < 0.0:
             return None
-        total += nilai
+        total += value
     return total
 
 
 def turnover_windows_available(bars: int, per_day: int) -> int:
-    if per_day <= 0:
-        return 0
-    return max(0, int(bars) // int(per_day) - 1)
+    return 0 if per_day <= 0 else max(0, int(bars) // int(per_day) - 1)
 
 
 def turnover_rise_ratio(bars: Sequence, per_day: int, days: int) -> Optional[float]:
-    if per_day <= 0 or days <= 0:
+    available = turnover_windows_available(len(bars), per_day)
+    if per_day <= 0 or days <= 0 or available < 1:
         return None
-    tersedia = turnover_windows_available(len(bars), per_day)
-    if tersedia < 1:
+    count = min(int(days), available)
+    tail = list(bars[-per_day * (count + 1):])
+    current = _turnover(tail[-per_day:])
+    past = [_turnover(tail[i * per_day:(i + 1) * per_day]) for i in range(count)]
+    if current is None or any(value is None for value in past):
         return None
-    hari = min(int(days), tersedia)
-    butuh = per_day * (hari + 1)
-    ekor = list(bars[-butuh:])
-    sekarang = _turnover(ekor[-per_day:])
-    if sekarang is None:
-        return None
-    lampau = [_turnover(ekor[i * per_day : (i + 1) * per_day]) for i in range(hari)]
-    if any(nilai is None for nilai in lampau):
-        return None
-    rata = sum(lampau) / float(hari)
-    if rata <= 0.0:
-        return None
-    return sekarang / rata
+    average = sum(past) / count
+    return None if average <= 0.0 else current / average
 
 
 def volume_rise_check(klines: Sequence, config: dict) -> dict:
     params = volume_rise_params(config)
-    hasil = {
-        "ok": True,
-        "skipped": False,
-        "ratio": None,
-        "stage": STAGE_VOLUME_24H,
-        "reason": "",
-    }
+    result = {"ok": True, "skipped": False, "ratio": None, "stage": STAGE_VOLUME_24H, "reason": ""}
     if not params["enabled"] or params["mult"] <= 0.0:
-        hasil["reason"] = "syarat kenaikan volume 24 jam nonaktif"
-        return hasil
-    per_hari = bars_per_day(config)
-    hari = min(int(params["days"]), turnover_windows_available(len(klines), per_hari))
-    rasio = turnover_rise_ratio(klines, per_hari, params["days"])
-    if rasio is None:
-        hasil["skipped"] = True
-        hasil["reason"] = (
-            f"turnover 24 jam tidak bisa dinilai, candle "
-            f"{momentum_interval(config)} kurang dari {2 * per_hari} bar"
-        )
-        return hasil
-    hasil["ratio"] = rasio
-    hasil["days"] = hari
-    if rasio + 1e-12 < params["mult"]:
-        hasil["ok"] = False
-        hasil["reason"] = (
-            f"turnover 24 jam hanya {rasio:.2f} x rata-rata {hari} hari, "
-            f"di bawah syarat {params['mult']:g} x"
-        )
-        return hasil
-    hasil["reason"] = f"turnover 24 jam {rasio:.2f} x rata-rata {hari} hari"
-    return hasil
-
-
-def momentum_interval(config: dict) -> str:
-    sumber = config if isinstance(config, dict) else {}
-    raw = str(sumber.get("CONFIRM_INTERVAL", "1h") or "1h").strip().lower()
-    return raw or "1h"
+        result["reason"] = "syarat kenaikan volume 24 jam nonaktif"
+        return result
+    per_day = bars_per_day(config)
+    days = min(params["days"], turnover_windows_available(len(klines), per_day))
+    ratio = turnover_rise_ratio(klines, per_day, params["days"])
+    if ratio is None:
+        result["skipped"] = True
+        result["reason"] = f"turnover 24 jam tidak bisa dinilai, candle {momentum_interval(config)} kurang dari {2 * per_day} bar"
+        return result
+    result.update(ratio=ratio, days=days)
+    if ratio + 1e-12 < params["mult"]:
+        result["ok"] = False
+        result["reason"] = f"turnover 24 jam hanya {ratio:.2f} x rata-rata {days} hari, di bawah syarat {params['mult']:g} x"
+    else:
+        result["reason"] = f"turnover 24 jam {ratio:.2f} x rata-rata {days} hari"
+    return result
 
 
 def min_rr_ratio(config: dict) -> float:
-    return max(0.1, min(20.0, _cfg_float(config, "ENTRY_MIN_RR_RATIO", 2.0, 0.1, 20.0)))
+    return _cfg_float(config, "ENTRY_MIN_RR_RATIO", 3.0, 0.1, 20.0)
 
 
 def max_sl_pct(config: dict) -> float:
-    return max(0.0, min(50.0, _cfg_float(config, "EXIT_ATR_MAX_SL_PCT", 5.0, 0.0, 50.0)))
+    return _cfg_float(config, "EXIT_ATR_MAX_SL_PCT", 5.0, 0.0, 50.0)
 
 
 def atr_period(config: dict) -> int:
@@ -250,450 +198,200 @@ def atr_period(config: dict) -> int:
 
 
 def required_bars(config: dict) -> int:
-    momentum = momentum_params(config)
-    minimal = max(
-        15,
-        atr_period(config) + 2,
-        momentum["volume_lookback"] + 2,
-        momentum["lookback"] + 2,
-    )
-    return int(minimal)
+    params = signal_params(config)
+    return max(3, params["ema_slow"] + 1, atr_period(config) + 1)
 
 
 def atr_window_bars(config: dict) -> int:
-    return max(required_bars(config), _cfg_int(config, "CONFIRM_LOOKBACK_BARS", 60, 15, 1000))
+    return max(required_bars(config), _cfg_int(config, "CONFIRM_LOOKBACK_BARS", 121, 3, 1000))
 
 
 def max_hold_hours(config: Optional[dict] = None) -> float:
-    if config is None:
-        return EXIT_MAX_HOLD_HOURS
-    return _cfg_float(
-        config, "EXIT_MAX_HOLD_HOURS", EXIT_MAX_HOLD_HOURS, 0.0, MAX_HOLD_HOURS_LIMIT
-    )
+    return EXIT_MAX_HOLD_HOURS if config is None else _cfg_float(config, "EXIT_MAX_HOLD_HOURS", EXIT_MAX_HOLD_HOURS, 0.0, MAX_HOLD_HOURS_LIMIT)
+
+
+def exit_fixed_params(config: Optional[dict] = None) -> dict:
+    result = dict(EXIT_FIXED)
+    params = exit_atr.atr_params(config or {})
+    result.update(breakeven_r_multiple=params["breakeven_trigger_r"], trailing_start_r=params["trailing_start_r"], trailing_atr_mult=params["trail_mult"], max_hold_hours=max_hold_hours(config))
+    return result
 
 
 def trailing_stop_price(highest_price: float, atr: float, mult: float) -> float:
     return exit_atr.trailing_stop_price(highest_price, atr, mult)
 
 
-def breakeven_price(
-    entry_price: float,
-    sl_price: float = 0.0,
-    r_multiple: float = 0.0,
-    lock_pct: float = 0.0,
-) -> float:
+def breakeven_price(entry_price: float, sl_price: float = 0.0, r_multiple: float = 0.0, lock_pct: float = 0.0) -> float:
     return exit_atr.breakeven_price(entry_price, lock_pct)
 
 
 def candles_valid(bars: Sequence) -> bool:
-    if not bars:
-        return False
-    for bar in bars:
+    for bar in bars or []:
         try:
-            o = float(bar.open)
-            h = float(bar.high)
-            low = float(bar.low)
-            c = float(bar.close)
+            values = tuple(float(value) for value in (bar.open, bar.high, bar.low, bar.close))
         except (AttributeError, TypeError, ValueError):
             return False
-        if not all(math.isfinite(x) and x > 0.0 for x in (o, h, low, c)):
+        o, h, low, c = values
+        if not all(math.isfinite(value) and value > 0.0 for value in values) or h < max(o, c, low) or low > min(o, c, h):
             return False
-        if h < max(o, c, low) or low > min(o, c, h):
-            return False
-    return True
-
-
-def is_bullish(bar, previous) -> bool:
-    try:
-        open_ = float(bar.open)
-        close = float(bar.close)
-    except (AttributeError, TypeError, ValueError):
-        return False
-    if not (math.isfinite(open_) and math.isfinite(close)):
-        return False
-    if close <= open_:
-        return False
-    if previous is None:
-        return True
-    try:
-        prev_close = float(previous.close)
-    except (AttributeError, TypeError, ValueError):
-        return False
-    if not math.isfinite(prev_close):
-        return False
-    return close > prev_close
-
-
-def count_bull_run(bars: Sequence) -> int:
-    total = 0
-    for index in range(len(bars) - 1, -1, -1):
-        previous = bars[index - 1] if index > 0 else None
-        if not is_bullish(bars[index], previous):
-            break
-        total += 1
-    return total
+    return bool(bars)
 
 
 def atr_value(klines: Sequence, period: int = 14) -> Optional[float]:
-    period = int(period)
     if period <= 0 or len(klines) < period:
         return None
-    trs: list[float] = []
+    values = []
     for index, candle in enumerate(klines):
         try:
-            prev_close_raw = klines[index - 1].close if index else candle.close
-            prev_close = float(prev_close_raw)
-            high = float(candle.high)
-            low = float(candle.low)
-            close = float(candle.close)
+            previous = float(klines[index - 1].close if index else candle.close)
+            high, low, close = float(candle.high), float(candle.low), float(candle.close)
         except (AttributeError, TypeError, ValueError):
             return None
-        if not all(math.isfinite(x) and x > 0.0 for x in (high, low, close)):
+        if not all(math.isfinite(value) and value > 0.0 for value in (high, low, close)):
             return None
-        trs.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
-    seed = sum(trs[:period]) / period
-    nilai = seed
-    for tr in trs[period:]:
-        nilai = (nilai * (period - 1) + tr) / period
-    return nilai if math.isfinite(nilai) and nilai > 0.0 else None
+        values.append(max(high - low, abs(high - previous), abs(low - previous)))
+    result = sum(values[:period]) / period
+    for value in values[period:]:
+        result = (result * (period - 1) + value) / period
+    return result if math.isfinite(result) and result > 0.0 else None
 
 
-def candle_body(bar) -> float:
+def ema_values(bars: Sequence, period: int) -> list[Optional[float]]:
+    if period <= 0:
+        return [None] * len(bars)
+    closes = []
+    for bar in bars:
+        value = _finite(getattr(bar, "close", None))
+        if value is None or value <= 0.0:
+            return [None] * len(bars)
+        closes.append(value)
+    output: list[Optional[float]] = [None] * len(closes)
+    if len(closes) < period:
+        return output
+    value = sum(closes[:period]) / period
+    output[period - 1] = value
+    multiplier = 2.0 / (period + 1.0)
+    for index in range(period, len(closes)):
+        value = (closes[index] - value) * multiplier + value
+        output[index] = value
+    return output
+
+
+def ema_value(bars: Sequence, period: int) -> Optional[float]:
+    values = ema_values(bars, period)
+    return values[-1] if values else None
+
+
+def is_bullish_engulfing(previous, current, strict: bool = True) -> bool:
     try:
-        return abs(float(bar.close) - float(bar.open))
+        po, pc = float(previous.open), float(previous.close)
+        co, cc = float(current.open), float(current.close)
     except (AttributeError, TypeError, ValueError):
-        return 0.0
+        return False
+    if not all(math.isfinite(value) for value in (po, pc, co, cc)) or pc >= po or cc <= co:
+        return False
+    covers = co <= pc and cc >= po
+    exceeds = co < pc or cc > po
+    return covers and (exceeds if strict else True)
 
 
-def breakout_level(bars: Sequence, lookback: int) -> Optional[float]:
-    jumlah = int(lookback)
-    if jumlah <= 0 or len(bars) < jumlah + 1:
-        return None
-    sebelumnya = bars[-(jumlah + 1) : -1]
-    tertinggi = 0.0
-    for bar in sebelumnya:
-        try:
-            high = float(bar.high)
-        except (AttributeError, TypeError, ValueError):
-            return None
-        if not math.isfinite(high) or high <= 0.0:
-            return None
-        tertinggi = max(tertinggi, high)
-    return tertinggi if tertinggi > 0.0 else None
-
-
-def volume_ratio(bars: Sequence, lookback: int) -> Optional[float]:
-    jumlah = int(lookback)
-    if jumlah <= 0 or len(bars) < jumlah + 1:
-        return None
-    sebelumnya = bars[-(jumlah + 1) : -1]
-    volume: list[float] = []
-    for bar in sebelumnya:
-        try:
-            nilai = float(bar.volume)
-        except (AttributeError, TypeError, ValueError):
-            return None
-        if not math.isfinite(nilai) or nilai < 0.0:
-            return None
-        volume.append(nilai)
-    rata = sum(volume) / len(volume)
-    if rata <= 0.0:
-        return None
-    try:
-        terakhir = float(bars[-1].volume)
-    except (AttributeError, TypeError, ValueError):
-        return None
-    if not math.isfinite(terakhir) or terakhir < 0.0:
-        return None
-    return terakhir / rata
-
-
-def exit_levels(
-    entry_price: float,
-    anchor_low: float,
-    config: dict,
-    *,
-    atr: Optional[float] = None,
-    fallback_allowed: bool = False,
-) -> dict:
+def exit_levels(entry_price: float, anchor_low: float, config: dict, *, atr: Optional[float] = None, fallback_allowed: bool = False) -> dict:
     entry = _finite(entry_price) or 0.0
     low = _finite(anchor_low) or 0.0
-    jarak = _finite(atr)
-    dasar = {
-        "ok": False,
-        "stage": STAGE_RISK,
-        "reason": "",
-        "sl_price": None,
-        "tp_price": None,
-        "sl_pct": None,
-        "tp_pct": None,
-        "rr_ratio": None,
-        "min_rr_ratio": min_rr_ratio(config),
-        "max_sl_pct": max_sl_pct(config),
-        "anchor_low": low if low > 0.0 else None,
-        "atr": jarak if jarak and jarak > 0.0 else None,
-    }
-
-    if entry <= 0.0:
-        dasar["reason"] = "harga entry tidak valid untuk menghitung level ATR"
-        return dasar
-
-    if jarak is not None and jarak > 0.0:
-        rencana = exit_atr.plan_levels(entry, jarak, config)
-        dasar.update(
-            {
-                "ok": bool(rencana["ok"]),
-                "reason": str(rencana["reason"]),
-                "sl_price": rencana["sl_price"],
-                "tp_price": rencana["tp_price"],
-                "sl_pct": rencana["sl_pct"],
-                "tp_pct": rencana["tp_pct"],
-                "rr_ratio": rencana["rr_ratio"],
-                "atr": rencana["atr"],
-                "sl_mult": rencana["sl_mult"],
-                "tp_mult": rencana["tp_mult"],
-                "trail_mult": rencana["trail_mult"],
-                "breakeven_mult": rencana["breakeven_mult"],
-            }
-        )
-        if dasar["ok"]:
-            dasar["stage"] = STAGE_OK
-        return dasar
-
-    if not fallback_allowed:
-        dasar["reason"] = (
-            "ATR tidak tersedia sehingga stop ATR tidak bisa dihitung; entry ditolak "
-            "daripada memakai stop tebakan"
-        )
-        return dasar
-
-    sl_pct = EXIT_FALLBACK_SL_PCT
+    distance = _finite(atr)
     rr = min_rr_ratio(config)
-    sl = entry * (1.0 - sl_pct / 100.0)
-    tp = entry + (entry - sl) * rr
-    dasar.update(
-        {
-            "ok": True,
-            "stage": STAGE_OK,
-            "sl_price": sl,
-            "tp_price": tp,
-            "sl_pct": sl_pct,
-            "tp_pct": (tp - entry) / entry * 100.0,
-            "rr_ratio": rr,
-            "reason": (
-                f"ATR tidak tersedia, dipakai stop cadangan {sl_pct:g}% dan TP "
-                f"R:R 1:{rr:.2f} sebagai level sementara"
-            ),
-        }
-    )
-    return dasar
-
-
-def _empty_result(interval: str, bars: int, required: int, bull: int) -> dict:
-    return {
-        "ok": False,
-        "stage": STAGE_HISTORY,
-        "reason": "",
-        "interval": interval,
-        "bars": bars,
-        "required": required,
-        "window": required,
-        "bull_count": 0,
-        "bull_required": bull,
-        "signal_close": None,
-        "signal_close_time": None,
-        "entry_low": None,
-        "atr": None,
-        "sl_price": None,
-        "tp_price": None,
-        "sl_pct": None,
-        "tp_pct": None,
-        "rr_ratio": None,
-        "body_atr": None,
-        "volume_ratio": None,
-        "breakout_level": None,
-        "checks": {
-            "history": False,
-            "candles": False,
-            "bull_sequence": False,
-            "momentum_body": False,
-            "momentum_breakout": False,
-            "momentum_volume": False,
-            "risk": False,
-        },
-        "values": {},
-    }
-
-
-def evaluate_entry_rule(
-    klines: Sequence,
-    config: dict,
-    signal_close_time_ms: Optional[int] = None,
-) -> dict:
-    interval = momentum_interval(config)
-    momentum = momentum_params(config)
-    period = atr_period(config)
-    need = required_bars(config)
-    rows = [
-        k
-        for k in (klines or [])
-        if signal_close_time_ms is None
-        or int(getattr(k, "close_time", 0)) <= int(signal_close_time_ms)
-    ]
-    window = rows[-need:] if need > 0 else list(rows)
-    result = _empty_result(interval, len(window), need, MOMENTUM_CONFIRM_CANDLES)
-
-    if not rule_enabled(config):
-        result["ok"] = True
-        result["stage"] = STAGE_DISABLED
-        result["reason"] = "filter momentum nonaktif di konfigurasi"
-        for kunci in result["checks"]:
-            result["checks"][kunci] = True
-        if window:
-            last = window[-1]
-            entry = float(last.close)
-            jarak = atr_value(rows[-atr_window_bars(config) :], period)
-            info = exit_levels(
-                entry, float(last.low), config, atr=jarak, fallback_allowed=True
-            )
-            result["signal_close"] = entry
-            result["signal_close_time"] = int(last.close_time)
-            result["entry_low"] = float(last.low)
-            result["atr"] = jarak
-            result["sl_price"] = info["sl_price"]
-            result["tp_price"] = info["tp_price"]
-            result["sl_pct"] = info["sl_pct"]
-            result["tp_pct"] = info["tp_pct"]
-            result["rr_ratio"] = info["rr_ratio"]
+    buffer_mult = signal_params(config)["sl_atr_buffer_mult"]
+    result = {"ok": False, "stage": STAGE_RISK, "reason": "", "sl_price": None, "tp_price": None, "sl_pct": None, "tp_pct": None, "rr_ratio": None, "min_rr_ratio": rr, "max_sl_pct": max_sl_pct(config), "anchor_low": low or None, "atr": distance if distance and distance > 0 else None, "sl_atr_buffer_mult": buffer_mult}
+    if entry <= 0.0 or low <= 0.0:
+        result["reason"] = "harga entry atau low pola engulfing tidak valid"
         return result
+    if distance is None or distance <= 0.0:
+        if not fallback_allowed:
+            result["reason"] = "ATR tidak tersedia untuk menghitung buffer stop"
+            return result
+        distance = 0.0
+    sl = low - distance * buffer_mult
+    if sl <= 0.0 or sl >= entry:
+        result["reason"] = f"SL {sl:.6g} dari low pola tidak berada di bawah entry {entry:.6g}"
+        return result
+    sl_pct = (entry - sl) / entry * 100.0
+    limit = max_sl_pct(config)
+    if limit > 0.0 and sl_pct > limit + 1e-9:
+        result.update(sl_price=sl, sl_pct=sl_pct)
+        result["reason"] = f"jarak SL pola {sl_pct:.2f}% melampaui batas {limit:.2f}%"
+        return result
+    tp = entry + (entry - sl) * rr
+    tp_pct = (tp - entry) / entry * 100.0
+    result.update(ok=True, stage=STAGE_OK, sl_price=sl, tp_price=tp, sl_pct=sl_pct, tp_pct=tp_pct, rr_ratio=rr, atr=distance, reason=f"SL {sl:.6g} di bawah low pola {low:.6g} dengan buffer {buffer_mult:g} x ATR, TP {tp:.6g}, R:R 1:{rr:.2f}")
+    return result
 
-    if len(window) < need:
-        result["reason"] = (
-            f"data candle {interval} kurang: {len(window)} dari minimum {need}"
-        )
+
+def _empty_result(interval: str, bars: int, required: int) -> dict:
+    return {"ok": False, "stage": STAGE_HISTORY, "reason": "", "interval": interval, "bars": bars, "required": required, "window": required, "bull_count": 0, "bull_required": 1, "signal_close": None, "signal_close_time": None, "entry_low": None, "atr": None, "sl_price": None, "tp_price": None, "sl_pct": None, "tp_pct": None, "rr_ratio": None, "ema_fast": None, "ema_slow": None, "engulfing_strength": None, "price_ema_atr": None, "ema_trend_atr": None, "checks": {"history": False, "candles": False, "bullish_engulfing": False, "price_above_ema": False, "ema_trend": False, "risk": False}, "values": {}}
+
+
+def evaluate_entry_rule(klines: Sequence, config: dict, signal_close_time_ms: Optional[int] = None) -> dict:
+    interval = momentum_interval(config)
+    params = signal_params(config)
+    need = required_bars(config)
+    rows = [bar for bar in (klines or []) if signal_close_time_ms is None or int(getattr(bar, "close_time", 0)) <= int(signal_close_time_ms)]
+    result = _empty_result(interval, len(rows), need)
+    if len(rows) < need:
+        result["reason"] = f"data candle {interval} kurang: {len(rows)} dari minimum {need}"
         return result
     result["checks"]["history"] = True
-
+    window = rows[-atr_window_bars(config):]
     if not candles_valid(window):
-        result["stage"] = STAGE_CANDLE
-        result["reason"] = f"data OHLC candle {interval} tidak valid"
+        result.update(stage=STAGE_CANDLE, reason=f"data OHLC candle {interval} tidak valid")
         return result
     result["checks"]["candles"] = True
-
-    sinyal = window[-1]
-    sebelumnya = window[-2] if len(window) >= 2 else None
-    entry = float(sinyal.close)
-    jarak = atr_value(rows[-atr_window_bars(config) :], period)
-    result["signal_close"] = entry
-    result["signal_close_time"] = int(sinyal.close_time)
-    result["entry_low"] = float(sinyal.low)
-    result["atr"] = jarak
-    result["bull_count"] = count_bull_run(window)
-
-    if jarak is None or jarak <= 0.0:
-        result["stage"] = STAGE_RISK
-        result["reason"] = (
-            f"ATR periode {period} pada {interval} tidak dapat dihitung dari "
-            f"{len(window)} candle, momentum tidak bisa dinilai"
-        )
+    current, previous = window[-1], window[-2]
+    entry = float(current.close)
+    atr = atr_value(window, atr_period(config))
+    pattern_low = min(float(previous.low), float(current.low))
+    result.update(signal_close=entry, signal_close_time=int(current.close_time), entry_low=pattern_low, atr=atr)
+    if not rule_enabled(config):
+        levels = exit_levels(entry, pattern_low, config, atr=atr, fallback_allowed=True)
+        result.update(ok=True, stage=STAGE_DISABLED, reason="filter bullish engulfing dan EMA nonaktif", sl_price=levels["sl_price"], tp_price=levels["tp_price"], sl_pct=levels["sl_pct"], tp_pct=levels["tp_pct"], rr_ratio=levels["rr_ratio"])
+        for key in result["checks"]:
+            result["checks"][key] = True
         return result
-
-    if not is_bullish(sinyal, sebelumnya):
-        result["stage"] = STAGE_SEQUENCE
-        result["reason"] = (
-            f"candle {interval} terakhir tidak bullish (close {entry:.6g} tidak di atas "
-            f"open {float(sinyal.open):.6g} dan close sebelumnya)"
-        )
+    if not is_bullish_engulfing(previous, current, strict=True):
+        result.update(stage=STAGE_ENGULFING, reason=f"dua candle terakhir {interval} bukan bullish engulfing body ketat")
         return result
-    result["checks"]["bull_sequence"] = True
-
-    body = candle_body(sinyal)
-    rasio_body = body / jarak if jarak > 0.0 else 0.0
-    result["body_atr"] = rasio_body
-    if momentum["body_atr_mult"] > 0.0 and rasio_body + 1e-12 < momentum["body_atr_mult"]:
-        result["stage"] = STAGE_BODY
-        result["reason"] = (
-            f"body candle {interval} hanya {rasio_body:.2f} x ATR, "
-            f"di bawah syarat {momentum['body_atr_mult']:g} x ATR"
-        )
+    previous_body = abs(float(previous.open) - float(previous.close))
+    current_body = abs(float(current.close) - float(current.open))
+    engulfing_strength = current_body / previous_body if previous_body > 0.0 else 0.0
+    result["engulfing_strength"] = engulfing_strength
+    result["bull_count"] = 1
+    result["checks"]["bullish_engulfing"] = True
+    fast = ema_value(window, params["ema_fast"])
+    slow = ema_value(window, params["ema_slow"])
+    price_ema_atr = (entry - slow) / atr if slow is not None and atr and atr > 0.0 else None
+    ema_trend_atr = (fast - slow) / atr if fast is not None and slow is not None and atr and atr > 0.0 else None
+    result.update(ema_fast=fast, ema_slow=slow, price_ema_atr=price_ema_atr, ema_trend_atr=ema_trend_atr)
+    if fast is None or slow is None:
+        result.update(stage=STAGE_HISTORY, reason="EMA belum tersedia dari riwayat candle")
         return result
-    result["checks"]["momentum_body"] = True
-
-    batas = breakout_level(window, momentum["lookback"])
-    result["breakout_level"] = batas
-    if batas is None:
-        result["stage"] = STAGE_BREAKOUT
-        result["reason"] = f"high acuan breakout {interval} tidak tersedia"
+    if entry <= fast or entry <= slow:
+        result.update(stage=STAGE_EMA_PRICE, reason=f"close {entry:.6g} belum di atas EMA {params['ema_fast']} ({fast:.6g}) dan EMA {params['ema_slow']} ({slow:.6g})")
         return result
-    if entry <= batas + 1e-12:
-        result["stage"] = STAGE_BREAKOUT
-        result["reason"] = (
-            f"close {entry:.6g} belum melewati high {momentum['lookback']} candle "
-            f"{interval} sebelumnya di {batas:.6g}"
-        )
+    result["checks"]["price_above_ema"] = True
+    if fast <= slow:
+        result.update(stage=STAGE_EMA_TREND, reason=f"EMA {params['ema_fast']} {fast:.6g} belum di atas EMA {params['ema_slow']} {slow:.6g}")
         return result
-    result["checks"]["momentum_breakout"] = True
-
-    rasio_volume = volume_ratio(window, momentum["volume_lookback"])
-    result["volume_ratio"] = rasio_volume
-    if momentum["volume_mult"] > 0.0:
-        if rasio_volume is None:
-            result["stage"] = STAGE_VOLUME
-            result["reason"] = (
-                f"volume {momentum['volume_lookback']} candle {interval} tidak bisa "
-                "dihitung sehingga lonjakan volume tidak terverifikasi"
-            )
-            return result
-        if rasio_volume + 1e-12 < momentum["volume_mult"]:
-            result["stage"] = STAGE_VOLUME
-            result["reason"] = (
-                f"volume candle {interval} hanya {rasio_volume:.2f} x rata-rata "
-                f"{momentum['volume_lookback']} candle, di bawah syarat "
-                f"{momentum['volume_mult']:g} x"
-            )
-            return result
-    result["checks"]["momentum_volume"] = True
-
-    info = exit_levels(entry, float(sinyal.low), config, atr=jarak)
-    result["sl_price"] = info["sl_price"]
-    result["tp_price"] = info["tp_price"]
-    result["sl_pct"] = info["sl_pct"]
-    result["tp_pct"] = info["tp_pct"]
-    result["rr_ratio"] = info["rr_ratio"]
-    if not info["ok"]:
-        result["stage"] = STAGE_RISK
-        result["reason"] = info["reason"]
+    result["checks"]["ema_trend"] = True
+    levels = exit_levels(entry, pattern_low, config, atr=atr)
+    result.update(sl_price=levels["sl_price"], tp_price=levels["tp_price"], sl_pct=levels["sl_pct"], tp_pct=levels["tp_pct"], rr_ratio=levels["rr_ratio"])
+    if not levels["ok"]:
+        result.update(stage=STAGE_RISK, reason=levels["reason"])
         return result
     result["checks"]["risk"] = True
-    result["ok"] = True
-    result["stage"] = STAGE_OK
-    result["reason"] = (
-        f"momentum {interval} terpenuhi: close {entry:.6g} menembus high "
-        f"{batas:.6g}, body {rasio_body:.2f} x ATR, volume {rasio_volume:.2f} x "
-        f"rata-rata; " + info["reason"]
-    )
-    result["values"] = {
-        "entry_low": float(sinyal.low),
-        "sl_price": info["sl_price"],
-        "tp_price": info["tp_price"],
-        "rr_ratio": info["rr_ratio"],
-        "bull_count": result["bull_count"],
-        "atr": jarak,
-        "body_atr": rasio_body,
-        "volume_ratio": rasio_volume,
-        "breakout_level": batas,
-    }
+    result.update(ok=True, stage=STAGE_OK, reason=f"bullish engulfing {interval} valid, close di atas EMA {params['ema_fast']}/{params['ema_slow']}, EMA cepat di atas EMA lambat; {levels['reason']}")
+    result["values"] = {"entry_low": pattern_low, "sl_price": levels["sl_price"], "tp_price": levels["tp_price"], "rr_ratio": levels["rr_ratio"], "atr": atr, "ema_fast": fast, "ema_slow": slow, "engulfing_strength": engulfing_strength, "price_ema_atr": price_ema_atr, "ema_trend_atr": ema_trend_atr}
     return result
 
 
 def take_profit_due(entry_price, target_price, current_price) -> bool:
-    entry = _finite(entry_price)
-    target = _finite(target_price)
-    current = _finite(current_price)
-    return bool(
-        EXIT_TAKE_PROFIT_ENABLED
-        and entry is not None
-        and target is not None
-        and current is not None
-        and 0.0 < entry < target <= current
-    )
+    entry, target, current = _finite(entry_price), _finite(target_price), _finite(current_price)
+    return bool(EXIT_TAKE_PROFIT_ENABLED and entry is not None and target is not None and current is not None and 0.0 < entry < target <= current)

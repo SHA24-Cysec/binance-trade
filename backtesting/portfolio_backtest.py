@@ -1185,14 +1185,12 @@ def run_portfolio_backtest(
             f"({max_chase_pct:g}%), sama seperti bot live."
         )
     if entry_rule_skips:
-        mom_pb = strategy.entry_momentum_params(config)
-        atr_pb = strategy.exit_atr_params(config)
+        signal_pb = strategy.entry_signal_params(config)
         warnings.append(
             f"{entry_rule_skips} dari {entry_rule_scans} kandidat top gainer dilewati "
-            f"filter momentum ({interval}: close harus menembus high "
-            f"{mom_pb['lookback']} candle, body minimal {mom_pb['body_atr_mult']:g} x ATR, "
-            f"volume minimal {mom_pb['volume_mult']:g} x rata-rata, stop "
-            f"{atr_pb['sl_mult']:g} x ATR dalam batas jarak)."
+            f"filter bullish engulfing + EMA ({interval}: close di atas EMA "
+            f"{signal_pb['ema_fast']}/{signal_pb['ema_slow']}, EMA cepat di atas EMA lambat, "
+            f"SL low pola dengan buffer {signal_pb['sl_atr_buffer_mult']:g} x ATR)."
         )
     risk_summary = controls.summary()
     if risk_summary["kill_switch_triggers"] > 0:

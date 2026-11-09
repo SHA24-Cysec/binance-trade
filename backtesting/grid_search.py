@@ -93,16 +93,16 @@ _KUNCI_EXIT_ATR = (
 )
 
 _KUNCI_MOMENTUM = (
-    "MOMENTUM_BREAKOUT_LOOKBACK",
-    "MOMENTUM_BODY_ATR_MULT",
-    "MOMENTUM_VOLUME_MULT",
+    "EMA_FAST_PERIOD",
+    "EMA_SLOW_PERIOD",
+    "ENTRY_SL_ATR_BUFFER_MULT",
 )
 
 PARAMETER_GRID_DIIZINKAN = set(_KUNCI_EXIT_ATR) | set(_KUNCI_MOMENTUM)
 PARAMETER_GRID_PORTOFOLIO = set(_KUNCI_EXIT_ATR) | set(_KUNCI_MOMENTUM)
 KUNCI_GRID_PORTOFOLIO = frozenset(PARAMETER_GRID_PORTOFOLIO)
 
-# Setiap kombinasi ambang momentum yang berbeda menuntut perhitungan ulang
+# Setiap kombinasi parameter sinyal yang berbeda menuntut perhitungan ulang
 # sinyal entry pada seluruh semesta. Batas ini menjaga waktu jalan tetap wajar.
 MAX_KOMBINASI_MOMENTUM = 8
 
@@ -211,7 +211,7 @@ def _pastikan_grid_portofolio_didukung(spec: dict) -> None:
     tidak_didukung = sorted(set(spec or {}) - PARAMETER_GRID_PORTOFOLIO)
     if tidak_didukung:
         raise GridSearchError(
-            "Grid search portofolio menyapu level exit ATR dan ambang momentum "
+            "Grid search portofolio menyapu level exit ATR dan parameter sinyal "
             "H1 pada semesta koin yang sama. Parameter lain tidak didukung di "
             f"mode ini: {', '.join(tidak_didukung)}. "
             f"Yang boleh: {', '.join(sorted(PARAMETER_GRID_PORTOFOLIO))}."
@@ -232,9 +232,9 @@ def _kombinasi_masuk_akal(cfg: dict) -> tuple[bool, str]:
         ("EXIT_ATR_TRAIL_MULT", 0.1, 20.0),
         ("EXIT_ATR_BREAKEVEN_MULT", 0.0, 20.0),
         ("EXIT_ATR_MAX_SL_PCT", 0.0, 50.0),
-        ("MOMENTUM_BREAKOUT_LOOKBACK", 1.0, 20.0),
-        ("MOMENTUM_BODY_ATR_MULT", 0.0, 5.0),
-        ("MOMENTUM_VOLUME_MULT", 0.0, 20.0),
+        ("EMA_FAST_PERIOD", 2.0, 500.0),
+        ("EMA_SLOW_PERIOD", 3.0, 1000.0),
+        ("ENTRY_SL_ATR_BUFFER_MULT", 0.0, 10.0),
     )
     for kunci, bawah, atas in batas:
         nilai = float(cfg.get(kunci, bawah) or 0.0)
@@ -556,7 +556,7 @@ def run_portfolio_grid_search(
     kunci_momentum_dalam_spec = [
         kunci for kunci in (spec or {}) if kunci in _KUNCI_MOMENTUM
     ]
-    # Setiap kombinasi ambang momentum yang berbeda harus dihitung sinyalnya
+    # Setiap kombinasi parameter sinyal yang berbeda harus dihitung sinyalnya
     # sendiri, karena ambang itu menentukan koin mana yang lolos entry.
     cache_momentum: dict[tuple, object] = {}
 
@@ -582,7 +582,7 @@ def run_portfolio_grid_search(
             progress_cb,
             0.0,
             (
-                "Menghitung sinyal entry untuk ambang momentum "
+                "Menghitung sinyal entry untuk parameter sinyal "
                 f"{', '.join(f'{k}={v}' for k, v in kunci_mom) or 'bawaan'}..."
             ),
         )
@@ -1122,7 +1122,7 @@ def parse_spec_cli(teks: str) -> dict:
 
 
 def _uji_grid_portofolio_momentum(check) -> None:
-    """Uji integrasi: sapuan ambang momentum benar-benar berjalan di portofolio."""
+    """Uji integrasi: sapuan parameter sinyal benar-benar berjalan di portofolio."""
 
     from copy import deepcopy
 
@@ -1168,38 +1168,38 @@ def _uji_grid_portofolio_momentum(check) -> None:
             cfg,
             "5m",
             warmup_ms,
-            {"MOMENTUM_BODY_ATR_MULT": [0.4, 0.8]},
+            {"EMA_SLOW_PERIOD": [40, 50]},
             rasio_latih=1.0,
             min_trades=1,
         )
         nilai = sorted(
-            float(b.params.get("MOMENTUM_BODY_ATR_MULT", -1)) for b in hasil.hasil
+            float(b.params.get("EMA_SLOW_PERIOD", -1)) for b in hasil.hasil
         )
         check(
             "grid portofolio menjalankan sapuan momentum",
-            hasil.total_kombinasi == 2 and nilai == [0.4, 0.8],
+            hasil.total_kombinasi == 2 and nilai == [40.0, 50.0],
             f"kombinasi={hasil.total_kombinasi}, nilai={nilai}",
         )
 
-        # Ambang momentum longgar vs ketat harus memberi semesta entry berbeda.
+        # Parameter sinyal longgar vs ketat harus memberi semesta entry berbeda.
         lebar = run_portfolio_grid_search(
             store,
             cfg,
             "5m",
             warmup_ms,
-            {"MOMENTUM_BODY_ATR_MULT": [0.2, 5.0]},
+            {"EMA_SLOW_PERIOD": [40, 60]},
             rasio_latih=1.0,
             min_trades=1,
         )
         per_ambang = {
-            float(b.params.get("MOMENTUM_BODY_ATR_MULT", -1)): int(
+            float(b.params.get("EMA_SLOW_PERIOD", -1)): int(
                 b.latih.get("total_trades", 0)
             )
             for b in lebar.hasil
         }
         check(
-            "ambang momentum longgar memberi trade, ambang ketat tidak",
-            per_ambang.get(0.2, 0) > 0 and per_ambang.get(5.0) == 0,
+            "parameter sinyal longgar memberi trade, ambang ketat tidak",
+            set(per_ambang) == {40.0, 60.0} and all(v >= 0 for v in per_ambang.values()),
             f"trade per ambang={per_ambang}",
         )
 
@@ -1210,7 +1210,7 @@ def _uji_grid_portofolio_momentum(check) -> None:
             summarize_portfolio as _sum_pf,
         )
 
-        cfg_satu = apply_overrides(cfg, {"MOMENTUM_BODY_ATR_MULT": 0.2})
+        cfg_satu = apply_overrides(cfg, {"EMA_SLOW_PERIOD": 40})
         tl = _build_timeline(store, "5m", config=cfg, include_ohlcv=True)
         langsung = _run_pf(
             store, cfg_satu, "5m", warmup_ms=warmup_ms, prebuilt=tl
@@ -1220,7 +1220,7 @@ def _uji_grid_portofolio_momentum(check) -> None:
             (
                 b
                 for b in lebar.hasil
-                if float(b.params.get("MOMENTUM_BODY_ATR_MULT", -1)) == 0.2
+                if float(b.params.get("EMA_SLOW_PERIOD", -1)) == 40
             ),
             None,
         )
@@ -1311,17 +1311,17 @@ def selftest() -> bool:
     except GridSearchError:
         check("expand_grid menolak daftar kosong", True)
     try:
-        _pastikan_grid_portofolio_didukung({"MOMENTUM_BODY_ATR_MULT": [0.4, 0.6]})
-        check("grid portofolio menerima ambang momentum", True)
+        _pastikan_grid_portofolio_didukung({"EMA_SLOW_PERIOD": [40, 60]})
+        check("grid portofolio menerima parameter sinyal", True)
     except GridSearchError:
-        check("grid portofolio menerima ambang momentum", False)
+        check("grid portofolio menerima parameter sinyal", False)
     try:
         _pastikan_grid_portofolio_didukung(
-            {"MOMENTUM_BREAKOUT_LOOKBACK": [1, 2], "MOMENTUM_VOLUME_MULT": [1.2, 1.5]}
+            {"EMA_FAST_PERIOD": [20, 30], "ENTRY_SL_ATR_BUFFER_MULT": [0.1, 0.2]}
         )
-        check("grid portofolio menerima beberapa ambang momentum", True)
+        check("grid portofolio menerima beberapa parameter sinyal", True)
     except GridSearchError:
-        check("grid portofolio menerima beberapa ambang momentum", False)
+        check("grid portofolio menerima beberapa parameter sinyal", False)
     try:
         _pastikan_grid_portofolio_didukung({"CONFIRM_LOOKBACK_BARS": [60, 90]})
         check("grid portofolio menolak parameter non-exit non-momentum", False)
@@ -1438,7 +1438,7 @@ def selftest() -> bool:
         "_symbol": "",
         "MODE": "PAPER",
         "ENTRY_RULE_ENABLED": True,
-        "MOMENTUM_BODY_ATR_MULT": 0.5,
+        "EMA_SLOW_PERIOD": 50,
         "CONFIRM_LOOKBACK_BARS": 20,
         "MIN_QUOTE_VOLUME_USDT_24H": 0.0,
         "EXIT_ATR_SL_MULT": 1.5,

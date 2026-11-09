@@ -4979,7 +4979,7 @@ def run(
     if have_bars < need_setup:
         logger.warning(
             "CONFIRM_LOOKBACK_BARS=%d lebih kecil dari %d candle yang dibutuhkan "
-            "filter momentum. Bot tetap mengambil %d candle per konfirmasi agar deteksi "
+            "filter bullish engulfing + EMA. Bot tetap mengambil %d candle per konfirmasi agar deteksi "
             "tidak selalu gagal, tetapi perbaiki nilai config ini supaya backtest dan live "
             "benar-benar memakai angka yang sama.",
             have_bars,
@@ -4987,31 +4987,17 @@ def run(
             strategy.confirm_window_bars(config),
         )
     if strategy.entry_rule_enabled(config):
-        mom_bot = strategy.entry_momentum_params(config)
+        signal_bot = strategy.entry_signal_params(config)
         atr_bot = strategy.exit_atr_params(config)
         vol_bot = strategy.volume_rise_params(config)
         logger.info(
-            "Filter momentum AKTIF di timeframe %s: close candle terakhir harus "
-            "menembus high %d candle sebelumnya, body minimal %.2f x ATR, volume "
-            "minimal %.2f x rata-rata %d candle. Stop %.2f x ATR periode %d, target "
-            "%.2f x ATR, trailing %.2f x ATR, batas jarak stop %.2f%%. "
-            "Syarat turnover 24 jam %s.",
+            "Filter bullish engulfing + EMA AKTIF di timeframe %s: body bullish harus menelan body bearish sebelumnya secara ketat, close di atas EMA %d/%d, dan EMA cepat di atas EMA lambat. SL di bawah low pola dengan buffer %.2f x ATR periode %d, target R:R 1:%.2f, trailing %.2f x ATR, batas jarak stop %.2f%%. Syarat turnover 24 jam %s.",
             config.get("CONFIRM_INTERVAL", "1h"),
-            int(mom_bot["lookback"]),
-            float(mom_bot["body_atr_mult"]),
-            float(mom_bot["volume_mult"]),
-            int(mom_bot["volume_lookback"]),
-            float(atr_bot["sl_mult"]),
-            int(atr_bot["period"]),
-            float(atr_bot["tp_mult"]),
-            float(atr_bot["trail_mult"]),
+            int(signal_bot["ema_fast"]), int(signal_bot["ema_slow"]),
+            float(signal_bot["sl_atr_buffer_mult"]), int(atr_bot["period"]),
+            float(config.get("ENTRY_MIN_RR_RATIO", 3.0)), float(atr_bot["trail_mult"]),
             float(atr_bot["max_sl_pct"]),
-            (
-                "AKTIF, turnover 24 jam minimal %.2f x rata-rata %d hari"
-                % (float(vol_bot["mult"]), int(vol_bot["days"]))
-                if vol_bot["enabled"]
-                else "NONAKTIF"
-            ),
+            ("AKTIF, turnover 24 jam minimal %.2f x rata-rata %d hari" % (float(vol_bot["mult"]), int(vol_bot["days"]))) if vol_bot["enabled"] else "NONAKTIF",
         )
     else:
         logger.info(

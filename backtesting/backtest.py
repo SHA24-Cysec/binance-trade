@@ -442,14 +442,11 @@ def run_backtest(
             f"({max_chase_pct:g}%), sama seperti bot live."
         )
     if entry_rule_skips:
-        mom_bt = strategy.entry_momentum_params(config)
-        atr_bt = strategy.exit_atr_params(config)
+        signal_bt = strategy.entry_signal_params(config)
         warnings.append(
-            f"{entry_rule_skips} dari {entry_rule_scans} sinyal dilewati filter momentum "
-            f"({interval}: close harus menembus high {mom_bt['lookback']} candle, body "
-            f"minimal {mom_bt['body_atr_mult']:g} x ATR, volume minimal "
-            f"{mom_bt['volume_mult']:g} x rata-rata, lalu stop "
-            f"{atr_bt['sl_mult']:g} x ATR harus muat dalam batas jarak stop)."
+            f"{entry_rule_skips} dari {entry_rule_scans} sinyal dilewati filter bullish engulfing + EMA "
+            f"({interval}: close di atas EMA {signal_bt['ema_fast']}/{signal_bt['ema_slow']}, "
+            f"EMA cepat di atas EMA lambat, SL low pola dengan buffer {signal_bt['sl_atr_buffer_mult']:g} x ATR)."
         )
     risk_summary = controls.summary()
     if risk_summary["kill_switch_triggers"] > 0:
@@ -654,18 +651,34 @@ OVERRIDE_CASTERS = {
     "GAINER_VOLUME_FILTER_ENABLED": _cast_bool,
     "GAINER_VOLUME_RISE_MULT": float,
     "GAINER_VOLUME_AVG_DAYS": int,
+    "PUMP_DYNAMIC_FILTER_ENABLED": _cast_bool,
+    "PUMP_DYNAMIC_MIN_PERCENTILE": float,
+    "PUMP_DYNAMIC_MIN_FLOOR_PCT": float,
+    "PUMP_DYNAMIC_MIN_CAP_PCT": float,
+    "PUMP_DYNAMIC_MAX_PERCENTILE": float,
+    "PUMP_DYNAMIC_MAX_FLOOR_PCT": float,
+    "PUMP_DYNAMIC_MAX_CAP_PCT": float,
+    "PUMP_DYNAMIC_MIN_SAMPLE": int,
+    "PUMP_FALLBACK_MIN_CHANGE_PCT": float,
+    "PUMP_FALLBACK_MAX_CHANGE_PCT": float,
+    "PUMP_RANK_CHANGE_WEIGHT": float,
+    "PUMP_RANK_TURNOVER_WEIGHT": float,
+    "PUMP_RANK_ENGULFING_WEIGHT": float,
+    "PUMP_RANK_PRICE_EMA_WEIGHT": float,
+    "PUMP_RANK_EMA_TREND_WEIGHT": float,
     "CONFIRM_INTERVAL": str,
     "CONFIRM_LOOKBACK_BARS": int,
     "ENTRY_RULE_ENABLED": _cast_bool,
-    "MOMENTUM_BREAKOUT_LOOKBACK": int,
-    "MOMENTUM_BODY_ATR_MULT": float,
-    "MOMENTUM_VOLUME_MULT": float,
-    "MOMENTUM_VOLUME_LOOKBACK": int,
+    "EMA_FAST_PERIOD": int,
+    "EMA_SLOW_PERIOD": int,
+    "ENTRY_SL_ATR_BUFFER_MULT": float,
     "ENTRY_ATR_PERIOD": int,
     "EXIT_ATR_SL_MULT": float,
     "EXIT_ATR_TP_MULT": float,
     "EXIT_ATR_TRAIL_MULT": float,
     "EXIT_ATR_BREAKEVEN_MULT": float,
+    "EXIT_BREAKEVEN_TRIGGER_R": float,
+    "EXIT_TRAILING_START_R": float,
     "EXIT_ATR_MAX_SL_PCT": float,
     "EXIT_MAX_HOLD_HOURS": float,
     "ENTRY_MIN_RR_RATIO": float,
@@ -749,15 +762,16 @@ def validate_params(config: dict) -> None:
         ("GAINER_MAX_CHANGE_PCT", 0.0, 100000.0),
         ("GAINER_VOLUME_RISE_MULT", 0.0, 20.0),
         ("GAINER_VOLUME_AVG_DAYS", 1, 14),
-        ("MOMENTUM_BREAKOUT_LOOKBACK", 1, 20),
-        ("MOMENTUM_BODY_ATR_MULT", 0.0, 5.0),
-        ("MOMENTUM_VOLUME_MULT", 0.0, 20.0),
-        ("MOMENTUM_VOLUME_LOOKBACK", 3, 120),
+        ("EMA_FAST_PERIOD", 2, 500),
+        ("EMA_SLOW_PERIOD", 3, 1000),
+        ("ENTRY_SL_ATR_BUFFER_MULT", 0.0, 10.0),
         ("ENTRY_ATR_PERIOD", 2, 200),
         ("EXIT_ATR_SL_MULT", 0.1, 20.0),
         ("EXIT_ATR_TP_MULT", 0.1, 50.0),
         ("EXIT_ATR_TRAIL_MULT", 0.1, 20.0),
         ("EXIT_ATR_BREAKEVEN_MULT", 0.0, 20.0),
+        ("EXIT_BREAKEVEN_TRIGGER_R", 0.1, 20.0),
+        ("EXIT_TRAILING_START_R", 0.1, 20.0),
         ("EXIT_ATR_MAX_SL_PCT", 0.0, 50.0),
         ("EXIT_MAX_HOLD_HOURS", 0.0, entry_rule.MAX_HOLD_HOURS_LIMIT),
     ]
@@ -931,7 +945,7 @@ def execute_backtest(
 
     spread_pct, slip_pct, delay_bars = entry_execution_params(config)
     assumptions = [
-        "Simulasi 1 koin mengikuti aturan momentum H1 yang sama dengan bot: penembusan high candle sebelumnya, kekuatan body terhadap ATR, dan lonjakan volume. Logika exit juga memakai modul ATR yang sama.",
+        "Simulasi 1 koin mengikuti aturan bullish engulfing body ketat dan tren EMA yang sama dengan bot. SL memakai low pola dengan buffer ATR, TP memakai R:R, serta breakeven dan trailing memakai mesin exit yang sama.",
         (
             f"Eksekusi entry menunggu {delay_bars} bar setelah sinyal lalu membeli pada harga open + "
             f"setengah spread ({spread_pct / 2:.3f}%) + slippage ({slippage_label(slip_pct)}%). "
@@ -990,19 +1004,17 @@ def print_report(data: dict) -> None:
     )
     print("-" * 72)
     exit_info = (
-        f"SL {p.get('EXIT_ATR_SL_MULT', 1.5)}x ATR, "
-        f"TP {p.get('EXIT_ATR_TP_MULT', 3.0)}x ATR, "
+        f"SL low pola - {p.get('ENTRY_SL_ATR_BUFFER_MULT', 0.1)}x ATR, "
+        f"TP R:R 1:{p.get('ENTRY_MIN_RR_RATIO', 3.0)}, "
         f"trailing {p.get('EXIT_ATR_TRAIL_MULT', 2.0)}x ATR, "
         f"breakeven {p.get('EXIT_ATR_BREAKEVEN_MULT', 1.0)}x ATR, "
         f"batas stop {p.get('EXIT_ATR_MAX_SL_PCT', 5.0)}%, "
-        f"Min R:R=1:{p.get('ENTRY_MIN_RR_RATIO', 2.0)}, "
         f"MaxHold={p.get('EXIT_MAX_HOLD_HOURS', 24.0):g}h"
     )
     entry_info = (
-        f"momentum {p.get('CONFIRM_INTERVAL', '1h')}: tembus high "
-        f"{p.get('MOMENTUM_BREAKOUT_LOOKBACK', 1)} candle, body "
-        f"{p.get('MOMENTUM_BODY_ATR_MULT', 0.5)}x ATR, volume "
-        f"{p.get('MOMENTUM_VOLUME_MULT', 1.5)}x rata-rata"
+        f"bullish engulfing ketat {p.get('CONFIRM_INTERVAL', '1h')}, close di atas EMA "
+        f"{p.get('EMA_FAST_PERIOD', 20)}/{p.get('EMA_SLOW_PERIOD', 50)}, "
+        f"EMA cepat di atas EMA lambat"
         if p.get("ENTRY_RULE_ENABLED", True)
         else "OFF"
     )
@@ -1144,18 +1156,9 @@ def main():
         default=None,
         help="Override ENTRY_ATR_PERIOD.",
     )
-    parser.add_argument(
-        "--momentum-body",
-        type=float,
-        default=None,
-        help="Override MOMENTUM_BODY_ATR_MULT, kekuatan body minimal.",
-    )
-    parser.add_argument(
-        "--momentum-volume",
-        type=float,
-        default=None,
-        help="Override MOMENTUM_VOLUME_MULT, lonjakan volume minimal.",
-    )
+    parser.add_argument("--ema-fast", type=int, default=None, help="Override EMA_FAST_PERIOD.")
+    parser.add_argument("--ema-slow", type=int, default=None, help="Override EMA_SLOW_PERIOD.")
+    parser.add_argument("--sl-buffer-atr", type=float, default=None, help="Override ENTRY_SL_ATR_BUFFER_MULT.")
     parser.add_argument(
         "--gainer-min",
         type=float,
@@ -1244,10 +1247,12 @@ def main():
         overrides["EXIT_ATR_TRAIL_MULT"] = args.atr_trail
     if args.atr_period is not None:
         overrides["ENTRY_ATR_PERIOD"] = args.atr_period
-    if args.momentum_body is not None:
-        overrides["MOMENTUM_BODY_ATR_MULT"] = args.momentum_body
-    if args.momentum_volume is not None:
-        overrides["MOMENTUM_VOLUME_MULT"] = args.momentum_volume
+    if args.ema_fast is not None:
+        overrides["EMA_FAST_PERIOD"] = args.ema_fast
+    if args.ema_slow is not None:
+        overrides["EMA_SLOW_PERIOD"] = args.ema_slow
+    if args.sl_buffer_atr is not None:
+        overrides["ENTRY_SL_ATR_BUFFER_MULT"] = args.sl_buffer_atr
     if args.gainer_min is not None:
         overrides["GAINER_MIN_CHANGE_PCT"] = args.gainer_min
     if args.min_rr is not None:

@@ -2406,7 +2406,7 @@
             </div>
             <div
               class="bt-field"
-              title="Saklar filter momentum. Bila aktif, entry hanya terjadi setelah candle H1 terakhir yang sudah tertutup menembus high candle sebelumnya, dengan body dan volume sesuai syarat di bawah. Bila dimatikan, bot masuk hanya berdasarkan peringkat gainer dan proteksi orderbook."
+              title="Saklar filter bullish engulfing + EMA. Bila aktif, entry hanya terjadi setelah candle H1 terakhir yang sudah tertutup menembus high candle sebelumnya, dengan body dan volume sesuai syarat di bawah. Bila dimatikan, bot masuk hanya berdasarkan peringkat gainer dan proteksi orderbook."
             >
               <label for="btEntryRuleEnabled">Filter Momentum Aktif</label>
               <div style="display:flex;align-items:center;gap:8px;min-height:38px">
@@ -2417,7 +2417,7 @@
                   style="width:16px;height:16px;max-width:16px;padding:0;accent-color:var(--accent)"
                   onchange="btSyncEntryRuleAvailability(); btUpdateEstimate()"
                 />
-                <span class="mut" style="font-size:11.5px">Entry menunggu candle momentum H1 tertutup</span>
+                <span class="mut" style="font-size:11.5px">Entry menunggu bullish engulfing tertutup dan konfirmasi EMA</span>
               </div>
             </div>
             <div class="bt-field" style="grid-column:1/-1">
@@ -2462,10 +2462,10 @@
               <input type="number" id="btGainerVolDays" min="1" max="14" step="1" value="3" oninput="btRenderStrategySummary()" />
             </div>
             <div class="bt-field" style="grid-column:1/-1">
-              <label style="color:var(--accent);font-size:11px;letter-spacing:.6px">MOMENTUM H1</label>
+              <label style="color:var(--accent);font-size:11px;letter-spacing:.6px">BULLISH ENGULFING + EMA</label>
             </div>
-            <div class="bt-field" title="Timeframe candle untuk menilai momentum. Default 1h sesuai strategi momentum H1.">
-              <label>Interval momentum</label>
+            <div class="bt-field" title="Timeframe candle untuk pola bullish engulfing dan EMA.">
+              <label>Interval sinyal</label>
               <select id="btInterval" onchange="btRenderStrategySummary()">
                 <option value="15m">15m</option>
                 <option value="30m">30m</option>
@@ -2474,30 +2474,26 @@
                 <option value="4h">4h</option>
               </select>
             </div>
-            <div class="bt-field" title="Berapa candle sebelumnya yang high-nya harus ditembus oleh close candle terakhir. 1 berarti cukup menembus high satu candle sebelumnya.">
-              <label>Tembus high (candle)</label>
-              <input type="number" id="btMomBreakout" min="1" max="20" step="1" value="1" oninput="btRenderStrategySummary()" />
+            <div class="bt-field" title="Periode EMA cepat. Close harus di atas EMA ini.">
+              <label>EMA cepat</label>
+              <input type="number" id="btEmaFast" min="2" max="500" step="1" value="20" oninput="btRenderStrategySummary()" />
             </div>
-            <div class="bt-field" title="Body candle momentum minimal dalam kelipatan ATR. Menyaring candle yang naik tipis. 0 berarti tanpa syarat body.">
-              <label>Body minimum (x ATR)</label>
-              <input type="number" id="btMomBody" min="0" max="5" step="0.1" value="0.5" oninput="btRenderStrategySummary()" />
+            <div class="bt-field" title="Periode EMA lambat. Close harus di atas EMA ini dan EMA cepat harus lebih tinggi.">
+              <label>EMA lambat</label>
+              <input type="number" id="btEmaSlow" min="3" max="1000" step="1" value="50" oninput="btRenderStrategySummary()" />
             </div>
-            <div class="bt-field" title="Volume candle momentum minimal dibanding rata-rata volume sejumlah candle sebelumnya. 0 berarti tanpa syarat volume.">
-              <label>Volume minimum (x rata-rata)</label>
-              <input type="number" id="btMomVolume" min="0" max="20" step="0.1" value="1.5" oninput="btRenderStrategySummary()" />
+            <div class="bt-field" title="Ruang tambahan Stop Loss di bawah low terendah pola dalam kelipatan ATR.">
+              <label>Buffer SL (x ATR)</label>
+              <input type="number" id="btSlBufferAtr" min="0" max="10" step="0.05" value="0.1" oninput="btRenderStrategySummary()" />
             </div>
-            <div class="bt-field" title="Berapa candle sebelumnya dipakai sebagai pembanding volume normal.">
-              <label>Rata-rata volume (candle)</label>
-              <input type="number" id="btMomVolLookback" min="3" max="120" step="1" value="20" oninput="btRenderStrategySummary()" />
-            </div>
-            <div class="bt-field" title="Jumlah candle terakhir yang diunduh untuk menilai momentum dan ATR. Minimal harus lebih besar dari periode ATR.">
+            <div class="bt-field" title="Jumlah candle terakhir yang diunduh untuk menghitung pola, EMA, dan ATR.">
               <label>Riwayat candle</label>
               <input type="number" id="btLookback" min="15" max="1000" step="1" value="121" oninput="btRenderStrategySummary()" />
             </div>
             <div class="bt-field" style="grid-column:1/-1">
               <label style="color:var(--accent);font-size:11px;letter-spacing:.6px">EXIT ATR</label>
             </div>
-            <div class="bt-field" title="Jumlah candle untuk menghitung Average True Range pada interval momentum. ATR menjadi satuan semua level exit.">
+            <div class="bt-field" title="Jumlah candle untuk menghitung Average True Range pada interval sinyal.">
               <label>Periode ATR (candle)</label>
               <input type="number" id="btAtrPeriod" min="2" max="200" step="1" value="14" oninput="btRenderStrategySummary()" />
             </div>
@@ -2514,7 +2510,7 @@
               <input type="number" id="btAtrTrail" min="0.1" max="20" step="0.1" value="2.0" oninput="btRenderStrategySummary()" />
             </div>
             <div class="bt-field" title="Profit minimal dalam kelipatan ATR sebelum stop dipindah ke harga entry. 0 berarti breakeven dimatikan.">
-              <label>Breakeven (x ATR)</label>
+              <label>Breakeven (R)</label>
               <input type="number" id="btAtrBe" min="0" max="20" step="0.1" value="1.0" oninput="btRenderStrategySummary()" />
             </div>
             <div class="bt-field" title="Setup ditolak bila jarak stop hasil ATR lebih lebar dari persen ini terhadap harga entry. 0 berarti tanpa batas.">
@@ -2657,8 +2653,8 @@
                 6 menghasilkan 2, 4, 6. Semua kombinasi dijalankan pada data
                 yang sama, lalu diuji ulang pada periode uji. Grid berjalan di
                 atas simulasi portofolio, sama seperti mode Simulasi Portofolio.
-                Parameter exit ATR dan ambang momentum H1 boleh disapu; setiap
-                kombinasi ambang momentum menghitung ulang sinyal entry seluruh
+                Parameter exit, EMA, dan buffer SL boleh disapu; setiap
+                kombinasi parameter menghitung ulang sinyal entry seluruh
                 semesta, jadi jumlahnya dibatasi supaya waktu jalan tetap wajar.
                 Kombinasi yang melanggar batas R:R atau aturan relasi parameter
                 otomatis dilewati.
@@ -3475,7 +3471,7 @@
         const modeTxt='ATURAN ENTRY';
         const noteTxt=p.has_position
           ? ('SL terkunci di '+fmtP(c.sl_price)+' · TP terkunci di '+fmtP(c.tp_price)+'.')
-          : ('Entry bila candle '+(c.confirm_interval||'1h')+' menembus high '+fmt(c.breakout_lookback, 0)+' candle sebelumnya · body '+fmt((c.momentum||{}).body_atr_mult, 2)+'x ATR · volume '+fmt((c.momentum||{}).volume_mult, 2)+'x rata-rata · SL '+fmt((c.exit_atr||{}).sl_mult, 1)+'x ATR · TP '+fmt((c.exit_atr||{}).tp_mult, 1)+'x ATR.');
+          : ('Entry pada bullish engulfing body ketat '+(c.confirm_interval||'1h')+' · close di atas EMA '+fmt((c.entry_signal||{}).ema_fast||20,0)+'/'+fmt((c.entry_signal||{}).ema_slow||50,0)+' · SL low pola - '+fmt((c.entry_signal||{}).sl_atr_buffer_mult||0.1,2)+'x ATR · TP 1:'+fmt(c.entry_min_rr_ratio||3,1)+'R.');
 
         renderConfigPanel(s, false, '', modeTxt, noteTxt);
       }
@@ -3555,20 +3551,13 @@
           }
         }
         if(!keys.length){
-          const mom = (c && c.momentum) || {};
+          const signal = (c && c.entry_signal) || {};
           const atrCfg = (c && c.exit_atr) || {};
           const tfTxt = ((c && c.confirm_interval) || '1h');
-          const bullTxt = c && c.breakout_lookback !== undefined ? fmt(c.breakout_lookback, 0) + ' candle' : '1 candle';
-          const bodyTxt = fmt(mom.body_atr_mult, 2) + 'x ATR';
-          const volTxt = fmt(mom.volume_mult, 2) + 'x rata-rata ' + fmt(mom.volume_lookback, 0) + ' candle';
-          const slTxt = fmt(atrCfg.sl_mult, 1) + 'x ATR';
-          const tpTxt = fmt(atrCfg.tp_mult, 1) + 'x ATR';
-          const trailTxt = fmt(atrCfg.trail_mult, 1) + 'x ATR';
           const holdTxt = c && Number(c.max_hold_hours) > 0 ? fmt(c.max_hold_hours, 1) + ' jam' : 'nonaktif';
-          html += '<div class="posrow"><span class="k">Momentum ' + tfTxt + '</span><span class="v mono">close tembus high ' + bullTxt + ' sebelumnya</span></div>'
-            + '<div class="posrow"><span class="k">Body dan Volume</span><span class="v mono">' + bodyTxt + ' / ' + volTxt + '</span></div>'
-            + '<div class="posrow"><span class="k">Stop dan Target</span><span class="v mono">SL ' + slTxt + ' / TP ' + tpTxt + '</span></div>'
-            + '<div class="posrow"><span class="k">Trailing</span><span class="v mono">' + trailTxt + ' setelah profit ' + slTxt + '</span></div>'
+          html += '<div class="posrow"><span class="k">Engulfing + EMA ' + tfTxt + '</span><span class="v mono">body ketat, close di atas EMA ' + fmt(signal.ema_fast || 20, 0) + '/' + fmt(signal.ema_slow || 50, 0) + '</span></div>'
+            + '<div class="posrow"><span class="k">Stop dan Target</span><span class="v mono">low pola - ' + fmt(signal.sl_atr_buffer_mult || 0.1, 2) + 'x ATR / TP 1:3R</span></div>'
+            + '<div class="posrow"><span class="k">BE dan Trailing</span><span class="v mono">BE 1R + biaya / mulai 1,5R / jarak ' + fmt(atrCfg.trail_mult || 2, 1) + 'x ATR</span></div>'
             + '<div class="posrow"><span class="k">Batas Waktu Tahan</span><span class="v mono">' + holdTxt + '</span></div>';
         }
         if(noteHtml){
@@ -3804,7 +3793,7 @@
 
         const meter = !!p.has_position && entryPx > 0;
         const keys = ['sl', 'tp'].filter(k => lv.on[k]);
-        const sig = [meter ? 'meter' : 'plain', keys.join(','), modeTxt, noteHtml || '', fmt(c.breakout_lookback, 0), fmt(c.entry_min_rr_ratio, 2), fmt(c.max_hold_hours, 1), fmt(c.atr_entry, 8), JSON.stringify(c.momentum || {}), JSON.stringify(c.exit_atr || {})].join('|');
+        const sig = [meter ? 'meter' : 'plain', keys.join(','), modeTxt, noteHtml || '', fmt(c.entry_min_rr_ratio, 2), fmt(c.max_hold_hours, 1), fmt(c.atr_entry, 8), JSON.stringify(c.entry_signal || {}), JSON.stringify(c.exit_atr || {})].join('|');
         if(!_cfgUI || _cfgUI.sig !== sig) _cfgUI = buildConfigPanel(box, sig, meter, noteHtml, keys, c, entryPx);
         if(_cfgUI.mode) _cfgUI.mode.textContent = modeTxt;
 
@@ -4492,15 +4481,12 @@
         const itv = val('btInterval', d.CONFIRM_INTERVAL || '1h');
         const gainMin = val('btGainerMin', d.GAINER_MIN_CHANGE_PCT ?? 3.0);
         const gainMax = val('btGainerMax', d.GAINER_MAX_CHANGE_PCT ?? 0);
-        const lookback = val('btMomBreakout', d.MOMENTUM_BREAKOUT_LOOKBACK ?? 1);
-        const bodyMul = val('btMomBody', d.MOMENTUM_BODY_ATR_MULT ?? 0.5);
-        const volMul = val('btMomVolume', d.MOMENTUM_VOLUME_MULT ?? 1.5);
-        const volLook = val('btMomVolLookback', d.MOMENTUM_VOLUME_LOOKBACK ?? 20);
+        const emaFast = val('btEmaFast', d.EMA_FAST_PERIOD ?? 20);
+        const emaSlow = val('btEmaSlow', d.EMA_SLOW_PERIOD ?? 50);
+        const slBuffer = val('btSlBufferAtr', d.ENTRY_SL_ATR_BUFFER_MULT ?? 0.1);
         const atrP = val('btAtrPeriod', d.ENTRY_ATR_PERIOD ?? 14);
-        const atrSl = val('btAtrSl', d.EXIT_ATR_SL_MULT ?? 1.5);
-        const atrTp = val('btAtrTp', d.EXIT_ATR_TP_MULT ?? 3.0);
         const atrTrail = val('btAtrTrail', d.EXIT_ATR_TRAIL_MULT ?? 2.0);
-        const atrBe = val('btAtrBe', d.EXIT_ATR_BREAKEVEN_MULT ?? 1.0);
+        const atrBe = val('btAtrBe', d.EXIT_BREAKEVEN_TRIGGER_R ?? 1.0);
         const atrMaxSl = val('btAtrMaxSl', d.EXIT_ATR_MAX_SL_PCT ?? 5.0);
         const rrMin = val('btEntryMinRr', d.ENTRY_MIN_RR_RATIO ?? 2.0);
         const maxHold = val('btMaxHold', d.EXIT_MAX_HOLD_HOURS ?? 24);
@@ -4508,26 +4494,22 @@
         const volOn = volOnEl ? volOnEl.value === '1' : (d.GAINER_VOLUME_FILTER_ENABLED !== false);
         const volRise = val('btGainerVolMult', d.GAINER_VOLUME_RISE_MULT ?? 1.2);
         const volDays = val('btGainerVolDays', d.GAINER_VOLUME_AVG_DAYS ?? 3);
-        const rrAtr = parseFloat(atrSl) > 0 ? (parseFloat(atrTp) / parseFloat(atrSl)) : 0;
-        const rrNote = rrAtr + 1e-9 < parseFloat(rrMin)
-          ? '<span style="color:var(--red)"> &middot; R:R ' + fmt(rrAtr, 2) + ' di bawah minimum, semua setup akan ditolak</span>'
-          : ' &middot; R:R 1:' + fmt(rrAtr, 2);
         const maxTxt = parseFloat(gainMax) > 0 ? fmt(gainMax, 1) + '%' : 'tanpa batas';
         const flowText = !ruleOn
-          ? 'Filter momentum nonaktif (hanya peringkat gainer dan proteksi orderbook)'
-          : 'close ' + esc(itv) + ' harus menembus high ' + fmt(lookback, 0) + ' candle sebelumnya, body &ge; ' + fmt(bodyMul, 2) + 'x ATR, volume &ge; ' + fmt(volMul, 2) + 'x rata-rata ' + fmt(volLook, 0) + ' candle';
+          ? 'Filter bullish engulfing + EMA nonaktif (hanya peringkat gainer dan proteksi orderbook)'
+          : 'bullish engulfing body ketat pada ' + esc(itv) + ', close di atas EMA ' + fmt(emaFast, 0) + '/' + fmt(emaSlow, 0) + ', dan EMA cepat di atas EMA lambat';
         strategySummary.innerHTML = `
           <div class="posrow"><span class="k">Peringkat koin</span><span class="v mono" style="font-size:11.5px">kenaikan 24 jam terbesar, minimum ${fmt(gainMin, 1)}%, maksimum ${esc(maxTxt)}, ${volOn ? 'turnover harus naik &ge; ' + fmt(volRise, 2) + 'x rata-rata ' + fmt(volDays, 0) + ' hari' : 'syarat kenaikan turnover nonaktif'}</span></div>
           <div class="posrow"><span class="k">Alur entry aktif</span><span class="v mono" style="font-size:11.5px">${flowText}</span></div>
-          <div class="posrow"><span class="k">Stop dan target</span><span class="v mono" style="font-size:11.5px">SL ${fmt(atrSl, 1)}x ATR periode ${fmt(atrP, 0)}, TP ${fmt(atrTp, 1)}x ATR${rrNote}</span></div>
-          <div class="posrow"><span class="k">Pengelolaan posisi</span><span class="v mono" style="font-size:11.5px">breakeven di ${fmt(atrBe, 1)}x ATR, trailing ${fmt(atrTrail, 1)}x ATR dari puncak, ${parseFloat(maxHold) > 0 ? 'batas tahan ' + fmt(maxHold, 1) + ' jam' : 'tanpa batas waktu'}</span></div>
+          <div class="posrow"><span class="k">Stop dan target</span><span class="v mono" style="font-size:11.5px">SL di bawah low pola dengan buffer ${fmt(slBuffer, 2)}x ATR periode ${fmt(atrP, 0)}, TP R:R 1:${fmt(rrMin, 2)}</span></div>
+          <div class="posrow"><span class="k">Pengelolaan posisi</span><span class="v mono" style="font-size:11.5px">breakeven di ${fmt(atrBe, 1)}R + biaya, trailing mulai 1,5R, trailing ${fmt(atrTrail, 1)}x ATR dari puncak, ${parseFloat(maxHold) > 0 ? 'batas tahan ' + fmt(maxHold, 1) + ' jam' : 'tanpa batas waktu'}</span></div>
           <div class="posrow"><span class="k">Batas risiko</span><span class="v mono" style="font-size:11.5px">setup ditolak bila jarak stop di atas ${fmt(atrMaxSl, 1)}%</span></div>
           <div class="posrow"><span class="k">Riwayat minimum</span><span class="v mono" style="font-size:11.5px">${fmt(val('btLookback', d.CONFIRM_LOOKBACK_BARS ?? 121), 0)} candle ${esc(itv)}</span></div>`;
       }
 
       function btSyncEntryRuleAvailability(){
         const aktif = !!document.getElementById('btEntryRuleEnabled')?.checked;
-        for(const id of ['btInterval','btMomBreakout','btMomBody','btMomVolume','btMomVolLookback']){
+        for(const id of ['btInterval','btEmaFast','btEmaSlow','btSlBufferAtr','btAtrPeriod']){
           const el = document.getElementById(id);
           if(el) el.disabled = !aktif;
         }
@@ -4549,12 +4531,12 @@
           document.getElementById('btDays').value = d.default_days;
           document.getElementById('btEntryRuleEnabled').checked = d.ENTRY_RULE_ENABLED !== false;
           const isi = {btInterval: d.CONFIRM_INTERVAL, btGainerMin: d.GAINER_MIN_CHANGE_PCT,
-            btGainerMax: d.GAINER_MAX_CHANGE_PCT, btMomBreakout: d.MOMENTUM_BREAKOUT_LOOKBACK,
-            btMomBody: d.MOMENTUM_BODY_ATR_MULT, btMomVolume: d.MOMENTUM_VOLUME_MULT,
-            btMomVolLookback: d.MOMENTUM_VOLUME_LOOKBACK, btLookback: d.CONFIRM_LOOKBACK_BARS,
+            btGainerMax: d.GAINER_MAX_CHANGE_PCT, btEmaFast: d.EMA_FAST_PERIOD,
+            btEmaSlow: d.EMA_SLOW_PERIOD, btSlBufferAtr: d.ENTRY_SL_ATR_BUFFER_MULT,
+            btAtrPeriod: d.ENTRY_ATR_PERIOD, btLookback: d.CONFIRM_LOOKBACK_BARS,
             btAtrPeriod: d.ENTRY_ATR_PERIOD, btAtrSl: d.EXIT_ATR_SL_MULT,
             btAtrTp: d.EXIT_ATR_TP_MULT, btAtrTrail: d.EXIT_ATR_TRAIL_MULT,
-            btAtrBe: d.EXIT_ATR_BREAKEVEN_MULT, btAtrMaxSl: d.EXIT_ATR_MAX_SL_PCT,
+            btAtrBe: d.EXIT_BREAKEVEN_TRIGGER_R, btAtrMaxSl: d.EXIT_ATR_MAX_SL_PCT,
             btMaxHold: d.EXIT_MAX_HOLD_HOURS,
             btGainerVolOn: d.GAINER_VOLUME_FILTER_ENABLED === false ? '0' : '1',
             btGainerVolMult: d.GAINER_VOLUME_RISE_MULT,
@@ -4663,15 +4645,15 @@
           CONFIRM_LOOKBACK_BARS: 'btLookback',
           GAINER_MIN_CHANGE_PCT: 'btGainerMin',
           GAINER_MAX_CHANGE_PCT: 'btGainerMax',
-          MOMENTUM_BREAKOUT_LOOKBACK: 'btMomBreakout',
-          MOMENTUM_BODY_ATR_MULT: 'btMomBody',
-          MOMENTUM_VOLUME_MULT: 'btMomVolume',
-          MOMENTUM_VOLUME_LOOKBACK: 'btMomVolLookback',
+          EMA_FAST_PERIOD: 'btEmaFast',
+          EMA_SLOW_PERIOD: 'btEmaSlow',
+          ENTRY_SL_ATR_BUFFER_MULT: 'btSlBufferAtr',
+          ENTRY_ATR_PERIOD: 'btAtrPeriod',
           ENTRY_ATR_PERIOD: 'btAtrPeriod',
           EXIT_ATR_SL_MULT: 'btAtrSl',
           EXIT_ATR_TP_MULT: 'btAtrTp',
           EXIT_ATR_TRAIL_MULT: 'btAtrTrail',
-          EXIT_ATR_BREAKEVEN_MULT: 'btAtrBe',
+          EXIT_BREAKEVEN_TRIGGER_R: 'btAtrBe',
           EXIT_ATR_MAX_SL_PCT: 'btAtrMaxSl',
           EXIT_MAX_HOLD_HOURS: 'btMaxHold',
           GAINER_VOLUME_RISE_MULT: 'btGainerVolMult',
@@ -4754,12 +4736,12 @@
         ['EXIT_ATR_SL_MULT', 'Stop Loss (x ATR)'],
         ['EXIT_ATR_TP_MULT', 'Take Profit (x ATR)'],
         ['EXIT_ATR_TRAIL_MULT', 'Trailing (x ATR)'],
-        ['EXIT_ATR_BREAKEVEN_MULT', 'Breakeven (x ATR)'],
+        ['EXIT_BREAKEVEN_TRIGGER_R', 'Breakeven (R)'],
         ['EXIT_ATR_MAX_SL_PCT', 'Batas jarak stop (%)'],
         ['ENTRY_MIN_RR_RATIO', 'Min Risk:Reward'],
-        ['MOMENTUM_BREAKOUT_LOOKBACK', 'Breakout (jumlah candle)'],
-        ['MOMENTUM_BODY_ATR_MULT', 'Kekuatan body (x ATR)'],
-        ['MOMENTUM_VOLUME_MULT', 'Lonjakan volume (x rata-rata)'],
+        ['EMA_FAST_PERIOD', 'Breakout (jumlah candle)'],
+        ['EMA_SLOW_PERIOD', 'Kekuatan body (x ATR)'],
+        ['ENTRY_SL_ATR_BUFFER_MULT', 'Lonjakan volume (x rata-rata)'],
       ];
       let _btGridDefaults = null;
       const btGridMaxKombinasi = () =>
@@ -4975,7 +4957,7 @@
         EXIT_ATR_SL_MULT: 'btAtrSl',
         EXIT_ATR_TP_MULT: 'btAtrTp',
         EXIT_ATR_TRAIL_MULT: 'btAtrTrail',
-        EXIT_ATR_BREAKEVEN_MULT: 'btAtrBe',
+        EXIT_BREAKEVEN_TRIGGER_R: 'btAtrBe',
         EXIT_ATR_MAX_SL_PCT: 'btAtrMaxSl',
         ENTRY_MIN_RR_RATIO: 'btEntryMinRr',
       };
@@ -5245,11 +5227,11 @@
         const p = res.params_used;
         let reasonRows = Object.entries(s.reason_counts||{}).map(([k,v])=>
           `<div class="posrow"><span class="k">${btReasonLabel(k)}</span><span class="v mono">${fmt(v,0)}x</span></div>`).join('');
-        const momP = {body_atr_mult: p.MOMENTUM_BODY_ATR_MULT, volume_mult: p.MOMENTUM_VOLUME_MULT};
+        const momP = {ema_slow: p.EMA_SLOW_PERIOD, sl_atr_buffer_mult: p.ENTRY_SL_ATR_BUFFER_MULT};
         const exitRows = `<div class="posrow"><span class="k">Mode exit</span><span class="v mono">ATR (SL, TP, breakeven, dan trailing dari Average True Range)</span></div>
              <div class="posrow"><span class="k">Stop / Target / Trailing</span><span class="v mono" style="font-size:11.5px">${esc(p.EXIT_ATR_SL_MULT)}x ATR / ${esc(p.EXIT_ATR_TP_MULT)}x ATR / ${esc(p.EXIT_ATR_TRAIL_MULT)}x ATR</span></div>
-             <div class="posrow"><span class="k">Breakeven / Batas Stop</span><span class="v mono" style="font-size:11.5px">${esc(p.EXIT_ATR_BREAKEVEN_MULT)}x ATR / ${esc(p.EXIT_ATR_MAX_SL_PCT)}% maksimum, batas tahan ${Number(p.EXIT_MAX_HOLD_HOURS) > 0 ? fmt(p.EXIT_MAX_HOLD_HOURS,0)+' jam' : 'tanpa batas waktu'}</span></div>
-             <div class="posrow"><span class="k">Momentum entry</span><span class="v mono" style="font-size:11.5px">breakout ${esc(p.MOMENTUM_BREAKOUT_LOOKBACK)} candle / body ${esc(momP.body_atr_mult)}x ATR / volume ${esc(momP.volume_mult)}x rata-rata</span></div>
+             <div class="posrow"><span class="k">Breakeven / Batas Stop</span><span class="v mono" style="font-size:11.5px">${esc(p.EXIT_BREAKEVEN_TRIGGER_R)}R, trailing mulai ${esc(p.EXIT_TRAILING_START_R || 1.5)}R / ${esc(p.EXIT_ATR_MAX_SL_PCT)}% maksimum, batas tahan ${Number(p.EXIT_MAX_HOLD_HOURS) > 0 ? fmt(p.EXIT_MAX_HOLD_HOURS,0)+' jam' : 'tanpa batas waktu'}</span></div>
+             <div class="posrow"><span class="k">Sinyal entry</span><span class="v mono" style="font-size:11.5px">breakout ${esc(p.EMA_FAST_PERIOD)} candle / body ${esc(momP.ema_slow)}x ATR / volume ${esc(momP.sl_atr_buffer_mult)}x rata-rata</span></div>
              <div class="posrow"><span class="k">Syarat turnover 24 jam</span><span class="v mono" style="font-size:11.5px">${p.GAINER_VOLUME_FILTER_ENABLED ? 'turnover naik minimal '+fmt(p.GAINER_VOLUME_RISE_MULT,2)+'x rata-rata '+fmt(p.GAINER_VOLUME_AVG_DAYS,0)+' hari' : 'nonaktif'}</span></div>
              <div class="posrow"><span class="k">Saringan koin</span><span class="v mono" style="font-size:11.5px">kenaikan 24 jam ${fmt(p.GAINER_MIN_CHANGE_PCT,1)}% sampai ${Number(p.GAINER_MAX_CHANGE_PCT) > 0 ? fmt(p.GAINER_MAX_CHANGE_PCT,1)+'%' : 'tanpa batas atas'}</span></div>`;
         const sd = res.summary ? res.summary.stop_distance_pct : null;
@@ -5266,7 +5248,7 @@
             `<div class="posrow"><span class="k mut" style="font-size:11px">Jarak stop diukur dari harga entry ke SL saat posisi dibuka${sd.max_sl_pct ? `, batas ${fmt(sd.max_sl_pct,2)}%` : ''}${sd.at_limit_count ? `, ${fmt(sd.at_limit_count,0)} trade menyentuh batas itu` : ''}.</span></div>`;
         })() : '';
         const entryRow = res.entry_rule ? `
-          <div class="posrow"><span class="k">Aturan Entry (${esc(entryObj.interval || '1h')})</span><span class="v mono" style="font-size:11.5px">${entryObj.enabled ? 'aktif, close menembus high '+fmt((entryObj.momentum||{}).lookback,0)+' candle, body '+fmt((entryObj.momentum||{}).body_atr_mult,2)+'x ATR, volume '+fmt((entryObj.momentum||{}).volume_mult,2)+'x, SL '+fmt((entryObj.exit_atr||{}).sl_mult,1)+'x ATR, TP '+fmt((entryObj.exit_atr||{}).tp_mult,1)+'x ATR, batas SL '+fmt(entryObj.max_sl_pct,2)+'%, disaring '+fmt(entryObj.skips,0)+' dari '+fmt(entryObj.scans,0)+' sinyal' : 'nonaktif'}</span></div>` : '';
+          <div class="posrow"><span class="k">Aturan Entry (${esc(entryObj.interval || '1h')})</span><span class="v mono" style="font-size:11.5px">${entryObj.enabled ? 'aktif, close menembus high '+fmt((entryObj.entry_signal||{}).ema_fast,0)+' candle, body '+fmt((entryObj.entry_signal||{}).ema_slow,2)+'x ATR, volume '+fmt((entryObj.entry_signal||{}).sl_atr_buffer_mult,2)+'x, SL '+fmt((entryObj.exit_atr||{}).sl_mult,1)+'x ATR, TP '+fmt((entryObj.exit_atr||{}).tp_mult,1)+'x ATR, batas SL '+fmt(entryObj.max_sl_pct,2)+'%, disaring '+fmt(entryObj.skips,0)+' dari '+fmt(entryObj.scans,0)+' sinyal' : 'nonaktif'}</span></div>` : '';
         document.getElementById('btInfoBox').innerHTML = `
           <div class="posrow"><span class="k">Semesta simbol</span><span class="v mono">${fmt(res.universe_with_data,0)} berhasil / ${fmt(res.universe_requested,0)} diminta${res.symbols_failed_count? ' ('+fmt(res.symbols_failed_count,0)+' gagal)':''}</span></div>
           <div class="posrow"><span class="k">Rentang data</span><span class="v mono" style="font-size:11.5px">${esc(res.start_time||'-')} &rarr; ${esc(res.end_time||'-')}</span></div>
@@ -5285,7 +5267,7 @@
         document.getElementById('btTradeCount').textContent = trades.length ? '('+trades.length+' trade)' : '';
         const tb = document.getElementById('btTradeBody');
         if(!trades.length){
-          tb.innerHTML = '<tr><td colspan="10" class="empty">Tidak ada entry yang sah pada rentang ini. Coba turunkan syarat momentum H1 (body atau volume), longgarkan batas kenaikan 24 jam, perbanyak simbol, atau perpanjang rentang hari.</td></tr>';
+          tb.innerHTML = '<tr><td colspan="10" class="empty">Tidak ada entry yang sah pada rentang ini. Coba perpanjang periode, tambah simbol, atau tinjau filter gainer dan turnover tanpa melemahkan validitas pola.</td></tr>';
         } else {
           tb.innerHTML = trades.map(t=>`
             <tr>

@@ -67,9 +67,12 @@ class SetupResult:
     sl_pct: Optional[float] = None
     tp_pct: Optional[float] = None
     rr_ratio: Optional[float] = None
-    body_atr: Optional[float] = None
-    volume_ratio: Optional[float] = None
-    breakout_level: Optional[float] = None
+    turnover_ratio: Optional[float] = None
+    ema_fast: Optional[float] = None
+    ema_slow: Optional[float] = None
+    engulfing_strength: Optional[float] = None
+    price_ema_atr: Optional[float] = None
+    ema_trend_atr: Optional[float] = None
 
 
 @dataclass
@@ -79,6 +82,9 @@ class Candidate:
     quote_volume: float
     last_price: float
     change_pct: float = 0.0
+    market_score: float = 0.0
+    signal_score: float = 0.0
+    hybrid_score: float = 0.0
     confirmed: bool = False
     confirm_reason: str = ""
     setup: Optional[SetupResult] = None
@@ -126,46 +132,29 @@ class ScanDiagnostics:
         if not self.checked_candidates:
             return []
         interval = str(config.get("CONFIRM_INTERVAL", "1h"))
-        momentum = strategy.entry_momentum_params(config)
+        signal = strategy.entry_signal_params(config)
         labels = {
-            "ENTRY_RULE": f"filter momentum {interval}",
+            "ENTRY_RULE": f"filter engulfing + EMA {interval}",
             "CANDLE_CONFIRM": f"candle {interval} gagal diambil",
             "HISTORY_CONFIRM": f"riwayat {interval} kurang",
-            "MOMENTUM_BULL": f"candle {interval} tidak bullish",
-            "MOMENTUM_BODY": (
-                f"body candle {interval} di bawah {momentum['body_atr_mult']:g} x ATR"
-            ),
-            "MOMENTUM_BREAKOUT": f"close belum menembus high {interval} sebelumnya",
-            "MOMENTUM_VOLUME": (
-                f"volume di bawah {momentum['volume_mult']:g} x rata-rata "
-                f"{momentum['volume_lookback']} candle"
-            ),
-            "RISK_SL": "jarak Stop ATR",
+            "BULLISH_ENGULFING": f"pola bullish engulfing {interval} tidak valid",
+            "EMA_PRICE": f"close belum di atas EMA {signal['ema_fast']}/{signal['ema_slow']}",
+            "EMA_TREND": f"EMA {signal['ema_fast']} belum di atas EMA {signal['ema_slow']}",
+            "RISK_SL": "jarak Stop Loss pola",
             "VOLUME_24H": "turnover 24 jam tidak naik dibanding rata-rata",
         }
         candle = "belum tersedia"
         if self.latest_signal_close_ms > 0:
             try:
-                candle = datetime.fromtimestamp(
-                    self.latest_signal_close_ms / 1000, tz=timezone.utc
-                ).strftime("%H:%M:%S UTC")
+                candle = datetime.fromtimestamp(self.latest_signal_close_ms / 1000, tz=timezone.utc).strftime("%H:%M:%S UTC")
             except (OverflowError, OSError, ValueError):
                 candle = "waktu candle tidak valid"
         lines = [
-            f"Diagnostik entry: {self.checked_candidates} dari "
-            f"{self.market_candidates} kandidat pasar diperiksa; "
-            f"candle konfirmasi terbaru tutup {candle}.",
+            f"Diagnostik entry: {self.checked_candidates} dari {self.market_candidates} kandidat pasar diperiksa; candle konfirmasi terbaru tutup {candle}.",
             "Diagnostik: setiap simbol dicatat pada gerbang pertama yang gagal.",
         ]
         if strategy.entry_rule_enabled(config):
-            lines.insert(
-                0,
-                f"Status filter momentum ({interval}): AKTIF, close candle terakhir "
-                f"harus menembus high {momentum['lookback']} candle sebelumnya, "
-                f"body minimal {momentum['body_atr_mult']:g} x ATR, volume minimal "
-                f"{momentum['volume_mult']:g} x rata-rata "
-                f"{momentum['volume_lookback']} candle.",
-            )
+            lines.insert(0, f"Filter bullish engulfing + EMA AKTIF di {interval}: body candle bullish harus menelan body candle bearish sebelumnya secara ketat, close di atas EMA {signal['ema_fast']} dan EMA {signal['ema_slow']}, serta EMA cepat di atas EMA lambat.")
         for stage in sorted(self.rejection_counts):
             count = self.rejection_counts.get(stage, 0)
             if not count:
@@ -230,6 +219,54 @@ def _angka_perubahan(value) -> Optional[float]:
     return angka
 
 
+
+def _cfg_number(config: dict, key: str, default: float) -> float:
+    try:
+        value = float(config.get(key, default))
+    except (TypeError, ValueError):
+        return default
+    return value if math.isfinite(value) else default
+
+
+def _percentile(values: list[float], percentile: float) -> float:
+    ordered = sorted(float(value) for value in values if math.isfinite(float(value)))
+    if not ordered:
+        return 0.0
+    position = (len(ordered) - 1) * max(0.0, min(100.0, percentile)) / 100.0
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return ordered[lower]
+    fraction = position - lower
+    return ordered[lower] * (1.0 - fraction) + ordered[upper] * fraction
+
+
+def dynamic_market_thresholds(changes: list[float], config: dict) -> dict:
+    valid = [float(value) for value in changes if math.isfinite(float(value))]
+    minimum_sample = max(5, int(_cfg_number(config, "PUMP_DYNAMIC_MIN_SAMPLE", 30)))
+    if len(valid) < minimum_sample:
+        return {"minimum": _cfg_number(config, "PUMP_FALLBACK_MIN_CHANGE_PCT", 0.0), "maximum": _cfg_number(config, "PUMP_FALLBACK_MAX_CHANGE_PCT", 20.0), "sample": len(valid), "fallback": True}
+    raw_min = _percentile(valid, _cfg_number(config, "PUMP_DYNAMIC_MIN_PERCENTILE", 55.0))
+    raw_max = _percentile(valid, _cfg_number(config, "PUMP_DYNAMIC_MAX_PERCENTILE", 95.0))
+    min_floor = _cfg_number(config, "PUMP_DYNAMIC_MIN_FLOOR_PCT", -2.0)
+    min_cap = _cfg_number(config, "PUMP_DYNAMIC_MIN_CAP_PCT", 5.0)
+    max_floor = _cfg_number(config, "PUMP_DYNAMIC_MAX_FLOOR_PCT", 10.0)
+    max_cap = _cfg_number(config, "PUMP_DYNAMIC_MAX_CAP_PCT", 35.0)
+    minimum = max(min_floor, min(min_cap, raw_min))
+    maximum = max(max_floor, min(max_cap, raw_max))
+    return {"minimum": minimum, "maximum": max(minimum, maximum), "raw_minimum": raw_min, "raw_maximum": raw_max, "sample": len(valid), "fallback": False}
+
+
+def _percentile_ranks(values: list[float]) -> list[float]:
+    if not values:
+        return []
+    ordered = sorted((value, index) for index, value in enumerate(values))
+    result = [0.0] * len(values)
+    denominator = max(1, len(values) - 1)
+    for rank, (_value, index) in enumerate(ordered):
+        result[index] = rank / denominator * 100.0
+    return result
+
 def min_change_pct(config: dict) -> float:
     try:
         nilai = float(config.get("GAINER_MIN_CHANGE_PCT", 0.0) or 0.0)
@@ -260,14 +297,17 @@ def evaluate_market_gate(
     if perubahan is None:
         return False, f"perubahan harga 24 jam tidak wajar ({change_pct!r})"
 
-    batas_bawah = min_change_pct(config)
+    dynamic = config.get("_dynamic_market_thresholds") if isinstance(config, dict) else None
+    if not isinstance(dynamic, dict) and bool(config.get("PUMP_DYNAMIC_FILTER_ENABLED", True)):
+        dynamic = {"minimum": _cfg_number(config, "PUMP_FALLBACK_MIN_CHANGE_PCT", 0.0), "maximum": _cfg_number(config, "PUMP_FALLBACK_MAX_CHANGE_PCT", 20.0), "fallback": True, "sample": 0}
+    batas_bawah = float(dynamic["minimum"]) if isinstance(dynamic, dict) else min_change_pct(config)
     if perubahan < batas_bawah:
         return False, (
             f"kenaikan 24 jam {perubahan:.2f}% di bawah ambang top gainer "
             f"{batas_bawah:.2f}%"
         )
 
-    batas_atas = max_change_pct(config)
+    batas_atas = float(dynamic["maximum"]) if isinstance(dynamic, dict) else max_change_pct(config)
     if batas_atas > 0.0 and perubahan > batas_atas:
         return False, (
             f"kenaikan 24 jam {perubahan:.2f}% melampaui batas {batas_atas:.2f}%, "
@@ -298,6 +338,20 @@ def filter_and_rank_candidates(
     lolos_likuid = 0
     ditolak_gain = 0
     out: list[Candidate] = []
+    gate_config = config
+    if bool(config.get("PUMP_DYNAMIC_FILTER_ENABLED", True)):
+        liquid_changes = []
+        for ticker in tickers:
+            try:
+                ticker_symbol = str(ticker.get("symbol", ""))
+                ticker_volume = float(ticker.get("quoteVolume", 0.0))
+                ticker_change = float(ticker.get("priceChangePercent"))
+            except (TypeError, ValueError):
+                continue
+            if is_structurally_allowed_symbol(ticker_symbol, config, tradable_symbols) and math.isfinite(ticker_volume) and ticker_volume >= min_vol and math.isfinite(ticker_change):
+                liquid_changes.append(ticker_change)
+        gate_config = dict(config)
+        gate_config["_dynamic_market_thresholds"] = dynamic_market_thresholds(liquid_changes, config)
 
     for t in tickers:
         symbol = t.get("symbol", "")
@@ -326,7 +380,7 @@ def filter_and_rank_candidates(
         lolos_likuid += 1
 
         if apply_market_gate:
-            ok_market, alasan = evaluate_market_gate(perubahan, quote_volume, config)
+            ok_market, alasan = evaluate_market_gate(perubahan, quote_volume, gate_config)
             if not ok_market:
                 ditolak_gain += 1
                 logger.debug("Filter pasar menolak %s: %s", symbol, alasan)
@@ -342,7 +396,16 @@ def filter_and_rank_candidates(
             )
         )
 
-    out.sort(key=lambda c: (-c.change_pct, -c.quote_volume))
+    if out:
+        change_ranks = _percentile_ranks([candidate.change_pct for candidate in out])
+        turnover_ranks = _percentile_ranks([math.log1p(candidate.quote_volume) for candidate in out])
+        change_weight = _cfg_number(config, "PUMP_RANK_CHANGE_WEIGHT", 10.0)
+        turnover_weight = _cfg_number(config, "PUMP_RANK_TURNOVER_WEIGHT", 15.0)
+        total_weight = max(1e-12, change_weight + turnover_weight)
+        for index, candidate in enumerate(out):
+            candidate.market_score = (change_ranks[index] * change_weight + turnover_ranks[index] * turnover_weight) / total_weight
+            candidate.hybrid_score = candidate.market_score
+    out.sort(key=lambda c: (-c.market_score, -c.change_pct, -c.quote_volume))
 
     if apply_market_gate:
         logger.info(
@@ -535,7 +598,7 @@ def detect_entry_setup(
             stage=str(syarat_volume["stage"]),
             reason=str(syarat_volume["reason"]),
             entry_interval=str(strategy.momentum_interval(config)),
-            volume_ratio=syarat_volume["ratio"],
+            turnover_ratio=syarat_volume["ratio"],
         )
     verdict = strategy.evaluate_entry(klines, config, signal_close_time_ms)
     atr_value = verdict.get("atr")
@@ -543,7 +606,7 @@ def detect_entry_setup(
         atr_value = strategy.atr(klines, strategy.atr_period(config))
     return SetupResult(
         ok=bool(verdict.get("ok", False)),
-        stage=str(verdict.get("stage") or "MOMENTUM_BULL"),
+        stage=str(verdict.get("stage") or "BULLISH_ENGULFING"),
         reason=str(verdict.get("reason") or ""),
         signal_close=float(verdict.get("signal_close") or last_bar.close),
         signal_close_time=int(
@@ -559,9 +622,12 @@ def detect_entry_setup(
         sl_pct=verdict.get("sl_pct"),
         tp_pct=verdict.get("tp_pct"),
         rr_ratio=verdict.get("rr_ratio"),
-        body_atr=verdict.get("body_atr"),
-        volume_ratio=verdict.get("volume_ratio"),
-        breakout_level=verdict.get("breakout_level"),
+        turnover_ratio=syarat_volume.get("ratio"),
+        ema_fast=verdict.get("ema_fast"),
+        ema_slow=verdict.get("ema_slow"),
+        engulfing_strength=verdict.get("engulfing_strength"),
+        price_ema_atr=verdict.get("price_ema_atr"),
+        ema_trend_atr=verdict.get("ema_trend_atr"),
     )
 
 
@@ -570,18 +636,15 @@ STAGE_GROUPS = {
     "CANDLE_ENTRY": "CANDLE_ENTRY",
     "HISTORY_CONFIRM": "HISTORY_ENTRY",
     "CANDLE_CONFIRM": "CANDLE_ENTRY",
-    "MOMENTUM_BULL": "MOMENTUM_BULL",
-    "MOMENTUM_BODY": "MOMENTUM_BODY",
-    "MOMENTUM_BREAKOUT": "MOMENTUM_BREAKOUT",
-    "MOMENTUM_VOLUME": "MOMENTUM_VOLUME",
+    "BULLISH_ENGULFING": "BULLISH_ENGULFING",
+    "EMA_PRICE": "EMA_PRICE",
+    "EMA_TREND": "EMA_TREND",
     "VOLUME_24H": "VOLUME_24H",
-    "BULL_SEQUENCE": "MOMENTUM_BULL",
     "RISK_SL": "RISK_SL",
-    "ENTRY_RULE": "MOMENTUM_BULL",
+    "ENTRY_RULE": "ENTRY_RULE",
     "DISABLED": "ENTRY_RULE",
     "OK": "ENTRY_RULE",
 }
-
 
 def diagnostic_stage(stage: str, reason: str) -> str:
     kunci = str(stage or "").strip().upper()
@@ -589,11 +652,33 @@ def diagnostic_stage(stage: str, reason: str) -> str:
         return STAGE_GROUPS[kunci]
     if str(reason or "").startswith("data candle kurang"):
         return "HISTORY_ENTRY"
-    return "MOMENTUM_BULL"
+    return "BULLISH_ENGULFING"
 
 
 def setup_quality_key(setup: Optional[SetupResult], candidate: Candidate) -> tuple:
-    return (-float(candidate.change_pct), -float(candidate.quote_volume))
+    return (-float(candidate.hybrid_score), -float(candidate.market_score), -float(candidate.quote_volume))
+
+
+def apply_hybrid_scores(candidates: list[Candidate], config: dict) -> None:
+    if not candidates:
+        return
+    engulf_values = [min(3.0, max(1.0, float(c.setup.engulfing_strength or 1.0))) for c in candidates]
+    price_values = [min(5.0, max(0.0, float(c.setup.price_ema_atr or 0.0))) for c in candidates]
+    trend_values = [min(3.0, max(0.0, float(c.setup.ema_trend_atr or 0.0))) for c in candidates]
+    engulf_ranks = _percentile_ranks(engulf_values)
+    price_ranks = _percentile_ranks(price_values)
+    trend_ranks = _percentile_ranks(trend_values)
+    weights = {
+        "engulf": _cfg_number(config, "PUMP_RANK_ENGULFING_WEIGHT", 30.0),
+        "price": _cfg_number(config, "PUMP_RANK_PRICE_EMA_WEIGHT", 25.0),
+        "trend": _cfg_number(config, "PUMP_RANK_EMA_TREND_WEIGHT", 20.0),
+        "market": _cfg_number(config, "PUMP_RANK_CHANGE_WEIGHT", 10.0) + _cfg_number(config, "PUMP_RANK_TURNOVER_WEIGHT", 15.0),
+    }
+    total = max(1e-12, sum(weights.values()))
+    for index, candidate in enumerate(candidates):
+        risk_penalty = min(30.0, max(0.0, float(candidate.setup.sl_pct or 0.0)) * 3.0)
+        candidate.signal_score = (engulf_ranks[index] * weights["engulf"] + price_ranks[index] * weights["price"] + trend_ranks[index] * weights["trend"]) / max(1e-12, weights["engulf"] + weights["price"] + weights["trend"])
+        candidate.hybrid_score = max(0.0, (candidate.signal_score * (weights["engulf"] + weights["price"] + weights["trend"]) + candidate.market_score * weights["market"]) / total - risk_penalty)
 
 
 def find_best_candidate(
@@ -676,5 +761,6 @@ def find_best_candidate(
 
     if not lolos:
         return None
+    apply_hybrid_scores(lolos, config)
     lolos.sort(key=lambda c: setup_quality_key(c.setup, c))
     return lolos[0]

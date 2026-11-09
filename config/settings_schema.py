@@ -264,12 +264,27 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "GAINER_MAX_CHANGE_PCT": _field(
         "Pemilihan Koin",
         "Kenaikan 24 jam maksimum",
-        "Batas atas perubahan harga 24 jam. Berguna untuk menghindari koin yang sudah terbang jauh sebelum bot memeriksa momentum. 0 berarti tanpa batas.",
+        "Batas atas perubahan harga 24 jam. Berguna untuk menghindari koin yang sudah terbang jauh sebelum bot memeriksa sinyal. 0 berarti tanpa batas.",
         "float",
         minimum=0.0,
         maximum=100000.0,
         unit="%",
     ),
+    "PUMP_DYNAMIC_FILTER_ENABLED": _field("Pump Dinamis 24 Jam", "Aktifkan ambang dinamis", "Menghitung batas minimum dan maksimum perubahan 24 jam dari distribusi koin likuid saat pemindaian.", "bool"),
+    "PUMP_DYNAMIC_MIN_PERCENTILE": _field("Pump Dinamis 24 Jam", "Persentil minimum", "Persentil perubahan 24 jam untuk batas bawah dinamis.", "float", minimum=0.0, maximum=100.0, unit="persentil"),
+    "PUMP_DYNAMIC_MIN_FLOOR_PCT": _field("Pump Dinamis 24 Jam", "Lantai minimum", "Nilai terendah yang boleh dipakai sebagai batas bawah dinamis.", "float", minimum=-100.0, maximum=100.0, unit="%"),
+    "PUMP_DYNAMIC_MIN_CAP_PCT": _field("Pump Dinamis 24 Jam", "Plafon minimum", "Nilai tertinggi yang boleh dipakai sebagai batas bawah dinamis.", "float", minimum=-100.0, maximum=100.0, unit="%"),
+    "PUMP_DYNAMIC_MAX_PERCENTILE": _field("Pump Dinamis 24 Jam", "Persentil maksimum", "Persentil perubahan 24 jam untuk batas atas dinamis.", "float", minimum=0.0, maximum=100.0, unit="persentil"),
+    "PUMP_DYNAMIC_MAX_FLOOR_PCT": _field("Pump Dinamis 24 Jam", "Lantai maksimum", "Nilai terendah yang boleh dipakai sebagai batas atas dinamis.", "float", minimum=0.0, maximum=1000.0, unit="%"),
+    "PUMP_DYNAMIC_MAX_CAP_PCT": _field("Pump Dinamis 24 Jam", "Plafon maksimum", "Nilai tertinggi yang boleh dipakai sebagai batas atas dinamis.", "float", minimum=0.0, maximum=1000.0, unit="%"),
+    "PUMP_DYNAMIC_MIN_SAMPLE": _field("Pump Dinamis 24 Jam", "Minimum sampel", "Jumlah ticker valid minimum sebelum persentil dinamis digunakan.", "int", minimum=5, maximum=5000, unit="ticker"),
+    "PUMP_FALLBACK_MIN_CHANGE_PCT": _field("Pump Dinamis 24 Jam", "Minimum fallback", "Batas bawah cadangan saat jumlah sampel tidak cukup.", "float", minimum=-100.0, maximum=100.0, unit="%"),
+    "PUMP_FALLBACK_MAX_CHANGE_PCT": _field("Pump Dinamis 24 Jam", "Maksimum fallback", "Batas atas cadangan saat jumlah sampel tidak cukup.", "float", minimum=0.0, maximum=1000.0, unit="%"),
+    "PUMP_RANK_CHANGE_WEIGHT": _field("Ranking Hybrid", "Bobot perubahan 24 jam", "Bobot persentil perubahan harga pada skor hybrid.", "float", minimum=0.0, maximum=100.0, unit="bobot"),
+    "PUMP_RANK_TURNOVER_WEIGHT": _field("Ranking Hybrid", "Bobot turnover", "Bobot persentil log turnover pada skor hybrid.", "float", minimum=0.0, maximum=100.0, unit="bobot"),
+    "PUMP_RANK_ENGULFING_WEIGHT": _field("Ranking Hybrid", "Bobot engulfing", "Bobot kekuatan body engulfing pada skor akhir.", "float", minimum=0.0, maximum=100.0, unit="bobot"),
+    "PUMP_RANK_PRICE_EMA_WEIGHT": _field("Ranking Hybrid", "Bobot jarak harga dari EMA", "Bobot jarak close di atas EMA lambat yang dinormalisasi ATR.", "float", minimum=0.0, maximum=100.0, unit="bobot"),
+    "PUMP_RANK_EMA_TREND_WEIGHT": _field("Ranking Hybrid", "Bobot tren EMA", "Bobot jarak EMA cepat di atas EMA lambat yang dinormalisasi ATR.", "float", minimum=0.0, maximum=100.0, unit="bobot"),
     "GAINER_VOLUME_FILTER_ENABLED": _field(
         "Pemilihan Koin",
         "Syarat kenaikan volume 24 jam",
@@ -306,7 +321,7 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "ENTRY_MIN_RR_RATIO": _field(
         "Exit ATR",
         "Minimum Risk:Reward",
-        "Batas bawah rasio imbal hasil terhadap risiko. Nilai ini dibandingkan dengan hasil bagi EXIT_ATR_TP_MULT dibagi EXIT_ATR_SL_MULT. Setup ditolak bila rasio ATR yang dipakai lebih kecil dari angka ini.",
+        "Target profit dihitung dari jarak entry ke Stop Loss pola. Nilai 3 berarti target berada tiga kali jarak risiko, yaitu R:R 1:3.",
         "float",
         minimum=0.1,
         maximum=20.0,
@@ -315,7 +330,7 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "ENTRY_ATR_PERIOD": _field(
         "Exit ATR",
         "Periode ATR",
-        "Jumlah candle untuk menghitung Average True Range pada timeframe momentum. ATR inilah yang menjadi satuan jarak stop, target, dan trailing.",
+        "Jumlah candle untuk menghitung Average True Range pada timeframe sinyal. ATR dipakai untuk buffer Stop Loss, breakeven, dan trailing.",
         "int",
         minimum=2,
         maximum=200,
@@ -350,12 +365,30 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     ),
     "EXIT_ATR_BREAKEVEN_MULT": _field(
         "Exit ATR",
-        "Breakeven (x ATR)",
-        "Profit minimal dalam kelipatan ATR sebelum stop dipindah ke harga entry. Isi 0 untuk mematikan breakeven.",
+        "Kompatibilitas BE lama",
+        "Parameter kompatibilitas lama. Pemicu aktif sekarang memakai kelipatan risiko awal.",
         "float",
         minimum=0.0,
         maximum=20.0,
         unit="x ATR",
+    ),
+    "EXIT_BREAKEVEN_TRIGGER_R": _field(
+        "Exit ATR",
+        "Pemicu breakeven",
+        "Profit dalam kelipatan risiko awal sebelum stop dinaikkan ke entry ditambah estimasi biaya beli dan jual.",
+        "float",
+        minimum=0.1,
+        maximum=20.0,
+        unit="R",
+    ),
+    "EXIT_TRAILING_START_R": _field(
+        "Exit ATR",
+        "Mulai trailing",
+        "Profit dalam kelipatan risiko awal sebelum trailing ATR mulai mengikuti harga tertinggi.",
+        "float",
+        minimum=0.1,
+        maximum=20.0,
+        unit="R",
     ),
     "EXIT_ATR_MAX_SL_PCT": _field(
         "Exit ATR",
@@ -619,9 +652,9 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         unit="%",
     ),
     "CONFIRM_INTERVAL": _field(
-        "Momentum H1",
-        "Interval momentum",
-        "Timeframe candle untuk filter momentum entry. Default 1h karena strategi ini membaca momentum H1. Mengubah ke 15m membuat sinyal lebih sering tetapi jauh lebih berisik.",
+        "Bullish Engulfing + EMA",
+        "Interval sinyal",
+        "Timeframe candle untuk pola bullish engulfing dan EMA. Default 1h. Timeframe lebih rendah menghasilkan sinyal lebih sering, tetapi umumnya lebih berisik.",
         "str",
         editor="select",
         options=[
@@ -640,9 +673,9 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         ],
     ),
     "CONFIRM_LOOKBACK_BARS": _field(
-        "Momentum H1",
+        "Bullish Engulfing + EMA",
         "Jumlah candle yang diunduh",
-        "Banyaknya candle terakhir yang diambil untuk menilai momentum dan ATR. Harus lebih besar dari periode ATR dan panjang rata-rata volume. Limit endpoint klines Binance 1000 per panggilan.",
+        "Banyaknya candle terakhir yang diambil untuk menghitung pola, EMA, dan ATR. Limit endpoint klines Binance 1000 per panggilan.",
         "int",
         minimum=15,
         maximum=1000,
@@ -837,46 +870,37 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         maximum=1000,
     ),
     "ENTRY_RULE_ENABLED": _field(
-        "Momentum H1",
-        "Aktifkan filter momentum",
-        "Gerbang entry utama. Saat aktif, bot hanya masuk bila candle H1 terakhir menembus high candle sebelumnya, body-nya cukup besar dibanding ATR, dan volumenya melonjak. Jika nonaktif, kandidat yang lolos peringkat gainer langsung diproses ke proteksi orderbook.",
+        "Bullish Engulfing + EMA",
+        "Aktifkan filter entry",
+        "Bot hanya entry pada bullish engulfing body ketat, close di atas EMA cepat dan lambat, serta EMA cepat di atas EMA lambat.",
         "bool",
     ),
-    "MOMENTUM_BREAKOUT_LOOKBACK": _field(
-        "Momentum H1",
-        "Lookback breakout",
-        "Berapa candle sebelumnya yang high-nya harus ditembus oleh close candle terakhir. Nilai 1 berarti cukup menembus high satu candle sebelumnya.",
+    "EMA_FAST_PERIOD": _field(
+        "Bullish Engulfing + EMA",
+        "Periode EMA cepat",
+        "Periode EMA cepat untuk menyaring arah tren. Nilai default 20.",
         "int",
-        minimum=1,
-        maximum=20,
+        minimum=2,
+        maximum=500,
         unit="candle",
     ),
-    "MOMENTUM_BODY_ATR_MULT": _field(
-        "Momentum H1",
-        "Kekuatan body (x ATR)",
-        "Body candle momentum minimal sebesar sekian kali ATR. Menyaring candle yang naik tipis sehingga breakout palsu lebih jarang lolos. 0 berarti tanpa syarat body.",
-        "float",
-        minimum=0.0,
-        maximum=5.0,
-        unit="x ATR",
-    ),
-    "MOMENTUM_VOLUME_MULT": _field(
-        "Momentum H1",
-        "Lonjakan volume (x rata-rata)",
-        "Volume candle momentum minimal sekian kali rata-rata volume sejumlah candle sebelumnya. Ini yang memisahkan breakout dengan partisipasi nyata dari pergerakan tipis. 0 berarti tanpa syarat volume.",
-        "float",
-        minimum=0.0,
-        maximum=20.0,
-        unit="x",
-    ),
-    "MOMENTUM_VOLUME_LOOKBACK": _field(
-        "Momentum H1",
-        "Panjang rata-rata volume",
-        "Berapa candle sebelumnya dipakai sebagai pembanding volume normal.",
+    "EMA_SLOW_PERIOD": _field(
+        "Bullish Engulfing + EMA",
+        "Periode EMA lambat",
+        "Periode EMA lambat untuk menyaring arah tren. Nilai default 50 dan harus lebih besar dari EMA cepat.",
         "int",
         minimum=3,
-        maximum=120,
+        maximum=1000,
         unit="candle",
+    ),
+    "ENTRY_SL_ATR_BUFFER_MULT": _field(
+        "Bullish Engulfing + EMA",
+        "Buffer SL di bawah pola",
+        "Stop Loss ditempatkan di bawah low terendah dari dua candle pola, dikurangi buffer ATR ini.",
+        "float",
+        minimum=0.0,
+        maximum=10.0,
+        unit="x ATR",
     ),
     "USE_RISK_PERCENT": _field(
         "Ukuran Posisi",
@@ -1010,6 +1034,10 @@ def _read_doc_unlocked() -> tuple[dict, list[str]]:
 REMOVED_PARAMETERS = frozenset(
     {
         "ENTRY_BULL_CANDLES",
+        "MOMENTUM_BREAKOUT_LOOKBACK",
+        "MOMENTUM_BODY_ATR_MULT",
+        "MOMENTUM_VOLUME_MULT",
+        "MOMENTUM_VOLUME_LOOKBACK",
         "ENTRY_SL_ANCHOR",
         "MARKET_DATA_INTERVAL",
         "ENTRY_SL_BUFFER_PCT",
@@ -1421,18 +1449,36 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
                 "wajib diisi lebih besar dari nol saat IDR_RATE_MODE = MANUAL"
             )
 
+    if _flag_untuk_relasi(cfg, "PUMP_DYNAMIC_FILTER_ENABLED", True):
+        min_floor = _angka_untuk_relasi(cfg, "PUMP_DYNAMIC_MIN_FLOOR_PCT")
+        min_cap = _angka_untuk_relasi(cfg, "PUMP_DYNAMIC_MIN_CAP_PCT")
+        max_floor = _angka_untuk_relasi(cfg, "PUMP_DYNAMIC_MAX_FLOOR_PCT")
+        max_cap = _angka_untuk_relasi(cfg, "PUMP_DYNAMIC_MAX_CAP_PCT")
+        fallback_min = _angka_untuk_relasi(cfg, "PUMP_FALLBACK_MIN_CHANGE_PCT")
+        fallback_max = _angka_untuk_relasi(cfg, "PUMP_FALLBACK_MAX_CHANGE_PCT")
+        if min_floor is not None and min_cap is not None and min_floor > min_cap:
+            keluar["PUMP_DYNAMIC_MIN_CAP_PCT"] = "harus sama dengan atau lebih besar dari lantai minimum"
+        if max_floor is not None and max_cap is not None and max_floor > max_cap:
+            keluar["PUMP_DYNAMIC_MAX_CAP_PCT"] = "harus sama dengan atau lebih besar dari lantai maksimum"
+        if fallback_min is not None and fallback_max is not None and fallback_min > fallback_max:
+            keluar["PUMP_FALLBACK_MAX_CHANGE_PCT"] = "harus lebih besar dari minimum fallback"
+        weight_keys = ("PUMP_RANK_CHANGE_WEIGHT", "PUMP_RANK_TURNOVER_WEIGHT", "PUMP_RANK_ENGULFING_WEIGHT", "PUMP_RANK_PRICE_EMA_WEIGHT", "PUMP_RANK_EMA_TREND_WEIGHT")
+        weights = [_angka_untuk_relasi(cfg, key) for key in weight_keys]
+        if all(value is not None for value in weights) and sum(weights) <= 0:
+            keluar["PUMP_RANK_CHANGE_WEIGHT"] = "jumlah seluruh bobot ranking harus lebih besar dari nol"
+
     if _flag_untuk_relasi(cfg, "ENTRY_RULE_ENABLED", True):
         perlu = _angka_untuk_relasi(cfg, "ENTRY_ATR_PERIOD")
-        panjang_volume = _angka_untuk_relasi(cfg, "MOMENTUM_VOLUME_LOOKBACK")
-        lookback_kandidat = [
-            int(nilai) for nilai in (perlu, panjang_volume) if nilai is not None
-        ]
-        butuh = max([15] + [int(nilai) + 2 for nilai in lookback_kandidat])
+        ema_cepat = _angka_untuk_relasi(cfg, "EMA_FAST_PERIOD")
+        ema_lambat = _angka_untuk_relasi(cfg, "EMA_SLOW_PERIOD")
+        lookback_kandidat = [int(nilai) for nilai in (perlu, ema_lambat) if nilai is not None]
+        butuh = max([3] + [int(nilai) + 1 for nilai in lookback_kandidat])
+        if ema_cepat is not None and ema_lambat is not None and ema_cepat >= ema_lambat:
+            keluar["EMA_SLOW_PERIOD"] = "harus lebih besar dari EMA_FAST_PERIOD"
         lookback = _angka_untuk_relasi(cfg, "CONFIRM_LOOKBACK_BARS")
         if lookback is not None and lookback < butuh:
             keluar["CONFIRM_LOOKBACK_BARS"] = (
-                f"minimal {butuh} candle agar periode ATR dan rata-rata volume "
-                "punya cukup riwayat untuk dinilai"
+                f"minimal {butuh} candle agar ATR dan EMA lambat punya cukup riwayat"
             )
         if _flag_untuk_relasi(cfg, "GAINER_VOLUME_FILTER_ENABLED", True):
             menit_interval = _INTERVAL_MENIT.get(
@@ -1448,19 +1494,8 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
                         f"turnover bisa dibandingkan dengan periode sebelumnya "
                         f"pada interval {cfg.get('CONFIRM_INTERVAL', '1h')}"
                     )
-        sl_mult = _angka_untuk_relasi(cfg, "EXIT_ATR_SL_MULT")
-        tp_mult = _angka_untuk_relasi(cfg, "EXIT_ATR_TP_MULT")
-        min_rr = _angka_untuk_relasi(cfg, "ENTRY_MIN_RR_RATIO")
-        if sl_mult is not None and sl_mult <= 0:
-            keluar["EXIT_ATR_SL_MULT"] = "harus lebih besar dari nol"
-        if tp_mult is not None and sl_mult is not None and sl_mult > 0 and min_rr is not None:
-            if tp_mult / sl_mult + 1e-9 < min_rr:
-                keluar["EXIT_ATR_TP_MULT"] = (
-                    f"R:R dari kelipatan ATR hanya 1:{tp_mult / sl_mult:.2f}, "
-                    f"di bawah ENTRY_MIN_RR_RATIO 1:{min_rr:.2f}"
-                )
         batas_sl = _angka_untuk_relasi(cfg, "EXIT_ATR_MAX_SL_PCT")
-        if batas_sl is not None and batas_sl > 0 and sl_mult is not None:
+        if batas_sl is not None and batas_sl > 0:
             if batas_sl < 0.2:
                 keluar["EXIT_ATR_MAX_SL_PCT"] = (
                     "terlalu sempit, hampir semua setup akan ditolak; isi 0 untuk "
@@ -1509,7 +1544,7 @@ def validate_candidate(
         if not cleaned.get("ENTRY_RULE_ENABLED"):
             warnings.append(
                 "ENTRY_RULE_ENABLED nonaktif: bot masuk tanpa menunggu candle "
-                "momentum H1, hanya mengandalkan seleksi gainer 24 jam dan "
+                "bullish engulfing + EMA, hanya mengandalkan seleksi gainer 24 jam dan "
                 "proteksi orderbook."
             )
         relation(

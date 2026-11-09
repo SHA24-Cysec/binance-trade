@@ -151,8 +151,8 @@ def exit_fixed_params(config: Optional[dict] = None) -> dict:
     return entry_rule.exit_fixed_params(config)
 
 
-def entry_momentum_params(config: dict) -> dict:
-    return entry_rule.momentum_params(config)
+def entry_signal_params(config: dict) -> dict:
+    return entry_rule.signal_params(config)
 
 
 def momentum_interval(config: dict) -> str:
@@ -173,14 +173,6 @@ def volume_rise_check(klines: list[Kline], config: dict) -> dict:
 
 def volume_rise_bars(config: dict) -> int:
     return entry_rule.volume_rise_bars(config)
-
-
-def breakout_level(bars, lookback: int):
-    return entry_rule.breakout_level(bars, lookback)
-
-
-def volume_ratio(bars, lookback: int):
-    return entry_rule.volume_ratio(bars, lookback)
 
 
 def entry_warmup_bars(config: dict, interval: str) -> int:
@@ -227,86 +219,37 @@ def resolve_exit_levels(
 ) -> dict:
     if setup is None:
         setup = config.get("_setup")
-    ep_raw = entry_price if entry_price is not None else config.get("_entry_price")
-    ep = float(ep_raw) if ep_raw is not None and float(ep_raw) > 0 else 0.0
-
-    if setup is not None and ep <= 0.0:
-        sig_c = getattr(setup, "signal_close", None)
-        if sig_c is not None and float(sig_c) > 0:
-            ep = float(sig_c)
-
-    anchor_low = getattr(setup, "entry_low", None) if setup is not None else None
-    atr_nilai = getattr(setup, "atr_value", None) if setup is not None else None
-    if atr_nilai is None:
-        atr_nilai = config.get("_atr")
+    raw_entry = entry_price if entry_price is not None else config.get("_entry_price")
+    if raw_entry is None and setup is not None:
+        raw_entry = getattr(setup, "signal_close", None)
     try:
-        atr_nilai = float(atr_nilai) if atr_nilai is not None else None
+        entry = float(raw_entry or 0.0)
     except (TypeError, ValueError):
-        atr_nilai = None
-    if atr_nilai is not None and atr_nilai <= 0.0:
-        atr_nilai = None
-
+        entry = 0.0
+    anchor = getattr(setup, "entry_low", None) if setup is not None else None
+    atr_value = getattr(setup, "atr_value", None) if setup is not None else config.get("_atr")
+    plan = entry_rule.exit_levels(entry, anchor, config, atr=atr_value, fallback_allowed=True)
     params = exit_atr.atr_params(config)
-    plan = entry_rule.exit_levels(
-        ep if ep > 0.0 else 0.0,
-        anchor_low,
-        config,
-        atr=atr_nilai,
-        fallback_allowed=True,
-    )
-
-    sl_px = plan["sl_price"]
-    tp_px = plan["tp_price"]
-    sl_p = plan["sl_pct"]
-    tp_p = plan["tp_pct"]
-    sumber = "ATR"
-
-    valid = (
-        ep > 0.0
-        and sl_px is not None
-        and tp_px is not None
-        and 0.0 < float(sl_px) < ep < float(tp_px)
-    )
-    if not valid:
-        sl_px = None
-        tp_px = None
-        sl_p = 0.0
-        tp_p = 0.0
-        sumber = "TIDAK_TERSEDIA"
-
-    rr_ratio = (tp_p / sl_p) if sl_p and sl_p > 0.0 else 0.0
-
-    def _pct_dari_atr(mult: float) -> float:
-        if ep <= 0.0 or atr_nilai is None or mult <= 0.0:
-            return 0.0
-        return atr_nilai * mult / ep * 100.0
-
+    valid = bool(plan["ok"] and plan["sl_price"] and plan["tp_price"] and 0 < plan["sl_price"] < entry < plan["tp_price"])
     return {
-        "atr": atr_nilai,
+        "atr": plan["atr"],
         "atr_period": params["period"],
-        "sl_mult": params["sl_mult"],
-        "tp_mult": params["tp_mult"],
+        "sl_mult": plan.get("sl_atr_buffer_mult", 0.0),
+        "tp_mult": 0.0,
         "trail_mult": params["trail_mult"],
         "breakeven_mult": params["breakeven_mult"],
-        "sl_pct": sl_p,
-        "tp_pct": tp_p,
-        "sl_price": sl_px,
-        "tp_price": tp_px,
-        "rr_ratio": rr_ratio,
-        "min_rr_ratio": params["min_rr"],
-        "be_trigger_pct": _pct_dari_atr(params["breakeven_mult"]),
+        "sl_pct": plan["sl_pct"] if valid else 0.0,
+        "tp_pct": plan["tp_pct"] if valid else 0.0,
+        "sl_price": plan["sl_price"] if valid else None,
+        "tp_price": plan["tp_price"] if valid else None,
+        "rr_ratio": plan["rr_ratio"] if valid else 0.0,
+        "min_rr_ratio": plan["min_rr_ratio"],
+        "be_trigger_pct": 0.0,
         "be_lock_pct": 0.0,
-        "trail_start_pct": _pct_dari_atr(params["sl_mult"]),
-        "trail_step_pct": _pct_dari_atr(params["trail_mult"]),
-        "source": sumber,
-        "note": (
-            plan["reason"]
-            if plan["reason"]
-            else (
-                f"Level ATR: SL {params['sl_mult']:g} x ATR, "
-                f"TP {params['tp_mult']:g} x ATR, trailing {params['trail_mult']:g} x ATR"
-            )
-        ),
+        "trail_start_pct": 0.0,
+        "trail_step_pct": 0.0,
+        "source": "ENGULFING_LOW_ATR_BUFFER" if valid else "TIDAK_TERSEDIA",
+        "note": plan["reason"],
     }
 
 

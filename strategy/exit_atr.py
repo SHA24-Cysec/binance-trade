@@ -9,7 +9,9 @@ DEFAULT_TP_MULT = 3.0
 DEFAULT_TRAIL_MULT = 2.0
 DEFAULT_BREAKEVEN_MULT = 1.0
 DEFAULT_MAX_SL_PCT = 5.0
-DEFAULT_MIN_RR = 2.0
+DEFAULT_MIN_RR = 3.0
+DEFAULT_BREAKEVEN_TRIGGER_R = 1.0
+DEFAULT_TRAILING_START_R = 1.5
 
 ATR_PARAM_KEYS = (
     "ENTRY_ATR_PERIOD",
@@ -18,6 +20,8 @@ ATR_PARAM_KEYS = (
     "EXIT_ATR_TRAIL_MULT",
     "EXIT_ATR_BREAKEVEN_MULT",
     "EXIT_ATR_MAX_SL_PCT",
+    "EXIT_BREAKEVEN_TRIGGER_R",
+    "EXIT_TRAILING_START_R",
 )
 
 EVENT_BREAKEVEN = "BREAKEVEN_AKTIF"
@@ -66,6 +70,8 @@ def atr_params(config: dict) -> dict:
             config, "EXIT_ATR_MAX_SL_PCT", DEFAULT_MAX_SL_PCT, 0.0, 50.0
         ),
         "min_rr": _cfg_float(config, "ENTRY_MIN_RR_RATIO", DEFAULT_MIN_RR, 0.1, 20.0),
+        "breakeven_trigger_r": _cfg_float(config, "EXIT_BREAKEVEN_TRIGGER_R", DEFAULT_BREAKEVEN_TRIGGER_R, 0.1, 20.0),
+        "trailing_start_r": _cfg_float(config, "EXIT_TRAILING_START_R", DEFAULT_TRAILING_START_R, 0.1, 20.0),
     }
 
 
@@ -220,65 +226,42 @@ def advance(
 ) -> dict:
     params = atr_params(config)
     entry = _state_float(state, "entry_price")
-    harga = _finite(price) or 0.0
-    jarak = _finite(atr if atr is not None else state.get("atr_at_entry"))
-    awal = _state_float(state, "initial_sl_price") or _state_float(state, "sl_price")
-    sl_lama = _state_float(state, "sl_price")
-    puncak = max(_state_float(state, "peak_price"), harga, entry)
-    be_aktif = bool(state.get("be_active"))
+    current = _finite(price) or 0.0
+    distance = _finite(atr if atr is not None else state.get("atr_at_entry"))
+    initial_sl = _state_float(state, "initial_sl_price") or _state_float(state, "sl_price")
+    old_sl = _state_float(state, "sl_price")
+    peak = max(_state_float(state, "peak_price"), current, entry)
+    be_active = bool(state.get("be_active"))
     be_stop = _state_float(state, "be_stop_price")
-    trail_aktif = bool(state.get("trail_active"))
+    trail_active = bool(state.get("trail_active"))
     trail_stop = _state_float(state, "trail_stop_price")
-    sl_baru = sl_lama
+    new_sl = old_sl
     events: list[tuple] = []
-
-    hasil = {
-        "peak_price": puncak,
-        "be_active": be_aktif,
-        "be_stop_price": be_stop,
-        "trail_active": trail_aktif,
-        "trail_stop_price": trail_stop,
-        "sl_price": sl_lama,
-        "tp_price": _state_float(state, "tp_price"),
-        "events": events,
-        "atr": jarak,
-    }
-
-    if entry <= 0.0 or harga <= 0.0 or jarak is None or jarak <= 0.0:
-        return hasil
-
-    if params["breakeven_mult"] > 0.0 and not be_aktif:
-        pemicu = breakeven_trigger_price(entry, jarak, params["breakeven_mult"])
-        if pemicu > entry and puncak >= pemicu:
-            level = breakeven_price(entry)
-            if level > 0.0 and level > sl_baru:
-                events.append((EVENT_BREAKEVEN, sl_baru, level))
-                be_aktif = True
-                be_stop = level
-                sl_baru = level
-
-    if params["trail_mult"] > 0.0 and jarak > 0.0:
-        pemicu_trail = trailing_trigger_price(entry, jarak, params["sl_mult"])
-        if pemicu_trail > 0.0 and puncak >= pemicu_trail:
-            kandidat = trailing_stop_price(puncak, jarak, params["trail_mult"])
-            if kandidat > 0.0 and kandidat > sl_baru:
-                events.append((EVENT_TRAILING, sl_baru, kandidat))
-                trail_aktif = True
-                trail_stop = kandidat
-                sl_baru = kandidat
-
-    if awal > 0.0 and sl_baru < awal:
-        sl_baru = awal
-
-    hasil.update(
-        {
-            "be_active": be_aktif,
-            "be_stop_price": be_stop,
-            "trail_active": trail_aktif,
-            "trail_stop_price": trail_stop,
-            "sl_price": sl_baru,
-        }
-    )
-    return hasil
-
+    risk = entry - initial_sl if 0.0 < initial_sl < entry else 0.0
+    result = {"peak_price": peak, "be_active": be_active, "be_stop_price": be_stop, "trail_active": trail_active, "trail_stop_price": trail_stop, "sl_price": old_sl, "tp_price": _state_float(state, "tp_price"), "events": events, "atr": distance, "initial_risk": risk, "breakeven_trigger_r": params["breakeven_trigger_r"], "trailing_start_r": params["trailing_start_r"]}
+    if entry <= 0.0 or current <= 0.0 or risk <= 0.0:
+        return result
+    if not be_active and peak >= entry + risk * params["breakeven_trigger_r"]:
+        try:
+            from config.config import get_taker_fee_pct
+            round_trip_fee_pct = get_taker_fee_pct(config) * 2.0
+        except (ImportError, TypeError, ValueError):
+            round_trip_fee_pct = max(0.0, _cfg_float(config, "TAKER_FEE_PCT", 0.1, 0.0, 10.0) * 2.0)
+        level = entry * (1.0 + round_trip_fee_pct / 100.0)
+        if level > new_sl:
+            events.append((EVENT_BREAKEVEN, new_sl, level))
+            be_active = True
+            be_stop = level
+            new_sl = level
+    if distance is not None and distance > 0.0 and peak >= entry + risk * params["trailing_start_r"]:
+        candidate = trailing_stop_price(peak, distance, params["trail_mult"])
+        if candidate > new_sl:
+            events.append((EVENT_TRAILING, new_sl, candidate))
+            trail_active = True
+            trail_stop = candidate
+            new_sl = candidate
+    if initial_sl > 0.0 and new_sl < initial_sl:
+        new_sl = initial_sl
+    result.update(be_active=be_active, be_stop_price=be_stop, trail_active=trail_active, trail_stop_price=trail_stop, sl_price=new_sl)
+    return result
 
