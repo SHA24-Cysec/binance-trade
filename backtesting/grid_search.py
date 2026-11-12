@@ -93,8 +93,8 @@ _KUNCI_EXIT_ATR = (
 )
 
 _KUNCI_MOMENTUM = (
-    "EMA_FAST_PERIOD",
-    "EMA_SLOW_PERIOD",
+    "DEMAND_EMA_PERIOD",
+    "DEMAND_IMPULSE_ATR_MULT",
     "ENTRY_SL_ATR_BUFFER_MULT",
 )
 
@@ -212,7 +212,7 @@ def _pastikan_grid_portofolio_didukung(spec: dict) -> None:
     if tidak_didukung:
         raise GridSearchError(
             "Grid search portofolio menyapu level exit ATR dan parameter sinyal "
-            "H1 pada semesta koin yang sama. Parameter lain tidak didukung di "
+            "zona demand pada semesta koin yang sama. Parameter lain tidak didukung di "
             f"mode ini: {', '.join(tidak_didukung)}. "
             f"Yang boleh: {', '.join(sorted(PARAMETER_GRID_PORTOFOLIO))}."
         )
@@ -232,8 +232,8 @@ def _kombinasi_masuk_akal(cfg: dict) -> tuple[bool, str]:
         ("EXIT_ATR_TRAIL_MULT", 0.1, 20.0),
         ("EXIT_ATR_BREAKEVEN_MULT", 0.0, 20.0),
         ("EXIT_ATR_MAX_SL_PCT", 0.0, 50.0),
-        ("EMA_FAST_PERIOD", 2.0, 500.0),
-        ("EMA_SLOW_PERIOD", 3.0, 1000.0),
+        ("DEMAND_EMA_PERIOD", 5.0, 60.0),
+        ("DEMAND_IMPULSE_ATR_MULT", 0.5, 5.0),
         ("ENTRY_SL_ATR_BUFFER_MULT", 0.0, 10.0),
     )
     for kunci, bawah, atas in batas:
@@ -1061,7 +1061,7 @@ def cetak_tabel(hasil: HasilGridSearch, top_n: int = 15) -> None:
 
 
 _KUNCI_BOOL: tuple = ()
-_KUNCI_INT: tuple = ()
+_KUNCI_INT: tuple = ("DEMAND_EMA_PERIOD",)
 
 
 def _konversi_nilai(kunci: str, teks: str):
@@ -1128,7 +1128,7 @@ def _uji_grid_portofolio_momentum(check) -> None:
 
     from config.config import PUMP_CONFIG
     from backtesting.portfolio_backtest import new_backtest_store
-    from backtesting.synthetic_data import seri_banyak_setup
+    from backtesting.synthetic_data import seri_zona_demand
 
     cfg = deepcopy(PUMP_CONFIG)
     cfg.update(
@@ -1157,23 +1157,23 @@ def _uji_grid_portofolio_momentum(check) -> None:
     store = new_backtest_store(cfg)
     try:
         store.write_symbol(
-            "AAAUSDT", seri_banyak_setup(harga=100.0, siklus=10, volume=9_000_000.0)
+            "AAAUSDT", seri_zona_demand(harga=100.0, siklus=10, volume=9_000_000.0)
         )
         store.write_symbol(
-            "BBBUSDT", seri_banyak_setup(harga=200.0, siklus=10, volume=5_000_000.0)
+            "BBBUSDT", seri_zona_demand(harga=200.0, siklus=10, volume=5_000_000.0)
         )
-        warmup_ms = 300 * 5 * 60 * 1000
+        warmup_ms = 1000 * 15 * 60 * 1000
         hasil = run_portfolio_grid_search(
             store,
             cfg,
-            "5m",
+            "15m",
             warmup_ms,
-            {"EMA_SLOW_PERIOD": [40, 50]},
+            {"DEMAND_EMA_PERIOD": [40, 50]},
             rasio_latih=1.0,
             min_trades=1,
         )
         nilai = sorted(
-            float(b.params.get("EMA_SLOW_PERIOD", -1)) for b in hasil.hasil
+            float(b.params.get("DEMAND_EMA_PERIOD", -1)) for b in hasil.hasil
         )
         check(
             "grid portofolio menjalankan sapuan momentum",
@@ -1185,14 +1185,14 @@ def _uji_grid_portofolio_momentum(check) -> None:
         lebar = run_portfolio_grid_search(
             store,
             cfg,
-            "5m",
+            "15m",
             warmup_ms,
-            {"EMA_SLOW_PERIOD": [40, 60]},
+            {"DEMAND_EMA_PERIOD": [40, 60]},
             rasio_latih=1.0,
             min_trades=1,
         )
         per_ambang = {
-            float(b.params.get("EMA_SLOW_PERIOD", -1)): int(
+            float(b.params.get("DEMAND_EMA_PERIOD", -1)): int(
                 b.latih.get("total_trades", 0)
             )
             for b in lebar.hasil
@@ -1210,17 +1210,17 @@ def _uji_grid_portofolio_momentum(check) -> None:
             summarize_portfolio as _sum_pf,
         )
 
-        cfg_satu = apply_overrides(cfg, {"EMA_SLOW_PERIOD": 40})
-        tl = _build_timeline(store, "5m", config=cfg, include_ohlcv=True)
+        cfg_satu = apply_overrides(cfg, {"DEMAND_EMA_PERIOD": 40})
+        tl = _build_timeline(store, "15m", config=cfg, include_ohlcv=True)
         langsung = _run_pf(
-            store, cfg_satu, "5m", warmup_ms=warmup_ms, prebuilt=tl
+            store, cfg_satu, "15m", warmup_ms=warmup_ms, prebuilt=tl
         )
         ringkas_langsung = _sum_pf(langsung)
         baris_lebar = next(
             (
                 b
                 for b in lebar.hasil
-                if float(b.params.get("EMA_SLOW_PERIOD", -1)) == 40
+                if float(b.params.get("DEMAND_EMA_PERIOD", -1)) == 40
             ),
             None,
         )
@@ -1254,7 +1254,7 @@ def _uji_grid_portofolio_momentum(check) -> None:
         run_portfolio_grid_search(
             store=None,  # type: ignore[arg-type]
             base_config=cfg,
-            interval="5m",
+            interval="15m",
             warmup_ms=0,
             spec={"CONFIRM_LOOKBACK_BARS": [60, 90]},
         )
@@ -1311,13 +1311,13 @@ def selftest() -> bool:
     except GridSearchError:
         check("expand_grid menolak daftar kosong", True)
     try:
-        _pastikan_grid_portofolio_didukung({"EMA_SLOW_PERIOD": [40, 60]})
+        _pastikan_grid_portofolio_didukung({"DEMAND_EMA_PERIOD": [40, 60]})
         check("grid portofolio menerima parameter sinyal", True)
     except GridSearchError:
         check("grid portofolio menerima parameter sinyal", False)
     try:
         _pastikan_grid_portofolio_didukung(
-            {"EMA_FAST_PERIOD": [20, 30], "ENTRY_SL_ATR_BUFFER_MULT": [0.1, 0.2]}
+            {"DEMAND_IMPULSE_ATR_MULT": [1.0, 1.5], "ENTRY_SL_ATR_BUFFER_MULT": [0.1, 0.2]}
         )
         check("grid portofolio menerima beberapa parameter sinyal", True)
     except GridSearchError:
@@ -1387,7 +1387,7 @@ def selftest() -> bool:
     cfg["GAINER_MAX_CHANGE_PCT"] = 0.0
     cfg["GAINER_VOLUME_FILTER_ENABLED"] = False
     cfg["SAME_COIN_BLOCK_HOURS"] = 0.0
-    klines = sd.seri_banyak_setup(harga=100.0, siklus=10, volume=9_000_000.0)
+    klines = sd.seri_zona_demand(harga=100.0, siklus=10, volume=9_000_000.0)
 
     try:
         run_grid_search(klines[:50], cfg, {"EXIT_ATR_SL_MULT": [1.2]}, 300)
@@ -1438,14 +1438,14 @@ def selftest() -> bool:
         "_symbol": "",
         "MODE": "PAPER",
         "ENTRY_RULE_ENABLED": True,
-        "EMA_SLOW_PERIOD": 50,
+        "DEMAND_EMA_PERIOD": 50,
         "CONFIRM_LOOKBACK_BARS": 20,
         "MIN_QUOTE_VOLUME_USDT_24H": 0.0,
         "EXIT_ATR_SL_MULT": 1.5,
         "ENTRY_MIN_RR_RATIO": 2.0,
         "EXIT_ATR_MAX_SL_PCT": 5.0,
     })
-    klines_panjang = sd.seri_5m_trend(harga=100.0, jam_trend=120)
+    klines_panjang = sd.seri_zona_demand(harga=100.0, siklus=2)
     hasil_pendek = run_grid_search(
         klines_panjang,
         cfg_pendek,

@@ -28,246 +28,70 @@ def make_candle(
     )
 
 
-def seri_dengan_setup(
-    harga: float = 1.0,
-    bar_datar: int = 288,
-    volume: float = 5_000_000.0,
-    ekor: str = "naik",
-    panjang_ekor: int = 20,
-    mulai_index: int = 0,
-) -> list[Kline]:
+MS_PER_BAR_15M = 900_000
+BAR_PER_H4_15M = 16
+
+
+def _tambah_15m(out: list[Kline], i: int, open_: float, close: float, low: float, high: float, volume: float) -> int:
+    out.append(make_candle(i, open_, high, low, close, volume, bar_ms=MS_PER_BAR_15M))
+    return i + 1
+
+
+def blok_zona_demand(harga: float, mulai_index: int, volume: float = 5_000_000.0) -> tuple[list[Kline], float, int]:
+    if mulai_index % BAR_PER_H4_15M != 0:
+        raise ValueError("blok zona demand harus mulai tepat di batas candle 4h")
     out: list[Kline] = []
     i = mulai_index
-    for _ in range(bar_datar):
-        out.append(
-            make_candle(i, harga, harga * 1.002, harga * 0.998, harga * 1.0005, volume)
-        )
-        i += 1
-
-    blok, harga_akhir, i = blok_setup(harga, i, volume)
-    out.extend(blok)
-
-    harga_kini = harga_akhir
-    for _ in range(panjang_ekor):
-        if ekor == "naik":
-            harga_kini *= 1.01
-            out.append(
-                make_candle(
-                    i,
-                    harga_kini / 1.01,
-                    harga_kini * 1.002,
-                    harga_kini / 1.011,
-                    harga_kini,
-                    volume,
-                )
-            )
-        elif ekor == "invalidasi":
-            harga_kini *= 0.99
-            out.append(
-                make_candle(
-                    i,
-                    harga_kini / 0.99,
-                    harga_kini * 1.001,
-                    harga_kini * 0.998,
-                    harga_kini,
-                    volume,
-                )
-            )
-        else:
-            out.append(
-                make_candle(
-                    i,
-                    harga_kini,
-                    harga_kini * 1.001,
-                    harga_kini * 0.999,
-                    harga_kini,
-                    volume,
-                )
-            )
-        i += 1
-    return out
-
-
-def blok_setup(harga: float, mulai_index: int, volume: float = 5_000_000.0):
-    out: list[Kline] = []
-    i = mulai_index
-    for j in range(12):
-        o = harga
-        h = harga * 1.004
-        low = harga * 0.996
-        c = harga * 1.001
-        if j == 6:
-            h = harga * 1.012
-            c = harga * 1.006
-        out.append(make_candle(i, o, h, low, c, volume))
-        i += 1
-
-    level = harga * 1.012
-    out.append(
-        make_candle(
-            i,
-            harga * 1.002,
-            level * 1.013,
-            harga * 0.999,
-            level * 1.012,
-            volume * VOLUME_SPIKE_MULT,
-        )
-    )
-    i += 1
-    out.append(
-        make_candle(
-            i, level * 1.012, level * 1.014, level * 1.006, level * 1.008, volume
-        )
-    )
-    i += 1
-    out.append(
-        make_candle(
-            i, level * 1.008, level * 1.010, level * 1.004, level * 1.006, volume
-        )
-    )
-    i += 1
-    out.append(
-        make_candle(
-            i, level * 1.006, level * 1.008, level * 1.002, level * 1.004, volume
-        )
-    )
-    i += 1
-    out.append(
-        make_candle(
-            i, level * 1.001, level * 1.009, level * 0.997, level * 1.008, volume
-        )
-    )
-    i += 1
-
-    harga_naik = level * 1.008
+    p = float(harga)
+    for _ in range(4):
+        i = _tambah_15m(out, i, p, p, p * 0.9997, p * 1.0003, volume)
+    harga_kini = p
+    for _ in range(4):
+        tutup = harga_kini * 1.005
+        i = _tambah_15m(out, i, harga_kini, tutup, harga_kini * 0.9995, tutup * 1.0005, volume * VOLUME_SPIKE_MULT)
+        harga_kini = tutup
+    for _ in range(8):
+        i = _tambah_15m(out, i, harga_kini, harga_kini, harga_kini * 0.9995, harga_kini * 1.0005, volume)
+    target = p * 1.006
+    langkah = (harga_kini - target) / 3.0
     for _ in range(3):
-        open_ = harga_naik
-        harga_naik = open_ * 1.005
-        out.append(
-            make_candle(
-                i, open_, harga_naik * 1.002, open_ * 0.998, harga_naik, volume
-            )
-        )
-        i += 1
-    return out, harga_naik, i
+        tutup = harga_kini - langkah
+        i = _tambah_15m(out, i, harga_kini, tutup, tutup * 0.9995, harga_kini * 1.0005, volume)
+        harga_kini = tutup
+    tutup = p * 1.016
+    i = _tambah_15m(out, i, harga_kini, tutup, p * 1.0002, tutup * 1.0005, volume * VOLUME_SPIKE_MULT)
+    harga_kini = tutup
+    for _ in range(12):
+        tutup = harga_kini * 1.005
+        i = _tambah_15m(out, i, harga_kini, tutup, harga_kini * 0.9995, tutup * 1.0005, volume)
+        harga_kini = tutup
+    return out, harga_kini, i
 
 
-def seri_banyak_setup(
+def seri_zona_demand(
     harga: float = 100.0,
-    siklus: int = 10,
-    bar_datar: int = 288,
+    siklus: int = 4,
+    bar_awal: int = 960,
     volume: float = 5_000_000.0,
-    naik: int = 6,
-    turun: int = 20,
+    jeda: int = 64,
     mulai_index: int = 0,
 ) -> list[Kline]:
+    if mulai_index % BAR_PER_H4_15M != 0 or bar_awal % BAR_PER_H4_15M != 0 or jeda % BAR_PER_H4_15M != 0:
+        raise ValueError("indeks awal, bar awal, dan jeda harus kelipatan 16 candle 15m")
     out: list[Kline] = []
     i = mulai_index
-    for _ in range(bar_datar):
-        out.append(
-            make_candle(i, harga, harga * 1.002, harga * 0.998, harga * 1.0005, volume)
-        )
-        i += 1
+    p = float(harga)
 
+    def naik_pelan(jumlah: int) -> None:
+        nonlocal i, p
+        for _ in range(jumlah):
+            tutup = p * 1.0002
+            i = _tambah_15m(out, i, p, tutup, p * 0.9997, tutup * 1.0003, volume)
+            p = tutup
+
+    naik_pelan(bar_awal)
     for _ in range(max(1, siklus)):
-        blok, harga, i = blok_setup(harga, i, volume)
+        blok, p, i = blok_zona_demand(p, i, volume)
         out.extend(blok)
-        for _ in range(naik):
-            harga *= 1.01
-            out.append(
-                make_candle(
-                    i, harga / 1.01, harga * 1.002, harga / 1.011, harga, volume
-                )
-            )
-            i += 1
-        for _ in range(turun):
-            harga *= 0.995
-            out.append(
-                make_candle(
-                    i, harga / 0.995, harga * 1.001, harga * 0.997, harga, volume
-                )
-            )
-            i += 1
-    return out
-
-
-def seri_5m_trend(
-    harga: float = 100.0,
-    jam_trend: int = 130,
-    arah: float = 1.0,
-    tick: float = 0.0006,
-    volume: float = 5_000_000.0,
-    mulai_index: int = 0,
-    ayun: float = 0.0,
-) -> list[Kline]:
-    out: list[Kline] = []
-    i = mulai_index
-    price = float(harga)
-    total = max(1, int(jam_trend)) * 12
-    for bar in range(total):
-        langkah = tick * (1.0 if arah >= 0 else -1.0) * abs(arah)
-        if ayun > 0:
-            langkah = tick * (1.0 + ayun) if bar % 2 == 0 else -tick * ayun * abs(arah)
-        price = price * (1.0 + langkah)
-        out.append(
-            make_candle(
-                i,
-                price * (1 - langkah / 2),
-                price * 1.0008,
-                price * 0.9992,
-                price,
-                volume,
-            )
-        )
-        i += 1
-    return out
-
-
-def blok_setup_volume(
-    harga: float, mulai_index: int, volume: float = 5_000_000.0, lonjakan: float = 3.0
-) -> tuple[list[Kline], float, int]:
-    out: list[Kline] = []
-    i = mulai_index
-    harga = float(harga)
-    for j in range(12):
-        o = harga
-        h = harga * 1.004
-        low = harga * 0.996
-        c = harga * 1.001
-        if j == 6:
-            h = harga * 1.008
-            c = harga * 1.004
-        out.append(make_candle(i, o, h, low, c, volume))
-        i += 1
-
-    vulg = volume * lonjakan
-    for j in range(6):
-        o = harga * (1 + 0.004 * j)
-        c = o * 1.004
-        out.append(make_candle(i, o, c * 1.002, o * 0.998, max(c, o * 1.002), vulg))
-        i += 1
-    terakhir = out[-1].close
-    out.append(
-        make_candle(
-            i, terakhir, terakhir * 1.006, terakhir * 0.999, terakhir * 1.005, vulg
-        )
-    )
-    i += 1
-    return out, out[-1].close, i
-
-
-def seri_trend_dengan_setup(
-    harga: float = 100.0,
-    jam_trend: int = 130,
-    arah: float = 1.0,
-    tick: float = 0.0006,
-    volume: float = 5_000_000.0,
-    ayun: float = 0.0,
-    lonjakan: float = 3.0,
-) -> list[Kline]:
-    out = seri_5m_trend(
-        harga=harga, jam_trend=jam_trend, arah=arah, tick=tick, volume=volume, ayun=ayun
-    )
-    blok, _harga, _i = blok_setup_volume(out[-1].close, len(out), volume, lonjakan)
-    out.extend(blok)
+        naik_pelan(jeda)
     return out

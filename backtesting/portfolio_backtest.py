@@ -1199,9 +1199,9 @@ def run_portfolio_backtest(
         signal_pb = strategy.entry_signal_params(config)
         warnings.append(
             f"{entry_rule_skips} dari {entry_rule_scans} kandidat top gainer dilewati "
-            f"filter candle bullish + EMA ({interval}: close di atas EMA "
-            f"{signal_pb['ema_fast']}/{signal_pb['ema_slow']}, EMA cepat di atas EMA lambat, "
-            f"SL low candle dengan buffer {signal_pb['sl_atr_buffer_mult']:g} x ATR)."
+            f"filter zona demand + EMA ({interval}: candle bullish di zona demand 1h atau 4h, "
+            f"close di atas EMA {signal_pb['ema_period']} pada {interval}, 1h, dan 4h, "
+            f"SL di bawah zona dengan buffer {signal_pb['sl_atr_buffer_mult']:g} x ATR)."
         )
     risk_summary = controls.summary()
     if risk_summary["kill_switch_triggers"] > 0:
@@ -1655,7 +1655,7 @@ def selftest() -> bool:
     from copy import deepcopy
 
     from config.config import PUMP_CONFIG
-    from backtesting.synthetic_data import seri_banyak_setup
+    from backtesting.synthetic_data import seri_zona_demand
 
     ok_all = True
 
@@ -1697,17 +1697,17 @@ def selftest() -> bool:
     print("Menjalankan selftest portfolio_backtest...")
 
     cfg = _base_cfg()
-    up_a = seri_banyak_setup(harga=100.0, siklus=10, volume=9_000_000.0)
-    up_b = seri_banyak_setup(harga=200.0, siklus=10, volume=5_000_000.0)
+    up_a = seri_zona_demand(harga=100.0, siklus=10, volume=9_000_000.0)
+    up_b = seri_zona_demand(harga=200.0, siklus=10, volume=5_000_000.0)
     store = new_backtest_store(cfg)
     try:
         store.write_symbol("AAAUSDT", up_a)
         store.write_symbol("BBBUSDT", up_b)
 
-        tl_2 = build_timeline(store, "5m")
+        tl_2 = build_timeline(store, "15m")
         check("build_timeline 2-tuple tanpa config", len(tl_2) == 2 and len(tl_2[0]) == len(up_a))
 
-        tl_3 = build_timeline(store, "5m", config=cfg)
+        tl_3 = build_timeline(store, "15m", config=cfg)
         check("build_timeline 3-tuple dengan config", len(tl_3) == 3 and tl_3[2] == {})
 
         u2 = unpack_prebuilt((tl_2[0], tl_2[1]))
@@ -1717,17 +1717,17 @@ def selftest() -> bool:
             u2[2] is None and u3[2] == {},
         )
 
-        warmup_ms = 300 * 5 * MS_PER_MIN
+        warmup_ms = 1000 * 15 * MS_PER_MIN
         res_plain = run_portfolio_backtest(
-            store, cfg, "5m", warmup_ms=warmup_ms, prebuilt=tl_2
+            store, cfg, "15m", warmup_ms=warmup_ms, prebuilt=tl_2
         )
         sig_cache = precompute_entry_signals(
-            store, cfg, "5m", prebuilt=tl_2
+            store, cfg, "15m", prebuilt=tl_2
         )
         res_cached = run_portfolio_backtest(
             store,
             cfg,
-            "5m",
+            "15m",
             warmup_ms=warmup_ms,
             prebuilt=tl_2,
             entry_signal_cache=sig_cache,
@@ -1756,17 +1756,17 @@ def selftest() -> bool:
     from backtesting.backtest import run_backtest
 
     par_cfg = _base_cfg()
-    par_kl = seri_banyak_setup(harga=100.0, siklus=10, volume=9_000_000.0)
+    par_kl = seri_zona_demand(harga=100.0, siklus=10, volume=9_000_000.0)
     par_store = new_backtest_store(par_cfg)
     try:
         par_store.write_symbol("SOLOUSDT", par_kl)
-        warmup_bars = 300
+        warmup_bars = 1000
         bt_res = run_backtest(par_kl, par_cfg, warmup_bars=warmup_bars)
         pf_res = run_portfolio_backtest(
             par_store,
             par_cfg,
-            "5m",
-            warmup_ms=warmup_bars * 5 * MS_PER_MIN,
+            "15m",
+            warmup_ms=warmup_bars * 15 * MS_PER_MIN,
         )
         bt_jejak = [
             (t.entry_time, t.exit_time, round(t.pnl_pct, 8), t.reason)

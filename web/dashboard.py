@@ -830,8 +830,7 @@ def build_status():
             "entry_min_rr_ratio": float(
                 PUMP_CONFIG.get("ENTRY_MIN_RR_RATIO", 3.0) or 3.0
             ),
-            "ema_fast_period": int(strategy.entry_signal_params(PUMP_CONFIG)["ema_fast"]),
-            "ema_slow_period": int(strategy.entry_signal_params(PUMP_CONFIG)["ema_slow"]),
+            "ema_period": int(strategy.entry_signal_params(PUMP_CONFIG)["ema_period"]),
             "max_hold_hours": float(
                 strategy.exit_fixed_params(PUMP_CONFIG)["max_hold_hours"]
             ),
@@ -860,12 +859,36 @@ def entry_rule_status(config: dict) -> dict:
         "config_error": config_error,
         "interval": interval,
         "lookback_bars": lookback,
-        "sl_anchor": "BULLISH_CANDLE_LOW_ATR_BUFFER",
+        "sl_anchor": "DEMAND_ZONE_LOW_ATR_BUFFER",
         "min_rr_ratio": float(config.get("ENTRY_MIN_RR_RATIO", 3.0) or 3.0),
         "max_sl_pct": float(config.get("EXIT_ATR_MAX_SL_PCT", 5.0) or 0.0),
         "entry_signal": strategy.entry_signal_params(config),
         "exit_atr": strategy.exit_atr_params(config),
     }
+
+
+ENTRY_CHART_BARS = 192
+ENTRY_VIEW_TTL_SECONDS = 15.0
+ENTRY_VIEW_MAX_ITEMS = 32
+_entry_view_cache: dict = {}
+_entry_view_lock = threading.Lock()
+
+
+def cached_entry_view(symbol: str, config: dict) -> dict:
+    now = time.monotonic()
+    with _entry_view_lock:
+        item = _entry_view_cache.get(symbol)
+        if item is not None and now - item[0] < ENTRY_VIEW_TTL_SECONDS:
+            return item[1]
+    data = evaluate_entry_symbol(symbol, config)
+    with _entry_view_lock:
+        if len(_entry_view_cache) >= ENTRY_VIEW_MAX_ITEMS:
+            for key in [k for k, v in _entry_view_cache.items() if now - v[0] >= ENTRY_VIEW_TTL_SECONDS]:
+                _entry_view_cache.pop(key, None)
+            while len(_entry_view_cache) >= ENTRY_VIEW_MAX_ITEMS:
+                _entry_view_cache.pop(min(_entry_view_cache, key=lambda k: _entry_view_cache[k][0]), None)
+        _entry_view_cache[symbol] = (now, data)
+    return data
 
 
 def evaluate_entry_symbol(symbol: str, config: dict) -> dict:
@@ -889,23 +912,21 @@ def evaluate_entry_symbol(symbol: str, config: dict) -> dict:
     verdict = strategy.evaluate_entry(klines, config)
     syarat_volume = strategy.volume_rise_check(klines, config)
     sinyal = klines[-1]
-    urut = klines[-(strategy.entry_signal_params(config)["ema_slow"] + 3) :]
-    riwayat = [
+    snapshot = strategy.demand_zone_snapshot(klines, config)
+    jendela = klines[-strategy.confirm_window_bars(config) :]
+    ema_dasar = list(snapshot.get("ema_base") or [])
+    if len(ema_dasar) != len(jendela):
+        ema_dasar = [None] * len(jendela)
+    grafik = [
         {
-            "open_time": _fmt_ms(int(k.open_time)),
-            "open": float(k.open),
-            "high": float(k.high),
-            "low": float(k.low),
-            "close": float(k.close),
-            "bullish": bool(
-                float(k.close) > float(k.open)
-                and (
-                    idx == 0
-                    or float(k.close) > float(urut[idx - 1].close)
-                )
-            ),
+            "t": int(k.open_time),
+            "o": float(k.open),
+            "h": float(k.high),
+            "l": float(k.low),
+            "c": float(k.close),
+            "ema": ema,
         }
-        for idx, k in enumerate(urut)
+        for k, ema in list(zip(jendela, ema_dasar))[-ENTRY_CHART_BARS:]
     ]
     return {
         "symbol": symbol,
@@ -929,11 +950,25 @@ def evaluate_entry_symbol(symbol: str, config: dict) -> dict:
             "bull_count": int(verdict.get("bull_count") or 0),
             "bull_required": int(verdict.get("bull_required") or 0),
             "atr": verdict.get("atr"),
-            "ema_fast": verdict.get("ema_fast"),
-            "ema_slow": verdict.get("ema_slow"),
+            "ema_m15": verdict.get("ema_m15"),
+            "ema_h1": verdict.get("ema_h1"),
+            "ema_h4": verdict.get("ema_h4"),
+            "zone_low": verdict.get("zone_low"),
+            "zone_high": verdict.get("zone_high"),
+            "zone_timeframe": verdict.get("zone_timeframe"),
+            "zones_active": int(verdict.get("zones_active") or 0),
             "checks": dict(verdict.get("checks") or {}),
         },
-        "candles": riwayat,
+        "candles": grafik,
+        "zones": list(snapshot.get("zones") or []),
+        "zone_note": str(snapshot.get("reason") or ""),
+        "levels": {
+            "ema_period": int(snapshot.get("ema_period") or 0),
+            "ema_m15": ema_dasar[-1] if ema_dasar else None,
+            "ema_h1": snapshot.get("ema_h1"),
+            "ema_h4": snapshot.get("ema_h4"),
+            "bullish": bool(float(sinyal.close) > float(sinyal.open)),
+        },
         "exit": {
             "sl_price": verdict.get("sl_price"),
             "tp_price": verdict.get("tp_price"),
@@ -1033,8 +1068,8 @@ BT_PARAM_KEYS = (
     "PUMP_RANK_ENGULFING_WEIGHT",
     "PUMP_RANK_PRICE_EMA_WEIGHT",
     "PUMP_RANK_EMA_TREND_WEIGHT",
-    "EMA_FAST_PERIOD",
-    "EMA_SLOW_PERIOD",
+    "DEMAND_EMA_PERIOD",
+    "DEMAND_IMPULSE_ATR_MULT",
     "ENTRY_SL_ATR_BUFFER_MULT",
     "ENTRY_ATR_PERIOD",
     "ENTRY_ATR_PERIOD",
@@ -1156,7 +1191,7 @@ def _bt_timing_note(cfg: dict, interval: str) -> str:
     return (
         f"Aturan entry membutuhkan {candle} candle tertutup {interval} "
         f"(sekitar {jam:.2f} jam) sebelum bar pertama bisa dinilai, dan entry terjadi "
-        "pada close candle sinyal terakhir yang memenuhi candle bullish dan EMA."
+        "pada close candle sinyal terakhir yang memenuhi zona demand dan EMA."
     )
 
 
@@ -1463,7 +1498,7 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "exit_atr": strategy.exit_atr_params(cfg),
                 "min_rr_ratio": float(cfg.get("ENTRY_MIN_RR_RATIO", 2.0) or 2.0),
                 "max_sl_pct": float(cfg.get("EXIT_ATR_MAX_SL_PCT", 5.0) or 0.0),
-                "lookback_bars": int(cfg.get("CONFIRM_LOOKBACK_BARS", 192) or 192),
+                "lookback_bars": int(cfg.get("CONFIRM_LOOKBACK_BARS", 997) or 997),
                 "skips": int(getattr(result, "entry_rule_skips", 0)),
                 "scans": int(getattr(result, "entry_rule_scans", 0)),
             },
@@ -1527,14 +1562,13 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "dimodelkan, jadi order besar di koin tipis akan lebih buruk dari ini. "
                 "Filter kedalaman, ketimpangan bid/ask, dan sell wall juga hanya berlaku di "
                 "PAPER dan LIVE (snapshot order book tidak tersedia historis).",
-                "Filter candle bullish + EMA SUDAH disimulasikan memakai logika yang sama dengan "
+                "Filter zona demand + EMA SUDAH disimulasikan memakai logika yang sama dengan "
                 "bot live: candle "
                 + prep["interval"]
-                + " terakhir harus bullish (close > open), close di atas EMA "
-                + str(int(strategy.entry_signal_params(cfg)["ema_fast"]))
-                + " dan EMA "
-                + str(int(strategy.entry_signal_params(cfg)["ema_slow"]))
-                + ", serta EMA cepat di atas EMA lambat. SL memakai low candle dikurangi buffer "
+                + " terakhir harus bullish (close > open), menyentuh zona demand 1h atau 4h "
+                "yang belum ditembus, dan close di atas EMA "
+                + str(int(strategy.entry_signal_params(cfg)["ema_period"]))
+                + " pada timeframe pemicu, 1h, dan 4h. SL memakai batas bawah zona dikurangi buffer "
                 + f"{float(strategy.entry_signal_params(cfg)['sl_atr_buffer_mult']):g}"
                 + " x ATR, target mengikuti R:R 1:"
                 + f"{float(cfg.get('ENTRY_MIN_RR_RATIO', 3.0) or 3.0):g}"
@@ -1711,8 +1745,8 @@ def _bt_run_grid_job(
                 "rasio dan rentang hari yang berbeda.",
                 "Grid portofolio menyapu level exit ATR (EXIT_ATR_SL_MULT, "
                 "EXIT_ATR_TP_MULT, EXIT_ATR_TRAIL_MULT, EXIT_BREAKEVEN_TRIGGER_R, EXIT_TRAILING_START_R, "
-                "EXIT_ATR_MAX_SL_PCT, ENTRY_MIN_RR_RATIO) dan ambang candle bullish + EMA "
-                "(EMA_FAST_PERIOD, EMA_SLOW_PERIOD, "
+                "EXIT_ATR_MAX_SL_PCT, ENTRY_MIN_RR_RATIO) dan ambang zona demand + EMA "
+                "(DEMAND_EMA_PERIOD, DEMAND_IMPULSE_ATR_MULT, "
                 "ENTRY_SL_ATR_BUFFER_MULT). Sinyal entry dihitung ulang untuk setiap "
                 "kombinasi parameter sinyal, karena parameter itulah yang menentukan koin "
                 f"mana yang lolos; jumlah kombinasi parameter sinyal dibatasi {gs.MAX_KOMBINASI_MOMENTUM} "
@@ -2268,7 +2302,7 @@ def api_backtest_defaults():
     out["gain_volume"] = strategy.volume_rise_params(PUMP_CONFIG)
     out["confirm_interval"] = str(PUMP_CONFIG.get("CONFIRM_INTERVAL", "15m"))
     out["confirm_lookback_bars"] = int(
-        PUMP_CONFIG.get("CONFIRM_LOOKBACK_BARS", 192) or 192
+        PUMP_CONFIG.get("CONFIRM_LOOKBACK_BARS", 997) or 997
     )
     return jsonify(out)
 
@@ -2293,10 +2327,13 @@ def api_entry_rule():
     symbol = str(request.args.get("symbol", "") or "").strip().upper()
     if not symbol or not re.match(r"^[A-Z0-9]{2,30}$", symbol):
         return jsonify({"error": "symbol tidak valid"}), 400
+    if not symbol.endswith(QUOTE) or len(symbol) <= len(QUOTE):
+        return jsonify({"error": f"symbol harus berakhiran {QUOTE}"}), 400
     try:
-        return jsonify(evaluate_entry_symbol(symbol, PUMP_CONFIG))
+        return jsonify(cached_entry_view(symbol, PUMP_CONFIG))
     except Exception as exc:
-        return jsonify({"error": str(exc)[:200]}), 502
+        logger.warning("Pemeriksaan zona demand %s gagal: %s", symbol, str(exc)[:200])
+        return jsonify({"error": "data candle tidak bisa diambil atau simbol tidak tersedia"}), 502
 
 
 @app.route("/api/coin-icon/<symbol>")

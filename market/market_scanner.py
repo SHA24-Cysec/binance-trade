@@ -135,14 +135,13 @@ class ScanDiagnostics:
         interval = str(config.get("CONFIRM_INTERVAL", "15m"))
         signal = strategy.entry_signal_params(config)
         labels = {
-            "ENTRY_RULE": f"filter candle bullish + EMA {interval}",
+            "ENTRY_RULE": f"filter zona demand + EMA {interval}",
             "CANDLE_CONFIRM": f"candle {interval} gagal diambil",
             "HISTORY_CONFIRM": f"riwayat {interval} kurang",
             "BULLISH_CANDLE": f"candle {interval} bukan bullish",
-            "BULLISH_ENGULFING": f"candle {interval} bukan bullish",
-            "EMA_PRICE": f"close belum di atas EMA {signal['ema_fast']}/{signal['ema_slow']}",
-            "EMA_TREND": f"EMA {signal['ema_fast']} belum di atas EMA {signal['ema_slow']}",
-            "RISK_SL": "jarak Stop Loss candle",
+            "EMA_TREND": f"close belum di atas EMA {signal['ema_period']} pada {interval}, 1h, atau 4h",
+            "DEMAND_ZONE": f"candle {interval} tidak menyentuh zona demand 1h atau 4h",
+            "RISK_SL": "jarak Stop Loss zona demand",
             "VOLUME_24H": "turnover 24 jam tidak naik dibanding rata-rata",
         }
         candle = "belum tersedia"
@@ -156,7 +155,7 @@ class ScanDiagnostics:
             "Diagnostik: setiap simbol dicatat pada gerbang pertama yang gagal.",
         ]
         if strategy.entry_rule_enabled(config):
-            lines.insert(0, f"Filter candle bullish + EMA AKTIF di {interval}: candle terakhir harus bullish (close > open), close di atas EMA {signal['ema_fast']} dan EMA {signal['ema_slow']}, serta EMA cepat di atas EMA lambat.")
+            lines.insert(0, f"Filter zona demand + EMA AKTIF di {interval}: candle terakhir harus bullish (close > open), menyentuh zona demand 1h atau 4h yang belum ditembus, dan close di atas EMA {signal['ema_period']} pada {interval}, 1h, dan 4h.")
         for stage in sorted(self.rejection_counts):
             count = self.rejection_counts.get(stage, 0)
             if not count:
@@ -643,9 +642,8 @@ STAGE_GROUPS = {
     "HISTORY_CONFIRM": "HISTORY_ENTRY",
     "CANDLE_CONFIRM": "CANDLE_ENTRY",
     "BULLISH_CANDLE": "BULLISH_CANDLE",
-    "BULLISH_ENGULFING": "BULLISH_CANDLE",
-    "EMA_PRICE": "EMA_PRICE",
     "EMA_TREND": "EMA_TREND",
+    "DEMAND_ZONE": "DEMAND_ZONE",
     "VOLUME_24H": "VOLUME_24H",
     "RISK_SL": "RISK_SL",
     "ENTRY_RULE": "ENTRY_RULE",

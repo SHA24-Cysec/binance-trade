@@ -263,9 +263,17 @@ def evaluate_entry(
     return entry_rule.evaluate_entry_rule(klines, config, signal_close_time_ms)
 
 
+def demand_zone_snapshot(
+    klines: list[Kline],
+    config: dict,
+    signal_close_time_ms: Optional[int] = None,
+) -> dict:
+    return entry_rule.demand_zone_snapshot(klines, config, signal_close_time_ms)
+
+
 def confirm_window_bars(config: dict) -> int:
-    lookback = int(config.get("CONFIRM_LOOKBACK_BARS", 192) or 192)
-    return max(1, min(1000, max(lookback, required_lookback_bars(config))))
+    lookback = int(config.get("CONFIRM_LOOKBACK_BARS", entry_rule.DEFAULT_LOOKBACK_BARS) or entry_rule.DEFAULT_LOOKBACK_BARS)
+    return max(1, min(entry_rule.MAX_CLOSED_BARS, max(lookback, required_lookback_bars(config))))
 
 
 def resolve_position_notional(config: dict, quote_free: float) -> dict:

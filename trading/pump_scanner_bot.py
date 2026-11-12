@@ -4975,11 +4975,11 @@ def run(
             lifecycle.write("STOPPED", reason=risk_reason)
         return 2
     need_setup = strategy.required_lookback_bars(config)
-    have_bars = int(config.get("CONFIRM_LOOKBACK_BARS", 192))
+    have_bars = int(config.get("CONFIRM_LOOKBACK_BARS", 997))
     if have_bars < need_setup:
         logger.warning(
             "CONFIRM_LOOKBACK_BARS=%d lebih kecil dari %d candle yang dibutuhkan "
-            "filter candle bullish + EMA. Bot tetap mengambil %d candle per konfirmasi agar deteksi "
+            "filter zona demand + EMA. Bot tetap mengambil %d candle per konfirmasi agar deteksi "
             "tidak selalu gagal, tetapi perbaiki nilai config ini supaya backtest dan live "
             "benar-benar memakai angka yang sama.",
             have_bars,
@@ -4991,9 +4991,9 @@ def run(
         atr_bot = strategy.exit_atr_params(config)
         vol_bot = strategy.volume_rise_params(config)
         logger.info(
-            "Filter candle bullish + EMA AKTIF di timeframe %s: candle terakhir harus bullish (close > open), close di atas EMA %d/%d, dan EMA cepat di atas EMA lambat. SL di bawah low candle dengan buffer %.2f x ATR periode %d, target R:R 1:%.2f, trailing %.2f x ATR, batas jarak stop %.2f%%. Syarat turnover 24 jam %s.",
+            "Filter zona demand + EMA AKTIF di timeframe %s: candle terakhir harus bullish (close > open), menyentuh zona demand 1h atau 4h yang belum ditembus (impuls minimal %.2f x ATR), dan close di atas EMA %d pada timeframe pemicu, 1h, dan 4h. SL di bawah zona demand dengan buffer %.2f x ATR periode %d, target R:R 1:%.2f, trailing %.2f x ATR, batas jarak stop %.2f%%. Syarat turnover 24 jam %s.",
             config.get("CONFIRM_INTERVAL", "15m"),
-            int(signal_bot["ema_fast"]), int(signal_bot["ema_slow"]),
+            float(signal_bot["impulse_atr_mult"]), int(signal_bot["ema_period"]),
             float(signal_bot["sl_atr_buffer_mult"]), int(atr_bot["period"]),
             float(config.get("ENTRY_MIN_RR_RATIO", 3.0)), float(atr_bot["trail_mult"]),
             float(atr_bot["max_sl_pct"]),

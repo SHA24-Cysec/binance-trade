@@ -283,8 +283,8 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "PUMP_RANK_CHANGE_WEIGHT": _field("Ranking Hybrid", "Bobot perubahan 24 jam", "Bobot persentil perubahan harga pada skor hybrid.", "float", minimum=0.0, maximum=100.0, unit="bobot"),
     "PUMP_RANK_TURNOVER_WEIGHT": _field("Ranking Hybrid", "Bobot turnover", "Bobot persentil log turnover pada skor hybrid.", "float", minimum=0.0, maximum=100.0, unit="bobot"),
     "PUMP_RANK_ENGULFING_WEIGHT": _field("Ranking Hybrid", "Bobot candle bullish", "Bobot kekuatan body candle bullish terhadap ATR pada skor akhir.", "float", minimum=0.0, maximum=100.0, unit="bobot"),
-    "PUMP_RANK_PRICE_EMA_WEIGHT": _field("Ranking Hybrid", "Bobot jarak harga dari EMA", "Bobot jarak close di atas EMA lambat yang dinormalisasi ATR.", "float", minimum=0.0, maximum=100.0, unit="bobot"),
-    "PUMP_RANK_EMA_TREND_WEIGHT": _field("Ranking Hybrid", "Bobot tren EMA", "Bobot jarak EMA cepat di atas EMA lambat yang dinormalisasi ATR.", "float", minimum=0.0, maximum=100.0, unit="bobot"),
+    "PUMP_RANK_PRICE_EMA_WEIGHT": _field("Ranking Hybrid", "Bobot jarak harga dari EMA", "Bobot jarak close di atas EMA 4h yang dinormalisasi ATR.", "float", minimum=0.0, maximum=100.0, unit="bobot"),
+    "PUMP_RANK_EMA_TREND_WEIGHT": _field("Ranking Hybrid", "Bobot tren EMA", "Bobot jarak EMA 1h di atas EMA 4h yang dinormalisasi ATR.", "float", minimum=0.0, maximum=100.0, unit="bobot"),
     "GAINER_VOLUME_FILTER_ENABLED": _field(
         "Pemilihan Koin",
         "Syarat kenaikan volume 24 jam",
@@ -652,33 +652,23 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         unit="%",
     ),
     "CONFIRM_INTERVAL": _field(
-        "Candle Bullish + EMA",
-        "Interval sinyal",
-        "Timeframe candle untuk sinyal candle bullish dan EMA. Default 30m. Timeframe lebih rendah menghasilkan sinyal lebih sering, tetapi umumnya lebih berisik.",
+        "Zona Demand + EMA",
+        "Interval pemicu entry",
+        "Timeframe candle pemicu entry. Candle ini juga digabung menjadi candle 1h dan 4h untuk mencari zona demand dan menghitung EMA. Hanya 15m dan 30m yang didukung, default 15m.",
         "str",
         editor="select",
         options=[
-            "1m",
-            "3m",
-            "5m",
             "15m",
             "30m",
-            "1h",
-            "2h",
-            "4h",
-            "6h",
-            "8h",
-            "12h",
-            "1d",
         ],
     ),
     "CONFIRM_LOOKBACK_BARS": _field(
-        "Candle Bullish + EMA",
+        "Zona Demand + EMA",
         "Jumlah candle yang diunduh",
-        "Banyaknya candle terakhir yang diambil untuk menghitung candle bullish, EMA, dan ATR. Limit endpoint klines Binance 1000 per panggilan.",
+        "Banyaknya candle pemicu yang diambil untuk membentuk candle 1h dan 4h, zona demand, EMA, dan ATR. Endpoint klines Binance memberi paling banyak 1000 candle per panggilan termasuk candle yang belum tertutup, sehingga batasnya 997.",
         "int",
         minimum=15,
-        maximum=1000,
+        maximum=997,
         unit="candle",
     ),
     "COOLDOWN_MINUTES_AFTER_CLOSE": _field(
@@ -870,33 +860,33 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         maximum=1000,
     ),
     "ENTRY_RULE_ENABLED": _field(
-        "Candle Bullish + EMA",
+        "Zona Demand + EMA",
         "Aktifkan filter entry",
-        "Bot hanya entry pada candle bullish (close > open), close di atas EMA cepat dan lambat, serta EMA cepat di atas EMA lambat.",
+        "Bot hanya entry saat candle pemicu menyentuh zona demand 1h atau 4h yang belum ditembus, ditutup bullish, dan close berada di atas EMA pada timeframe pemicu, 1h, dan 4h.",
         "bool",
     ),
-    "EMA_FAST_PERIOD": _field(
-        "Candle Bullish + EMA",
-        "Periode EMA cepat",
-        "Periode EMA cepat untuk menyaring arah tren. Nilai default 20.",
+    "DEMAND_EMA_PERIOD": _field(
+        "Zona Demand + EMA",
+        "Periode EMA",
+        "Periode EMA yang dipakai pada timeframe pemicu, 1h, dan 4h. Close candle pemicu harus berada di atas ketiga EMA. Maksimum 60 karena riwayat 997 candle 15m hanya memuat 62 candle 4h.",
         "int",
-        minimum=2,
-        maximum=500,
+        minimum=5,
+        maximum=60,
         unit="candle",
     ),
-    "EMA_SLOW_PERIOD": _field(
-        "Candle Bullish + EMA",
-        "Periode EMA lambat",
-        "Periode EMA lambat untuk menyaring arah tren. Nilai default 50 dan harus lebih besar dari EMA cepat.",
-        "int",
-        minimum=3,
-        maximum=1000,
-        unit="candle",
+    "DEMAND_IMPULSE_ATR_MULT": _field(
+        "Zona Demand + EMA",
+        "Kekuatan candle impuls",
+        "Zona demand dibentuk oleh candle sebelum candle naik 1h atau 4h yang body-nya minimal sekian kali ATR dan ditutup di atas high candle sebelumnya. Nilai lebih besar membuat zona lebih sedikit tetapi lebih kuat.",
+        "float",
+        minimum=0.5,
+        maximum=5.0,
+        unit="x ATR",
     ),
     "ENTRY_SL_ATR_BUFFER_MULT": _field(
-        "Candle Bullish + EMA",
-        "Buffer SL di bawah low candle",
-        "Stop Loss ditempatkan di bawah low candle bullish sinyal, dikurangi buffer ATR ini.",
+        "Zona Demand + EMA",
+        "Buffer SL di bawah zona demand",
+        "Stop Loss ditempatkan di bawah batas bawah zona demand, dikurangi buffer ATR timeframe pemicu ini.",
         "float",
         minimum=0.0,
         maximum=10.0,
@@ -1034,6 +1024,8 @@ def _read_doc_unlocked() -> tuple[dict, list[str]]:
 REMOVED_PARAMETERS = frozenset(
     {
         "ENTRY_BULL_CANDLES",
+        "EMA_FAST_PERIOD",
+        "EMA_SLOW_PERIOD",
         "MOMENTUM_BREAKOUT_LOOKBACK",
         "MOMENTUM_BODY_ATR_MULT",
         "MOMENTUM_VOLUME_MULT",
@@ -1469,17 +1461,22 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
 
     if _flag_untuk_relasi(cfg, "ENTRY_RULE_ENABLED", True):
         perlu = _angka_untuk_relasi(cfg, "ENTRY_ATR_PERIOD")
-        ema_cepat = _angka_untuk_relasi(cfg, "EMA_FAST_PERIOD")
-        ema_lambat = _angka_untuk_relasi(cfg, "EMA_SLOW_PERIOD")
-        lookback_kandidat = [int(nilai) for nilai in (perlu, ema_lambat) if nilai is not None]
-        butuh = max([3] + [int(nilai) + 1 for nilai in lookback_kandidat])
-        if ema_cepat is not None and ema_lambat is not None and ema_cepat >= ema_lambat:
-            keluar["EMA_SLOW_PERIOD"] = "harus lebih besar dari EMA_FAST_PERIOD"
+        periode_ema = _angka_untuk_relasi(cfg, "DEMAND_EMA_PERIOD")
+        interval_pemicu = str(cfg.get("CONFIRM_INTERVAL", "15m") or "15m").strip().lower()
         lookback = _angka_untuk_relasi(cfg, "CONFIRM_LOOKBACK_BARS")
-        if lookback is not None and lookback < butuh:
-            keluar["CONFIRM_LOOKBACK_BARS"] = (
-                f"minimal {butuh} candle agar ATR dan EMA lambat punya cukup riwayat"
-            )
+        if interval_pemicu not in ("15m", "30m"):
+            keluar["CONFIRM_INTERVAL"] = "harus 15m atau 30m agar candle bisa digabung menjadi zona demand 1h dan 4h"
+        elif perlu is not None and periode_ema is not None:
+            faktor = 240 // _INTERVAL_MENIT[interval_pemicu]
+            butuh = (max(int(periode_ema), int(perlu) + 2) + 2) * faktor
+            if butuh > 997:
+                keluar["DEMAND_EMA_PERIOD"] = (
+                    f"terlalu besar: butuh {butuh} candle {interval_pemicu}, melebihi batas 997 candle tertutup per panggilan Binance"
+                )
+            elif lookback is not None and lookback < butuh:
+                keluar["CONFIRM_LOOKBACK_BARS"] = (
+                    f"minimal {butuh} candle agar EMA dan zona demand 4h punya cukup riwayat"
+                )
         if _flag_untuk_relasi(cfg, "GAINER_VOLUME_FILTER_ENABLED", True):
             menit_interval = _INTERVAL_MENIT.get(
                 str(cfg.get("CONFIRM_INTERVAL", "15m") or "15m").strip().lower()
@@ -1543,8 +1540,8 @@ def validate_candidate(
 
         if not cleaned.get("ENTRY_RULE_ENABLED"):
             warnings.append(
-                "ENTRY_RULE_ENABLED nonaktif: bot masuk tanpa menunggu candle "
-                "bullish + EMA, hanya mengandalkan seleksi gainer 24 jam dan "
+                "ENTRY_RULE_ENABLED nonaktif: bot masuk tanpa menunggu zona "
+                "demand + EMA, hanya mengandalkan seleksi gainer 24 jam dan "
                 "proteksi orderbook."
             )
         relation(

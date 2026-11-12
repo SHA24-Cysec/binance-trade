@@ -449,9 +449,9 @@ def run_backtest(
     if entry_rule_skips:
         signal_bt = strategy.entry_signal_params(config)
         warnings.append(
-            f"{entry_rule_skips} dari {entry_rule_scans} sinyal dilewati filter candle bullish + EMA "
-            f"({interval}: close di atas EMA {signal_bt['ema_fast']}/{signal_bt['ema_slow']}, "
-            f"EMA cepat di atas EMA lambat, SL low candle dengan buffer {signal_bt['sl_atr_buffer_mult']:g} x ATR)."
+            f"{entry_rule_skips} dari {entry_rule_scans} sinyal dilewati filter zona demand + EMA "
+            f"({interval}: candle bullish di zona demand 1h atau 4h, close di atas EMA {signal_bt['ema_period']} "
+            f"pada {interval}, 1h, dan 4h, SL di bawah zona dengan buffer {signal_bt['sl_atr_buffer_mult']:g} x ATR)."
         )
     risk_summary = controls.summary()
     if risk_summary["kill_switch_triggers"] > 0:
@@ -674,8 +674,8 @@ OVERRIDE_CASTERS = {
     "CONFIRM_INTERVAL": str,
     "CONFIRM_LOOKBACK_BARS": int,
     "ENTRY_RULE_ENABLED": _cast_bool,
-    "EMA_FAST_PERIOD": int,
-    "EMA_SLOW_PERIOD": int,
+    "DEMAND_EMA_PERIOD": int,
+    "DEMAND_IMPULSE_ATR_MULT": float,
     "ENTRY_SL_ATR_BUFFER_MULT": float,
     "ENTRY_ATR_PERIOD": int,
     "EXIT_ATR_SL_MULT": float,
@@ -767,8 +767,8 @@ def validate_params(config: dict) -> None:
         ("GAINER_MAX_CHANGE_PCT", 0.0, 100000.0),
         ("GAINER_VOLUME_RISE_MULT", 0.0, 20.0),
         ("GAINER_VOLUME_AVG_DAYS", 1, 14),
-        ("EMA_FAST_PERIOD", 2, 500),
-        ("EMA_SLOW_PERIOD", 3, 1000),
+        ("DEMAND_EMA_PERIOD", 5, 60),
+        ("DEMAND_IMPULSE_ATR_MULT", 0.5, 5.0),
         ("ENTRY_SL_ATR_BUFFER_MULT", 0.0, 10.0),
         ("ENTRY_ATR_PERIOD", 2, 200),
         ("EXIT_ATR_SL_MULT", 0.1, 20.0),
@@ -950,7 +950,7 @@ def execute_backtest(
 
     spread_pct, slip_pct, delay_bars = entry_execution_params(config)
     assumptions = [
-        "Simulasi 1 koin mengikuti aturan candle bullish dan tren EMA yang sama dengan bot. SL memakai low candle dengan buffer ATR, TP memakai R:R, serta breakeven dan trailing memakai mesin exit yang sama.",
+        "Simulasi 1 koin mengikuti aturan zona demand 1h dan 4h serta EMA tiga timeframe yang sama dengan bot. SL memakai batas bawah zona demand dengan buffer ATR, TP memakai R:R, serta breakeven dan trailing memakai mesin exit yang sama.",
         (
             f"Eksekusi entry menunggu {delay_bars} bar setelah sinyal lalu membeli pada harga open + "
             f"setengah spread ({spread_pct / 2:.3f}%) + slippage ({slippage_label(slip_pct)}%). "
@@ -1009,7 +1009,7 @@ def print_report(data: dict) -> None:
     )
     print("-" * 72)
     exit_info = (
-        f"SL low candle - {p.get('ENTRY_SL_ATR_BUFFER_MULT', 0.1)}x ATR, "
+        f"SL bawah zona demand - {p.get('ENTRY_SL_ATR_BUFFER_MULT', 2.0)}x ATR, "
         f"TP R:R 1:{p.get('ENTRY_MIN_RR_RATIO', 3.0)}, "
         f"trailing {p.get('EXIT_ATR_TRAIL_MULT', 2.0)}x ATR, "
         f"breakeven {p.get('EXIT_ATR_BREAKEVEN_MULT', 1.0)}x ATR, "
@@ -1017,9 +1017,9 @@ def print_report(data: dict) -> None:
         f"MaxHold={p.get('EXIT_MAX_HOLD_HOURS', 24.0):g}h"
     )
     entry_info = (
-        f"candle bullish {p.get('CONFIRM_INTERVAL', '15m')}, close di atas EMA "
-        f"{p.get('EMA_FAST_PERIOD', 20)}/{p.get('EMA_SLOW_PERIOD', 50)}, "
-        f"EMA cepat di atas EMA lambat"
+        f"candle bullish {p.get('CONFIRM_INTERVAL', '15m')} di zona demand 1h/4h "
+        f"(impuls {p.get('DEMAND_IMPULSE_ATR_MULT', 1.0)}x ATR), close di atas EMA "
+        f"{p.get('DEMAND_EMA_PERIOD', 50)} pada 3 timeframe"
         if p.get("ENTRY_RULE_ENABLED", True)
         else "OFF"
     )
@@ -1161,8 +1161,8 @@ def main():
         default=None,
         help="Override ENTRY_ATR_PERIOD.",
     )
-    parser.add_argument("--ema-fast", type=int, default=None, help="Override EMA_FAST_PERIOD.")
-    parser.add_argument("--ema-slow", type=int, default=None, help="Override EMA_SLOW_PERIOD.")
+    parser.add_argument("--ema-period", type=int, default=None, help="Override DEMAND_EMA_PERIOD.")
+    parser.add_argument("--impulse-atr", type=float, default=None, help="Override DEMAND_IMPULSE_ATR_MULT.")
     parser.add_argument("--sl-buffer-atr", type=float, default=None, help="Override ENTRY_SL_ATR_BUFFER_MULT.")
     parser.add_argument(
         "--gainer-min",
@@ -1252,10 +1252,10 @@ def main():
         overrides["EXIT_ATR_TRAIL_MULT"] = args.atr_trail
     if args.atr_period is not None:
         overrides["ENTRY_ATR_PERIOD"] = args.atr_period
-    if args.ema_fast is not None:
-        overrides["EMA_FAST_PERIOD"] = args.ema_fast
-    if args.ema_slow is not None:
-        overrides["EMA_SLOW_PERIOD"] = args.ema_slow
+    if args.ema_period is not None:
+        overrides["DEMAND_EMA_PERIOD"] = args.ema_period
+    if args.impulse_atr is not None:
+        overrides["DEMAND_IMPULSE_ATR_MULT"] = args.impulse_atr
     if args.sl_buffer_atr is not None:
         overrides["ENTRY_SL_ATR_BUFFER_MULT"] = args.sl_buffer_atr
     if args.gainer_min is not None:
