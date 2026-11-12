@@ -4874,7 +4874,7 @@ def should_log_scan_diagnostics(
     now_ms: int,
 ) -> bool:
     return bool(
-        diagnostics.checked_candidates
+        diagnostics.checked_symbols
         and (
             previous_signature != diagnostics.signature()
             or int(now_ms) < int(last_logged_ms)
@@ -5001,7 +5001,7 @@ def run(
         )
     else:
         logger.info(
-            "Aturan entry NONAKTIF: kandidat yang lolos gerbang 24 jam, syarat "
+            "Aturan entry NONAKTIF: simbol yang lolos gerbang 24 jam, syarat "
             "turnover, dan proteksi orderbook langsung memenuhi syarat entry."
         )
     logger.info("=" * 70)
@@ -5324,7 +5324,7 @@ def run(
                     except (KeyError, ValueError):
                         batas_konfirmasi = None
                     scan_diagnostics = scanner.ScanDiagnostics()
-                    best = scanner.find_best_candidate(
+                    pilihan = scanner.scan_entry_candidate(
                         tickers,
                         klines_fetcher,
                         scan_config,
@@ -5334,14 +5334,14 @@ def run(
                         diagnostics=scan_diagnostics,
                         confirm_close_time_ms=batas_konfirmasi,
                     )
-                    if best:
-                        book = client.get_book_ticker(best.symbol)
+                    if pilihan:
+                        book = client.get_book_ticker(pilihan.symbol)
                         bid, ask = float(book["bidPrice"]), float(book["askPrice"])
                         spread_pct = scanner.spread_pct_from_book(bid, ask)
                         max_chase = float(config.get("MAX_CHASE_PCT", 0) or 0)
                         signal_close = (
-                            float(best.setup.signal_close or 0.0)
-                            if (best.setup is not None and best.setup.signal_close)
+                            float(pilihan.setup.signal_close or 0.0)
+                            if (pilihan.setup is not None and pilihan.setup.signal_close)
                             else 0.0
                         )
                         chase_ok = True
@@ -5352,9 +5352,9 @@ def run(
                         ):
                             chase_ok = False
                             logger.info(
-                                "Kandidat %s dilewati: ask %.8f sudah %+.2f%% di atas "
+                                "Simbol %s dilewati: ask %.8f sudah %+.2f%% di atas "
                                 "close candle sinyal %.8f (batas MAX_CHASE_PCT %.2f%%).",
-                                best.symbol,
+                                pilihan.symbol,
                                 ask,
                                 (ask / signal_close - 1.0) * 100.0,
                                 signal_close,
@@ -5362,23 +5362,23 @@ def run(
                             )
                         if spread_pct <= config["MAX_SPREAD_PCT"] and chase_ok:
                             logger.info(
-                                "Kandidat terpilih: %s (vol24h=%.0f, spread=%.3f%%) | %s",
-                                best.symbol,
-                                best.quote_volume,
+                                "Entry dipilih: %s (vol24h=%.0f, spread=%.3f%%) | %s",
+                                pilihan.symbol,
+                                pilihan.quote_volume,
                                 spread_pct,
-                                best.confirm_reason,
+                                pilihan.confirm_reason,
                             )
                             min_age = float(config.get("MIN_LISTING_AGE_DAYS", 0) or 0)
                             if min_age > 0:
                                 try:
                                     age = listing_age_days(
-                                        client, best.symbol, state_mod.now_ms()
+                                        client, pilihan.symbol, state_mod.now_ms()
                                     )
                                 except BinanceAPIError as exc:
                                     logger.warning(
                                         "Usia listing %s tidak bisa diverifikasi (%s). "
                                         "Entry dilewati demi keamanan.",
-                                        best.symbol,
+                                        pilihan.symbol,
                                         exc,
                                     )
                                     continue_scan_entry = False
@@ -5387,9 +5387,9 @@ def run(
                                     continue_scan_entry = True
                                 if age is not None and age < min_age:
                                     logger.info(
-                                        "Kandidat %s dilewati: baru listing %.1f hari "
+                                        "Simbol %s dilewati: baru listing %.1f hari "
                                         "(batas minimal %.0f hari).",
-                                        best.symbol,
+                                        pilihan.symbol,
                                         age,
                                         min_age,
                                     )
@@ -5402,28 +5402,28 @@ def run(
                                     config,
                                     filters_cache,
                                     state,
-                                    best,
+                                    pilihan,
                                     reference_price=ask,
                                 )
                         else:
                             logger.info(
-                                "Kandidat %s dilewati: spread %.3f%% > batas %.3f%%.",
-                                best.symbol,
+                                "Simbol %s dilewati: spread %.3f%% > batas %.3f%%.",
+                                pilihan.symbol,
                                 spread_pct,
                                 config["MAX_SPREAD_PCT"],
                             )
-                    if not best:
+                    if not pilihan:
                         logger.info(
-                            "Tidak ada kandidat entry pada scan ini (%d diperiksa dari "
-                            "%d yang lolos filter pasar).",
-                            scan_diagnostics.checked_candidates,
-                            scan_diagnostics.market_candidates,
+                            "Tidak ada entry pada scan ini (%d diperiksa dari "
+                            "%d simbol yang lolos filter pasar).",
+                            scan_diagnostics.checked_symbols,
+                            scan_diagnostics.market_symbols,
                         )
                     structure_rejection_logged = (
                         strategy.entry_rule_enabled(scan_config)
                         and scan_diagnostics.rejection_counts.get("BULL_SEQUENCE", 0) > 0
                     )
-                    if not best or structure_rejection_logged:
+                    if not pilihan or structure_rejection_logged:
                         diagnostic_now_ms = state_mod.now_ms()
                         if should_log_scan_diagnostics(
                             scan_diagnostics,

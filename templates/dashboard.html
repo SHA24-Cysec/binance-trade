@@ -2480,8 +2480,8 @@
             Simulasi ini memindai <b>seluruh pasar</b> seperti bot asli:
             mengurutkan semua pair berdasarkan volume perdagangan 24 jam di setiap titik
             waktu setelah lolos saringan likuiditas dan kondisi pasar sesuai konfigurasi,
-            mengonfirmasi kandidat teratas satu per satu, mengambil
-            <b>yang pertama lolos</b>, dan hanya memegang
+            memeriksa simbol yang lolos saringan satu per satu tanpa batas jumlah,
+            mengambil <b>yang pertama lolos</b>, dan hanya memegang
             <b>satu posisi</b> pada satu waktu. Hasilnya menjawab "berapa hasil
             bot saya", bukan sekadar "bagaimana kalau bot hanya memantau satu
             koin ini". Backtest bersifat read-only, tidak menyentuh bot atau
@@ -3005,7 +3005,6 @@
                       <th>Entry</th>
                       <th>Exit</th>
                       <th>SL / TP (ATR)</th>
-                      <th>Peringkat</th>
                       <th>Hold</th>
                       <th>PnL %</th>
                       <th>Alasan</th>
@@ -5613,7 +5612,6 @@
               <td class="mono">${fmtP(t.entry_price)}</td>
               <td class="mono">${fmtP(t.exit_price)}</td>
               <td class="mono mut">${t.sl_pct?fmtP(t.sl_pct):'-'} / ${t.tp_pct?fmtP(t.tp_pct):'-'}</td>
-              <td class="mono mut">#${fmt(t.rank_at_entry,0)}</td>
               <td class="mono">${Math.round(t.hold_minutes)} mnt</td>
               <td class="mono ${cls(t.pnl_pct)}">${sign(t.pnl_pct)}${fmt(t.pnl_pct)}%</td>
               <td><span class="tag ${btReasonTagClass(t.reason)}">${btReasonLabel(t.reason)}</span></td>

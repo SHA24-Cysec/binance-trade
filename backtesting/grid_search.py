@@ -1151,7 +1151,6 @@ def _uji_grid_portofolio_momentum(check) -> None:
             "COOLDOWN_MINUTES_AFTER_CLOSE": 0,
             "MIN_SECONDS_BETWEEN_TRADES": 0,
             "MAX_CHASE_PCT": 0.0,
-            "TOP_N_CANDIDATES_TO_CONFIRM": 10,
         }
     )
     store = new_backtest_store(cfg)

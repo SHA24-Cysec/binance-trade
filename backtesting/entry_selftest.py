@@ -178,17 +178,47 @@ def cek_ambang_pump_dinamis() -> str:
     return "ambang pump dinamis memakai persentil terjepit dan fallback aman"
 
 
-def cek_ranking_hybrid() -> str:
+def cek_urutan_scan() -> str:
     cfg = config_dasar()
-    cfg.update({"PUMP_DYNAMIC_MIN_SAMPLE": 5, "MIN_QUOTE_VOLUME_USDT_24H": 0.0})
-    tickers = [{"symbol": f"COIN{i}USDT", "quoteVolume": str(1_000_000 * (i + 1)), "lastPrice": "1", "priceChangePercent": str(i * 2)} for i in range(8)]
-    ranked = scanner.filter_and_rank_candidates(tickers, cfg)
-    assert ranked and all(candidate.market_score >= 0.0 for candidate in ranked)
-    assert ranked[0].market_score >= ranked[-1].market_score
-    return "shortlist pasar diurutkan dengan skor hybrid perubahan dan turnover"
+    cfg.update({"PUMP_DYNAMIC_FILTER_ENABLED": False, "GAINER_MIN_CHANGE_PCT": 8.0, "GAINER_MAX_CHANGE_PCT": 30.0, "MIN_QUOTE_VOLUME_USDT_24H": 0.0})
+    tickers = [{"symbol": f"COIN{i}USDT", "quoteVolume": str(1_000_000 * (i + 1)), "lastPrice": "1", "priceChangePercent": str(10 if i % 2 else 20)} for i in range(6)]
+    eligible = scanner.filter_eligible_candidates(tickers, cfg)
+    assert len(eligible) == 6
+    assert [c.change_pct for c in eligible] == sorted((c.change_pct for c in eligible), reverse=True)
+    assert not any(hasattr(c, "market_score") or hasattr(c, "hybrid_score") for c in eligible)
+    sempit = scanner.filter_eligible_candidates(tickers, dict(cfg, GAINER_MAX_CHANGE_PCT=15.0))
+    assert len(sempit) == 3 and all(c.change_pct <= 15.0 for c in sempit)
+    return "simbol lolos saringan diurutkan berdasarkan kenaikan lalu turnover, tanpa skor peringkat"
 
 
-CHECKS = (cek_konfigurasi, cek_resample, cek_sinyal_lolos, cek_pola_ditolak, cek_ema_ditolak, cek_zona_ditolak, cek_zona_tembus, cek_batas_strict, cek_anti_lookahead, cek_interval, cek_scanner, cek_ambang_pump_dinamis, cek_ranking_hybrid)
+def cek_scan_tanpa_batas_kandidat() -> str:
+    cfg = config_dasar()
+    cfg.update({"PUMP_DYNAMIC_FILTER_ENABLED": False, "GAINER_MIN_CHANGE_PCT": 0.0, "GAINER_MAX_CHANGE_PCT": 0.0, "MIN_QUOTE_VOLUME_USDT_24H": 0.0})
+    valid = seri_sinyal()
+    tickers = [{"symbol": f"COIN{i}USDT", "quoteVolume": str(1_000_000 - i), "lastPrice": "1", "priceChangePercent": str(10 + i)} for i in range(45)]
+    nama_valid = "COIN40USDT"
+    dipanggil: list[str] = []
+
+    def fetcher(symbol: str):
+        dipanggil.append(symbol)
+        return list(valid) if symbol == nama_valid else []
+
+    pilihan = scanner.scan_entry_candidate(tickers, fetcher, cfg)
+    assert pilihan is not None and pilihan.symbol == nama_valid, pilihan
+    assert pilihan.confirmed and pilihan.setup is not None and pilihan.setup.ok
+    assert dipanggil.count(nama_valid) == 1
+    assert len(dipanggil) == 5, len(dipanggil)
+
+    diag = scanner.ScanDiagnostics()
+    tidak_ada = scanner.scan_entry_candidate(tickers[:3], fetcher, cfg, diagnostics=diag)
+    assert tidak_ada is None
+    assert diag.checked_symbols == 3 and diag.market_symbols == 3
+    for kunci in ("TOP_N_CANDIDATES_TO_CONFIRM", "PUMP_RANK_CHANGE_WEIGHT", "PUMP_RANK_TURNOVER_WEIGHT", "PUMP_RANK_ENGULFING_WEIGHT", "PUMP_RANK_PRICE_EMA_WEIGHT", "PUMP_RANK_EMA_TREND_WEIGHT"):
+        assert kunci not in PUMP_CONFIG and kunci not in PARAMETER_SCHEMA and kunci in REMOVED_PARAMETERS, kunci
+    return "pemindaian berhenti pada simbol pertama yang lolos tanpa batas jumlah kandidat, kunci peringkat lama dibuang dari settings"
+
+
+CHECKS = (cek_konfigurasi, cek_resample, cek_sinyal_lolos, cek_pola_ditolak, cek_ema_ditolak, cek_zona_ditolak, cek_zona_tembus, cek_batas_strict, cek_anti_lookahead, cek_interval, cek_scanner, cek_ambang_pump_dinamis, cek_urutan_scan, cek_scan_tanpa_batas_kandidat)
 
 
 def run(verbose: bool = False) -> tuple[bool, list[str]]:

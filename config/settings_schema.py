@@ -213,7 +213,7 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "WS_LAST_PRICE_OVERLAY_ENABLED": _field(
         "Sistem",
         "Timpa harga terakhir dari WebSocket",
-        "Harga terakhir pada snapshot ticker ditimpa dengan harga terbaru dari stream !miniTicker@arr. Hanya memengaruhi harga acuan cadangan, tidak pernah mengubah lolos atau tidaknya suatu kandidat.",
+        "Harga terakhir pada snapshot ticker ditimpa dengan harga terbaru dari stream !miniTicker@arr. Hanya memengaruhi harga acuan cadangan, tidak pernah mengubah lolos atau tidaknya suatu simbol.",
         "bool",
     ),
     "MARKET_SCAN_INTERVAL_SECONDS": _field(
@@ -280,11 +280,6 @@ PARAMETER_SCHEMA: dict[str, dict] = {
     "PUMP_DYNAMIC_MIN_SAMPLE": _field("Pump Dinamis 24 Jam", "Minimum sampel", "Jumlah ticker valid minimum sebelum persentil dinamis digunakan.", "int", minimum=5, maximum=5000, unit="ticker"),
     "PUMP_FALLBACK_MIN_CHANGE_PCT": _field("Pump Dinamis 24 Jam", "Minimum fallback", "Batas bawah cadangan saat jumlah sampel tidak cukup.", "float", minimum=-100.0, maximum=100.0, unit="%"),
     "PUMP_FALLBACK_MAX_CHANGE_PCT": _field("Pump Dinamis 24 Jam", "Maksimum fallback", "Batas atas cadangan saat jumlah sampel tidak cukup.", "float", minimum=0.0, maximum=1000.0, unit="%"),
-    "PUMP_RANK_CHANGE_WEIGHT": _field("Ranking Hybrid", "Bobot perubahan 24 jam", "Bobot persentil perubahan harga pada skor hybrid.", "float", minimum=0.0, maximum=100.0, unit="bobot"),
-    "PUMP_RANK_TURNOVER_WEIGHT": _field("Ranking Hybrid", "Bobot turnover", "Bobot persentil log turnover pada skor hybrid.", "float", minimum=0.0, maximum=100.0, unit="bobot"),
-    "PUMP_RANK_ENGULFING_WEIGHT": _field("Ranking Hybrid", "Bobot candle bullish", "Bobot kekuatan body candle bullish terhadap ATR pada skor akhir.", "float", minimum=0.0, maximum=100.0, unit="bobot"),
-    "PUMP_RANK_PRICE_EMA_WEIGHT": _field("Ranking Hybrid", "Bobot jarak harga dari EMA", "Bobot jarak close di atas EMA 4h yang dinormalisasi ATR.", "float", minimum=0.0, maximum=100.0, unit="bobot"),
-    "PUMP_RANK_EMA_TREND_WEIGHT": _field("Ranking Hybrid", "Bobot tren EMA", "Bobot jarak EMA 1h di atas EMA 4h yang dinormalisasi ATR.", "float", minimum=0.0, maximum=100.0, unit="bobot"),
     "GAINER_VOLUME_FILTER_ENABLED": _field(
         "Pemilihan Koin",
         "Syarat kenaikan volume 24 jam",
@@ -851,14 +846,6 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         maximum=100.0,
         unit="USDT",
     ),
-    "TOP_N_CANDIDATES_TO_CONFIRM": _field(
-        "Scan",
-        "Jumlah kandidat konfirmasi",
-        "Berapa kandidat teratas yang diperiksa.",
-        "int",
-        minimum=1,
-        maximum=1000,
-    ),
     "ENTRY_RULE_ENABLED": _field(
         "Zona Demand + EMA",
         "Aktifkan filter entry",
@@ -1023,6 +1010,12 @@ def _read_doc_unlocked() -> tuple[dict, list[str]]:
 
 REMOVED_PARAMETERS = frozenset(
     {
+        "TOP_N_CANDIDATES_TO_CONFIRM",
+        "PUMP_RANK_CHANGE_WEIGHT",
+        "PUMP_RANK_TURNOVER_WEIGHT",
+        "PUMP_RANK_ENGULFING_WEIGHT",
+        "PUMP_RANK_PRICE_EMA_WEIGHT",
+        "PUMP_RANK_EMA_TREND_WEIGHT",
         "ENTRY_BULL_CANDLES",
         "EMA_FAST_PERIOD",
         "EMA_SLOW_PERIOD",
@@ -1454,10 +1447,6 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
             keluar["PUMP_DYNAMIC_MAX_CAP_PCT"] = "harus sama dengan atau lebih besar dari lantai maksimum"
         if fallback_min is not None and fallback_max is not None and fallback_min > fallback_max:
             keluar["PUMP_FALLBACK_MAX_CHANGE_PCT"] = "harus lebih besar dari minimum fallback"
-        weight_keys = ("PUMP_RANK_CHANGE_WEIGHT", "PUMP_RANK_TURNOVER_WEIGHT", "PUMP_RANK_ENGULFING_WEIGHT", "PUMP_RANK_PRICE_EMA_WEIGHT", "PUMP_RANK_EMA_TREND_WEIGHT")
-        weights = [_angka_untuk_relasi(cfg, key) for key in weight_keys]
-        if all(value is not None for value in weights) and sum(weights) <= 0:
-            keluar["PUMP_RANK_CHANGE_WEIGHT"] = "jumlah seluruh bobot ranking harus lebih besar dari nol"
 
     if _flag_untuk_relasi(cfg, "ENTRY_RULE_ENABLED", True):
         perlu = _angka_untuk_relasi(cfg, "ENTRY_ATR_PERIOD")

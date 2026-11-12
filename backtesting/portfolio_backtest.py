@@ -36,6 +36,13 @@ from backtesting.backtest import (
 DATA_END_REASON = "DATA_END"
 
 
+def _candle_pemicu_bullish(bar) -> bool:
+    try:
+        return float(bar.close) > float(bar.open)
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
 @dataclass
 class PortfolioTrade:
     symbol: str
@@ -51,8 +58,6 @@ class PortfolioTrade:
     sl_pct: float
     tp_pct: float
     exit_source: str
-    rank_at_entry: int
-    candidates_at_entry: int
     position_notional: float = 0.0
     equity_before: float = 0.0
     equity_after: float = 0.0
@@ -103,11 +108,11 @@ def select_universe(
     cfg = dict(config)
     cfg["MIN_QUOTE_VOLUME_USDT_24H"] = float(config.get("MIN_QUOTE_VOLUME_USDT_24H", 0))
 
-    ranked = scanner.filter_and_rank_candidates(
+    eligible = scanner.filter_eligible_candidates(
         tickers, cfg, tradable_symbols, apply_market_gate=False
     )
-    ranked.sort(key=lambda c: c.quote_volume, reverse=True)
-    symbols = [c.symbol for c in ranked]
+    eligible.sort(key=lambda c: c.quote_volume, reverse=True)
+    symbols = [c.symbol for c in eligible]
     if max_symbols is not None and max_symbols > 0:
         symbols = symbols[:max_symbols]
     return symbols
@@ -397,8 +402,7 @@ def precompute_entry_signals(
 
     lookback = strategy.confirm_window_bars(config)
     min_vol = float(config["MIN_QUOTE_VOLUME_USDT_24H"])
-    top_n = int(config.get("TOP_N_CANDIDATES_TO_CONFIRM", 10))
-    store.set_cache_size(_resolve_symbol_cache_size(config, top_n))
+    store.set_cache_size(_resolve_symbol_cache_size(config))
 
     first_allowed_time = timeline[0] + warmup_ms_int
 
@@ -436,12 +440,10 @@ def precompute_entry_signals(
 
         if not board:
             continue
-        board.sort(key=lambda x: (-x[0], -x[1]))
+        board.sort(key=lambda x: (-x[0], -x[1], x[2]))
 
         lolos = []
-        for rank, (pct24, vol24, sym, i, close_time) in enumerate(
-            board[:top_n], start=1
-        ):
+        for pct24, vol24, sym, i, close_time in board:
             if i + 1 < lookback:
                 continue
             waktu_bar = int(t_now)
@@ -452,11 +454,20 @@ def precompute_entry_signals(
             else:
                 kl = store.klines(sym)
                 window_kl = kl[start_w : i + 1]
-            if strategy.entry_rule_enabled(config):
+            aturan_aktif = strategy.entry_rule_enabled(config)
+            if aturan_aktif:
                 signals.entry_rule_scans += 1
                 signals.entry_rule_scans_by_time[waktu_bar] = (
                     signals.entry_rule_scans_by_time.get(waktu_bar, 0) + 1
                 )
+                if not _candle_pemicu_bullish(window_kl[-1]):
+                    signals.entry_rule_skips += 1
+                    signals.entry_rule_skips_by_time[waktu_bar] = (
+                        signals.entry_rule_skips_by_time.get(waktu_bar, 0) + 1
+                    )
+                    if len(signals.entry_rule_events) < max_skipped_records:
+                        signals.entry_rule_events.append((waktu_bar, sym))
+                    continue
             try:
                 setup = scanner.detect_entry_setup(
                     window_kl,
@@ -477,39 +488,24 @@ def precompute_entry_signals(
                     if len(signals.entry_rule_events) < max_skipped_records:
                         signals.entry_rule_events.append((waktu_bar, sym))
                 continue
-            lolos.append((rank, sym, i, vol24, setup))
+            lolos.append((sym, i, vol24, setup))
 
         if not lolos:
             continue
 
-        lolos.sort(
-            key=lambda row: scanner.setup_quality_key(
-                row[4],
-                scanner.Candidate(
-                    row[1],
-                    "",
-                    row[3],
-                    (
-                        series_of[row[1]].kline_at(row[2]).close
-                        if series_of[row[1]].has_ohlcv
-                        else store.klines(row[1])[row[2]].close
-                    ),
-                ),
-            )
-        )
-        signals.signals[int(t_now)] = (len(board), lolos)
+        signals.signals[int(t_now)] = lolos
 
     if progress_cb:
         progress_cb(1.0)
     return signals
 
 
-def _resolve_symbol_cache_size(config: dict, top_n: int) -> int:
+def _resolve_symbol_cache_size(config: dict) -> int:
     diminta = int(
         config.get("BACKTEST_SYMBOL_CACHE_SIZE", storage.DEFAULT_SYMBOL_CACHE_SIZE)
         or storage.DEFAULT_SYMBOL_CACHE_SIZE
     )
-    return max(1, diminta, 2 * int(top_n) + 4)
+    return max(1, diminta)
 
 
 def run_portfolio_backtest(
@@ -559,9 +555,8 @@ def run_portfolio_backtest(
 
     lookback = strategy.confirm_window_bars(config)
     min_vol = float(config["MIN_QUOTE_VOLUME_USDT_24H"])
-    top_n = int(config.get("TOP_N_CANDIDATES_TO_CONFIRM", 10))
     if entry_signal_cache is None:
-        store.set_cache_size(_resolve_symbol_cache_size(config, top_n))
+        store.set_cache_size(_resolve_symbol_cache_size(config))
     else:
         cache_size = int(
             config.get("BACKTEST_SYMBOL_CACHE_SIZE", storage.DEFAULT_SYMBOL_CACHE_SIZE)
@@ -624,8 +619,6 @@ def run_portfolio_backtest(
     entry_time = 0
     position_notional = 0.0
     equity_before_entry = 0.0
-    rank_at_entry = 0
-    cands_at_entry = 0
     next_entry_allowed_at = 0
     chase_skips = 0
     entry_rule_skips = 0
@@ -759,7 +752,7 @@ def run_portfolio_backtest(
                 if not gate_ok:
                     continue
                 board.append((pct24, vol24, sym, pos))
-            board.sort(key=lambda x: (-x[0], -x[1]))
+            board.sort(key=lambda x: (-x[0], -x[1], x[2]))
 
         if holding is not None:
             held_series = series_of[holding]
@@ -839,8 +832,6 @@ def run_portfolio_backtest(
                         sl_pct=position.levels["sl"],
                         tp_pct=position.levels["tp"],
                         exit_source=position.levels["src"],
-                        rank_at_entry=rank_at_entry,
-                        candidates_at_entry=cands_at_entry,
                         position_notional=position_notional,
                         equity_before=equity_before_entry,
                         equity_after=equity_after,
@@ -868,12 +859,12 @@ def run_portfolio_backtest(
 
             if len(skipped) < max_skipped_records:
                 if entry_signal_cache is None:
-                    for _rank, (_pct24, _vol24, sym, i) in enumerate(
-                        board[:top_n], start=1
-                    ):
+                    for _pct24, _vol24, sym, i in board:
                         if sym == holding:
                             continue
                         kl = store.klines(sym)
+                        if strategy.entry_rule_enabled(config) and not _candle_pemicu_bullish(kl[i]):
+                            continue
                         window_kl = kl[max(0, i - lookback + 1) : i + 1]
                         setup_skip = scanner.detect_entry_setup(
                             window_kl,
@@ -893,7 +884,7 @@ def run_portfolio_backtest(
                 else:
                     cached = entry_signal_cache.get(int(t_now))
                     if cached:
-                        for _rank, sym, _i, _vol24, _setup in cached[1]:
+                        for sym, _i, _vol24, _setup in cached:
                             if sym == holding:
                                 continue
                             if parity.same_coin_blocked(sym, t_now, symbol_blocks):
@@ -917,8 +908,10 @@ def run_portfolio_backtest(
         if t_now < next_entry_allowed_at:
             if len(skipped) < max_skipped_records:
                 if entry_signal_cache is None and board:
-                    for _pct24, _vol24, sym, i in board[:top_n]:
+                    for _pct24, _vol24, sym, i in board:
                         kl = store.klines(sym)
+                        if strategy.entry_rule_enabled(config) and not _candle_pemicu_bullish(kl[i]):
+                            continue
                         window_kl = kl[max(0, i - lookback + 1) : i + 1]
                         if scanner.detect_entry_setup(
                             window_kl,
@@ -937,7 +930,7 @@ def run_portfolio_backtest(
                 elif entry_signal_cache is not None:
                     cached = entry_signal_cache.get(int(t_now))
                     if cached:
-                        for _rank, sym, _i, _vol24, _setup in cached[1]:
+                        for sym, _i, _vol24, _setup in cached:
                             if parity.same_coin_blocked(sym, t_now, symbol_blocks):
                                 continue
                             skipped.append(
@@ -955,15 +948,28 @@ def run_portfolio_backtest(
             if not board:
                 continue
 
-            eligible = board[:top_n]
+            eligible = board
             lolos = []
-            for rank, (pct24, vol24, sym, i) in enumerate(eligible, start=1):
+            for pct24, vol24, sym, i in eligible:
                 if i + 1 < lookback:
                     continue
                 kl = store.klines(sym)
                 window_kl = kl[max(0, i - lookback + 1) : i + 1]
-                if strategy.entry_rule_enabled(config):
+                aturan_aktif = strategy.entry_rule_enabled(config)
+                if aturan_aktif:
                     entry_rule_scans += 1
+                    if not _candle_pemicu_bullish(kl[i]):
+                        entry_rule_skips += 1
+                        if len(skipped) < max_skipped_records:
+                            skipped.append(
+                                SkippedSignal(
+                                    time=t_now,
+                                    symbol=sym,
+                                    reason="FILTER_ENTRY_RULE",
+                                    holding=None,
+                                )
+                            )
+                        continue
                 try:
                     setup = scanner.detect_entry_setup(
                         window_kl,
@@ -988,25 +994,15 @@ def run_portfolio_backtest(
                                 )
                             )
                     continue
-                lolos.append((rank, sym, i, vol24, setup))
+                lolos.append((sym, i, vol24, setup))
 
             if not lolos:
                 continue
-
-            lolos.sort(
-                key=lambda row: scanner.setup_quality_key(
-                    row[4],
-                    scanner.Candidate(
-                        row[1], "", row[3], store.klines(row[1])[row[2]].close
-                    ),
-                )
-            )
-            eligible_count = len(eligible)
         else:
             cached_entry = entry_signal_cache.get(int(t_now))
             if cached_entry is None:
                 continue
-            eligible_count, raw_lolos = cached_entry
+            raw_lolos = cached_entry
             if not raw_lolos:
                 continue
             same_exit_cfg = tuple(exit_level_signature(config)) == tuple(
@@ -1016,7 +1012,7 @@ def run_portfolio_backtest(
                 lolos = list(raw_lolos)
             else:
                 lolos = []
-                for r_rank, r_sym, r_i, r_vol24, r_setup in raw_lolos:
+                for r_sym, r_i, r_vol24, r_setup in raw_lolos:
                     info = strategy.compute_entry_exit_levels(
                         float(r_setup.signal_close or 0.0),
                         config,
@@ -1038,7 +1034,6 @@ def run_portfolio_backtest(
                         continue
                     lolos.append(
                         (
-                            r_rank,
                             r_sym,
                             r_i,
                             r_vol24,
@@ -1072,25 +1067,10 @@ def run_portfolio_backtest(
         lolos = lolos_tersedia
         if not lolos:
             continue
-        rank, sym, i, _vol24, setup_terpilih = lolos[0]
+        sym, i, _vol24, setup_terpilih = lolos[0]
         sizing = strategy.resolve_position_notional(config, equity)
         if sizing["notional"] <= 0 or sizing["notional"] > equity:
             continue
-
-        if len(skipped) < max_skipped_records:
-            for _r2, sym2, _i2, _v2, _s2 in lolos:
-                if sym2 == sym:
-                    continue
-                skipped.append(
-                    SkippedSignal(
-                        time=t_now,
-                        symbol=sym2,
-                        reason="KALAH_KUALITAS_SETUP",
-                        holding=sym,
-                    )
-                )
-                if len(skipped) >= max_skipped_records:
-                    break
 
         entry_series = series_of[sym]
         entry_idx = i + entry_delay_bars
@@ -1154,8 +1134,6 @@ def run_portfolio_backtest(
         equity_before_entry = equity
         entry_price = exec_entry_price
         entry_time = entry_time_value
-        rank_at_entry = rank
-        cands_at_entry = eligible_count
         if entry_delay_bars > 0:
             next_bi = bisect_left(timeline, entry_time_value)
             if next_bi > bi:
@@ -1198,7 +1176,7 @@ def run_portfolio_backtest(
     if entry_rule_skips:
         signal_pb = strategy.entry_signal_params(config)
         warnings.append(
-            f"{entry_rule_skips} dari {entry_rule_scans} kandidat top gainer dilewati "
+            f"{entry_rule_skips} dari {entry_rule_scans} sinyal simbol lolos saringan dilewati "
             f"filter zona demand + EMA ({interval}: candle bullish di zona demand 1h atau 4h, "
             f"close di atas EMA {signal_pb['ema_period']} pada {interval}, 1h, dan 4h, "
             f"SL di bawah zona dengan buffer {signal_pb['sl_atr_buffer_mult']:g} x ATR)."
@@ -1437,9 +1415,6 @@ def summarize_portfolio(result: PortfolioResult) -> dict:
             if p < 0
         ],
         "skipped_signals": len(result.skipped),
-        "avg_rank_at_entry": (
-            (sum(t.rank_at_entry for t in trades) / total) if total else 0.0
-        ),
         "exposure_pct": exposure,
         "span_days": span_days,
         "trades_per_day": (total / span_days) if span_days > 0 else 0.0,
@@ -1576,8 +1551,6 @@ def execute_portfolio_backtest(
             "sl_pct": round(t.sl_pct, 6),
             "tp_pct": round(t.tp_pct, 6),
             "exit_source": t.exit_source,
-            "rank_at_entry": t.rank_at_entry,
-            "candidates_at_entry": t.candidates_at_entry,
             "position_notional": round(t.position_notional, 2),
             "equity_before": round(t.equity_before, 2),
             "equity_after": round(t.equity_after, 2),
@@ -1689,7 +1662,6 @@ def selftest() -> bool:
                 "COOLDOWN_MINUTES_AFTER_CLOSE": 0,
                 "MIN_SECONDS_BETWEEN_TRADES": 0,
                 "MAX_CHASE_PCT": 0.0,
-                "TOP_N_CANDIDATES_TO_CONFIRM": 10,
             }
         )
         return cfg

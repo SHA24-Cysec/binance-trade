@@ -1063,11 +1063,6 @@ BT_PARAM_KEYS = (
     "PUMP_DYNAMIC_MIN_SAMPLE",
     "PUMP_FALLBACK_MIN_CHANGE_PCT",
     "PUMP_FALLBACK_MAX_CHANGE_PCT",
-    "PUMP_RANK_CHANGE_WEIGHT",
-    "PUMP_RANK_TURNOVER_WEIGHT",
-    "PUMP_RANK_ENGULFING_WEIGHT",
-    "PUMP_RANK_PRICE_EMA_WEIGHT",
-    "PUMP_RANK_EMA_TREND_WEIGHT",
     "DEMAND_EMA_PERIOD",
     "DEMAND_IMPULSE_ATR_MULT",
     "ENTRY_SL_ATR_BUFFER_MULT",
@@ -1457,7 +1452,6 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "sl_pct": getattr(t, "sl_pct", None),
                 "tp_pct": getattr(t, "tp_pct", None),
                 "exit_source": getattr(t, "exit_source", None),
-                "rank_at_entry": t.rank_at_entry,
             }
             for t in result.trades
         ]
@@ -1520,8 +1514,8 @@ def _bt_run_job(job_id: str, days: int, overrides: dict, max_symbols: int):
                 "Hasil di sini karenanya masih cenderung lebih baik daripada kenyataan.",
                 "Statistik 24 jam DIREKONSTRUKSI dari candle, bukan diambil dari snapshot "
                 "ticker/24hr historis (Binance tidak menyediakannya). Nilainya sangat dekat "
-                "tetapi tidak identik dengan yang dilihat bot saat itu. Volume itulah yang "
-                "menentukan simbol mana yang masuk top-N kandidat per bar.",
+                "tetapi tidak identik dengan yang dilihat bot saat itu. Angka itulah yang "
+                "menentukan simbol mana yang lolos saringan pasar per bar.",
                 "Syarat kenaikan turnover 24 jam "
                 + (
                     f"disimulasikan: turnover 24 jam terakhir harus minimal "
@@ -1752,9 +1746,13 @@ def _bt_run_grid_job(
                 f"mana yang lolos; jumlah kombinasi parameter sinyal dibatasi {gs.MAX_KOMBINASI_MOMENTUM} "
                 "supaya waktu jalan tetap wajar. Kombinasi yang melanggar aturan relasi "
                 "atau batas R:R otomatis dilewati dan dihitung pada kolom dilewati.",
+                "Setiap simbol yang lolos saringan pasar diperiksa satu per satu "
+                "sampai ada yang lolos aturan entry, tanpa batas jumlah simbol, sama "
+                "seperti bot live. Semakin longgar saringan gainer, semakin lama "
+                "simulasi berjalan.",
                 "Statistik 24 jam DIREKONSTRUKSI dari candle, bukan snapshot "
                 "ticker/24hr historis. Volume itulah yang menentukan simbol mana yang "
-                "masuk top-N kandidat per bar.",
+                "lolos saringan pasar per bar.",
                 "Fill memodelkan spread, slippage, dan fee taker dua sisi. Kedalaman "
                 "order book TIDAK dimodelkan, jadi order besar di koin tipis akan "
                 "lebih buruk dari hasil di sini. Filter kedalaman, ketimpangan bid/ask, dan "

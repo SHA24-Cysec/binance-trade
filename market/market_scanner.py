@@ -48,6 +48,7 @@ STABLE_BASE_ASSETS = {
 LEVERAGED_TOKEN_SUFFIXES = ("UP", "DOWN", "BULL", "BEAR")
 SELL_WALL_MIN_LEVELS = 3
 VALID_DEPTH_LIMITS = (100, 500, 1000)
+SCAN_CONFIRM_BATCH = 20
 
 
 @dataclass
@@ -83,9 +84,6 @@ class Candidate:
     quote_volume: float
     last_price: float
     change_pct: float = 0.0
-    market_score: float = 0.0
-    signal_score: float = 0.0
-    hybrid_score: float = 0.0
     confirmed: bool = False
     confirm_reason: str = ""
     setup: Optional[SetupResult] = None
@@ -93,8 +91,8 @@ class Candidate:
 
 @dataclass
 class ScanDiagnostics:
-    market_candidates: int = 0
-    checked_candidates: int = 0
+    market_symbols: int = 0
+    checked_symbols: int = 0
     latest_signal_close_ms: int = 0
     rejection_counts: dict[str, int] = field(default_factory=dict)
     examples: dict[str, tuple[str, str]] = field(default_factory=dict)
@@ -120,8 +118,8 @@ class ScanDiagnostics:
 
     def signature(self) -> tuple:
         return (
-            self.market_candidates,
-            self.checked_candidates,
+            self.market_symbols,
+            self.checked_symbols,
             self.latest_signal_close_ms,
             tuple(
                 (stage, count, self.examples.get(stage))
@@ -130,7 +128,7 @@ class ScanDiagnostics:
         )
 
     def log_lines(self, config: dict) -> list[str]:
-        if not self.checked_candidates:
+        if not self.checked_symbols:
             return []
         interval = str(config.get("CONFIRM_INTERVAL", "15m"))
         signal = strategy.entry_signal_params(config)
@@ -151,7 +149,7 @@ class ScanDiagnostics:
             except (OverflowError, OSError, ValueError):
                 candle = "waktu candle tidak valid"
         lines = [
-            f"Diagnostik entry: {self.checked_candidates} dari {self.market_candidates} kandidat pasar diperiksa; candle konfirmasi terbaru tutup {candle}.",
+            f"Diagnostik entry: {self.checked_symbols} dari {self.market_symbols} simbol pasar diperiksa; candle konfirmasi terbaru tutup {candle}.",
             "Diagnostik: setiap simbol dicatat pada gerbang pertama yang gagal.",
         ]
         if strategy.entry_rule_enabled(config):
@@ -163,7 +161,7 @@ class ScanDiagnostics:
             label = labels.get(stage, f"tahap {stage}")
             symbol, reason = self.examples.get(stage, ("-", "alasan tidak tersedia"))
             lines.append(
-                f"Penolakan {label}: {count} kandidat; contoh {symbol}: {reason}"
+                f"Penolakan {label}: {count} simbol; contoh {symbol}: {reason}"
             )
         return lines
 
@@ -257,17 +255,6 @@ def dynamic_market_thresholds(changes: list[float], config: dict) -> dict:
     return {"minimum": minimum, "maximum": max(minimum, maximum), "raw_minimum": raw_min, "raw_maximum": raw_max, "sample": len(valid), "fallback": False}
 
 
-def _percentile_ranks(values: list[float]) -> list[float]:
-    if not values:
-        return []
-    ordered = sorted((value, index) for index, value in enumerate(values))
-    result = [0.0] * len(values)
-    denominator = max(1, len(values) - 1)
-    for rank, (_value, index) in enumerate(ordered):
-        result[index] = rank / denominator * 100.0
-    return result
-
-
 def min_change_pct(config: dict) -> float:
     try:
         nilai = float(config.get("GAINER_MIN_CHANGE_PCT", 0.0) or 0.0)
@@ -326,7 +313,7 @@ def market_gate_ok_at(change_pct, quote_volume, config: dict) -> bool:
     return ok
 
 
-def filter_and_rank_candidates(
+def filter_eligible_candidates(
     tickers: list,
     config: dict,
     tradable_symbols: "set | None" = None,
@@ -397,31 +384,15 @@ def filter_and_rank_candidates(
             )
         )
 
-    if out:
-        change_ranks = _percentile_ranks([candidate.change_pct for candidate in out])
-        turnover_ranks = _percentile_ranks([math.log1p(candidate.quote_volume) for candidate in out])
-        change_weight = _cfg_number(config, "PUMP_RANK_CHANGE_WEIGHT", 10.0)
-        turnover_weight = _cfg_number(config, "PUMP_RANK_TURNOVER_WEIGHT", 15.0)
-        total_weight = max(1e-12, change_weight + turnover_weight)
-        for index, candidate in enumerate(out):
-            candidate.market_score = (change_ranks[index] * change_weight + turnover_ranks[index] * turnover_weight) / total_weight
-            candidate.hybrid_score = candidate.market_score
-    out.sort(key=lambda c: (-c.market_score, -c.change_pct, -c.quote_volume))
+    out.sort(key=lambda c: (-c.change_pct, -c.quote_volume, c.symbol))
 
     if apply_market_gate:
         logger.info(
-            "Peringkat top gainer: %d kandidat lolos dari %d simbol likuid "
-            "(%d ditolak karena ambang kenaikan). Teratas: %s",
+            "Saringan pasar: %d simbol lolos dari %d simbol likuid "
+            "(%d ditolak karena ambang kenaikan).",
             len(out),
             lolos_likuid,
             ditolak_gain,
-            (
-                ", ".join(
-                    f"{c.symbol} {c.change_pct:+.2f}%"
-                    for c in out[:5]
-                )
-                or "belum ada"
-            ),
         )
         logger.debug("Simbol lolos saringan likuiditas 24 jam: %d", lolos_likuid)
     return out
@@ -661,43 +632,7 @@ def diagnostic_stage(stage: str, reason: str) -> str:
     return "BULLISH_CANDLE"
 
 
-def setup_quality_key(setup: Optional[SetupResult], candidate: Candidate) -> tuple:
-    hybrid = float(candidate.hybrid_score or 0.0)
-    if hybrid <= 0.0 and setup is not None:
-        c_str = min(3.0, max(0.0, float(setup.candle_strength if setup.candle_strength is not None else (setup.engulfing_strength or 0.0))))
-        p_atr = min(5.0, max(0.0, float(setup.price_ema_atr or 0.0)))
-        t_atr = min(3.0, max(0.0, float(setup.ema_trend_atr or 0.0)))
-        sl_pen = min(30.0, max(0.0, float(setup.sl_pct or 0.0)) * 3.0)
-        hybrid = max(0.0, c_str * 10.0 + p_atr * 8.0 + t_atr * 6.0 - sl_pen)
-    return (-hybrid, -float(candidate.market_score), -float(candidate.quote_volume))
-
-
-def apply_hybrid_scores(candidates: list[Candidate], config: dict) -> None:
-    if not candidates:
-        return
-    candle_values = [
-        min(3.0, max(0.0, float((c.setup.candle_strength if c.setup and c.setup.candle_strength is not None else (c.setup.engulfing_strength if c.setup else 0.0)) or 0.0)))
-        for c in candidates
-    ]
-    price_values = [min(5.0, max(0.0, float(c.setup.price_ema_atr or 0.0))) for c in candidates]
-    trend_values = [min(3.0, max(0.0, float(c.setup.ema_trend_atr or 0.0))) for c in candidates]
-    candle_ranks = _percentile_ranks(candle_values)
-    price_ranks = _percentile_ranks(price_values)
-    trend_ranks = _percentile_ranks(trend_values)
-    weights = {
-        "candle": _cfg_number(config, "PUMP_RANK_ENGULFING_WEIGHT", 30.0),
-        "price": _cfg_number(config, "PUMP_RANK_PRICE_EMA_WEIGHT", 25.0),
-        "trend": _cfg_number(config, "PUMP_RANK_EMA_TREND_WEIGHT", 20.0),
-        "market": _cfg_number(config, "PUMP_RANK_CHANGE_WEIGHT", 10.0) + _cfg_number(config, "PUMP_RANK_TURNOVER_WEIGHT", 15.0),
-    }
-    total = max(1e-12, sum(weights.values()))
-    for index, candidate in enumerate(candidates):
-        risk_penalty = min(30.0, max(0.0, float(candidate.setup.sl_pct or 0.0)) * 3.0)
-        candidate.signal_score = (candle_ranks[index] * weights["candle"] + price_ranks[index] * weights["price"] + trend_ranks[index] * weights["trend"]) / max(1e-12, weights["candle"] + weights["price"] + weights["trend"])
-        candidate.hybrid_score = max(0.0, (candidate.signal_score * (weights["candle"] + weights["price"] + weights["trend"]) + candidate.market_score * weights["market"]) / total - risk_penalty)
-
-
-def find_best_candidate(
+def scan_entry_candidate(
     tickers: list,
     klines_fetcher,
     config: dict,
@@ -707,76 +642,68 @@ def find_best_candidate(
     diagnostics: Optional[ScanDiagnostics] = None,
     confirm_close_time_ms: "int | None" = None,
 ) -> Optional[Candidate]:
-    ranked = filter_and_rank_candidates(tickers, config, tradable_symbols)
-    top_n = ranked[: int(config.get("TOP_N_CANDIDATES_TO_CONFIRM", 10) or 10)]
+    eligible = filter_eligible_candidates(tickers, config, tradable_symbols)
     if diagnostics is not None:
-        diagnostics.market_candidates = len(ranked)
-        diagnostics.checked_candidates = len(top_n)
+        diagnostics.market_symbols = len(eligible)
+        diagnostics.checked_symbols = 0
         diagnostics.latest_signal_close_ms = 0
         diagnostics.rejection_counts.clear()
         diagnostics.examples.clear()
-    if not top_n:
+    if not eligible:
         return None
 
-    if prewarm_fn is not None:
-        try:
-            prewarm_fn([cand.symbol for cand in top_n])
-        except Exception as exc:
-            logger.debug("Pemanasan harga kandidat dilewati: %s", exc)
+    for start in range(0, len(eligible), SCAN_CONFIRM_BATCH):
+        batch = eligible[start : start + SCAN_CONFIRM_BATCH]
+        if prewarm_fn is not None:
+            try:
+                prewarm_fn([cand.symbol for cand in batch])
+            except Exception as exc:
+                logger.debug("Pemanasan harga simbol dilewati: %s", exc)
 
-    lolos_saring: list[Candidate] = list(top_n)
+        diprakira: dict = {}
+        if klines_fetcher_many is not None and len(batch) > 1:
+            try:
+                diprakira = klines_fetcher_many([cand.symbol for cand in batch]) or {}
+            except Exception as exc:
+                logger.debug("Pengambilan candle paralel dilewati: %s", exc)
+                diprakira = {}
 
-    if not lolos_saring:
-        return None
-
-    diprakira: dict = {}
-    if klines_fetcher_many is not None and len(lolos_saring) > 1:
-        try:
-            diprakira = (
-                klines_fetcher_many([cand.symbol for cand in lolos_saring]) or {}
-            )
-        except Exception as exc:
-            logger.debug("Pengambilan candle paralel dilewati: %s", exc)
-            diprakira = {}
-
-    lolos: list[Candidate] = []
-    for cand in lolos_saring:
-        try:
-            if cand.symbol in diprakira:
-                klines = diprakira.get(cand.symbol)
-                if klines is None:
-                    raise ValueError("candle konfirmasi gagal diunduh")
-            else:
-                klines = klines_fetcher(cand.symbol)
-        except Exception as exc:
-            cand.confirmed = False
-            cand.confirm_reason = f"gagal mengambil candle: {exc}"
+        for cand in batch:
             if diagnostics is not None:
-                diagnostics.reject("CANDLE_CONFIRM", cand.symbol, cand.confirm_reason)
-            continue
-        if diagnostics is not None:
-            diagnostics.observe_signal(klines)
+                diagnostics.checked_symbols += 1
+            try:
+                if cand.symbol in diprakira:
+                    klines = diprakira.get(cand.symbol)
+                    if klines is None:
+                        raise ValueError("candle konfirmasi gagal diunduh")
+                else:
+                    klines = klines_fetcher(cand.symbol)
+            except Exception as exc:
+                cand.confirmed = False
+                cand.confirm_reason = f"gagal mengambil candle: {exc}"
+                if diagnostics is not None:
+                    diagnostics.reject(
+                        "CANDLE_CONFIRM", cand.symbol, cand.confirm_reason
+                    )
+                continue
+            if diagnostics is not None:
+                diagnostics.observe_signal(klines)
 
-        hasil = detect_entry_setup(
-            klines or [],
-            config,
-            signal_close_time_ms=confirm_close_time_ms,
-        )
-        cand.confirmed = hasil.ok
-        cand.confirm_reason = hasil.reason
-        cand.setup = hasil
-        if not hasil.ok:
+            hasil = detect_entry_setup(
+                klines or [],
+                config,
+                signal_close_time_ms=confirm_close_time_ms,
+            )
+            cand.confirmed = hasil.ok
+            cand.confirm_reason = hasil.reason
+            cand.setup = hasil
+            if hasil.ok:
+                return cand
             if diagnostics is not None:
                 diagnostics.reject(
                     diagnostic_stage(hasil.stage, hasil.reason),
                     cand.symbol,
                     hasil.reason,
                 )
-            continue
-        lolos.append(cand)
 
-    if not lolos:
-        return None
-    apply_hybrid_scores(lolos, config)
-    lolos.sort(key=lambda c: setup_quality_key(c.setup, c))
-    return lolos[0]
+    return None
