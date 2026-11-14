@@ -1,9 +1,11 @@
 from __future__ import annotations
+from config.config import PUMP_CONFIG
 
 from strategy.indicators import Kline
 
 MS_PER_BAR = 300_000
-VOLUME_SPIKE_MULT = 3.0
+VOLUME_LEMBUT = 0.05
+VOLUME_DORONG = 6.0
 
 
 def make_candle(
@@ -29,69 +31,60 @@ def make_candle(
 
 
 MS_PER_BAR_15M = 900_000
-BAR_PER_H4_15M = 16
 
 
-def _tambah_15m(out: list[Kline], i: int, open_: float, close: float, low: float, high: float, volume: float) -> int:
-    out.append(make_candle(i, open_, high, low, close, volume, bar_ms=MS_PER_BAR_15M))
-    return i + 1
-
-
-def blok_zona_demand(harga: float, mulai_index: int, volume: float = 5_000_000.0) -> tuple[list[Kline], float, int]:
-    if mulai_index % BAR_PER_H4_15M != 0:
-        raise ValueError("blok zona demand harus mulai tepat di batas candle 4h")
-    out: list[Kline] = []
-    i = mulai_index
-    p = float(harga)
-    for _ in range(4):
-        i = _tambah_15m(out, i, p, p, p * 0.9997, p * 1.0003, volume)
-    harga_kini = p
-    for _ in range(4):
-        tutup = harga_kini * 1.005
-        i = _tambah_15m(out, i, harga_kini, tutup, harga_kini * 0.9995, tutup * 1.0005, volume * VOLUME_SPIKE_MULT)
-        harga_kini = tutup
-    for _ in range(8):
-        i = _tambah_15m(out, i, harga_kini, harga_kini, harga_kini * 0.9995, harga_kini * 1.0005, volume)
-    target = p * 1.006
-    langkah = (harga_kini - target) / 3.0
-    for _ in range(3):
-        tutup = harga_kini - langkah
-        i = _tambah_15m(out, i, harga_kini, tutup, tutup * 0.9995, harga_kini * 1.0005, volume)
-        harga_kini = tutup
-    tutup = p * 1.016
-    i = _tambah_15m(out, i, harga_kini, tutup, p * 1.0002, tutup * 1.0005, volume * VOLUME_SPIKE_MULT)
-    harga_kini = tutup
-    for _ in range(12):
-        tutup = harga_kini * 1.005
-        i = _tambah_15m(out, i, harga_kini, tutup, harga_kini * 0.9995, tutup * 1.0005, volume)
-        harga_kini = tutup
-    return out, harga_kini, i
-
-
-def seri_zona_demand(
+def seri_vidya_flip(
     harga: float = 100.0,
     siklus: int = 4,
-    bar_awal: int = 960,
+    bar_dasar: int = 1000,
+    bar_turun: int = 300,
+    bar_lanjut: int = 80,
     volume: float = 5_000_000.0,
-    jeda: int = 64,
+    volume_dorong: float | None = None,
     mulai_index: int = 0,
+    config: dict | None = None,
 ) -> list[Kline]:
-    if mulai_index % BAR_PER_H4_15M != 0 or bar_awal % BAR_PER_H4_15M != 0 or jeda % BAR_PER_H4_15M != 0:
-        raise ValueError("indeks awal, bar awal, dan jeda harus kelipatan 16 candle 15m")
+    """Seri sintetis yang memicu flip tren naik VIDYA berulang kali.
+
+    Fase dasar mengisi candle sampai melewati jendela konfirmasi bot supaya
+    sinyal pertama bisa dievaluasi. Tiap siklus lalu menurunkan harga pelan
+    dengan volume tipis supaya garis VIDYA berbalik turun, kemudian mendorong
+    harga naik dengan volume beli dominan sampai indikator mencetak flip naik.
+    Jumlah candle dorongan dicari otomatis supaya seri tetap valid bila
+    parameter VIDYA diubah.
+    """
+    from strategy import vidya as vidya_mod
+
+    cfg = dict(config) if config else dict(PUMP_CONFIG)
     out: list[Kline] = []
     i = mulai_index
     p = float(harga)
 
-    def naik_pelan(jumlah: int) -> None:
+    def tambah(open_: float, close: float, volume_bar: float) -> None:
         nonlocal i, p
-        for _ in range(jumlah):
-            tutup = p * 1.0002
-            i = _tambah_15m(out, i, p, tutup, p * 0.9997, tutup * 1.0003, volume)
-            p = tutup
+        out.append(make_candle(
+            i, open_, max(open_, close) * 1.0008, min(open_, close) * 0.9992,
+            close, volume_bar, bar_ms=MS_PER_BAR_15M,
+        ))
+        p = close
+        i += 1
 
-    naik_pelan(bar_awal)
+    def flip_terakhir() -> bool:
+        if len(out) < 2:
+            return False
+        seri = vidya_mod.compute_series(out, cfg)
+        return bool(seri["cross_up"][-1])
+
+    for k in range(bar_dasar):
+        tambah(p, p * (1.0003 if k % 2 == 0 else 0.9997), volume)
     for _ in range(max(1, siklus)):
-        blok, p, i = blok_zona_demand(p, i, volume)
-        out.extend(blok)
-        naik_pelan(jeda)
+        for _ in range(bar_turun):
+            tambah(p, p * 0.9995, volume * VOLUME_LEMBUT)
+        dorong = volume * VOLUME_DORONG if volume_dorong is None else volume_dorong
+        for _ in range(80):
+            tambah(p, p * 1.004, dorong)
+            if flip_terakhir():
+                break
+        for _ in range(bar_lanjut):
+            tambah(p, p * 1.0002, volume)
     return out

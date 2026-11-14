@@ -460,14 +460,6 @@ def precompute_entry_signals(
                 signals.entry_rule_scans_by_time[waktu_bar] = (
                     signals.entry_rule_scans_by_time.get(waktu_bar, 0) + 1
                 )
-                if not _candle_pemicu_bullish(window_kl[-1]):
-                    signals.entry_rule_skips += 1
-                    signals.entry_rule_skips_by_time[waktu_bar] = (
-                        signals.entry_rule_skips_by_time.get(waktu_bar, 0) + 1
-                    )
-                    if len(signals.entry_rule_events) < max_skipped_records:
-                        signals.entry_rule_events.append((waktu_bar, sym))
-                    continue
             try:
                 setup = scanner.detect_entry_setup(
                     window_kl,
@@ -1175,11 +1167,11 @@ def run_portfolio_backtest(
         )
     if entry_rule_skips:
         signal_pb = strategy.entry_signal_params(config)
+        trigger_label = "konfirmasi pullback ke garis VIDYA" if str(config.get("VIDYA_ENTRY_TRIGGER", "FLIP")).upper() == "PULLBACK" else "flip trend naik"
         warnings.append(
             f"{entry_rule_skips} dari {entry_rule_scans} sinyal simbol lolos saringan dilewati "
-            f"filter zona demand + EMA ({interval}: candle bullish di zona demand 1h atau 4h, "
-            f"close di atas EMA {signal_pb['ema_period']} pada {interval}, 1h, dan 4h, "
-            f"SL di bawah zona dengan buffer {signal_pb['sl_atr_buffer_mult']:g} x ATR)."
+            f"filter Volumatic VIDYA ({interval}: {trigger_label} + delta volume beli dominan, "
+            f"SL di bawah anchor dengan buffer {signal_pb['sl_atr_buffer_mult']:g} x ATR)."
         )
     risk_summary = controls.summary()
     if risk_summary["kill_switch_triggers"] > 0:
@@ -1628,7 +1620,7 @@ def selftest() -> bool:
     from copy import deepcopy
 
     from config.config import PUMP_CONFIG
-    from backtesting.synthetic_data import seri_zona_demand
+    from backtesting.synthetic_data import seri_vidya_flip
 
     ok_all = True
 
@@ -1647,9 +1639,13 @@ def selftest() -> bool:
                 "MODE": "PAPER",
                 "ENTRY_RULE_ENABLED": True,
                 "MIN_QUOTE_VOLUME_USDT_24H": 0.0,
-                "GAINER_MIN_CHANGE_PCT": 0.0,
-                "GAINER_MAX_CHANGE_PCT": 0.0,
+                "GAINER_MIN_CHANGE_PCT": -100.0,
+                "GAINER_MAX_CHANGE_PCT": 100.0,
+                "PUMP_FALLBACK_MIN_CHANGE_PCT": -100.0,
+                "PUMP_FALLBACK_MAX_CHANGE_PCT": 100.0,
                 "GAINER_VOLUME_FILTER_ENABLED": False,
+                "VIDYA_DELTA_MIN_RATIO": 0.0,
+                "VIDYA_ENTRY_TRIGGER": "FLIP",
                 "SAME_COIN_BLOCK_HOURS": 0.0,
                 "ENTRY_MIN_RR_RATIO": 2.0,
                 "EXIT_ATR_MAX_SL_PCT": 5.0,
@@ -1669,8 +1665,8 @@ def selftest() -> bool:
     print("Menjalankan selftest portfolio_backtest...")
 
     cfg = _base_cfg()
-    up_a = seri_zona_demand(harga=100.0, siklus=10, volume=9_000_000.0)
-    up_b = seri_zona_demand(harga=200.0, siklus=10, volume=5_000_000.0)
+    up_a = seri_vidya_flip(harga=100.0, siklus=4, volume=9_000_000.0)
+    up_b = seri_vidya_flip(harga=200.0, siklus=4, volume=5_000_000.0)
     store = new_backtest_store(cfg)
     try:
         store.write_symbol("AAAUSDT", up_a)
@@ -1728,7 +1724,7 @@ def selftest() -> bool:
     from backtesting.backtest import run_backtest
 
     par_cfg = _base_cfg()
-    par_kl = seri_zona_demand(harga=100.0, siklus=10, volume=9_000_000.0)
+    par_kl = seri_vidya_flip(harga=100.0, siklus=6, volume=9_000_000.0)
     par_store = new_backtest_store(par_cfg)
     try:
         par_store.write_symbol("SOLOUSDT", par_kl)

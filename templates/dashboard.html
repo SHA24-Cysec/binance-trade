@@ -2357,7 +2357,7 @@
           </div>
         </div>
         <div class="panel" style="margin-top: 16px">
-          <h2>🟩 Zona Demand (H1 dan H4)</h2>
+          <h2>🟩 Volumatic VIDYA</h2>
           <form class="dz-form" id="dzForm" autocomplete="off">
             <input
               id="dzSymbol"
@@ -2372,7 +2372,7 @@
           </form>
           <div id="dzBox">
             <div class="dz-msg">
-              Masukkan simbol untuk melihat zona demand yang masih aktif, posisi harga terhadap EMA
+              Masukkan simbol untuk melihat garis VIDYA, band ATR, dan delta volume beli terakhir
               di tiga timeframe, dan syarat entry yang sudah atau belum terpenuhi.
             </div>
           </div>
@@ -2543,9 +2543,9 @@
             </div>
             <div
               class="bt-field"
-              title="Saklar filter zona demand + EMA. Bila aktif, entry hanya terjadi setelah candle pemicu tertutup bullish (close > open) di zona demand 1h atau 4h dan close berada di atas EMA pada 15m, 1h, dan 4h. Bila dimatikan, bot masuk hanya berdasarkan peringkat gainer dan proteksi orderbook."
+              title="Saklar filter Volumatic VIDYA. Bila aktif, entry hanya terjadi setelah candle pemicu menembus band atas VIDYA dan delta volume beli dominan. Bila dimatikan, bot masuk hanya berdasarkan peringkat gainer dan proteksi orderbook."
             >
-              <label for="btEntryRuleEnabled">Filter Zona Demand Aktif</label>
+              <label for="btEntryRuleEnabled">Filter VIDYA Aktif</label>
               <div style="display:flex;align-items:center;gap:8px;min-height:38px">
                 <input
                   type="checkbox"
@@ -2554,7 +2554,7 @@
                   style="width:16px;height:16px;max-width:16px;padding:0;accent-color:var(--accent)"
                   onchange="btSyncEntryRuleAvailability(); btUpdateEstimate()"
                 />
-                <span class="mut" style="font-size:11.5px">Entry menunggu candle bullish di zona demand dan konfirmasi EMA 3 timeframe</span>
+                <span class="mut" style="font-size:11.5px">Entry menunggu flip tren naik VIDYA dan delta volume beli dominan</span>
               </div>
             </div>
             <div class="bt-field" style="grid-column:1/-1">
@@ -2599,9 +2599,9 @@
               <input type="number" id="btGainerVolDays" min="1" max="14" step="1" value="3" oninput="btRenderStrategySummary()" />
             </div>
             <div class="bt-field" style="grid-column:1/-1">
-              <label style="color:var(--accent);font-size:11px;letter-spacing:.6px">ZONA DEMAND + EMA</label>
+              <label style="color:var(--accent);font-size:11px;letter-spacing:.6px">VOLUMATIC VIDYA</label>
             </div>
-            <div class="bt-field" title="Timeframe candle pemicu entry. Candle ini digabung menjadi candle 1h dan 4h untuk zona demand dan EMA.">
+            <div class="bt-field" title="Timeframe candle pemicu entry. Garis VIDYA, band ATR, delta volume, dan ATR dihitung dari candle ini.">
               <label>Interval pemicu</label>
               <select id="btInterval" onchange="btRenderStrategySummary()">
                 <option value="15m" selected>15m</option>
@@ -2610,17 +2610,17 @@
             </div>
             <div class="bt-field" title="Periode EMA pada timeframe pemicu, 1h, dan 4h. Close candle pemicu harus di atas ketiganya.">
               <label>Periode EMA</label>
-              <input type="number" id="btEmaPeriod" min="5" max="60" step="1" value="50" oninput="btRenderStrategySummary()" />
+              <input type="number" id="btVidyaLength" min="2" max="200" step="1" value="10" oninput="btRenderStrategySummary()" />
             </div>
-            <div class="bt-field" title="Body candle naik 1h atau 4h pembentuk zona demand minimal sekian kali ATR.">
+            <div class="bt-field" title="Lebar band VIDYA dalam kelipatan ATR. Band lebih sempit membuat flip tren naik lebih sering.">
               <label>Impuls zona (x ATR)</label>
-              <input type="number" id="btImpulseAtr" min="0.5" max="5" step="0.1" value="1" oninput="btRenderStrategySummary()" />
+              <input type="number" id="btVidyaBand" min="0.1" max="20" step="0.1" value="2" oninput="btRenderStrategySummary()" />
             </div>
-            <div class="bt-field" title="Ruang tambahan Stop Loss di bawah batas bawah zona demand dalam kelipatan ATR.">
+            <div class="bt-field" title="Ruang tambahan Stop Loss di bawah anchor VIDYA dalam kelipatan ATR.">
               <label>Buffer SL (x ATR)</label>
               <input type="number" id="btSlBufferAtr" min="0" max="10" step="0.05" value="2" oninput="btRenderStrategySummary()" />
             </div>
-            <div class="bt-field" title="Jumlah candle pemicu yang diunduh untuk membentuk candle 1h dan 4h, zona demand, EMA, dan ATR.">
+            <div class="bt-field" title="Jumlah candle pemicu yang diunduh untuk menghitung VIDYA, band ATR, dan ATR.">
               <label>Riwayat candle</label>
               <input type="number" id="btLookback" min="15" max="997" step="1" value="997" oninput="btRenderStrategySummary()" />
             </div>
@@ -3605,7 +3605,7 @@
         const modeTxt='ATURAN ENTRY';
         const noteTxt=p.has_position
           ? ('SL terkunci di '+fmtP(c.sl_price)+' · TP terkunci di '+fmtP(c.tp_price)+'.')
-          : ('Entry pada candle bullish '+(c.confirm_interval||'15m')+' di zona demand 1h/4h · close di atas EMA '+fmt((c.entry_signal||{}).ema_period||50,0)+' pada 3 timeframe · SL bawah zona - '+fmt((c.entry_signal||{}).sl_atr_buffer_mult??2,2)+'x ATR · TP 1:'+fmt(c.entry_min_rr_ratio||3,1)+'R.');
+          : ('Entry pada konfirmasi tren naik VIDYA '+(c.confirm_interval||'15m')+' · SL di bawah anchor - '+fmt((c.entry_signal||{}).sl_atr_buffer_mult??2,2)+'x ATR · TP 1:'+fmt(c.entry_min_rr_ratio||3,1)+'R.');
 
         renderConfigPanel(s, false, '', modeTxt, noteTxt);
       }
@@ -3689,7 +3689,8 @@
           const atrCfg = (c && c.exit_atr) || {};
           const tfTxt = ((c && c.confirm_interval) || '1h');
           const holdTxt = c && Number(c.max_hold_hours) > 0 ? fmt(c.max_hold_hours, 1) + ' jam' : 'nonaktif';
-          html += '<div class="posrow"><span class="k">Zona Demand + EMA ' + tfTxt + '</span><span class="v mono">zona 1h/4h, impuls ' + fmt(signal.impulse_atr_mult || 1, 1) + 'x ATR, close di atas EMA ' + fmt(signal.ema_period || 50, 0) + ' pada 3 timeframe</span></div>'
+          const vv = (c && c.entry_signal && c.entry_signal.vidya) || {};
+          html += '<div class="posrow"><span class="k">Volumatic VIDYA ' + tfTxt + '</span><span class="v mono">panjang ' + fmt(vv.length || 10, 0) + ', momentum ' + fmt(vv.momentum || 20, 0) + ', band ' + fmt(vv.band_mult || 2, 2) + 'x ATR' + fmt(vv.atr_period || 200, 0) + ', delta minimal ' + fmt(vv.delta_min_ratio || 0, 1) + '%</span></div>'
             + '<div class="posrow"><span class="k">Stop dan Target</span><span class="v mono">bawah zona - ' + fmt(signal.sl_atr_buffer_mult ?? 2, 2) + 'x ATR / TP 1:' + fmt((c && c.entry_min_rr_ratio) || 2.5, 1) + 'R</span></div>'
             + '<div class="posrow"><span class="k">BE dan Trailing</span><span class="v mono">BE 1R + biaya / mulai 1,5R / jarak ' + fmt(atrCfg.trail_mult || 2, 1) + 'x ATR</span></div>'
             + '<div class="posrow"><span class="k">Batas Waktu Tahan</span><span class="v mono">' + holdTxt + '</span></div>';
@@ -3802,7 +3803,7 @@
         const x = i => L + step * (i + 0.5);
         const y = v => T + (hi - v) / (hi - lo) * (H - T - B);
         const f = v => v.toFixed(1);
-        const out = ['<svg class="dz-chart" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Grafik candle dan zona demand">'];
+        const out = ['<svg class="dz-chart" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Grafik candle dan band VIDYA">'];
         for(let i = 0; i <= 4; i++){
           const v = lo + (hi - lo) * i / 4;
           out.push('<line x1="' + L + '" x2="' + (W - R) + '" y1="' + f(y(v)) + '" y2="' + f(y(v)) + '" stroke="rgba(148,163,184,0.12)"/>');
@@ -3862,21 +3863,20 @@
         const mark = ok => ok === null ? '<span class="mut">-</span>' : ok ? '<span class="pos">✔ ya</span>' : '<span class="neg">✘ belum</span>';
         const above = e => (price === null || dzNum(e) === null) ? null : price > Number(e);
         const row = (k, val) => '<div class="posrow"><span class="k">' + esc(k) + '</span><span class="v">' + val + '</span></div>';
-        const emaRow = (tf, e) => row('Harga di atas EMA ' + esc(lv.ema_period) + ' ' + tf,
+        const vidRow = (label, e) => row(esc(label),
           mark(above(e)) + ' <span class="mut">(' + esc(dzPrice(e)) + ')</span>');
         const touched = zones.some(z => z && z.touched);
         const left = '<div class="posbox">' +
           row('Harga penutupan terakhir', esc(dzPrice(price))) +
           row('Candle ' + esc(data.interval) + ' terakhir bullish', mark(!!lv.bullish)) +
-          emaRow(esc(data.interval), lv.ema_m15) + emaRow('1h', lv.ema_h1) + emaRow('4h', lv.ema_h4) +
-          row('Candle terakhir menyentuh zona', mark(zones.length ? touched : false)) +
-          row('Zona aktif', esc(zones.length)) +
+          vidRow('Harga di atas garis VIDYA', lv.vidya) + vidRow('Harga di atas band bawah', lv.lower_band) + vidRow('Harga di atas band atas', lv.upper_band) +
+          row('Delta volume beli dominan', mark(dzNum(lv.delta_ratio) === null ? null : dzNum(lv.delta_ratio) > 0)) +
           (v.ok ? row('Stop loss', esc(dzPrice((data.exit || {}).sl_price)) + ' <span class="mut">(' + esc(fmt((data.exit || {}).sl_pct)) + '%)</span>') +
                   row('Take profit', esc(dzPrice((data.exit || {}).tp_price)) + ' <span class="mut">(' + esc(fmt((data.exit || {}).tp_pct)) + '%)</span>') : '') +
           '</div>';
         let right;
         if(!zones.length){
-          right = '<div class="dz-msg">' + esc(data.zone_note || 'Tidak ada zona demand H1 atau H4 yang masih aktif dalam rentang data. Zona dianggap gugur setelah ada candle yang ditutup di bawah batas bawahnya.') + '</div>';
+          right = '<div class="dz-msg">' + esc(data.zone_note || 'Garis VIDYA atau band ATR belum siap dari rentang candle yang tersedia.') + '</div>';
         } else {
           right = '<div class="dz-scroll"><table class="dz-table"><thead><tr><th>TF</th><th>Batas bawah</th><th>Batas atas</th><th>Jarak harga</th><th>Impuls</th><th>Terbentuk (UTC)</th><th>Status</th></tr></thead><tbody>' +
             zones.map(z => {
@@ -3884,7 +3884,7 @@
               const status = z.selected ? 'zona terpilih' : z.touched ? 'tersentuh' : (dist !== null && dist < 0 ? 'harga di dalam/bawah' : 'menunggu');
               return '<tr' + (z.selected ? ' class="sel"' : '') + '><td>' + esc(String(z.timeframe || '').toUpperCase()) + '</td><td>' + esc(dzPrice(z.low)) +
                 '</td><td>' + esc(dzPrice(z.high)) + '</td><td>' + (dist === null ? '-' : esc(fmt(dist)) + '%') +
-                '</td><td>' + (dzNum(z.impulse_atr) === null ? '-' : esc(fmt(z.impulse_atr)) + ' ATR') + '</td><td>' + esc(dzTime(z.created_time)) + '</td><td>' + esc(status) + '</td></tr>';
+                '</td><td>' + esc(dzTime(z.created_time)) + '</td><td>' + esc(status) + '</td></tr>';
             }).join('') + '</tbody></table></div>';
         }
         box.innerHTML =
@@ -4817,8 +4817,8 @@
         const itv = val('btInterval', d.CONFIRM_INTERVAL || '15m');
         const gainMin = val('btGainerMin', d.GAINER_MIN_CHANGE_PCT ?? 3.0);
         const gainMax = val('btGainerMax', d.GAINER_MAX_CHANGE_PCT ?? 0);
-        const emaPeriod = val('btEmaPeriod', d.DEMAND_EMA_PERIOD ?? 50);
-        const impulseAtr = val('btImpulseAtr', d.DEMAND_IMPULSE_ATR_MULT ?? 1);
+        const vidyaLength = val('btVidyaLength', d.VIDYA_LENGTH ?? 10);
+        const bandMult = val('btVidyaBand', d.VIDYA_BAND_MULT ?? 2);
         const slBuffer = val('btSlBufferAtr', d.ENTRY_SL_ATR_BUFFER_MULT ?? 2);
         const atrP = val('btAtrPeriod', d.ENTRY_ATR_PERIOD ?? 14);
         const atrTrail = val('btAtrTrail', d.EXIT_ATR_TRAIL_MULT ?? 2.0);
@@ -4832,12 +4832,12 @@
         const volDays = val('btGainerVolDays', d.GAINER_VOLUME_AVG_DAYS ?? 3);
         const maxTxt = parseFloat(gainMax) > 0 ? fmt(gainMax, 1) + '%' : 'tanpa batas';
         const flowText = !ruleOn
-          ? 'Filter zona demand + EMA nonaktif (hanya peringkat gainer dan proteksi orderbook)'
-          : 'candle bullish ' + esc(itv) + ' di zona demand 1h atau 4h (impuls ' + fmt(impulseAtr, 1) + 'x ATR), close di atas EMA ' + fmt(emaPeriod, 0) + ' pada ' + esc(itv) + ', 1h, dan 4h';
+          ? 'Filter VIDYA nonaktif (hanya peringkat gainer dan proteksi orderbook)'
+          : 'flip tren naik VIDYA ' + esc(itv) + ' (panjang ' + fmt(vidyaLength, 0) + ', band ' + fmt(bandMult, 2) + 'x ATR) dan delta volume beli dominan';
         strategySummary.innerHTML = `
           <div class="posrow"><span class="k">Peringkat koin</span><span class="v mono" style="font-size:11.5px">kenaikan 24 jam terbesar, minimum ${fmt(gainMin, 1)}%, maksimum ${esc(maxTxt)}, ${volOn ? 'turnover harus naik &ge; ' + fmt(volRise, 2) + 'x rata-rata ' + fmt(volDays, 0) + ' hari' : 'syarat kenaikan turnover nonaktif'}</span></div>
           <div class="posrow"><span class="k">Alur entry aktif</span><span class="v mono" style="font-size:11.5px">${flowText}</span></div>
-          <div class="posrow"><span class="k">Stop dan target</span><span class="v mono" style="font-size:11.5px">SL di bawah zona demand dengan buffer ${fmt(slBuffer, 2)}x ATR periode ${fmt(atrP, 0)}, TP R:R 1:${fmt(rrMin, 2)}</span></div>
+          <div class="posrow"><span class="k">Stop dan target</span><span class="v mono" style="font-size:11.5px">SL di bawah anchor VIDYA dengan buffer ${fmt(slBuffer, 2)}x ATR periode ${fmt(atrP, 0)}, TP R:R 1:${fmt(rrMin, 2)}</span></div>
           <div class="posrow"><span class="k">Pengelolaan posisi</span><span class="v mono" style="font-size:11.5px">breakeven di ${fmt(atrBe, 1)}R + biaya, trailing mulai 1,5R, trailing ${fmt(atrTrail, 1)}x ATR dari puncak, ${parseFloat(maxHold) > 0 ? 'batas tahan ' + fmt(maxHold, 1) + ' jam' : 'tanpa batas waktu'}</span></div>
           <div class="posrow"><span class="k">Batas risiko</span><span class="v mono" style="font-size:11.5px">setup ditolak bila jarak stop di atas ${fmt(atrMaxSl, 1)}%</span></div>
           <div class="posrow"><span class="k">Riwayat minimum</span><span class="v mono" style="font-size:11.5px">${fmt(val('btLookback', d.CONFIRM_LOOKBACK_BARS ?? 192), 0)} candle ${esc(itv)}</span></div>`;
@@ -4845,7 +4845,7 @@
 
       function btSyncEntryRuleAvailability(){
         const aktif = !!document.getElementById('btEntryRuleEnabled')?.checked;
-        for(const id of ['btInterval','btEmaPeriod','btImpulseAtr','btSlBufferAtr','btAtrPeriod']){
+        for(const id of ['btInterval','btVidyaLength','btVidyaBand','btSlBufferAtr','btAtrPeriod']){
           const el = document.getElementById(id);
           if(el) el.disabled = !aktif;
         }
@@ -4867,8 +4867,8 @@
           document.getElementById('btDays').value = d.default_days;
           document.getElementById('btEntryRuleEnabled').checked = d.ENTRY_RULE_ENABLED !== false;
           const isi = {btInterval: d.CONFIRM_INTERVAL, btGainerMin: d.GAINER_MIN_CHANGE_PCT,
-            btGainerMax: d.GAINER_MAX_CHANGE_PCT, btEmaPeriod: d.DEMAND_EMA_PERIOD,
-            btImpulseAtr: d.DEMAND_IMPULSE_ATR_MULT, btSlBufferAtr: d.ENTRY_SL_ATR_BUFFER_MULT,
+            btGainerMax: d.GAINER_MAX_CHANGE_PCT, btVidyaLength: d.VIDYA_LENGTH,
+            btVidyaBand: d.VIDYA_BAND_MULT, btSlBufferAtr: d.ENTRY_SL_ATR_BUFFER_MULT,
             btAtrPeriod: d.ENTRY_ATR_PERIOD, btLookback: d.CONFIRM_LOOKBACK_BARS,
             btAtrPeriod: d.ENTRY_ATR_PERIOD, btAtrSl: d.EXIT_ATR_SL_MULT,
             btAtrTp: d.EXIT_ATR_TP_MULT, btAtrTrail: d.EXIT_ATR_TRAIL_MULT,
@@ -4981,8 +4981,8 @@
           CONFIRM_LOOKBACK_BARS: 'btLookback',
           GAINER_MIN_CHANGE_PCT: 'btGainerMin',
           GAINER_MAX_CHANGE_PCT: 'btGainerMax',
-          DEMAND_EMA_PERIOD: 'btEmaPeriod',
-          DEMAND_IMPULSE_ATR_MULT: 'btImpulseAtr',
+          VIDYA_LENGTH: 'btVidyaLength',
+          VIDYA_BAND_MULT: 'btVidyaBand',
           ENTRY_SL_ATR_BUFFER_MULT: 'btSlBufferAtr',
           ENTRY_ATR_PERIOD: 'btAtrPeriod',
           ENTRY_ATR_PERIOD: 'btAtrPeriod',
@@ -5075,8 +5075,8 @@
         ['EXIT_BREAKEVEN_TRIGGER_R', 'Breakeven (R)'],
         ['EXIT_ATR_MAX_SL_PCT', 'Batas jarak stop (%)'],
         ['ENTRY_MIN_RR_RATIO', 'Min Risk:Reward'],
-        ['DEMAND_EMA_PERIOD', 'Periode EMA 3 timeframe'],
-        ['DEMAND_IMPULSE_ATR_MULT', 'Impuls zona demand (x ATR)'],
+        ['VIDYA_LENGTH', 'Panjang VIDYA'],
+        ['VIDYA_BAND_MULT', 'Lebar band VIDYA (x ATR)'],
         ['ENTRY_SL_ATR_BUFFER_MULT', 'Buffer SL bawah zona (x ATR)'],
       ];
       let _btGridDefaults = null;
@@ -5566,7 +5566,7 @@
         const exitRows = `<div class="posrow"><span class="k">Mode exit</span><span class="v mono">ATR (SL, TP, breakeven, dan trailing dari Average True Range)</span></div>
              <div class="posrow"><span class="k">Stop / Target / Trailing</span><span class="v mono" style="font-size:11.5px">${esc(p.EXIT_ATR_SL_MULT)}x ATR / ${esc(p.EXIT_ATR_TP_MULT)}x ATR / ${esc(p.EXIT_ATR_TRAIL_MULT)}x ATR</span></div>
              <div class="posrow"><span class="k">Breakeven / Batas Stop</span><span class="v mono" style="font-size:11.5px">${esc(p.EXIT_BREAKEVEN_TRIGGER_R)}R, trailing mulai ${esc(p.EXIT_TRAILING_START_R || 1.5)}R / ${esc(p.EXIT_ATR_MAX_SL_PCT)}% maksimum, batas tahan ${Number(p.EXIT_MAX_HOLD_HOURS) > 0 ? fmt(p.EXIT_MAX_HOLD_HOURS,0)+' jam' : 'tanpa batas waktu'}</span></div>
-             <div class="posrow"><span class="k">Sinyal entry</span><span class="v mono" style="font-size:11.5px">zona demand 1h/4h impuls ${esc(p.DEMAND_IMPULSE_ATR_MULT)}x ATR / EMA ${esc(p.DEMAND_EMA_PERIOD)} pada 3 timeframe / buffer SL ${esc(p.ENTRY_SL_ATR_BUFFER_MULT)}x ATR</span></div>
+             <div class="posrow"><span class="k">Sinyal entry</span><span class="v mono" style="font-size:11.5px">VIDYA panjang ${esc(p.VIDYA_LENGTH)} / band ${esc(p.VIDYA_BAND_MULT)}x ATR / delta minimal ${esc(p.VIDYA_DELTA_MIN_RATIO)}% / buffer SL ${esc(p.ENTRY_SL_ATR_BUFFER_MULT)}x ATR</span></div>
              <div class="posrow"><span class="k">Syarat turnover 24 jam</span><span class="v mono" style="font-size:11.5px">${p.GAINER_VOLUME_FILTER_ENABLED ? 'turnover naik minimal '+fmt(p.GAINER_VOLUME_RISE_MULT,2)+'x rata-rata '+fmt(p.GAINER_VOLUME_AVG_DAYS,0)+' hari' : 'nonaktif'}</span></div>
              <div class="posrow"><span class="k">Saringan koin</span><span class="v mono" style="font-size:11.5px">kenaikan 24 jam ${fmt(p.GAINER_MIN_CHANGE_PCT,1)}% sampai ${Number(p.GAINER_MAX_CHANGE_PCT) > 0 ? fmt(p.GAINER_MAX_CHANGE_PCT,1)+'%' : 'tanpa batas atas'}</span></div>`;
         const sd = res.summary ? res.summary.stop_distance_pct : null;
@@ -5583,7 +5583,7 @@
             `<div class="posrow"><span class="k mut" style="font-size:11px">Jarak stop diukur dari harga entry ke SL saat posisi dibuka${sd.max_sl_pct ? `, batas ${fmt(sd.max_sl_pct,2)}%` : ''}${sd.at_limit_count ? `, ${fmt(sd.at_limit_count,0)} trade menyentuh batas itu` : ''}.</span></div>`;
         })() : '';
         const entryRow = res.entry_rule ? `
-          <div class="posrow"><span class="k">Aturan Entry (${esc(entryObj.interval || '1h')})</span><span class="v mono" style="font-size:11.5px">${entryObj.enabled ? 'aktif, candle bullish di zona demand 1h/4h, impuls '+fmt((entryObj.entry_signal||{}).impulse_atr_mult,2)+'x ATR, close di atas EMA '+fmt((entryObj.entry_signal||{}).ema_period,0)+' pada 3 timeframe, buffer SL '+fmt((entryObj.entry_signal||{}).sl_atr_buffer_mult,2)+'x ATR, SL '+fmt((entryObj.exit_atr||{}).sl_mult,1)+'x ATR, TP '+fmt((entryObj.exit_atr||{}).tp_mult,1)+'x ATR, batas SL '+fmt(entryObj.max_sl_pct,2)+'%, disaring '+fmt(entryObj.skips,0)+' dari '+fmt(entryObj.scans,0)+' sinyal' : 'nonaktif'}</span></div>` : '';
+          <div class="posrow"><span class="k">Aturan Entry (${esc(entryObj.interval || '1h')})</span><span class="v mono" style="font-size:11.5px">${entryObj.enabled ? 'aktif, konfirmasi tren naik VIDYA pada '+(entryObj.interval||'15m')+', buffer SL '+fmt((entryObj.entry_signal||{}).sl_atr_buffer_mult,2)+'x ATR, SL '+fmt((entryObj.exit_atr||{}).sl_mult,1)+'x ATR, TP '+fmt((entryObj.exit_atr||{}).tp_mult,1)+'x ATR, batas SL '+fmt(entryObj.max_sl_pct,2)+'%, disaring '+fmt(entryObj.skips,0)+' dari '+fmt(entryObj.scans,0)+' sinyal' : 'nonaktif'}</span></div>` : '';
         document.getElementById('btInfoBox').innerHTML = `
           <div class="posrow"><span class="k">Semesta simbol</span><span class="v mono">${fmt(res.universe_with_data,0)} berhasil / ${fmt(res.universe_requested,0)} diminta${res.symbols_failed_count? ' ('+fmt(res.symbols_failed_count,0)+' gagal)':''}</span></div>
           <div class="posrow"><span class="k">Rentang data</span><span class="v mono" style="font-size:11.5px">${esc(res.start_time||'-')} &rarr; ${esc(res.end_time||'-')}</span></div>

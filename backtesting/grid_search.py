@@ -93,8 +93,8 @@ _KUNCI_EXIT_ATR = (
 )
 
 _KUNCI_MOMENTUM = (
-    "DEMAND_EMA_PERIOD",
-    "DEMAND_IMPULSE_ATR_MULT",
+    "VIDYA_LENGTH",
+    "VIDYA_BAND_MULT",
     "ENTRY_SL_ATR_BUFFER_MULT",
 )
 
@@ -212,7 +212,7 @@ def _pastikan_grid_portofolio_didukung(spec: dict) -> None:
     if tidak_didukung:
         raise GridSearchError(
             "Grid search portofolio menyapu level exit ATR dan parameter sinyal "
-            "zona demand pada semesta koin yang sama. Parameter lain tidak didukung di "
+            "Volumatic VIDYA pada semesta koin yang sama. Parameter lain tidak didukung di "
             f"mode ini: {', '.join(tidak_didukung)}. "
             f"Yang boleh: {', '.join(sorted(PARAMETER_GRID_PORTOFOLIO))}."
         )
@@ -232,8 +232,8 @@ def _kombinasi_masuk_akal(cfg: dict) -> tuple[bool, str]:
         ("EXIT_ATR_TRAIL_MULT", 0.1, 20.0),
         ("EXIT_ATR_BREAKEVEN_MULT", 0.0, 20.0),
         ("EXIT_ATR_MAX_SL_PCT", 0.0, 50.0),
-        ("DEMAND_EMA_PERIOD", 5.0, 60.0),
-        ("DEMAND_IMPULSE_ATR_MULT", 0.5, 5.0),
+        ("VIDYA_LENGTH", 2.0, 200.0),
+        ("VIDYA_BAND_MULT", 0.1, 20.0),
         ("ENTRY_SL_ATR_BUFFER_MULT", 0.0, 10.0),
     )
     for kunci, bawah, atas in batas:
@@ -1061,7 +1061,7 @@ def cetak_tabel(hasil: HasilGridSearch, top_n: int = 15) -> None:
 
 
 _KUNCI_BOOL: tuple = ()
-_KUNCI_INT: tuple = ("DEMAND_EMA_PERIOD",)
+_KUNCI_INT: tuple = ("VIDYA_LENGTH",)
 
 
 def _konversi_nilai(kunci: str, teks: str):
@@ -1128,7 +1128,7 @@ def _uji_grid_portofolio_momentum(check) -> None:
 
     from config.config import PUMP_CONFIG
     from backtesting.portfolio_backtest import new_backtest_store
-    from backtesting.synthetic_data import seri_zona_demand
+    from backtesting.synthetic_data import seri_vidya_flip
 
     cfg = deepcopy(PUMP_CONFIG)
     cfg.update(
@@ -1156,10 +1156,10 @@ def _uji_grid_portofolio_momentum(check) -> None:
     store = new_backtest_store(cfg)
     try:
         store.write_symbol(
-            "AAAUSDT", seri_zona_demand(harga=100.0, siklus=10, volume=9_000_000.0)
+            "AAAUSDT", seri_vidya_flip(harga=100.0, siklus=4, volume=9_000_000.0)
         )
         store.write_symbol(
-            "BBBUSDT", seri_zona_demand(harga=200.0, siklus=10, volume=5_000_000.0)
+            "BBBUSDT", seri_vidya_flip(harga=200.0, siklus=4, volume=5_000_000.0)
         )
         warmup_ms = 1000 * 15 * 60 * 1000
         hasil = run_portfolio_grid_search(
@@ -1167,16 +1167,16 @@ def _uji_grid_portofolio_momentum(check) -> None:
             cfg,
             "15m",
             warmup_ms,
-            {"DEMAND_EMA_PERIOD": [40, 50]},
+            {"VIDYA_LENGTH": [10, 20]},
             rasio_latih=1.0,
             min_trades=1,
         )
         nilai = sorted(
-            float(b.params.get("DEMAND_EMA_PERIOD", -1)) for b in hasil.hasil
+            float(b.params.get("VIDYA_LENGTH", -1)) for b in hasil.hasil
         )
         check(
             "grid portofolio menjalankan sapuan momentum",
-            hasil.total_kombinasi == 2 and nilai == [40.0, 50.0],
+            hasil.total_kombinasi == 2 and nilai == [10.0, 20.0],
             f"kombinasi={hasil.total_kombinasi}, nilai={nilai}",
         )
 
@@ -1186,19 +1186,19 @@ def _uji_grid_portofolio_momentum(check) -> None:
             cfg,
             "15m",
             warmup_ms,
-            {"DEMAND_EMA_PERIOD": [40, 60]},
+            {"VIDYA_LENGTH": [10, 30]},
             rasio_latih=1.0,
             min_trades=1,
         )
         per_ambang = {
-            float(b.params.get("DEMAND_EMA_PERIOD", -1)): int(
+            float(b.params.get("VIDYA_LENGTH", -1)): int(
                 b.latih.get("total_trades", 0)
             )
             for b in lebar.hasil
         }
         check(
-            "parameter sinyal longgar memberi trade, ambang ketat tidak",
-            set(per_ambang) == {40.0, 60.0} and all(v >= 0 for v in per_ambang.values()),
+            "kedua ambang parameter sinyal dieksekusi dan dilaporkan",
+            set(per_ambang) == {10.0, 30.0} and all(v >= 0 for v in per_ambang.values()),
             f"trade per ambang={per_ambang}",
         )
 
@@ -1209,7 +1209,7 @@ def _uji_grid_portofolio_momentum(check) -> None:
             summarize_portfolio as _sum_pf,
         )
 
-        cfg_satu = apply_overrides(cfg, {"DEMAND_EMA_PERIOD": 40})
+        cfg_satu = apply_overrides(cfg, {"VIDYA_LENGTH": 10})
         tl = _build_timeline(store, "15m", config=cfg, include_ohlcv=True)
         langsung = _run_pf(
             store, cfg_satu, "15m", warmup_ms=warmup_ms, prebuilt=tl
@@ -1219,7 +1219,7 @@ def _uji_grid_portofolio_momentum(check) -> None:
             (
                 b
                 for b in lebar.hasil
-                if float(b.params.get("DEMAND_EMA_PERIOD", -1)) == 40
+                if float(b.params.get("VIDYA_LENGTH", -1)) == 10
             ),
             None,
         )
@@ -1310,13 +1310,13 @@ def selftest() -> bool:
     except GridSearchError:
         check("expand_grid menolak daftar kosong", True)
     try:
-        _pastikan_grid_portofolio_didukung({"DEMAND_EMA_PERIOD": [40, 60]})
+        _pastikan_grid_portofolio_didukung({"VIDYA_LENGTH": [10, 30]})
         check("grid portofolio menerima parameter sinyal", True)
     except GridSearchError:
         check("grid portofolio menerima parameter sinyal", False)
     try:
         _pastikan_grid_portofolio_didukung(
-            {"DEMAND_IMPULSE_ATR_MULT": [1.0, 1.5], "ENTRY_SL_ATR_BUFFER_MULT": [0.1, 0.2]}
+            {"VIDYA_BAND_MULT": [1.5, 2.5], "ENTRY_SL_ATR_BUFFER_MULT": [0.1, 0.2]}
         )
         check("grid portofolio menerima beberapa parameter sinyal", True)
     except GridSearchError:
@@ -1386,7 +1386,7 @@ def selftest() -> bool:
     cfg["GAINER_MAX_CHANGE_PCT"] = 0.0
     cfg["GAINER_VOLUME_FILTER_ENABLED"] = False
     cfg["SAME_COIN_BLOCK_HOURS"] = 0.0
-    klines = sd.seri_zona_demand(harga=100.0, siklus=10, volume=9_000_000.0)
+    klines = sd.seri_vidya_flip(harga=100.0, siklus=4, volume=9_000_000.0)
 
     try:
         run_grid_search(klines[:50], cfg, {"EXIT_ATR_SL_MULT": [1.2]}, 300)
@@ -1437,14 +1437,14 @@ def selftest() -> bool:
         "_symbol": "",
         "MODE": "PAPER",
         "ENTRY_RULE_ENABLED": True,
-        "DEMAND_EMA_PERIOD": 50,
+        "VIDYA_LENGTH": 10,
         "CONFIRM_LOOKBACK_BARS": 20,
         "MIN_QUOTE_VOLUME_USDT_24H": 0.0,
         "EXIT_ATR_SL_MULT": 1.5,
         "ENTRY_MIN_RR_RATIO": 2.0,
         "EXIT_ATR_MAX_SL_PCT": 5.0,
     })
-    klines_panjang = sd.seri_zona_demand(harga=100.0, siklus=2)
+    klines_panjang = sd.seri_vidya_flip(harga=100.0, siklus=2)
     hasil_pendek = run_grid_search(
         klines_panjang,
         cfg_pendek,

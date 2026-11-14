@@ -647,20 +647,23 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         unit="%",
     ),
     "CONFIRM_INTERVAL": _field(
-        "Zona Demand + EMA",
+        "Filter Entry",
         "Interval pemicu entry",
-        "Timeframe candle pemicu entry. Candle ini juga digabung menjadi candle 1h dan 4h untuk mencari zona demand dan menghitung EMA. Hanya 15m dan 30m yang didukung, default 15m.",
+        "Timeframe candle pemicu entry. Mode VIDYA mendukung 1m, 3m, 5m, 15m, dan 30m untuk scalping.",
         "str",
         editor="select",
         options=[
+            "1m",
+            "3m",
+            "5m",
             "15m",
             "30m",
         ],
     ),
     "CONFIRM_LOOKBACK_BARS": _field(
-        "Zona Demand + EMA",
+        "Filter Entry",
         "Jumlah candle yang diunduh",
-        "Banyaknya candle pemicu yang diambil untuk membentuk candle 1h dan 4h, zona demand, EMA, dan ATR. Endpoint klines Binance memberi paling banyak 1000 candle per panggilan termasuk candle yang belum tertutup, sehingga batasnya 997.",
+        "Banyaknya candle pemicu yang diambil untuk menghitung VIDYA, band ATR, delta volume, dan ATR. Endpoint klines Binance memberi paling banyak 1000 candle per panggilan termasuk candle yang belum tertutup, sehingga batasnya 997.",
         "int",
         minimum=15,
         maximum=997,
@@ -847,33 +850,117 @@ PARAMETER_SCHEMA: dict[str, dict] = {
         unit="USDT",
     ),
     "ENTRY_RULE_ENABLED": _field(
-        "Zona Demand + EMA",
+        "Filter Entry",
         "Aktifkan filter entry",
-        "Bot hanya entry saat candle pemicu menyentuh zona demand 1h atau 4h yang belum ditembus, ditutup bullish, dan close berada di atas EMA pada timeframe pemicu, 1h, dan 4h.",
+        "Mengaktifkan filter entry Volumatic VIDYA: flip trend naik ditambah delta volume beli dominan.",
         "bool",
     ),
-    "DEMAND_EMA_PERIOD": _field(
-        "Zona Demand + EMA",
-        "Periode EMA",
-        "Periode EMA yang dipakai pada timeframe pemicu, 1h, dan 4h. Close candle pemicu harus berada di atas ketiga EMA. Maksimum 60 karena riwayat 997 candle 15m hanya memuat 62 candle 4h.",
+    "VIDYA_LENGTH": _field(
+        "Volumatic VIDYA",
+        "Panjang VIDYA",
+        "Periode smoothing VIDYA (alpha = 2 / (panjang + 1)). Default BigBeluga 10.",
         "int",
-        minimum=5,
-        maximum=60,
+        minimum=2,
+        maximum=200,
         unit="candle",
     ),
-    "DEMAND_IMPULSE_ATR_MULT": _field(
-        "Zona Demand + EMA",
-        "Kekuatan candle impuls",
-        "Zona demand dibentuk oleh candle sebelum candle naik 1h atau 4h yang body-nya minimal sekian kali ATR dan ditutup di atas high candle sebelumnya. Nilai lebih besar membuat zona lebih sedikit tetapi lebih kuat.",
+    "VIDYA_MOMENTUM": _field(
+        "Volumatic VIDYA",
+        "Panjang momentum CMO",
+        "Jendela Chande Momentum Oscillator untuk menghitung abs_CMO yang mengatur adaptasi VIDYA. Default BigBeluga 20.",
+        "int",
+        minimum=2,
+        maximum=200,
+        unit="candle",
+    ),
+    "VIDYA_BAND_MULT": _field(
+        "Volumatic VIDYA",
+        "Jarak band ATR",
+        "Pengali ATR untuk band atas/bawah di sekitar garis VIDYA. Flip trend naik terjadi saat close menembus band atas. Default BigBeluga 2.0.",
         "float",
-        minimum=0.5,
+        minimum=0.1,
+        maximum=20.0,
+        unit="x ATR",
+    ),
+    "VIDYA_ATR_PERIOD": _field(
+        "Volumatic VIDYA",
+        "Periode ATR band",
+        "Periode ATR untuk band VIDYA. Default BigBeluga 200.",
+        "int",
+        minimum=2,
+        maximum=400,
+        unit="candle",
+    ),
+    "VIDYA_DELTA_LOOKBACK": _field(
+        "Volumatic VIDYA",
+        "Jendela delta volume",
+        "Jumlah candle terakhir untuk menghitung delta volume beli/jual (volume candle bullish dikurangi volume candle bearish).",
+        "int",
+        minimum=2,
+        maximum=400,
+        unit="candle",
+    ),
+    "VIDYA_DELTA_MIN_RATIO": _field(
+        "Volumatic VIDYA",
+        "Delta volume minimum",
+        "Syarat minimum rasio delta volume beli dalam persen saat flip naik. 0 berarti volume beli harus lebih besar dari volume jual.",
+        "float",
+        minimum=-100.0,
+        maximum=100.0,
+        unit="%",
+    ),
+    "VIDYA_SL_ANCHOR": _field(
+        "Volumatic VIDYA",
+        "Anchor Stop Loss",
+        "LOWER_BAND menempatkan SL di bawah band bawah VIDYA. SIGNAL_LOW di bawah low candle sinyal. VIDYA_LINE di bawah garis VIDYA. Buffer ATR tetap berlaku.",
+        "str",
+        editor="select",
+        options=["LOWER_BAND", "SIGNAL_LOW", "VIDYA_LINE"],
+    ),
+    "VIDYA_ENTRY_TRIGGER": _field(
+        "Volumatic VIDYA",
+        "Pemicu Entry",
+        "FLIP membeli tepat di candle yang menembus band atas. PULLBACK menunggu harga pullback ke garis VIDYA lalu reclaim setelah flip, supaya tidak membeli puncak.",
+        "str",
+        editor="select",
+        options=["FLIP", "PULLBACK"],
+    ),
+    "VIDYA_PULLBACK_MAX_BARS": _field(
+        "Volumatic VIDYA",
+        "Batas candle pullback",
+        "Maksimum jumlah candle setelah flip naik untuk menunggu pullback. Lewat dari ini, sinyal flip dibatalkan.",
+        "int",
+        minimum=1,
+        maximum=400,
+        unit="candle",
+    ),
+    "VIDYA_PULLBACK_TOUCH_ATR": _field(
+        "Volumatic VIDYA",
+        "Toleransi sentuh garis",
+        "Jarak maksimum low candle di atas garis target (dalam kelipatan ATR) yang masih dianggap menyentuh garis VIDYA saat pullback.",
+        "float",
+        minimum=0.0,
         maximum=5.0,
         unit="x ATR",
     ),
+    "VIDYA_PULLBACK_TARGET": _field(
+        "Volumatic VIDYA",
+        "Target pullback",
+        "Garis yang ditunggu saat pullback: VIDYA_LINE (garis rata-rata) atau LOWER_BAND (band bawah yang diplot saat uptrend).",
+        "str",
+        editor="select",
+        options=["VIDYA_LINE", "LOWER_BAND"],
+    ),
+    "VIDYA_PULLBACK_REQUIRE_BULLISH": _field(
+        "Volumatic VIDYA",
+        "Wajib candle bullish",
+        "Jika aktif, candle reclaim harus bullish (close >= open) supaya konfirmasi pullback lebih ketat.",
+        "bool",
+    ),
     "ENTRY_SL_ATR_BUFFER_MULT": _field(
-        "Zona Demand + EMA",
-        "Buffer SL di bawah zona demand",
-        "Stop Loss ditempatkan di bawah batas bawah zona demand, dikurangi buffer ATR timeframe pemicu ini.",
+        "Filter Entry",
+        "Buffer SL di bawah anchor",
+        "Stop Loss ditempatkan di bawah anchor (band bawah VIDYA, garis VIDYA, atau low candle sinyal), dikurangi buffer ATR timeframe pemicu ini.",
         "float",
         minimum=0.0,
         maximum=10.0,
@@ -1036,6 +1123,9 @@ REMOVED_PARAMETERS = frozenset(
         "MIN_CLOSE_POSITION_IN_RANGE",
         "SWING_LOOKBACK_BARS",
         "SWING_PIVOT_WING_BARS",
+        "ENTRY_FILTER_MODE",
+        "DEMAND_EMA_PERIOD",
+        "DEMAND_IMPULSE_ATR_MULT",
         "VWAP_MIN_BARS_AFTER_ANCHOR",
         "MAX_BARS_BREAKOUT_TO_RETEST",
         "MAX_RETEST_TOUCHES",
@@ -1450,21 +1540,22 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
 
     if _flag_untuk_relasi(cfg, "ENTRY_RULE_ENABLED", True):
         perlu = _angka_untuk_relasi(cfg, "ENTRY_ATR_PERIOD")
-        periode_ema = _angka_untuk_relasi(cfg, "DEMAND_EMA_PERIOD")
         interval_pemicu = str(cfg.get("CONFIRM_INTERVAL", "15m") or "15m").strip().lower()
         lookback = _angka_untuk_relasi(cfg, "CONFIRM_LOOKBACK_BARS")
-        if interval_pemicu not in ("15m", "30m"):
-            keluar["CONFIRM_INTERVAL"] = "harus 15m atau 30m agar candle bisa digabung menjadi zona demand 1h dan 4h"
-        elif perlu is not None and periode_ema is not None:
-            faktor = 240 // _INTERVAL_MENIT[interval_pemicu]
-            butuh = (max(int(periode_ema), int(perlu) + 2) + 2) * faktor
+        if interval_pemicu not in ("1m", "3m", "5m", "15m", "30m"):
+            keluar["CONFIRM_INTERVAL"] = "mode VIDYA mendukung 1m, 3m, 5m, 15m, atau 30m"
+        else:
+            from strategy import vidya as _vidya
+            butuh = _vidya.required_bars(cfg)
+            if perlu is not None:
+                butuh = max(butuh, int(perlu) + 1)
             if butuh > 997:
-                keluar["DEMAND_EMA_PERIOD"] = (
+                keluar["VIDYA_ATR_PERIOD"] = (
                     f"terlalu besar: butuh {butuh} candle {interval_pemicu}, melebihi batas 997 candle tertutup per panggilan Binance"
                 )
             elif lookback is not None and lookback < butuh:
                 keluar["CONFIRM_LOOKBACK_BARS"] = (
-                    f"minimal {butuh} candle agar EMA dan zona demand 4h punya cukup riwayat"
+                    f"minimal {butuh} candle agar VIDYA, band ATR, dan delta volume punya cukup riwayat"
                 )
         if _flag_untuk_relasi(cfg, "GAINER_VOLUME_FILTER_ENABLED", True):
             menit_interval = _INTERVAL_MENIT.get(
@@ -1474,7 +1565,7 @@ def relation_violations(cfg: dict, *, mode_aware: bool = False) -> dict[str, str
             if menit_interval and hari is not None:
                 per_hari = max(1, 1440 // int(menit_interval))
                 butuh_volume = per_hari * 2
-                if lookback is not None and lookback < butuh_volume:
+                if lookback is not None and lookback < butuh_volume and butuh_volume <= 997:
                     keluar["CONFIRM_LOOKBACK_BARS"] = (
                         f"minimal {butuh_volume} candle agar syarat kenaikan "
                         f"turnover bisa dibandingkan dengan periode sebelumnya "
@@ -1529,8 +1620,8 @@ def validate_candidate(
 
         if not cleaned.get("ENTRY_RULE_ENABLED"):
             warnings.append(
-                "ENTRY_RULE_ENABLED nonaktif: bot masuk tanpa menunggu zona "
-                "demand + EMA, hanya mengandalkan seleksi gainer 24 jam dan "
+                "ENTRY_RULE_ENABLED nonaktif: bot masuk tanpa menunggu filter "
+                "VIDYA, hanya mengandalkan seleksi gainer 24 jam dan "
                 "proteksi orderbook."
             )
         relation(

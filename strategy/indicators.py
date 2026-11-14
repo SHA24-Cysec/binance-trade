@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from typing import NamedTuple, Optional
 
 from strategy import entry_rule
@@ -263,12 +262,12 @@ def evaluate_entry(
     return entry_rule.evaluate_entry_rule(klines, config, signal_close_time_ms)
 
 
-def demand_zone_snapshot(
+def vidya_snapshot(
     klines: list[Kline],
     config: dict,
     signal_close_time_ms: Optional[int] = None,
 ) -> dict:
-    return entry_rule.demand_zone_snapshot(klines, config, signal_close_time_ms)
+    return entry_rule.vidya_snapshot(klines, config, signal_close_time_ms)
 
 
 def confirm_window_bars(config: dict) -> int:

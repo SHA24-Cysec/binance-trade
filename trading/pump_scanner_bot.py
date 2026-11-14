@@ -4979,7 +4979,7 @@ def run(
     if have_bars < need_setup:
         logger.warning(
             "CONFIRM_LOOKBACK_BARS=%d lebih kecil dari %d candle yang dibutuhkan "
-            "filter zona demand + EMA. Bot tetap mengambil %d candle per konfirmasi agar deteksi "
+            "filter VIDYA. Bot tetap mengambil %d candle per konfirmasi agar deteksi "
             "tidak selalu gagal, tetapi perbaiki nilai config ini supaya backtest dan live "
             "benar-benar memakai angka yang sama.",
             have_bars,
@@ -4990,14 +4990,17 @@ def run(
         signal_bot = strategy.entry_signal_params(config)
         atr_bot = strategy.exit_atr_params(config)
         vol_bot = strategy.volume_rise_params(config)
+        vol_txt = ("AKTIF, turnover 24 jam minimal %.2f x rata-rata %d hari" % (float(vol_bot["mult"]), int(vol_bot["days"]))) if vol_bot["enabled"] else "NONAKTIF"
+        vp = signal_bot.get("vidya", {})
         logger.info(
-            "Filter zona demand + EMA AKTIF di timeframe %s: candle terakhir harus bullish (close > open), menyentuh zona demand 1h atau 4h yang belum ditembus (impuls minimal %.2f x ATR), dan close di atas EMA %d pada timeframe pemicu, 1h, dan 4h. SL di bawah zona demand dengan buffer %.2f x ATR periode %d, target R:R 1:%.2f, trailing %.2f x ATR, batas jarak stop %.2f%%. Syarat turnover 24 jam %s.",
+            "Filter Volumatic VIDYA AKTIF di timeframe %s: entry saat flip trend naik (close menembus band atas VIDYA) dan delta volume beli dominan. VIDYA panjang %d, momentum %d, band %.2f x ATR%d, jendela delta %d candle. SL di bawah %s dengan buffer %.2f x ATR periode %d, target R:R 1:%.2f, trailing %.2f x ATR, batas jarak stop %.2f%%. Syarat turnover 24 jam %s.",
             config.get("CONFIRM_INTERVAL", "15m"),
-            float(signal_bot["impulse_atr_mult"]), int(signal_bot["ema_period"]),
+            int(vp.get("length", 10)), int(vp.get("momentum", 20)),
+            float(vp.get("band_mult", 2.0)), int(vp.get("atr_period", 200)),
+            int(vp.get("delta_lookback", 20)), entry_rule.vidya_sl_anchor(config),
             float(signal_bot["sl_atr_buffer_mult"]), int(atr_bot["period"]),
             float(config.get("ENTRY_MIN_RR_RATIO", 3.0)), float(atr_bot["trail_mult"]),
-            float(atr_bot["max_sl_pct"]),
-            ("AKTIF, turnover 24 jam minimal %.2f x rata-rata %d hari" % (float(vol_bot["mult"]), int(vol_bot["days"]))) if vol_bot["enabled"] else "NONAKTIF",
+            float(atr_bot["max_sl_pct"]), vol_txt,
         )
     else:
         logger.info(

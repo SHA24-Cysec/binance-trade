@@ -8,241 +8,283 @@ from config.settings_schema import PARAMETER_SCHEMA, REMOVED_PARAMETERS, relatio
 from market import market_scanner as scanner
 from strategy import entry_rule
 from strategy import indicators as strategy
+from strategy import vidya
 from strategy.indicators import Kline
 
-SINYAL_INDEX = 960 + 19
+KUNCI_LAMA = ("ENTRY_FILTER_MODE", "DEMAND_EMA_PERIOD", "DEMAND_IMPULSE_ATR_MULT")
+KUNCI_VIDYA = (
+    "VIDYA_LENGTH",
+    "VIDYA_MOMENTUM",
+    "VIDYA_BAND_MULT",
+    "VIDYA_ATR_PERIOD",
+    "VIDYA_DELTA_LOOKBACK",
+    "VIDYA_DELTA_MIN_RATIO",
+)
 
 
-def config_dasar() -> dict:
+def config_dasar(**ganti) -> dict:
     cfg = deepcopy(PUMP_CONFIG)
-    cfg.update({"GAINER_VOLUME_FILTER_ENABLED": False, "CONFIRM_INTERVAL": "15m", "CONFIRM_LOOKBACK_BARS": 1000, "DEMAND_EMA_PERIOD": 50, "DEMAND_IMPULSE_ATR_MULT": 1.5, "ENTRY_SL_ATR_BUFFER_MULT": 0.5, "ENTRY_ATR_PERIOD": 14, "ENTRY_MIN_RR_RATIO": 3.0, "EXIT_ATR_MAX_SL_PCT": 10.0})
+    cfg.update({
+        "GAINER_VOLUME_FILTER_ENABLED": False,
+        "CONFIRM_INTERVAL": "15m",
+        "ENTRY_SL_ATR_BUFFER_MULT": 0.5,
+        "ENTRY_ATR_PERIOD": 14,
+        "ENTRY_MIN_RR_RATIO": 3.0,
+        "EXIT_ATR_MAX_SL_PCT": 10.0,
+        "VIDYA_DELTA_MIN_RATIO": 0.0,
+        "VIDYA_ENTRY_TRIGGER": "FLIP",
+        "VIDYA_SL_ANCHOR": "LOWER_BAND",
+    })
+    cfg.update(ganti)
     return cfg
 
 
-def seri_sinyal() -> list[Kline]:
-    bars = sd.seri_zona_demand(siklus=1)
-    return bars[: SINYAL_INDEX + 1]
+def seri_sinyal(cfg: dict | None = None, **opsi) -> list[Kline]:
+    """Seri sintetis yang berakhir tepat di candle flip tren naik VIDYA."""
+    bars = sd.seri_vidya_flip(siklus=1, bar_lanjut=0, **opsi)
+    series = vidya.compute_series(bars, cfg or PUMP_CONFIG)
+    indeks = [i for i, naik in enumerate(series["cross_up"]) if naik]
+    assert indeks, "generator sintetis tidak menghasilkan flip tren naik"
+    return bars[: indeks[-1] + 1]
 
 
 def ganti_terakhir(bars: list[Kline], open_: float, close: float, low: float, high: float) -> list[Kline]:
     last = bars[-1]
     out = list(bars)
-    out[-1] = Kline(open_time=last.open_time, open=open_, high=high, low=low, close=close, close_time=last.close_time, volume=last.volume, quote_volume=last.quote_volume)
+    out[-1] = Kline(
+        open_time=last.open_time, open=open_, high=high, low=low, close=close,
+        close_time=last.close_time, volume=last.volume, quote_volume=last.quote_volume,
+    )
     return out
 
 
 def cek_konfigurasi() -> str:
-    for key in ("DEMAND_EMA_PERIOD", "DEMAND_IMPULSE_ATR_MULT", "ENTRY_SL_ATR_BUFFER_MULT"):
+    for key in KUNCI_VIDYA:
         assert key in PUMP_CONFIG and key in PARAMETER_SCHEMA, key
-    for key in ("EMA_FAST_PERIOD", "EMA_SLOW_PERIOD", "MOMENTUM_BREAKOUT_LOOKBACK", "MOMENTUM_BODY_ATR_MULT", "MOMENTUM_VOLUME_MULT", "MOMENTUM_VOLUME_LOOKBACK"):
-        assert key not in PUMP_CONFIG and key not in PARAMETER_SCHEMA and key in REMOVED_PARAMETERS, key
-    assert PUMP_CONFIG["CONFIRM_INTERVAL"] == "15m"
+    for key in KUNCI_LAMA:
+        assert key not in PUMP_CONFIG and key not in PARAMETER_SCHEMA, key
+        assert key in REMOVED_PARAMETERS, key
+    assert entry_rule.signal_params(PUMP_CONFIG)["mode"] == entry_rule.ENTRY_FILTER_VIDYA
+    assert PUMP_CONFIG["CONFIRM_INTERVAL"] in entry_rule.VIDYA_TRIGGER_INTERVALS
     assert PUMP_CONFIG["CONFIRM_LOOKBACK_BARS"] >= entry_rule.required_bars(PUMP_CONFIG)
     assert entry_rule.required_bars(PUMP_CONFIG) <= entry_rule.KLINE_FETCH_LIMIT
     assert not CONFIG_LOAD_ERRORS, CONFIG_LOAD_ERRORS
-    assert not relation_violations(PUMP_CONFIG, mode_aware=True)
+    assert not relation_violations(PUMP_CONFIG), relation_violations(PUMP_CONFIG)
     salah = deepcopy(PUMP_CONFIG)
     salah["CONFIRM_INTERVAL"] = "1h"
-    assert "CONFIRM_INTERVAL" in relation_violations(salah, mode_aware=True)
-    return "config interval 15m, EMA tiga timeframe, zona demand, dan riwayat candle sinkron"
+    assert "CONFIRM_INTERVAL" in relation_violations(salah), "interval 1h harus ditolak skema"
+    return "konfigurasi VIDYA lengkap, kunci filter lama sudah dihapus, dan riwayat candle sinkron"
 
 
-def cek_resample() -> str:
-    bars = sd.seri_zona_demand(siklus=1)
-    h1 = entry_rule.resample_closed(bars, 15, 60)
-    h4 = entry_rule.resample_closed(bars, 15, 240)
-    assert len(h1) == len(bars) // 4 and len(h4) == len(bars) // 16
-    blok = bars[16:32]
-    assert h4[1].open == blok[0].open and h4[1].close == blok[-1].close
-    assert h4[1].high == max(b.high for b in blok) and h4[1].low == min(b.low for b in blok)
-    assert h4[1].open_time == blok[0].open_time and h4[1].close_time == blok[-1].close_time
-    potong = entry_rule.resample_closed(bars[3:37], 15, 240)
-    assert len(potong) == 1 and potong[0].open_time == bars[16].open_time
-    bolong = bars[:20] + bars[21:48]
-    assert [b.open_time for b in entry_rule.resample_closed(bolong, 15, 240)] == [bars[0].open_time, bars[32].open_time]
-    return "candle 15m digabung menjadi 1h dan 4h hanya dari blok yang lengkap dan sudah tertutup"
+def cek_interval_didukung() -> str:
+    for interval in entry_rule.VIDYA_TRIGGER_INTERVALS:
+        assert entry_rule.trigger_interval_ok(interval, PUMP_CONFIG), interval
+    for interval in ("1h", "4h", "1d", "2m"):
+        assert not entry_rule.trigger_interval_ok(interval, PUMP_CONFIG), interval
+    bars = seri_sinyal()
+    result = entry_rule.evaluate_entry_rule(bars, config_dasar(CONFIRM_INTERVAL="1h"))
+    assert not result["ok"] and "interval" in result["reason"], result
+    return "interval scalping 1m sampai 30m didukung dan interval di atasnya ditolak"
 
 
 def cek_sinyal_lolos() -> str:
-    bars = seri_sinyal()
-    result = entry_rule.evaluate_entry_rule(bars, config_dasar())
+    cfg = config_dasar()
+    bars = seri_sinyal(cfg)
+    series = vidya.compute_series(bars, cfg)
+    indeks = len(bars) - 1
+    assert series["cross_up"][indeks], "bar terakhir harus flip tren naik"
+    result = entry_rule.evaluate_entry_rule(bars, cfg)
     assert result["ok"], result
-    assert result["zone_timeframe"] in ("1h", "4h")
+    assert result["stage"] == entry_rule.STAGE_OK
+    assert result["zone_low"] is not None and result["zone_high"] is not None
     assert result["zone_low"] < result["zone_high"]
-    assert float(bars[-1].low) <= result["zone_high"] and result["signal_close"] > result["zone_low"]
-    assert result["signal_close"] > result["ema_m15"] and result["signal_close"] > result["ema_h1"] and result["signal_close"] > result["ema_h4"]
-    assert abs(result["rr_ratio"] - 3.0) < 1e-12
-    assert result["entry_low"] <= result["zone_low"]
+    assert result["signal_close"] > result["zone_high"] > result["ema_m15"]
+    assert result["zone_timeframe"] == "15m"
     assert result["sl_price"] < result["entry_low"] < result["signal_close"] < result["tp_price"]
+    assert abs(result["tp_pct"] / result["sl_pct"] - 3.0) < 1e-9
     assert all(result["checks"].values()), result["checks"]
-    return "candle bullish 15m di zona demand 1h dengan close di atas EMA tiga timeframe lolos, SL di bawah zona"
+    assert result["values"]["sl_anchor"] == "LOWER_BAND"
+    return "flip tren naik dengan delta volume beli dominan lolos, SL di bawah anchor dengan buffer ATR"
 
 
-def cek_pola_ditolak() -> str:
-    bars = seri_sinyal()
+def cek_tanpa_flip_ditolak() -> str:
+    cfg = config_dasar()
+    bars = seri_sinyal(cfg)
+    potong = bars[:-5]
+    result = entry_rule.evaluate_entry_rule(potong, cfg)
+    assert not result["ok"], result
+    assert result["stage"] == entry_rule.STAGE_VIDYA_TREND, result
+    assert result["checks"]["vidya_ready"] and not result["checks"]["vidya_flip"]
+    assert not result["checks"]["delta_volume"] and not result["checks"]["risk"]
+    return "periode tanpa flip tren naik ditolak di tahap VIDYA_TREND"
+
+
+def cek_delta_ditolak() -> str:
+    cfg = config_dasar()
+    bars = seri_sinyal(cfg, volume_dorong=100_000.0)
+    result = entry_rule.evaluate_entry_rule(bars, cfg)
+    assert not result["ok"], result
+    assert result["stage"] == entry_rule.STAGE_DELTA_VOLUME, result
+    assert result["checks"]["vidya_ready"] and not result["checks"]["delta_volume"]
+    rasio = vidya.compute_series(bars, cfg)["delta_ratio"][-1]
+    assert rasio is not None and rasio < 0.0, rasio
+    return "flip naik dengan delta volume jual dominan ditolak di tahap DELTA_VOLUME"
+
+
+def cek_riwayat_kurang() -> str:
+    cfg = config_dasar()
+    bars = seri_sinyal(cfg)
+    butuh = entry_rule.required_bars(cfg)
+    result = entry_rule.evaluate_entry_rule(bars[: butuh - 1], cfg)
+    assert not result["ok"], result
+    assert result["stage"] == entry_rule.STAGE_HISTORY, result
+    assert "kurang" in result["reason"]
+    assert not result["checks"]["history"]
+    return f"riwayat kurang dari {butuh} candle ditolak di tahap riwayat"
+
+
+def cek_candle_tidak_valid() -> str:
+    cfg = config_dasar()
+    bars = seri_sinyal(cfg)
     last = bars[-1]
-    bars = ganti_terakhir(bars, float(last.open), float(last.open) * 0.999, float(last.low), float(last.high))
-    result = entry_rule.evaluate_entry_rule(bars, config_dasar())
-    assert not result["ok"] and result["stage"] == entry_rule.STAGE_BULLISH_CANDLE, result
-    return "candle bearish di zona demand ditolak"
+    rusak = ganti_terakhir(bars, float(last.open), float(last.close), float(last.high), float(last.low))
+    result = entry_rule.evaluate_entry_rule(rusak, cfg)
+    assert not result["ok"], result
+    assert result["stage"] == entry_rule.STAGE_CANDLE, result
+    assert result["checks"]["history"] and not result["checks"]["candles"]
+    return "candle dengan high di bawah low ditolak di tahap validasi candle"
 
 
-def cek_ema_ditolak() -> str:
-    bars = seri_sinyal()
-    last = bars[-1]
-    low = float(last.low)
-    bars = ganti_terakhir(bars, low * 1.0001, low * 1.0006, low, low * 1.0008)
-    result = entry_rule.evaluate_entry_rule(bars, config_dasar())
-    assert not result["ok"] and result["stage"] == entry_rule.STAGE_EMA_TREND, result
-    return "candle bullish di zona demand tetapi close di bawah EMA ditolak"
+def cek_batas_risiko() -> str:
+    cfg = config_dasar(EXIT_ATR_MAX_SL_PCT=0.001)
+    bars = seri_sinyal(cfg)
+    result = entry_rule.evaluate_entry_rule(bars, cfg)
+    assert not result["ok"], result
+    assert result["stage"] == entry_rule.STAGE_RISK, result
+    assert "melampaui" in result["reason"]
+    assert result["checks"]["delta_volume"] and not result["checks"]["risk"]
+    return "jarak stop yang melewati batas EXIT_ATR_MAX_SL_PCT ditolak di tahap RISK_SL"
 
 
-def cek_zona_ditolak() -> str:
-    bars = seri_sinyal()
-    last = bars[-1]
-    bars = ganti_terakhir(bars, float(last.open), float(last.close), float(last.open) * 0.9995, float(last.high))
-    result = entry_rule.evaluate_entry_rule(bars, config_dasar())
-    assert not result["ok"] and result["stage"] == entry_rule.STAGE_DEMAND_ZONE, result
-    assert result["zones_active"] >= 1
-    return "candle bullish di atas EMA yang tidak menyentuh zona demand ditolak"
+def cek_anchor_sl() -> str:
+    hasil = {}
+    for anchor in entry_rule.VIDYA_SL_ANCHORS:
+        cfg = config_dasar(VIDYA_SL_ANCHOR=anchor)
+        bars = seri_sinyal(cfg)
+        result = entry_rule.evaluate_entry_rule(bars, cfg)
+        assert result["ok"], (anchor, result)
+        assert result["values"]["sl_anchor"] == anchor
+        assert result["sl_price"] < result["entry_low"] < result["signal_close"] < result["tp_price"]
+        hasil[anchor] = result["sl_price"]
+    assert len(set(round(v, 10) for v in hasil.values())) == len(hasil), hasil
+    return "ketiga anchor stop loss menghasilkan SL berbeda yang selalu di bawah harga entry"
 
 
-def cek_zona_tembus() -> str:
-    bars = seri_sinyal()
-    acuan = entry_rule.evaluate_entry_rule(bars, config_dasar())
-    sebelum = bars[-2]
-
-    def tembus(harga: float) -> dict:
-        salinan = list(bars)
-        salinan[-2] = Kline(open_time=sebelum.open_time, open=float(sebelum.open), high=float(sebelum.high), low=harga * 0.999, close=harga, close_time=sebelum.close_time, volume=sebelum.volume, quote_volume=sebelum.quote_volume)
-        return entry_rule.evaluate_entry_rule(salinan, config_dasar())
-
-    sebagian = tembus(float(acuan["zone_low"]) * 0.9995)
-    assert sebagian["zone_low"] is None or sebagian["zone_low"] < acuan["zone_low"], sebagian
-    semua = tembus(float(acuan["zone_low"]) * 0.99)
-    assert not semua["ok"] and semua["stage"] == entry_rule.STAGE_DEMAND_ZONE and semua["zones_active"] == 0, semua
-    return "zona demand yang sudah ditembus close di bawahnya tidak dipakai lagi"
-
-
-def cek_batas_strict() -> str:
-    bars = seri_sinyal()
-    last = bars[-1]
-    doji = Kline(open_time=last.open_time, open=float(last.open), high=float(last.high), low=float(last.low), close=float(last.open), close_time=last.close_time)
-    assert not entry_rule.is_bullish_candle(doji)
-    assert entry_rule.is_bullish_candle(last)
-    return "candle doji (close == open) ditolak dan hanya close > open yang diterima"
+def cek_trigger_pullback() -> str:
+    cfg = config_dasar(VIDYA_ENTRY_TRIGGER="PULLBACK")
+    bars = seri_sinyal(cfg)
+    flip = entry_rule.evaluate_entry_rule(bars, config_dasar(VIDYA_ENTRY_TRIGGER="FLIP"))
+    assert flip["ok"], "mode FLIP harus menerima candle flip"
+    result = entry_rule.evaluate_entry_rule(bars, cfg)
+    assert not result["ok"], result
+    assert result["stage"] == entry_rule.STAGE_VIDYA_TREND, result
+    assert "pullback" in result["reason"]
+    return "mode PULLBACK menolak candle flip dan menunggu konfirmasi pullback ke garis VIDYA"
 
 
 def cek_anti_lookahead() -> str:
-    bars = sd.seri_zona_demand(siklus=1)
-    result = entry_rule.evaluate_entry_rule(bars, config_dasar(), int(bars[SINYAL_INDEX - 1].close_time))
-    assert not result["ok"]
-    assert result.get("signal_close_time") == int(bars[SINYAL_INDEX - 1].close_time)
-    tepat = entry_rule.evaluate_entry_rule(bars, config_dasar(), int(bars[SINYAL_INDEX].close_time))
-    assert tepat["ok"] and tepat["signal_close_time"] == int(bars[SINYAL_INDEX].close_time)
-    sebelum_impuls = entry_rule.evaluate_entry_rule(bars, config_dasar(), int(bars[sd.BAR_PER_H4_15M * 60 + 6].close_time))
-    assert not sebelum_impuls["ok"] and sebelum_impuls["zone_low"] is None
-    return "candle setelah waktu evaluasi dan candle 1h yang belum tertutup tidak ikut dihitung"
-
-
-def cek_interval() -> str:
     cfg = config_dasar()
-    cfg["CONFIRM_INTERVAL"] = "1h"
-    result = entry_rule.evaluate_entry_rule(seri_sinyal(), cfg)
-    assert not result["ok"] and result["stage"] == entry_rule.STAGE_HISTORY and "tidak didukung" in result["reason"]
-    pendek = entry_rule.evaluate_entry_rule(seri_sinyal()[-200:], config_dasar())
-    assert not pendek["ok"] and pendek["stage"] == entry_rule.STAGE_HISTORY
-    return "interval di luar 15m dan 30m serta riwayat yang kurang ditolak dengan alasan jelas"
+    bars = sd.seri_vidya_flip(siklus=1, bar_lanjut=40)
+    series = vidya.compute_series(bars, cfg)
+    indeks = [i for i, naik in enumerate(series["cross_up"]) if naik]
+    assert indeks, "generator sintetis tidak menghasilkan flip tren naik"
+    target = indeks[0]
+    sebelum = entry_rule.evaluate_entry_rule(bars, cfg, int(bars[target - 1].close_time))
+    assert not sebelum["ok"], sebelum
+    assert sebelum.get("signal_close_time") == int(bars[target - 1].close_time)
+    tepat = entry_rule.evaluate_entry_rule(bars, cfg, int(bars[target].close_time))
+    assert tepat["ok"] and tepat["signal_close_time"] == int(bars[target].close_time)
+    return "candle setelah waktu evaluasi tidak ikut dihitung (anti lookahead)"
 
 
-def cek_scanner() -> str:
-    setup = scanner.detect_entry_setup(seri_sinyal(), config_dasar())
+def cek_nonaktif() -> str:
+    cfg = config_dasar(ENTRY_RULE_ENABLED=False)
+    bars = seri_sinyal(cfg)
+    result = entry_rule.evaluate_entry_rule(bars, cfg)
+    assert result["ok"], result
+    assert result["stage"] == entry_rule.STAGE_DISABLED, result
+    assert result["sl_price"] is not None and result["tp_price"] is not None
+    assert result["sl_price"] < result["signal_close"] < result["tp_price"]
+    return "filter entry nonaktif tetap mengembalikan level SL dan TP yang bisa dipakai"
+
+
+def cek_snapshot() -> str:
+    cfg = config_dasar()
+    bars = seri_sinyal(cfg)
+    snapshot = strategy.vidya_snapshot(bars, cfg)
+    assert snapshot["ok"], snapshot
+    assert snapshot["mode"] == entry_rule.ENTRY_FILTER_VIDYA
+    assert len(snapshot["vidya"]) == len(snapshot["upper"]) == len(snapshot["lower"])
+    assert snapshot["cross_up"][-1] is True
+    result = entry_rule.evaluate_entry_rule(bars, cfg)
+    assert abs(float(snapshot["vidya"][-1]) - float(result["ema_m15"])) < 1e-9
+    assert abs(float(snapshot["lower"][-1]) - float(result["zone_low"])) < 1e-9
+    return "snapshot VIDYA sejajar dengan hasil evaluasi entry pada candle yang sama"
+
+
+def cek_scanner_sinkron() -> str:
+    cfg = config_dasar()
+    bars = seri_sinyal(cfg)
+    setup = scanner.detect_entry_setup(bars, cfg)
     assert setup.ok, setup.reason
-    assert setup.ema_fast and setup.ema_slow
-    assert setup.entry_low and setup.sl_price and setup.sl_price < setup.entry_low
-    levels = strategy.resolve_exit_levels(config_dasar(), setup=setup, entry_price=float(setup.signal_close))
-    assert levels["sl_price"] and abs(levels["sl_price"] - setup.sl_price) < 1e-9
-    assert levels["source"] == entry_rule.SL_ANCHOR_ATR
-    return "scanner membawa batas zona demand dan level risiko yang sama dengan mesin exit"
+    result = entry_rule.evaluate_entry_rule(bars, cfg)
+    assert result["ok"], result
+    assert abs(float(setup.sl_price) - float(result["sl_price"])) < 1e-9
+    assert abs(float(setup.tp_price) - float(result["tp_price"])) < 1e-9
+    levels = strategy.resolve_exit_levels(cfg, setup=setup, entry_price=float(setup.signal_close))
+    assert levels["sl_price"] and abs(levels["sl_price"] - float(setup.sl_price)) < 1e-9
+    return "scanner dan mesin exit memakai level VIDYA yang sama dengan aturan entry"
 
 
-def cek_ambang_pump_dinamis() -> str:
-    cfg = config_dasar()
-    values = [float(value) for value in range(-10, 90)]
-    result = scanner.dynamic_market_thresholds(values, cfg)
-    assert not result["fallback"] and result["sample"] == 100
-    assert -2.0 <= result["minimum"] <= 5.0
-    assert 10.0 <= result["maximum"] <= 35.0
-    fallback = scanner.dynamic_market_thresholds([1.0, 2.0], cfg)
-    assert fallback["fallback"] and fallback["minimum"] == float(cfg["PUMP_FALLBACK_MIN_CHANGE_PCT"]) and fallback["maximum"] == float(cfg["PUMP_FALLBACK_MAX_CHANGE_PCT"])
-    return "ambang pump dinamis memakai persentil terjepit dan fallback aman"
-
-
-def cek_urutan_scan() -> str:
-    cfg = config_dasar()
-    cfg.update({"PUMP_DYNAMIC_FILTER_ENABLED": False, "GAINER_MIN_CHANGE_PCT": 8.0, "GAINER_MAX_CHANGE_PCT": 30.0, "MIN_QUOTE_VOLUME_USDT_24H": 0.0})
-    tickers = [{"symbol": f"COIN{i}USDT", "quoteVolume": str(1_000_000 * (i + 1)), "lastPrice": "1", "priceChangePercent": str(10 if i % 2 else 20)} for i in range(6)]
-    eligible = scanner.filter_eligible_candidates(tickers, cfg)
-    assert len(eligible) == 6
-    assert [c.change_pct for c in eligible] == sorted((c.change_pct for c in eligible), reverse=True)
-    assert not any(hasattr(c, "market_score") or hasattr(c, "hybrid_score") for c in eligible)
-    sempit = scanner.filter_eligible_candidates(tickers, dict(cfg, GAINER_MAX_CHANGE_PCT=15.0))
-    assert len(sempit) == 3 and all(c.change_pct <= 15.0 for c in sempit)
-    return "simbol lolos saringan diurutkan berdasarkan kenaikan lalu turnover, tanpa skor peringkat"
-
-
-def cek_scan_tanpa_batas_kandidat() -> str:
-    cfg = config_dasar()
-    cfg.update({"PUMP_DYNAMIC_FILTER_ENABLED": False, "GAINER_MIN_CHANGE_PCT": 0.0, "GAINER_MAX_CHANGE_PCT": 0.0, "MIN_QUOTE_VOLUME_USDT_24H": 0.0})
-    valid = seri_sinyal()
-    tickers = [{"symbol": f"COIN{i}USDT", "quoteVolume": str(1_000_000 - i), "lastPrice": "1", "priceChangePercent": str(10 + i)} for i in range(45)]
-    nama_valid = "COIN40USDT"
-    dipanggil: list[str] = []
-
-    def fetcher(symbol: str):
-        dipanggil.append(symbol)
-        return list(valid) if symbol == nama_valid else []
-
-    pilihan = scanner.scan_entry_candidate(tickers, fetcher, cfg)
-    assert pilihan is not None and pilihan.symbol == nama_valid, pilihan
-    assert pilihan.confirmed and pilihan.setup is not None and pilihan.setup.ok
-    assert dipanggil.count(nama_valid) == 1
-    assert len(dipanggil) == 5, len(dipanggil)
-
-    diag = scanner.ScanDiagnostics()
-    tidak_ada = scanner.scan_entry_candidate(tickers[:3], fetcher, cfg, diagnostics=diag)
-    assert tidak_ada is None
-    assert diag.checked_symbols == 3 and diag.market_symbols == 3
-    for kunci in ("TOP_N_CANDIDATES_TO_CONFIRM", "PUMP_RANK_CHANGE_WEIGHT", "PUMP_RANK_TURNOVER_WEIGHT", "PUMP_RANK_ENGULFING_WEIGHT", "PUMP_RANK_PRICE_EMA_WEIGHT", "PUMP_RANK_EMA_TREND_WEIGHT"):
-        assert kunci not in PUMP_CONFIG and kunci not in PARAMETER_SCHEMA and kunci in REMOVED_PARAMETERS, kunci
-    return "pemindaian berhenti pada simbol pertama yang lolos tanpa batas jumlah kandidat, kunci peringkat lama dibuang dari settings"
-
-
-CHECKS = (cek_konfigurasi, cek_resample, cek_sinyal_lolos, cek_pola_ditolak, cek_ema_ditolak, cek_zona_ditolak, cek_zona_tembus, cek_batas_strict, cek_anti_lookahead, cek_interval, cek_scanner, cek_ambang_pump_dinamis, cek_urutan_scan, cek_scan_tanpa_batas_kandidat)
+CHECKS = (
+    cek_konfigurasi,
+    cek_interval_didukung,
+    cek_sinyal_lolos,
+    cek_tanpa_flip_ditolak,
+    cek_delta_ditolak,
+    cek_riwayat_kurang,
+    cek_candle_tidak_valid,
+    cek_batas_risiko,
+    cek_anchor_sl,
+    cek_trigger_pullback,
+    cek_anti_lookahead,
+    cek_nonaktif,
+    cek_snapshot,
+    cek_scanner_sinkron,
+)
 
 
 def run(verbose: bool = False) -> tuple[bool, list[str]]:
-    messages = []
-    try:
-        for check in CHECKS:
-            message = check()
-            messages.append(message)
+    messages: list[str] = []
+    ok = True
+    for check in CHECKS:
+        try:
+            messages.append(check())
             if verbose:
-                print(f"[OK] {message}")
-        return True, messages
-    except Exception as exc:
-        messages.append(str(exc))
-        if verbose:
-            print(f"[GAGAL] {exc}")
-        return False, messages
+                print(f"  [LULUS] {messages[-1]}")
+        except Exception as exc:
+            ok = False
+            messages.append(f"GAGAL: {check.__name__}: {exc}")
+            if verbose:
+                print(f"  [GAGAL] {check.__name__}: {exc}")
+    return ok, messages
 
 
 def main() -> int:
-    checks = CHECKS
-    for check in checks:
-        print(f"[OK] {check()}")
-    print(f"SELFTEST ENTRY OK: {len(checks)} pemeriksaan")
-    return 0
+    print("Selftest aturan entry VIDYA:")
+    ok, pesan = run(verbose=True)
+    print(f"HASIL: {len(CHECKS)}/{len(CHECKS)} lulus" if ok else "HASIL: ADA YANG GAGAL")
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

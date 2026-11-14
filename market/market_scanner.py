@@ -131,15 +131,13 @@ class ScanDiagnostics:
         if not self.checked_symbols:
             return []
         interval = str(config.get("CONFIRM_INTERVAL", "15m"))
-        signal = strategy.entry_signal_params(config)
         labels = {
-            "ENTRY_RULE": f"filter zona demand + EMA {interval}",
+            "ENTRY_RULE": f"filter Volumatic VIDYA {interval}",
             "CANDLE_CONFIRM": f"candle {interval} gagal diambil",
             "HISTORY_CONFIRM": f"riwayat {interval} kurang",
-            "BULLISH_CANDLE": f"candle {interval} bukan bullish",
-            "EMA_TREND": f"close belum di atas EMA {signal['ema_period']} pada {interval}, 1h, atau 4h",
-            "DEMAND_ZONE": f"candle {interval} tidak menyentuh zona demand 1h atau 4h",
-            "RISK_SL": "jarak Stop Loss zona demand",
+            "VIDYA_TREND": f"belum ada flip trend naik VIDYA pada {interval}",
+            "DELTA_VOLUME": f"delta volume beli belum dominan pada {interval}",
+            "RISK_SL": "jarak Stop Loss melampaui batas",
             "VOLUME_24H": "turnover 24 jam tidak naik dibanding rata-rata",
         }
         candle = "belum tersedia"
@@ -153,7 +151,7 @@ class ScanDiagnostics:
             "Diagnostik: setiap simbol dicatat pada gerbang pertama yang gagal.",
         ]
         if strategy.entry_rule_enabled(config):
-            lines.insert(0, f"Filter zona demand + EMA AKTIF di {interval}: candle terakhir harus bullish (close > open), menyentuh zona demand 1h atau 4h yang belum ditembus, dan close di atas EMA {signal['ema_period']} pada {interval}, 1h, dan 4h.")
+            lines.insert(0, f"Filter Volumatic VIDYA AKTIF di {interval}: entry saat flip trend naik (close menembus band atas VIDYA) dan delta volume beli dominan.")
         for stage in sorted(self.rejection_counts):
             count = self.rejection_counts.get(stage, 0)
             if not count:
@@ -613,8 +611,8 @@ STAGE_GROUPS = {
     "HISTORY_CONFIRM": "HISTORY_ENTRY",
     "CANDLE_CONFIRM": "CANDLE_ENTRY",
     "BULLISH_CANDLE": "BULLISH_CANDLE",
-    "EMA_TREND": "EMA_TREND",
-    "DEMAND_ZONE": "DEMAND_ZONE",
+    "VIDYA_TREND": "VIDYA_TREND",
+    "DELTA_VOLUME": "DELTA_VOLUME",
     "VOLUME_24H": "VOLUME_24H",
     "RISK_SL": "RISK_SL",
     "ENTRY_RULE": "ENTRY_RULE",

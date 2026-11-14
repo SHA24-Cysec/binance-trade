@@ -448,10 +448,10 @@ def run_backtest(
         )
     if entry_rule_skips:
         signal_bt = strategy.entry_signal_params(config)
+        trigger_label = "konfirmasi pullback ke garis VIDYA" if str(config.get("VIDYA_ENTRY_TRIGGER", "FLIP")).upper() == "PULLBACK" else "flip trend naik"
         warnings.append(
-            f"{entry_rule_skips} dari {entry_rule_scans} sinyal dilewati filter zona demand + EMA "
-            f"({interval}: candle bullish di zona demand 1h atau 4h, close di atas EMA {signal_bt['ema_period']} "
-            f"pada {interval}, 1h, dan 4h, SL di bawah zona dengan buffer {signal_bt['sl_atr_buffer_mult']:g} x ATR)."
+            f"{entry_rule_skips} dari {entry_rule_scans} sinyal dilewati filter Volumatic VIDYA "
+            f"({interval}: {trigger_label} + delta volume beli dominan, SL di bawah anchor dengan buffer {signal_bt['sl_atr_buffer_mult']:g} x ATR)."
         )
     risk_summary = controls.summary()
     if risk_summary["kill_switch_triggers"] > 0:
@@ -669,8 +669,18 @@ OVERRIDE_CASTERS = {
     "CONFIRM_INTERVAL": str,
     "CONFIRM_LOOKBACK_BARS": int,
     "ENTRY_RULE_ENABLED": _cast_bool,
-    "DEMAND_EMA_PERIOD": int,
-    "DEMAND_IMPULSE_ATR_MULT": float,
+    "VIDYA_LENGTH": int,
+    "VIDYA_MOMENTUM": int,
+    "VIDYA_BAND_MULT": float,
+    "VIDYA_ATR_PERIOD": int,
+    "VIDYA_DELTA_LOOKBACK": int,
+    "VIDYA_DELTA_MIN_RATIO": float,
+    "VIDYA_SL_ANCHOR": str,
+    "VIDYA_ENTRY_TRIGGER": str,
+    "VIDYA_PULLBACK_MAX_BARS": int,
+    "VIDYA_PULLBACK_TOUCH_ATR": float,
+    "VIDYA_PULLBACK_TARGET": str,
+    "VIDYA_PULLBACK_REQUIRE_BULLISH": bool,
     "ENTRY_SL_ATR_BUFFER_MULT": float,
     "ENTRY_ATR_PERIOD": int,
     "EXIT_ATR_SL_MULT": float,
@@ -762,8 +772,6 @@ def validate_params(config: dict) -> None:
         ("GAINER_MAX_CHANGE_PCT", 0.0, 100000.0),
         ("GAINER_VOLUME_RISE_MULT", 0.0, 20.0),
         ("GAINER_VOLUME_AVG_DAYS", 1, 14),
-        ("DEMAND_EMA_PERIOD", 5, 60),
-        ("DEMAND_IMPULSE_ATR_MULT", 0.5, 5.0),
         ("ENTRY_SL_ATR_BUFFER_MULT", 0.0, 10.0),
         ("ENTRY_ATR_PERIOD", 2, 200),
         ("EXIT_ATR_SL_MULT", 0.1, 20.0),
@@ -775,6 +783,16 @@ def validate_params(config: dict) -> None:
         ("EXIT_ATR_MAX_SL_PCT", 0.0, 50.0),
         ("EXIT_MAX_HOLD_HOURS", 0.0, entry_rule.MAX_HOLD_HOURS_LIMIT),
     ]
+    checks.extend([
+        ("VIDYA_LENGTH", 2, 200),
+        ("VIDYA_MOMENTUM", 2, 200),
+        ("VIDYA_BAND_MULT", 0.1, 20.0),
+        ("VIDYA_ATR_PERIOD", 2, 400),
+        ("VIDYA_DELTA_LOOKBACK", 2, 400),
+        ("VIDYA_DELTA_MIN_RATIO", -100.0, 100.0),
+        ("VIDYA_PULLBACK_MAX_BARS", 1, 400),
+        ("VIDYA_PULLBACK_TOUCH_ATR", 0.0, 5.0),
+    ])
     for key, lo, hi in checks:
         lo, hi = _rentang_schema(key, lo, hi)
         val = config.get(key)
@@ -945,7 +963,7 @@ def execute_backtest(
 
     spread_pct, slip_pct, delay_bars = entry_execution_params(config)
     assumptions = [
-        "Simulasi 1 koin mengikuti aturan zona demand 1h dan 4h serta EMA tiga timeframe yang sama dengan bot. SL memakai batas bawah zona demand dengan buffer ATR, TP memakai R:R, serta breakeven dan trailing memakai mesin exit yang sama.",
+        "Simulasi 1 koin mengikuti aturan Volumatic VIDYA yang sama dengan bot: entry saat konfirmasi tren naik dan delta volume beli dominan, SL memakai anchor VIDYA dengan buffer ATR, TP memakai R:R, serta breakeven dan trailing memakai mesin exit yang sama.",
         (
             f"Eksekusi entry menunggu {delay_bars} bar setelah sinyal lalu membeli pada harga open + "
             f"setengah spread ({spread_pct / 2:.3f}%) + slippage ({slippage_label(slip_pct)}%). "
@@ -1003,23 +1021,34 @@ def print_report(data: dict) -> None:
         f"({data['bars_usable']} candle diuji)"
     )
     print("-" * 72)
+    sl_anchor_label = str(entry_rule.vidya_sl_anchor(p)).replace("_", " ").lower()
     exit_info = (
-        f"SL bawah zona demand - {p.get('ENTRY_SL_ATR_BUFFER_MULT', 2.0)}x ATR, "
+        f"SL bawah {sl_anchor_label} - {p.get('ENTRY_SL_ATR_BUFFER_MULT', 2.0)}x ATR, "
         f"TP R:R 1:{p.get('ENTRY_MIN_RR_RATIO', 3.0)}, "
         f"trailing {p.get('EXIT_ATR_TRAIL_MULT', 2.0)}x ATR, "
         f"breakeven {p.get('EXIT_ATR_BREAKEVEN_MULT', 1.0)}x ATR, "
         f"batas stop {p.get('EXIT_ATR_MAX_SL_PCT', 5.0)}%, "
         f"MaxHold={p.get('EXIT_MAX_HOLD_HOURS', 24.0):g}h"
     )
-    entry_info = (
-        f"candle bullish {p.get('CONFIRM_INTERVAL', '15m')} di zona demand 1h/4h "
-        f"(impuls {p.get('DEMAND_IMPULSE_ATR_MULT', 1.0)}x ATR), close di atas EMA "
-        f"{p.get('DEMAND_EMA_PERIOD', 50)} pada 3 timeframe"
-        if p.get("ENTRY_RULE_ENABLED", True)
-        else "OFF"
-    )
+    if not p.get("ENTRY_RULE_ENABLED", True):
+        entry_info = "OFF"
+    else:
+        entry_info = (
+            f"Volumatic VIDYA {p.get('CONFIRM_INTERVAL', '15m')} "
+            f"(panjang {p.get('VIDYA_LENGTH', 10)}, momentum {p.get('VIDYA_MOMENTUM', 20)}, "
+            f"band {p.get('VIDYA_BAND_MULT', 2.0)}x ATR{p.get('VIDYA_ATR_PERIOD', 200)}), "
+            f"{'konfirmasi pullback ke garis VIDYA' if str(p.get('VIDYA_ENTRY_TRIGGER', 'FLIP')).upper() == 'PULLBACK' else 'flip trend naik'} + delta volume beli dominan"
+        )
+    _gmin = float(p.get("GAINER_MIN_CHANGE_PCT", 3.0) or 0.0)
+    _gmax = float(p.get("GAINER_MAX_CHANGE_PCT", 0.0) or 0.0)
+    if _gmin <= -100.0 and _gmax <= 0.0:
+        _gate = "gate gainer 24 jam NONAKTIF (semua koin lolos)"
+    elif _gmax <= 0.0:
+        _gate = f"gainer naik >= {_gmin:g}% 24 jam (tanpa batas atas)"
+    else:
+        _gate = f"gainer naik {_gmin:g}-{_gmax:g}% 24 jam"
     gainer_info = (
-        f"gainer naik >= {p.get('GAINER_MIN_CHANGE_PCT', 3.0)}% 24 jam, "
+        f"{_gate}, "
         f"turnover >= {p.get('MIN_QUOTE_VOLUME_USDT_24H', 0):,.0f} USDT, "
         + (
             f"turnover naik >= {p.get('GAINER_VOLUME_RISE_MULT', 1.2)}x rata-rata "
@@ -1156,8 +1185,8 @@ def main():
         default=None,
         help="Override ENTRY_ATR_PERIOD.",
     )
-    parser.add_argument("--ema-period", type=int, default=None, help="Override DEMAND_EMA_PERIOD.")
-    parser.add_argument("--impulse-atr", type=float, default=None, help="Override DEMAND_IMPULSE_ATR_MULT.")
+    parser.add_argument("--vidya-length", type=int, default=None, help="Override VIDYA_LENGTH.")
+    parser.add_argument("--vidya-band", type=float, default=None, help="Override VIDYA_BAND_MULT.")
     parser.add_argument("--sl-buffer-atr", type=float, default=None, help="Override ENTRY_SL_ATR_BUFFER_MULT.")
     parser.add_argument(
         "--gainer-min",
@@ -1247,10 +1276,10 @@ def main():
         overrides["EXIT_ATR_TRAIL_MULT"] = args.atr_trail
     if args.atr_period is not None:
         overrides["ENTRY_ATR_PERIOD"] = args.atr_period
-    if args.ema_period is not None:
-        overrides["DEMAND_EMA_PERIOD"] = args.ema_period
-    if args.impulse_atr is not None:
-        overrides["DEMAND_IMPULSE_ATR_MULT"] = args.impulse_atr
+    if args.vidya_length is not None:
+        overrides["VIDYA_LENGTH"] = args.vidya_length
+    if args.vidya_band is not None:
+        overrides["VIDYA_BAND_MULT"] = args.vidya_band
     if args.sl_buffer_atr is not None:
         overrides["ENTRY_SL_ATR_BUFFER_MULT"] = args.sl_buffer_atr
     if args.gainer_min is not None:
